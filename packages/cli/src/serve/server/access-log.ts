@@ -42,6 +42,22 @@ export const ACCESS_LOG_REJECT_LOCAL = 'accessLogPreAuthReject';
 export const ACCESS_LOG_ERROR_CODE_LOCAL = 'accessLogErrorCode';
 export const ACCESS_LOG_ERROR_REASON_LOCAL = 'accessLogErrorReason';
 
+/**
+ * Records the rejecting branch of an `{error, code}` refusal so the access
+ * log can attribute every status >= 400: every emitter calls this, never
+ * each wires the locals itself.
+ */
+export function markAccessLogError(
+  res: Response,
+  code: string,
+  reason?: string,
+): void {
+  const locals = res.locals as Record<string, unknown> | undefined;
+  if (!locals) return;
+  locals[ACCESS_LOG_ERROR_CODE_LOCAL] = code;
+  if (reason !== undefined) locals[ACCESS_LOG_ERROR_REASON_LOCAL] = reason;
+}
+
 export interface AccessLogController {
   sealAndFlushSuppressed(): void;
 }

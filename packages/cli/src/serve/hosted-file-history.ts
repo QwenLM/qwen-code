@@ -104,18 +104,22 @@ type HarnessRunAuthorizationBlockedReason = Extract<
 
 /** One name per conjunct that can keep the pending turn from settling. */
 export type HostedFileHistorySettleBlocker =
+  // (production-unreachable: the caller checked pendingUndo upstream)
   | 'undo_pending'
+  // (production-unreachable: every caller requires a pending turn)
   | 'no_pending_turn'
   | 'no_pending_message'
   | 'authorization_initial'
   | `authorization_blocked_${HarnessRunAuthorizationBlockedReason}`
   | 'checkpoint_identity_mismatch'
-  // Never returned below: the load gate and the live-Turn path name the
-  // stranger record before this probe runs.
+  // (production-unreachable from the load gate)
   | 'pending_turn_mismatch'
+  // (production-unreachable other than the phases the caller proves gated)
   | `phase_${HarnessCheckpointPhase}`
   | 'pending_message_not_ready'
+  // (production-unreachable: parsers refuse an unsettled tool item)
   | 'tool_item_unsettled'
+  | 'pending_message_absent'
   | 'assistant_mismatch'
   | 'no_pending_tool_calls'
   | 'unexpected_tail_item'
@@ -135,8 +139,9 @@ export interface HostedFileHistorySettlement {
 
 /**
  * Null when the pending turn settles clean; otherwise the blocking conjunct
- * the cold-load refusal may log. The grounds are the same conjuncts the
- * boolean version evaluated, in the same order, each with its own name.
+ * the cold-load refusal may log. Conjuncts are evaluated pending undo first,
+ * then pending turn, then pending message, then authorization and tail, so a
+ * multi-fault record names the earliest conjunct this order produces.
  */
 export async function canSettleHostedFileHistory(
   session: ManagedSession,
@@ -178,8 +183,9 @@ export async function canSettleHostedFileHistory(
     (item) => item.daemonPromptId === record.pendingTurn,
   );
   const index = current.findLastIndex((item) => item.type === 'assistant');
-  const assistant = current[index];
-  if (assistant?.uuid !== record.pendingMessageId)
+  const assistant = index === -1 ? undefined : current[index];
+  if (assistant === undefined) return { blocker: 'pending_message_absent' };
+  if (assistant.uuid !== record.pendingMessageId)
     return { blocker: 'assistant_mismatch' };
   const calls =
     assistant.message?.parts?.flatMap((part) =>

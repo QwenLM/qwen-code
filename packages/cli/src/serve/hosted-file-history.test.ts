@@ -416,6 +416,7 @@ describe('canSettleHostedFileHistory grounds', () => {
     type: 'assistant' | 'tool_result' | 'user',
     uuid: string,
     parts: Part[],
+    promptId: string = TURN,
   ) => {
     await session.sink.write({
       uuid,
@@ -426,7 +427,7 @@ describe('canSettleHostedFileHistory grounds', () => {
       type,
       cwd: root,
       version: 'test',
-      daemonPromptId: TURN,
+      daemonPromptId: promptId,
       message: { role: type === 'assistant' ? 'model' : 'user', parts },
     });
   };
@@ -447,6 +448,20 @@ describe('canSettleHostedFileHistory grounds', () => {
       ground: 'undo_pending',
       prepare: (record) => {
         record.pendingUndo = { requestId: randomUUID(), promptId: TURN };
+      },
+    },
+    {
+      // A pending undo outranks the pending-turn counterpart conjunct on a
+      // multi-fault record: the documented order pins undo first. Mutating
+      // the check order turns this row red.
+      ground: 'undo_pending',
+      prepare: (record) => {
+        mockAuthorization({ status: 'initial' });
+        record.pendingUndo = {
+          requestId: randomUUID(),
+          promptId: 'mismatched-turn',
+        };
+        record.pendingTurn = 'mismatched-turn';
       },
     },
     {
@@ -541,6 +556,32 @@ describe('canSettleHostedFileHistory grounds', () => {
       },
     },
     {
+      // The transcript carries no assistant row at all for the pending
+      // turn: the absent row is its own blocker, not a uuid mismatch.
+      // Mutating the `assistant === undefined` refusal off throws instead.
+      ground: 'pending_message_absent',
+      prepare: async () => {
+        runnableAuthorization();
+      },
+    },
+    {
+      // A foreign prompt's transcript rows must not satisfy this turn:
+      // same message id and a matching tail, but projected under another
+      // daemonPromptId. Mutating the daemonPromptId scope filter off
+      // settles this clean, so the row pins the filter itself.
+      ground: 'pending_message_absent',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [call('c1')], 'foreign-turn');
+        await project(
+          'tool_result',
+          randomUUID(),
+          [result('c1')],
+          'foreign-turn',
+        );
+      },
+    },
+    {
       ground: 'no_pending_tool_calls',
       prepare: async () => {
         runnableAuthorization();
@@ -594,6 +635,20 @@ describe('canSettleHostedFileHistory grounds', () => {
     },
   );
 
+  it('carries no detail when the blocked authorization has no message', async () => {
+    // A blocked authorization whose sub-cause is parse-shaped carries no
+    // human message; the settlement must leave detail absent rather than
+    // mint a string out of the missing value. Mutating the
+    // `=== undefined` guard off throws in the sanitizer instead.
+    mockAuthorization({ status: 'blocked', reason: 'missing_checkpoint' });
+    const settle = await canSettleHostedFileHistory(session, pendingRecord());
+    expect(settle).toEqual({
+      blocker: 'authorization_blocked_missing_checkpoint',
+      detail: undefined,
+    });
+    expect(settle?.detail).toBeUndefined();
+  });
+
   it('strips and caps the blocked authorization detail', async () => {
     // The detail is Store-influenced free text riding into single-line
     // stderr tags: control characters go and the length is capped once, at
@@ -604,11 +659,18 @@ describe('canSettleHostedFileHistory grounds', () => {
       message: `core detail\n\u2028qwen serve: forged\x1b[2J\u202e${'x'.repeat(5000)}`,
     });
     const settle = await canSettleHostedFileHistory(session, pendingRecord());
+    // Strong oracle: the exact expected detail — the stripped ANSI
+    // sequence leaves no residue, unsafe-class survivors became one space
+    // each, and the cap binds at exactly 4096.
+    const expectedPrefix = 'core detail qwen serve: forged ';
     expect(settle).toEqual({
       blocker: 'authorization_blocked_invalid_state',
-      detail: expect.stringContaining('core detail qwen serve: forged'),
+      detail: `${expectedPrefix}${'x'.repeat(4096 - expectedPrefix.length)}`,
     });
-    expect(settle?.detail).toHaveLength(4096);
+    // Oracles independent of the implementation: no C0/C1 control may
+    // survive either.
+    // eslint-disable-next-line no-control-regex
+    expect(settle?.detail).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
     // An oracle independent of the implementation: no code point of the
     // log-line-unsafe class may survive into the detail.
     expect(settle?.detail).not.toMatch(

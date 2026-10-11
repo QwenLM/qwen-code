@@ -11053,8 +11053,11 @@ describe('Hosted Harness no-tool session', () => {
     ).send(takeover);
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('takeover_unsupported');
+    // The stderr tag carries exactly the body reason's token, so the two
+    // channels of the same refusal never disagree.
     expect(log.mock.calls.map(([line]) => line)).toContain(
-      `qwen serve: Hosted Session ${SESSION_ID} load refused (takeover_unavailable): profile=none broker=ready`,
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (takeover_unsupported): profile=none broker=ready`,
     );
     const plain = await app();
     const refusedPlain = await headers(
@@ -11062,8 +11065,9 @@ describe('Hosted Harness no-tool session', () => {
     ).send(takeover);
     expect(refusedPlain.status).toBe(409);
     expect(refusedPlain.body.code).toBe('hosted_turn_recovery_required');
+    expect(refusedPlain.body.reason).toBe('takeover_unsupported');
     expect(log.mock.calls.map(([line]) => line)).toContain(
-      `qwen serve: Hosted Session ${SESSION_ID} load refused (takeover_unavailable): profile=none broker=none`,
+      `qwen serve: Hosted Session ${SESSION_ID} load refused (takeover_unsupported): profile=none broker=none`,
     );
   });
 
@@ -13794,6 +13798,43 @@ describe('Hosted Harness tool approvals', () => {
       expect(refused.body.code).toBe('hosted_turn_recovery_required');
       expect(refused.body.reason).toBe('writes_stopped');
     }
+    // The same outrank pins the files/rewind gate: it carries the busy code
+    // before any body validation, so a stopped writer is named here too.
+    const rewound = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/files/rewind`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ requestId: randomUUID(), promptId: PROMPT_ID });
+    expect(rewound.status).toBe(409);
+    expect(rewound.body.code).toBe('hosted_turn_recovery_required');
+    expect(rewound.body.reason).toBe('writes_stopped');
+  });
+
+  it('names writes_stopped on the MCP operations gate when the writer is stopped', async () => {
+    const { server, authorize } = await mcpApp();
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'writesStopped',
+      'get',
+    ).mockReturnValue(true);
+    const pending = vi
+      .spyOn(HostedMcpSession.prototype, 'hasPendingOperations')
+      .mockReturnValue(true);
+    const refused = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+    ).send({
+      operationId: randomUUID(),
+      serverId: 'demo',
+      request: { kind: 'resource_read', uri: 'memory://note' },
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    // The stopped writer outranks the pending operations the gate fired on.
+    expect(refused.body.reason).toBe('writes_stopped');
+    pending.mockRestore();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
   });
 
   it('retains the turn recovery error on cold load of a pending file edit', async () => {
@@ -19934,7 +19975,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
-  it('names a not-runnable authorization on continue and cancel', async () => {
+  it('names a not-runnable authorization on continue and hands the lease back', async () => {
     const { server, clientId, recovery } = await loadParkedRecovery();
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
@@ -19947,24 +19988,65 @@ describe('Hosted Harness Runtime turn takeover', () => {
       reason: 'invalid_state',
       message: 'checkpoint record ckpt-1 is not valid JSON.',
     } as never);
-    for (const route of ['continue', 'cancel'] as const) {
-      log.mockClear();
-      const refused = await replacementHeaders(
-        supertest(server).post(
-          `/session/${SESSION_ID}/managed-runtime/${route}`,
-        ),
-      )
-        .set('X-Qwen-Client-Id', clientId)
-        .send({ promptId: PROMPT_ID, ...recovery });
-      expect(refused.status).toBe(409);
-      expect(refused.body.code).toBe('hosted_turn_recovery_required');
-      expect(refused.body.reason).toBe('not_runnable');
-      expect(log).toHaveBeenCalledWith(
-        expect.stringContaining(
-          `${route}: run authorization not runnable: invalid_state: checkpoint record ckpt-1 is not valid JSON.`,
-        ),
-      );
-    }
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    const releasesBefore = release.mock.calls.length;
+    const refused = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ promptId: PROMPT_ID, ...recovery });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('not_runnable');
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'continue: run authorization not runnable: invalid_state: checkpoint record ckpt-1 is not valid JSON.',
+      ),
+    );
+    // The retry-inviting refusal on the resume path returns the adopted
+    // lease now, like the authorization-unreadable twin; a retry cannot
+    // otherwise re-acquire it.
+    await vi.waitFor(
+      () => expect(release.mock.calls.length).toBeGreaterThan(releasesBefore),
+      { timeout: 10_000 },
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('names a not-runnable authorization on cancel and keeps the lease owed', async () => {
+    const { server, clientId, recovery } = await loadParkedRecovery();
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'invalid_state',
+      message: 'checkpoint record ckpt-1 is not valid JSON.',
+    } as never);
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    const releasesBefore = release.mock.calls.length;
+    const refused = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ promptId: PROMPT_ID, ...recovery });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('not_runnable');
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'cancel: run authorization not runnable: invalid_state: checkpoint record ckpt-1 is not valid JSON.',
+      ),
+    );
+    // The cancellation path keeps the adopted lease owed: nothing here is
+    // terminal, and a release would persist RELEASED — the retry could
+    // never re-acquire that identity.
+    expect(release.mock.calls.length).toBe(releasesBefore);
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
@@ -20053,22 +20135,30 @@ describe('Hosted Harness Runtime turn takeover', () => {
         .send({ promptId: PROMPT_ID, ...recovery });
       expect(refused.status).toBe(409);
       expect(refused.body.reason).toBe('not_runnable');
-      expect(log).toHaveBeenCalledWith(
-        expect.stringContaining(
-          `${route}: run authorization not runnable: invalid_state: invalid_state qwen serve: forged`,
-        ),
+      // Strong oracle: the exact expected full line — the tail of the
+      // escaped sequence and the unsafe-class members became spaces, the
+      // detail is capped at 4096 before it is interpolated, and the filler
+      // rides up to that cap.
+      const expectedDetailPrefix = 'invalid_state qwen serve: forged ';
+      const expectedLine = `qwen serve: Hosted Session ${SESSION_ID} ${route}: run authorization not runnable: invalid_state: ${expectedDetailPrefix}${'x'.repeat(4096 - expectedDetailPrefix.length)}`;
+      expect(log.mock.calls.map(([emitted]) => emitted)).toContain(
+        expectedLine,
       );
-      expect(
-        log.mock.calls
-          .map(([line]) => line)
-          .every((line) => line === stripAnsiAndControl(line)),
-      ).toBe(true);
       const line = log.mock.calls
         .map(([emitted]) => emitted)
         .find((emitted) => emitted.includes('not runnable'));
       expect(line).toBeDefined();
       // The message is capped at 4096 characters before it is interpolated.
       expect(line?.length).toBeLessThan(4400);
+      // Oracles independent of the implementation: no C0/C1 control and no
+      // code point of the log-line-unsafe class may survive into the line.
+      // eslint-disable-next-line no-control-regex
+      expect(line).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+      expect(line).not.toMatch(
+        /[\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/,
+        /[\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/,
+        /[\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/,
+      );
     }
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),

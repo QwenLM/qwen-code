@@ -257,6 +257,7 @@ export type HostedRefusalReason =
   | 'continuation_not_ready'
   | 'file_history_unsettled'
   | 'hook_operations_pending'
+  | 'inputs_unsettled'
   | 'mcp_operations_pending'
   | 'not_runnable'
   | 'publication_incomplete'
