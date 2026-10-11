@@ -2394,13 +2394,19 @@ export class LlmChat {
   ) {
     validateHistory(history);
     this.redactApprovedPlansFromLoadedHistory();
-    this.markLoadedToolResults();
+    this.markToolResultsInjected(this.history);
   }
 
-  private markLoadedToolResults(
-    history: readonly Content[] = this.history,
-  ): void {
-    for (const content of history)
+  /**
+   * Marks every provenance in `contents` as already reported, so the next
+   * dispatch does not re-emit its `tool_result_injected` event. Callers hand
+   * this only parts another chat already reported — loaded/restored history
+   * and the speculation-accept replay. Results parked through `addHistory`
+   * for a later turn have NOT been submitted yet and must stay unmarked, or
+   * their one owed injection event is suppressed permanently.
+   */
+  markToolResultsInjected(contents: readonly Content[]): void {
+    for (const content of contents)
       for (const part of content.parts ?? []) {
         const provenance = getToolOutputProvenance(part);
         if (provenance) this.injectedToolResults.add(provenance);
@@ -5636,10 +5642,6 @@ export class LlmChat {
   addHistory(content: Content): void {
     this.history.push(content);
     this.syncReviewedSchemasForContent(content);
-    // acceptSpeculation replays provenance-bearing parts another chat
-    // already injected; seed them so the next dispatch does not re-emit
-    // those injection events.
-    this.markLoadedToolResults([content]);
     // addHistory only runs between sends, so the partial-push marker
     // should already be cleared. If it is not, a new caller is
     // violating that invariant — surface it at error level so the
@@ -5793,7 +5795,7 @@ export class LlmChat {
     completedToolCallIds?: readonly string[],
   ): void {
     this.history = history;
-    this.markLoadedToolResults();
+    this.markToolResultsInjected(this.history);
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The

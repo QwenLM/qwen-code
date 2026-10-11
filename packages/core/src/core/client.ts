@@ -732,6 +732,14 @@ export class LlmClient {
     this.getChat().addHistory(content);
   }
 
+  /**
+   * Marks replayed content as already injected. Only for parts another chat
+   * already reported (speculation accept); see `LlmChat.markToolResultsInjected`.
+   */
+  markToolResultsInjected(contents: readonly Content[]): void {
+    this.getChat().markToolResultsInjected(contents);
+  }
+
   getChat(): LlmChat {
     if (!this.chat) {
       throw new Error('Chat not initialized');

@@ -7,14 +7,22 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   abortSpeculation,
+  acceptSpeculation,
   ensureToolResultPairing,
   startSpeculation,
+  type SpeculationState,
 } from './speculation.js';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import type { CacheSafeParams } from '../agents/forkedAgent.js';
+import type { LlmClient } from '../core/client.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
-import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  modelText,
+} from '../test-utils/model-fixtures.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
   getCacheSafeParams: vi.fn<
@@ -831,5 +839,39 @@ describe('ensureToolResultPairing', () => {
     ];
     const result = ensureToolResultPairing(messages);
     expect(result).toEqual(messages);
+  });
+});
+
+describe('acceptSpeculation', () => {
+  it('marks the replayed messages as already injected', async () => {
+    const messages: Content[] = [
+      content('model', fnCall('read_file', {}, 'call-1')),
+      content('user', fnResponse('read_file', { output: 'x' }, 'call-1')),
+      modelText('done'),
+    ];
+    const state = {
+      id: 'spec-1',
+      status: 'running',
+      suggestion: '',
+      overlayFs: null,
+      abortController: null,
+      messages,
+      startTime: Date.now(),
+      toolUseCount: 1,
+    } as SpeculationState;
+    const addHistory = vi.fn<(entry: Content) => Promise<void>>(async () => {});
+    const markToolResultsInjected =
+      vi.fn<(entries: readonly Content[]) => void>();
+
+    const result = await acceptSpeculation(state, {
+      addHistory,
+      markToolResultsInjected,
+    } as unknown as LlmClient);
+
+    expect(result.messages).toEqual(messages);
+    expect(addHistory.mock.calls.map(([entry]) => entry)).toEqual(messages);
+    // The forked chat already reported these results, so the main chat must
+    // not emit their injection events a second time.
+    expect(markToolResultsInjected).toHaveBeenCalledWith(result.messages);
   });
 });

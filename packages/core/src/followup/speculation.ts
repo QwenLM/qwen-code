@@ -625,6 +625,9 @@ export async function acceptSpeculation(
     for (const msg of cleanMessages) {
       await llmClient.addHistory(msg);
     }
+    // The fork chat already reported these results; mark the replay so this
+    // chat does not re-emit their injection events.
+    llmClient.markToolResultsInjected(cleanMessages);
 
     state.status = 'completed';
 

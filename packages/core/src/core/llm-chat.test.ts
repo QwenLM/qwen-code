@@ -11939,7 +11939,7 @@ describe('LlmChat', async () => {
       ).toHaveLength(1);
     });
 
-    it.each(['constructor', 'setHistory', 'addHistory'] as const)(
+    it.each(['constructor', 'setHistory'] as const)(
       'does not recount %s history while counting new fork results',
       async (load) => {
         const inherited = result();
@@ -11960,8 +11960,7 @@ describe('LlmChat', async () => {
           modelText('parent complete'),
         ];
         if (load === 'constructor') chat = new LlmChat(mockConfig, {}, history);
-        else if (load === 'setHistory') chat.setHistory(history);
-        else for (const entry of history) chat.addHistory(entry);
+        else chat.setHistory(history);
         vi.spyOn(chat, 'tryCompress').mockResolvedValue({
           compressionStatus: CompressionStatus.NOOP,
           originalTokenCount: 0,
@@ -11989,6 +11988,23 @@ describe('LlmChat', async () => {
         expect(events[0].prompt_id).toBe('fork');
       },
     );
+
+    // A result parked through addHistory has not been submitted to the
+    // generator yet, so its one owed injection event must survive until the
+    // turn that actually carries it.
+    it('counts a parked result once on the turn that submits it', async () => {
+      chat.addHistory({ role: 'user', parts: result() });
+      mockStreamsOnce(textStream('done'), textStream('again'));
+      await sendDrain('next', 'parked');
+      await sendDrain('next', 'again');
+      const events = vi
+        .mocked(logToolResultSize)
+        .mock.calls.filter(([, event]) => event.layer === 'injection')
+        .map(([, event]) => event);
+      expect(events).toHaveLength(1);
+      expect(events[0].call_id).toBe('anonymous-result');
+      expect(events[0].prompt_id).toBe('p');
+    });
 
     it('records each parallel result and preserves user steering', async () => {
       const second = attachToolOutputProvenance(
