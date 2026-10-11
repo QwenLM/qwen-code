@@ -1052,6 +1052,24 @@ describe('background continuation', () => {
     expect(container.querySelector('[title="security"]')).not.toBeNull();
   });
 
+  it('renders teammate activity as an attributed notice bubble', () => {
+    const container = render(
+      <SystemMessage
+        content="researcher started read_file: Read notes.md"
+        variant="info"
+        source="teammate_activity"
+        data={{
+          kind: 'peer',
+          status: 'call',
+          taskId: 'teammate-activity-1',
+        }}
+        teammate={{ name: 'researcher' }}
+      />,
+    );
+    expect(container.textContent).toContain('@researcher');
+    expect(container.textContent).toContain('researcher started read_file');
+  });
+
   it('leaves a peer notice unattributed when no identity persisted', () => {
     const container = render(
       <SystemMessage

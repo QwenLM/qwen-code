@@ -439,6 +439,10 @@ type AssistantSystemNotice =
       source: 'background_notification';
       data: Record<string, unknown> | undefined;
     }
+  | {
+      source: 'teammate_activity';
+      data: Record<string, unknown> | undefined;
+    }
   | { source: 'vision_bridge_notice'; data: unknown }
   | {
       source: 'context_compression';
@@ -454,6 +458,13 @@ function classifyAssistantSystemNotice(
   if (isBackgroundNotificationBlock(block)) {
     return {
       source: 'background_notification',
+      data: getBackgroundNotificationData(block),
+    };
+  }
+  const activityMeta = getRecord(block.meta);
+  if (activityMeta?.['source'] === 'teammate_activity') {
+    return {
+      source: 'teammate_activity',
       data: getBackgroundNotificationData(block),
     };
   }
@@ -794,14 +805,19 @@ export function transcriptBlocksToDaemonMessages(
           currentThinkingIdx = null;
           needsNewContentMessage = true;
         }
-        if (notice?.source === 'background_notification') {
+        if (
+          notice?.source === 'background_notification' ||
+          notice?.source === 'teammate_activity'
+        ) {
+          const teammate = teammateOfAgent(textBlock.agent);
           messages.push({
             id: block.id,
             role: 'system',
             content: textBlock.text,
             variant: 'info',
-            source: 'background_notification',
+            source: notice.source,
             data: notice.data,
+            ...(teammate ? { teammate } : {}),
             timestamp: blockTime,
             sourceBlockIds: [block.id],
           });

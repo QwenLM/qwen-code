@@ -11,6 +11,8 @@ import type {
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import {
   TeamEventType,
+  type MessageSentEvent,
+  type TeammateActivityEvent,
   type TeammateApprovalRequestEvent,
   type TeammateExitedEvent,
   type TeammateJoinedEvent,
@@ -58,6 +60,23 @@ export interface TeamSinkDeps {
     name: string;
     status?: string;
   }) => void;
+  /**
+   * Observational teammate progress (tool calls/results) and inter-teammate
+   * messages, for UI display only. Emitted as display frames without entering
+   * the notification queue, so they never wake the leader into an automatic
+   * turn.
+   */
+  readonly reportTeammateActivity: (activity: {
+    kind: 'tool' | 'message';
+    name: string;
+    toolName?: string;
+    phase?: 'call' | 'result';
+    success?: boolean;
+    description?: string;
+    from?: string;
+    to?: string;
+    message?: string;
+  }) => void;
   /** Asks the ACP client to decide a teammate's tool approval. */
   readonly requestPermission: (
     params: RequestPermissionRequest,
@@ -85,6 +104,8 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     null;
   let joinedListener: ((event: TeammateJoinedEvent) => void) | null = null;
   let exitedListener: ((event: TeammateExitedEvent) => void) | null = null;
+  let activityListener: ((event: TeammateActivityEvent) => void) | null = null;
+  let messageSentListener: ((event: MessageSentEvent) => void) | null = null;
   let detached = false;
 
   const detachFromManager = (manager: TeamManager): void => {
@@ -101,6 +122,14 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     if (exitedListener) {
       emitter.off(TeamEventType.TEAMMATE_EXITED, exitedListener);
       exitedListener = null;
+    }
+    if (activityListener) {
+      emitter.off(TeamEventType.TEAMMATE_ACTIVITY, activityListener);
+      activityListener = null;
+    }
+    if (messageSentListener) {
+      emitter.off(TeamEventType.MESSAGE_SENT, messageSentListener);
+      messageSentListener = null;
     }
   };
 
@@ -213,6 +242,27 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     });
   };
 
+  const handleActivity = (event: TeammateActivityEvent): void => {
+    deps.reportTeammateActivity({
+      kind: 'tool',
+      name: event.name,
+      toolName: event.toolName,
+      phase: event.phase,
+      success: event.success,
+      description: event.description,
+    });
+  };
+
+  const handleMessageSent = (event: MessageSentEvent): void => {
+    deps.reportTeammateActivity({
+      kind: 'message',
+      name: event.from,
+      from: event.from,
+      to: event.to,
+      message: event.message,
+    });
+  };
+
   const handleManagerChange = (manager: TeamManager | null): void => {
     if (detached) return;
     if (boundManager && boundManager !== manager) {
@@ -231,6 +281,10 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     emitter.on(TeamEventType.TEAMMATE_JOINED, joinedListener);
     exitedListener = handleExited;
     emitter.on(TeamEventType.TEAMMATE_EXITED, exitedListener);
+    activityListener = handleActivity;
+    emitter.on(TeamEventType.TEAMMATE_ACTIVITY, activityListener);
+    messageSentListener = handleMessageSent;
+    emitter.on(TeamEventType.MESSAGE_SENT, messageSentListener);
   };
 
   deps.config.onTeamManagerChange(handleManagerChange);

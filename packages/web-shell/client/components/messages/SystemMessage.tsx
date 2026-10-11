@@ -372,7 +372,8 @@ export const SystemMessage = memo(function SystemMessage({
   const isTaskNotification =
     variant === 'info' &&
     (source === 'background_notification' ||
-      source === 'background_task_completed');
+      source === 'background_task_completed' ||
+      source === 'teammate_activity');
   const notificationData =
     isTaskNotification && typeof data === 'object' && data !== null
       ? (data as Record<string, unknown>)

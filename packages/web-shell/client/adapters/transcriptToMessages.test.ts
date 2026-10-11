@@ -598,6 +598,88 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('renders teammate activity frames as attributed notices, not leader text', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'activity-1',
+        'assistant',
+        'researcher started read_file: Read notes.md',
+        1,
+        false,
+        {
+          meta: {
+            source: 'teammate_activity',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'teammate-activity-1',
+              status: 'call',
+              kind: 'peer',
+            },
+          },
+          agent: {
+            agentName: '/root/researcher',
+            depth: 1,
+            kind: 'teammate',
+          },
+        },
+      ),
+      textBlock(
+        'activity-2',
+        'assistant',
+        'writer → checker: sky sentence',
+        2,
+        false,
+        {
+          meta: {
+            source: 'teammate_activity',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'teammate-activity-2',
+              status: 'message',
+              kind: 'peer',
+            },
+          },
+          agent: {
+            agentName: '/root/writer',
+            depth: 1,
+            kind: 'teammate',
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'activity-1',
+        role: 'system',
+        content: 'researcher started read_file: Read notes.md',
+        variant: 'info',
+        source: 'teammate_activity',
+        data: {
+          taskId: 'teammate-activity-1',
+          status: 'call',
+          kind: 'peer',
+        },
+        teammate: { name: 'researcher' },
+        timestamp: 1,
+      },
+      {
+        id: 'activity-2',
+        role: 'system',
+        content: 'writer → checker: sky sentence',
+        variant: 'info',
+        source: 'teammate_activity',
+        data: {
+          taskId: 'teammate-activity-2',
+          status: 'message',
+          kind: 'peer',
+        },
+        teammate: { name: 'writer' },
+        timestamp: 2,
+      },
+    ]);
+  });
+
   it('attributes a teammate roster change delivered as background_task_completed', () => {
     // Real peer frames carry `_meta.source: 'background_task_completed'`, so
     // the attribution must live on that push site too, not only on the

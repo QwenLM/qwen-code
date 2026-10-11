@@ -10841,6 +10841,8 @@ export class Session implements SessionContext {
       injectLeaderMessage: (modelText, displayText, senders) =>
         this.#enqueueTeammateMessage(modelText, displayText, senders),
       reportRosterChange: (change) => this.#enqueueTeamRosterChange(change),
+      reportTeammateActivity: (activity) =>
+        this.#emitTeammateActivity(activity),
       requestPermission: (params, signal) =>
         this.#requestPermissionQueued(params, signal),
     });
@@ -10909,6 +10911,50 @@ export class Session implements SessionContext {
       },
       label: change.name,
       continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
+  /**
+   * Teammate progress and inter-teammate messages as display-only frames.
+   * Unlike roster changes and reports these never enter the notification
+   * queue — they carry nothing the leader must act on, and each would
+   * otherwise wake it into an automatic turn. Persistence is skipped for the
+   * same reason: the frames are ephemeral activity, while the report the
+   * teammate eventually sends is what the transcript must keep.
+   */
+  #emitTeammateActivity(activity: {
+    kind: 'tool' | 'message';
+    name: string;
+    toolName?: string;
+    phase?: 'call' | 'result';
+    success?: boolean;
+    description?: string;
+    from?: string;
+    to?: string;
+    message?: string;
+  }): void {
+    if (this.disposed || this.closing) return;
+    const text =
+      activity.kind === 'tool'
+        ? `${activity.name} ${activity.phase === 'result' ? 'finished' : 'started'} ${activity.toolName ?? 'a tool'}${activity.description && activity.phase === 'call' ? `: ${activity.description}` : ''}`
+        : `${activity.from} → ${activity.to}: ${activity.message ?? ''}`;
+    void this.#emitBackgroundNotificationDisplay(
+      {
+        displayText: text,
+        modelText: text,
+        taskId: `teammate-activity-${++this.teammateMessageSeq}`,
+        status:
+          activity.kind === 'tool' ? (activity.phase ?? 'call') : 'message',
+        kind: 'peer',
+        agent: {
+          agentName: `${ROOT_AGENT_IDENTITY.agentName}/${activity.name}`,
+          depth: 1,
+          kind: 'teammate' as const,
+        },
+      },
+      'teammate_activity',
+    ).catch((error) => {
+      debugLogger.warn('Failed to publish teammate activity:', error);
     });
   }
 

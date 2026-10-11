@@ -1906,12 +1906,29 @@ export class TeamManager {
       }
     };
 
-    const onToolCall = (_event: AgentToolCallEvent) => {
+    const onToolCall = (event: AgentToolCallEvent) => {
       recordActivity();
+      this.teamEventEmitter.emit(TeamEventType.TEAMMATE_ACTIVITY, {
+        agentId,
+        name: agentName,
+        toolName: event.name,
+        phase: 'call',
+        description: event.description,
+        timestamp: Date.now(),
+      });
     };
 
-    const onToolResult = (_event: AgentToolResultEvent) => {
+    const onToolResult = (event: AgentToolResultEvent) => {
       recordActivity();
+      this.teamEventEmitter.emit(TeamEventType.TEAMMATE_ACTIVITY, {
+        agentId,
+        name: agentName,
+        toolName: event.name,
+        phase: 'result',
+        success: event.success,
+        description: event.error ?? event.name,
+        timestamp: Date.now(),
+      });
     };
 
     const onRoundText = (event: AgentRoundTextEvent) => {
