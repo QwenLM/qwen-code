@@ -5,7 +5,11 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { convertClaudePluginPackage } from '@qwen-code/qwen-code-core/extension/claude-converter.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import type { ModLog } from '@qwen-code/qwen-code-core/mods/types.js';
 import type { LoadedSettings } from '../config/settings.js';
@@ -30,6 +34,7 @@ vi.mock('@qwen-code/qwen-code-core/mods/runtime.js', () => ({
 
 describe('headless Mod session ownership', () => {
   const sessions: ModSession[] = [];
+  const tempDirs: string[] = [];
   const setup = (overrides: Record<string, unknown> = {}) => {
     const extension = {
       id: 'id',
@@ -85,6 +90,11 @@ describe('headless Mod session ownership', () => {
   };
   afterEach(async () => {
     await Promise.all(sessions.splice(0).map((session) => session.close()));
+    await Promise.all(
+      tempDirs
+        .splice(0)
+        .map((dir) => fs.rm(dir, { recursive: true, force: true })),
+    );
     vi.resetAllMocks();
   });
 
@@ -310,6 +320,121 @@ describe('headless Mod session ownership', () => {
       '/consumer',
     ]);
   });
+
+  describe.each(['direct', 'ordinary'] as const)(
+    'converted marketplace %s dependencies',
+    (via) => {
+      it.each(['missing', 'incompatible', 'satisfied', 'invalid'])(
+        'validates %s dependencies before starting a worker',
+        async (state) => {
+          const root = await fs.mkdtemp(
+            path.join(os.tmpdir(), 'mod-marketplace-'),
+          );
+          tempDirs.push(root);
+          const names = [
+            'consumer',
+            ...(via === 'ordinary' ? ['ordinary'] : []),
+          ];
+          if (state !== 'missing') names.push('base');
+          const entries = [];
+          for (const name of names) {
+            const version =
+              name === 'base' && state === 'incompatible' ? '1.0.0' : '2.0.0';
+            const declaresDependency =
+              name === (via === 'direct' ? 'consumer' : 'ordinary');
+            entries.push({
+              name,
+              version,
+              source: `./${name}`,
+              ...(declaresDependency
+                ? {
+                    dependencies:
+                      state === 'invalid'
+                        ? false
+                        : [{ name: 'base', version: '^2.0.0' }],
+                  }
+                : {}),
+            });
+            await fs.mkdir(path.join(root, name, '.claude-plugin'), {
+              recursive: true,
+            });
+            await fs.writeFile(
+              path.join(root, name, '.claude-plugin/plugin.json'),
+              JSON.stringify({
+                name,
+                version,
+                ...(name === 'consumer' && via === 'ordinary'
+                  ? { dependencies: ['ordinary'] }
+                  : {}),
+              }),
+            );
+          }
+          await fs.mkdir(path.join(root, '.claude-plugin'));
+          await fs.writeFile(
+            path.join(root, '.claude-plugin/marketplace.json'),
+            JSON.stringify({
+              name: 'fixture',
+              owner: { name: 'Fixture' },
+              plugins: entries,
+            }),
+          );
+          await fs.mkdir(path.join(root, 'consumer/hooks'));
+          await fs.writeFile(
+            path.join(root, 'consumer/hooks/hooks.json'),
+            JSON.stringify({ modules: ['./entry.js'] }),
+          );
+          await fs.writeFile(
+            path.join(root, 'consumer/hooks/entry.js'),
+            'export function register() {}',
+          );
+          const extensions = await Promise.all(
+            names.map(async (name) => {
+              const { convertedDir, config } = await convertClaudePluginPackage(
+                root,
+                name,
+              );
+              tempDirs.push(convertedDir);
+              return {
+                ...config,
+                id: name,
+                path: convertedDir,
+                isActive: true,
+                installMetadata: { marketplaceConfig: { name: 'fixture' } },
+              };
+            }),
+          );
+          const { session } = setup({ getExtensions: () => extensions });
+          const discovery = await vi.importActual<
+            typeof import('@qwen-code/qwen-code-core/mods/discovery.js')
+          >('@qwen-code/qwen-code-core/mods/discovery.js');
+          mocks.load.mockImplementation(discovery.loadModSource);
+          mocks.dependencies.mockImplementation(discovery.loadModDependencies);
+
+          const initialization = session.initialize(
+            new AbortController().signal,
+          );
+          if (state === 'satisfied') {
+            await initialization;
+            expect(mocks.create).toHaveBeenCalledTimes(1);
+            expect(
+              (await session.loadCommands(new AbortController().signal)).map(
+                ({ name }) => name,
+              ),
+            ).toEqual(['hello']);
+          } else {
+            await expect(initialization).rejects.toThrow(
+              state === 'missing'
+                ? /dependency base.*installed, enabled/
+                : state === 'incompatible'
+                  ? /dependency base.*incompatible installed version/
+                  : /Invalid Mod dependencies declaration/,
+            );
+            expect(mocks.create).not.toHaveBeenCalled();
+          }
+        },
+      );
+    },
+  );
 
   it('keeps Agent Plugins v1 hooks ignored', async () => {
     const { session } = setup({

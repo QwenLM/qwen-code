@@ -811,6 +811,36 @@ describe('convertClaudePluginPackage', () => {
     expect(definition?.dependencies).toEqual(dependencies);
   });
 
+  it.each([
+    { dependencies: [{ name: 'marketplace-base', version: '^2.0.0' }] },
+    { dependencies: [] },
+  ])(
+    'uses marketplace dependency declarations over plugin.json: $dependencies',
+    async ({ dependencies }) => {
+      const originalManifest = JSON.stringify({
+        name: 'consumer',
+        version: '1.0.0',
+        dependencies: ['plugin-base'],
+      });
+      const { dir, result } = await layoutAndConvert(
+        'marketplace-dependencies',
+        { name: 'consumer', dependencies },
+        {
+          '.claude-plugin/plugin.json': originalManifest,
+          'hooks/hooks.json': JSON.stringify({ modules: ['./entry.js'] }),
+          'hooks/entry.js': 'export function register() {}',
+        },
+      );
+
+      expect((await loadModSource(result.convertedDir))?.dependencies).toEqual(
+        dependencies,
+      );
+      expect(
+        fs.readFileSync(path.join(dir, '.claude-plugin/plugin.json'), 'utf8'),
+      ).toBe(originalManifest);
+    },
+  );
+
   it('throws when marketplace.json itself is a symlink resolving outside the plugin', async () => {
     // A hostile clone makes the marketplace manifest a symlink to a JSON-shaped
     // host file. The converter must refuse to follow it (realPathWithin guard).
