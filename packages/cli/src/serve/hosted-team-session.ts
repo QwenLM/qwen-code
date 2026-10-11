@@ -47,9 +47,10 @@ import {
   HostedChildChains,
   givenWorkThisTurn,
   hostedMemberView,
+  hostedNeverStarted,
   isEndedMember,
   isRunningMember,
-  neverStartedReason,
+  neverStartedClause,
   outboundChildMessages,
   type HostedMemberView,
 } from './hosted-member-chain.js';
@@ -222,7 +223,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_list',
     description:
-      'List the team board, optionally filtered, followed by each member with the state of its newest started run (and why a failed or cancelled run ended), its task id while it can still take work, and a newer continuation that never started. Address a member with send_message to its name.',
+      'List the team board, optionally filtered, followed by each member with the state of its current run, which is its newest one that did not fail to start (and why a failed or cancelled run ended), its task id while it can still take work, and a newer continuation that never started, with the messages that did not reach it. Address a member with send_message to its name.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -760,14 +761,31 @@ export class HostedTeamSession {
     const task = this.task(board.get(number)!.taskId);
     if (deleting) return `Task #${number} deleted.`;
     // H4e-b2 decision 7: the board is a record, never a delivery. The
-    // answer never asks for a send: the launch prompt or a send earlier in
-    // the Turn may already have given this work.
-    const notice =
+    // answer never asks for a send outright: the launch prompt or a send
+    // earlier in the Turn may already have given this work, and when such
+    // a send exists it says so.
+    let notice = '';
+    if (
       owner != null &&
       owner !== MANAGED_TEAM_LEADER &&
       task.status !== 'completed'
-        ? ` "${owner}" was not notified: task_update records the board only. If ${owner} does not already have this work, give it with send_message to "${owner}".`
-        : '';
+    ) {
+      const member = team.members.find((each) => each.name === owner);
+      const given =
+        member !== undefined &&
+        turnPrefix !== undefined &&
+        givenWorkThisTurn(
+          this.chains(),
+          member.childRunId,
+          outboundChildMessages(
+            this.store.authority.extensionRecordsInDomain('session_message'),
+          ),
+          turnPrefix,
+        );
+      notice = given
+        ? ` "${owner}" was not notified: task_update records the board only. A send_message earlier in this turn gave ${owner} work; if it did not carry this task, give it with send_message to "${owner}".`
+        : ` "${owner}" was not notified: task_update records the board only. If ${owner} does not already have this work, give it with send_message to "${owner}".`;
+    }
     return (
       `Task #${number} updated (status: ${task.status}` +
       (task.owner ? `, owner: ${task.owner}` : '') +
@@ -972,20 +990,15 @@ export class HostedTeamSession {
     const reachable =
       head !== undefined &&
       ((view.state === 'running' && !view.stopping) || view.continuable);
-    let note = '';
-    if (view.neverStarted !== undefined) {
-      const lost = this.messagesTo(view.neverStarted.childRunId).filter(
-        (message) =>
-          message.run.delivery?.state !== 'accepted' &&
-          message.run.delivery?.state !== 'consumed',
-      ).length;
-      note =
-        ` (its latest continuation never started: ${neverStartedReason(view.neverStarted)}` +
-        (lost > 0
-          ? `; ${lost} message${lost === 1 ? '' : 's'} to it never arrived`
-          : '') +
-        ')';
-    }
+    const note =
+      view.neverStarted === undefined
+        ? ''
+        : ` (its latest continuation ${neverStartedClause(
+            hostedNeverStarted(
+              view.neverStarted,
+              this.messagesTo(view.neverStarted.childRunId),
+            ),
+          )})`;
     return (
       `${member.name}: ${label}` +
       (reason ? ` (${reason})` : '') +
@@ -1041,11 +1054,11 @@ export class HostedTeamSession {
     const chains = this.chains();
     const view = hostedMemberView(chains, member.childRunId);
     const kept = keptOn !== undefined;
-    // "Member X has finished", or for a kept owner "… and cannot keep
-    // task #N open".
+    // "Member X has finished", or for a kept owner "Member X cannot keep
+    // task #N open: it has finished".
     const who = (state: string) =>
       kept
-        ? `Member "${owner}" ${state} and cannot keep task #${keptOn} open`
+        ? `Member "${owner}" cannot keep task #${keptOn} open: it ${state}`
         : `Member "${owner}" ${state}`;
     const unassign = kept ? ', or set owner "" to unassign it' : '';
     if (isEndedMember(view)) {
@@ -1071,10 +1084,16 @@ export class HostedTeamSession {
     // The head's newest continuation never started, so the newest work
     // sent to the member did not arrive, whatever an earlier send of this
     // Turn gave: no later started run exists, or it would be the head.
-    if (view.neverStarted !== undefined)
-      throw new HostedTeamRefusal(
-        `${who(`has finished, and its latest continuation never started (${neverStartedReason(view.neverStarted)})`)}, so the work that continuation carried did not arrive. Send that work again with send_message to "${owner}", then update the task in the same turn${unassign}.`,
+    // One cancelled at a user's request is resent only if still wanted.
+    if (view.neverStarted !== undefined) {
+      const neverStarted = hostedNeverStarted(
+        view.neverStarted,
+        this.messagesTo(view.neverStarted.childRunId),
       );
+      throw new HostedTeamRefusal(
+        `${who(`has finished, and its latest continuation ${neverStartedClause(neverStarted)}`)}. ${neverStarted.cancelled ? 'If that work is still wanted, send it again' : 'Send that work again'} with send_message to "${owner}", then update the task in the same turn${unassign}.`,
+      );
+    }
     if (
       turnPrefix !== undefined &&
       givenWorkThisTurn(

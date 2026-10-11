@@ -19,6 +19,7 @@ import {
   parseTeamState,
   type TeamState,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
+import type { ManagedSessionDomain } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 // H4e-b2 of #12827: what a team adds on top of H4d-b's Session messages —
 // a member is its continuation chain, every run of that chain opens its
@@ -166,6 +167,19 @@ export class HostedChildChains {
     return list === undefined ? undefined : list[list.length - 1];
   }
 
+  /**
+   * The continuation its predecessor took just before this one. When there
+   * is one, it had proved it never started by then, or routing would have
+   * reached it instead (H4d-a decision 9).
+   */
+  previousContinuation(childRunId: string): ChildSessionRun | undefined {
+    const predecessor = this.byId.get(childRunId)?.predecessorChildRunId;
+    if (predecessor === null || predecessor === undefined) return undefined;
+    const list = this.successors.get(predecessor) ?? [];
+    const index = list.findIndex((run) => run.childRunId === childRunId);
+    return index > 0 ? list[index - 1] : undefined;
+  }
+
   /** Every run of the chain a launch started, never-started ones included. */
   chain(rootChildRunId: string): readonly ChildSessionRun[] {
     const runs: ChildSessionRun[] = [];
@@ -232,6 +246,8 @@ export function hostedMemberView(
       : head?.run.state === 'failed' || head?.run.state === 'cancelled'
         ? head.run.state
         : 'running';
+  // Every continuation the head took proved it never started, or the
+  // newest that did not would be the head.
   const newest =
     head === undefined ? undefined : chains.newestContinuation(head.childRunId);
   return {
@@ -245,16 +261,130 @@ export function hostedMemberView(
       head?.kind === 'child_agent' &&
       head.stopReason === 'completed' &&
       !head.stopRequested,
-    neverStarted:
-      newest !== undefined && newest.run.execution === 'not_started_proven'
-        ? newest
-        : undefined,
+    neverStarted: newest,
   };
 }
 
 /** Why a continuation that never started ended, for the lead to read. */
-export function neverStartedReason(run: ChildSessionRun): string {
+function neverStartedReason(run: ChildSessionRun): string {
   return run.stopReason ?? run.run.state;
+}
+
+/**
+ * A run that proved it never started, as the lead must read it: the work
+ * it carried did not arrive, nor did the messages sent to it while it
+ * waited (H4d-b cancels a message to a run that ended before its
+ * handover). A failed child sends no notification, so an answer or the
+ * roster is how the lead learns of it. One cancelled before its start, at
+ * a user's request (H4f), is told apart: that work may no longer be wanted.
+ */
+export interface HostedNeverStarted {
+  readonly childRunId: string;
+  /** Null for a launch: there is no earlier run to send to again. */
+  readonly predecessorChildRunId: string | null;
+  readonly reason: string;
+  readonly cancelled: boolean;
+  /** The messages sent to it, none of which arrived. */
+  readonly lostMessages: number;
+}
+
+export function hostedNeverStarted(
+  run: ChildSessionRun,
+  messages: readonly SessionMessage[],
+): HostedNeverStarted {
+  return {
+    childRunId: run.childRunId,
+    predecessorChildRunId: run.predecessorChildRunId,
+    reason: neverStartedReason(run),
+    cancelled: run.run.state === 'cancelled',
+    lostMessages: messages.filter(
+      (message) => message.childRunId === run.childRunId,
+    ).length,
+  };
+}
+
+/** "never started (creation_failed)", or "was cancelled before it started
+ * (stop_requested)". */
+export function neverStartedPhrase(neverStarted: HostedNeverStarted): string {
+  return neverStarted.cancelled
+    ? `was cancelled before it started (${neverStarted.reason})`
+    : `never started (${neverStarted.reason})`;
+}
+
+/** "1 message sent to it", "2 messages sent to it". */
+export function messagesSentToIt(count: number): string {
+  return `${count} message${count === 1 ? '' : 's'} sent to it`;
+}
+
+/**
+ * "never started (creation_failed), so the work it carried did not
+ * arrive, nor did 1 message sent to it" — said of a continuation.
+ */
+export function neverStartedClause(neverStarted: HostedNeverStarted): string {
+  return (
+    `${neverStartedPhrase(neverStarted)}, so the work it carried did not arrive` +
+    (neverStarted.lostMessages > 0
+      ? `, nor did ${messagesSentToIt(neverStarted.lostMessages)}`
+      : '')
+  );
+}
+
+/**
+ * H4e-b2: what a committed send reached, as its answer must tell it. A
+ * replay or a recovered answer reads it again, so it may find what the
+ * first answer could not: the run the send reached has proved since that
+ * it never started.
+ */
+export interface HostedRouteDetails {
+  /** The open team member whose chain the send reached. */
+  readonly member?: { readonly name: string; readonly teamName: string };
+  /** The run the send reached — the continuation it launched, or the
+   * waiting run a message was queued for — never started, so the send did
+   * not arrive. */
+  readonly ownNeverStarted?: HostedNeverStarted;
+  /** The continuation taken just before the one the send launched, which
+   * never started. */
+  readonly previousNeverStarted?: HostedNeverStarted;
+}
+
+export function hostedRouteDetails(
+  authority: {
+    extensionRecordsInDomain(
+      domain: ManagedSessionDomain,
+    ): ReadonlyArray<{ readonly record: unknown }>;
+  },
+  route: {
+    readonly kind: 'message' | 'continuation';
+    readonly childRunId: string;
+  },
+): HostedRouteDetails {
+  const chains = new HostedChildChains(
+    authority.extensionRecordsInDomain('child_run'),
+  );
+  const messages = outboundChildMessages(
+    authority.extensionRecordsInDomain('session_message'),
+  );
+  const member = hostedOpenTeamChainMember(
+    authority.extensionRecordsInDomain('team_state'),
+    chains,
+    route.childRunId,
+  );
+  const reached = chains.run(route.childRunId);
+  const previous =
+    route.kind === 'continuation'
+      ? chains.previousContinuation(route.childRunId)
+      : undefined;
+  return {
+    ...(member === undefined
+      ? {}
+      : { member: { name: member.name, teamName: member.team.name } }),
+    ...(reached?.run.execution === 'not_started_proven'
+      ? { ownNeverStarted: hostedNeverStarted(reached, messages) }
+      : {}),
+    ...(previous?.run.execution === 'not_started_proven'
+      ? { previousNeverStarted: hostedNeverStarted(previous, messages) }
+      : {}),
+  };
 }
 
 /** The lead's outbound messages to the child runs of one Session. */

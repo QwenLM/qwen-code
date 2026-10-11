@@ -93,7 +93,7 @@ The facts below are from `main` at `66ddb151cb`, which includes #13846 (merged a
      - `running`, or `running (stopping)` once a stop was requested;
      - `completed`, or `completed (stop requested)` for a head that settled after a stop request, which routing refuses to continue;
      - `failed` or `cancelled`, with the stop reason.
-   - **The roster view.** `task_list` shows that state, and the head's task id whenever the member can still take work, running or continuable. When the head's newest continuation, the one committed last, never started, the line also says why, and how many messages sent to it never arrived (H4d-b cancels a message to a run that ended before its handover). For example: `alpha: completed — task_r1 (its latest continuation never started: creation_failed; 1 message to it never arrived)`. The line does not show that continuation's task id: a send to it would route from that run, which ended, and be refused. A failed or cancelled child sends no notification, so this line is how the lead learns that new work never reached the member, as H4e-b1 decision 6 meant the roster view for failures.
+   - **The roster view.** `task_list` shows that state, and the head's task id whenever the member can still take work, running or continuable. When the head's newest continuation, the one committed last, never started, the line also says why, and how many messages sent to it never arrived (H4d-b cancels a message to a run that ended before its handover). For example: `alpha: completed — task_r1 (its latest continuation never started (creation_failed), so the work it carried did not arrive, nor did 1 message sent to it)`. One cancelled before its start at a user's request reads `was cancelled before it started (stop_requested)` instead. The line does not show that continuation's task id: a send to it would route from that run, which ended, and be refused. A failed or cancelled child sends no notification, so this line is how the lead learns that new work never reached the member, as H4e-b1 decision 6 meant the roster view for failures.
    - **What reads the state.**
      - `team_delete` refuses while any head runs.
      - The owner rules read the head too (decision 7). There a stopping head counts as ended and not completed, and a head that completed after a stop request counts as completed but not continuable.
@@ -101,7 +101,7 @@ The facts below are from `main` at `66ddb151cb`, which includes #13846 (merged a
    - **Worktree members.** A worktree member's continuation keeps its `workspaceMode`, as every H4d-b continuation does, so it needs a host that serves child Workspaces.
    - **No record changes.** A continuation never joins a roster, because it is launched by `send_message`, not by a named Agent call. H4e-a's join rule, which admits only a live run that no other team lists, still guards every join.
    - **Ended members.** A member whose head failed or was cancelled after it started stays ended: H4d-a decision 9 never continues such a run. So does a head that completed after a stop was requested. The lead launches a new member instead, which takes another roster slot (open question 4).
-   - **A continuation that never started** leaves its member as it was, because H4d-a decision 9 releases the predecessor. That covers a failed creation and an H4f cancel before the start. The next message continues the same head again, and its answer says that the previous continuation never started.
+   - **A continuation that never started** leaves its member as it was, because H4d-a decision 9 releases the predecessor. That covers a failed creation and an H4f cancel before the start. The next message continues the same head again. Its answer, by name or by task id, says that the previous continuation never started and how many messages sent to it were lost, and asks for that work again unless the new message carries it. A continuation a user cancelled before its start is told apart, and its work is asked for again only if it is still wanted, since the user may have cancelled it on purpose.
    - **Cancelling a member's work.** A user's H4f task cancel stops exactly the run its task id names. To stop a continued member's work, the user names the head's task, which is the member's newest open child task on the public task list. The first run's task answers that the task already settled.
    - **After `team_delete`.** Routing by name, broadcasts, the preamble and the continuation labels (decisions 3–6) concern the open team's roster only. Once its team is deleted, a former member's chain takes messages by `task_id` alone, and it continues as a plain child with no preamble and no label, as #13846 decided (open question 7).
 
@@ -118,13 +118,13 @@ The facts below are from `main` at `66ddb151cb`, which includes #13846 (merged a
    - **Routing.** A name routes exactly as the task id of that member's first run does:
      - a running head takes a message, unless it is stopping;
      - a continuable head (completed, with no stop requested) is continued;
-     - any other head is refused, with the member's name and its state.
+     - any other head is refused, with the member's name and its state. An ended member's refusal points to a new member under a new name, because a plain launch would not join the team.
    - **Ids.** The message id and the continuation's run id are the ones the `task_id` form would mint for the same call. So H4d-b's replay and its bounds apply unchanged:
      - the envelope bound;
      - 8 messages in flight and 64 per run;
      - the continuation's launch admission (closing, H4b's active cap, H4c's launch budget, a worktree's need for child Workspaces).
    - **Replay order.** A replay looks the call's committed message or continuation up before it resolves `to`, so it answers the committed send even after the team has changed.
-   - **Answers.** They name the member: `Message queued for delivery to member "<name>" (task <id>)…`, or `Member "<name>" had completed; continued it as task <id>…`. When the head's newest continuation never started, the answer says so, without that continuation's task id.
+   - **Answers.** They name the member: `Message queued for delivery to member "<name>" (task <id>)…`, or `Member "<name>" had completed; continued it as task <id>…`. When the continuation taken just before the one the send launched never started, the answer says so (decision 2), without that continuation's task id. A send by `task_id` to a member of the open team gets the same answers, because the lead's reply hint names the task id (decision 6).
    - **Legacy's `summary`** is refused as an unsupported argument. An argument that would mean nothing is the dead switch H4b decision 11 refused.
 
 4. **`to: "*"` reaches every member.** A broadcast sends to every member of the open team, in roster order. Each member is routed as in decision 3 and committed on its own.
@@ -199,9 +199,9 @@ The facts below are from `main` at `66ddb151cb`, which includes #13846 (merged a
    - **Still refused.** A member whose head failed, was cancelled after it started, is stopping, or completed after a stop request is refused, as decision 2 counts it ended.
 
    The texts lead the model there. None of them claims which task a past send carried, because no record ties a send to a task, and none offers to skip a send for work that never arrived:
-   - **The `task_update` answer.** For a member owner, it says that it notified nobody, and that if the member does not already have this work, `send_message` to its name gives it. It does not tell the model to send: a send earlier in the Turn, or the launch prompt, may already have given the work, and a second send would repeat it.
+   - **The `task_update` answer.** For a member owner, it says that it notified nobody, and that if the member does not already have this work, `send_message` to its name gives it. It does not tell the model to send: a send earlier in the Turn, or the launch prompt, may already have given the work, and a second send would repeat it. When a send earlier in the Turn gave the member work, the answer says so, and asks for a send only if that one did not carry this task.
    - **A completed, continuable member not given work in this Turn.** It is refused on open work with one conditional text. If it already did this task's work, from its launch prompt or a message the lead sent it, set the status `completed` with this owner once its report is in. Otherwise give it the work with `send_message` to its name first, which continues it, and then assign it. The first branch is #13846's way out, kept.
-   - **A head whose newest continuation never started.** The refusal says that this continuation never started and why, and that the work it carried did not arrive. It points to sending that work again by name and then assigning the task, with no branch that skips the send.
+   - **A head whose newest continuation never started.** The refusal says that this continuation never started and why, and that the work it carried did not arrive, nor did the messages sent to it. It points to sending that work again by name and then assigning the task, with no branch that skips the send. For a continuation a user cancelled before its start, it asks for the work again only if it is still wanted.
    - **A member that cannot be continued.** One that failed, was cancelled, is stopping or completed after a stop request is refused as ended. The refusal points to launching a new member, or, for one that completed, to completing the task with it as owner if it did the work.
    - **The descriptions.** The `task_update`, `task_create` and `task_list` descriptions, and the team form's `send_message` description, say the same. `task_list` no longer calls the task id the way to reach a member.
 
@@ -219,10 +219,10 @@ The facts below are from `main` at `66ddb151cb`, which includes #13846 (merged a
 
 9. **Interrupted turns are answered by what committed (extends H4d-b decision 16).**
    - **Which ids to probe.** Recovery and the PostToolUse dispatch evidence look up a `send_message` call under its base ids and under the ten broadcast positions' ids, whatever the journaled arguments say. A PreToolUse or permission hook can rewrite the input the call executed, so the journaled `to` may not be the one that ran.
-   - **A single send.** One found under the base ids is answered with H4d-b's task-id text. It names the run without the member's name and never invites a retry.
+   - **A single send.** One found under the base ids is answered as decision 3 answers a live send: with the member's name while its team is open, otherwise with H4d-b's task-id text. It never invites a retry of a send that arrived. When the run the send reached has proved since that it never started, the answer says that the message did not arrive and how to send it again: a failed child sends no notification, so nothing else would tell the lead.
    - **A broadcast.**
      - One found under position ids is answered recipient by recipient, from the committed message or continuation of each position.
-     - The answer lists who was reached and who was not, so the model resends only to the rest.
+     - The answer lists who was reached and who was not, so the model resends only to the rest. A recipient whose run never started counts as not reached. A member that has ended is listed apart, because a send by name would be refused.
      - A route that resumes the Turn answers a call that committed nothing as never run.
    - **Dispatch evidence.** A committed broadcast still counts as dispatched after a restart.
 
@@ -332,7 +332,8 @@ To a running member, step 1 is an outbound `session_message` to the head, and H4
     - the broadcast batch rule.
   - A member launched and addressed by name in one batch.
   - A send by name to a member that is running, completed, failed, stopping, or completed after a stop request.
-  - A send by name after a continuation that never started, whose answer names it.
+  - A send by name after a continuation that never started, whose answer names it with the messages it lost; the same by task id; and one after a continuation a user cancelled before its start.
+  - A replay of a send whose continuation, or the waiting run its message was queued for, has proved since that it never started.
   - A broadcast with mixed outcomes, including the active cap, and its replay.
   - A broadcast and, in the same turn, a plain call whose provider id equals the broadcast's derived `bcast_…` run id or `msgb_…` message id, or is a prefix of the broadcast's call id: every message and run id still differs, and recovery tells the two calls apart.
   - One approval covering a broadcast.

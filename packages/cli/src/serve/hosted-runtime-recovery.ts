@@ -46,15 +46,21 @@ import {
   hostedAgentBackgroundStartedText,
   hostedBroadcastCommitted,
   hostedChildRunIdFor,
-  hostedMessageContinuedText,
   hostedMessageToChildText,
   HOSTED_MESSAGE_TO_PARENT_TEXT,
+  hostedRouteAnswer,
   hostedTeamJoinedText,
   hostedRuntimeSessionId,
   journaledToolResultIds,
   truncateHostedGlobResponse,
 } from './hosted-workspace-tool-turn.js';
 import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
+import {
+  HostedChildChains,
+  hostedMemberView,
+  hostedRouteDetails,
+  isEndedMember,
+} from './hosted-member-chain.js';
 import {
   endHostedAction,
   readHostedActionOptions,
@@ -519,7 +525,9 @@ async function answerAbandonedTurnCalls(input: {
 /**
  * H4d-b: the answer a send_message call earned when it committed — its
  * outbox entry, or the continuation it launched for a completed child —
- * or undefined when it committed nothing.
+ * or undefined when it committed nothing. H4e-b2 names a member and tells
+ * a run that proved it never started since, and answers a broadcast by
+ * the recipients it committed (decision 9).
  */
 function sentMessageText(
   input: {
@@ -540,18 +548,26 @@ function sentMessageText(
     }),
   );
   if (message?.direction === 'outbound') {
-    return message.route === 'to_parent'
-      ? HOSTED_MESSAGE_TO_PARENT_TEXT
-      : hostedMessageToChildText(
-          input.children?.taskIdOf(message.childRunId) ?? message.childRunId,
-        );
+    if (message.route === 'to_parent') return HOSTED_MESSAGE_TO_PARENT_TEXT;
+    if (input.children === undefined)
+      return hostedMessageToChildText(message.childRunId);
+    const sent = { kind: 'message', childRunId: message.childRunId } as const;
+    return hostedRouteAnswer(input.children, {
+      ...sent,
+      ...hostedRouteDetails(input.session.authority, sent),
+    });
   }
   const continued = input.children?.record(callKey);
   if (continued?.predecessorChildRunId) {
-    return hostedMessageContinuedText(
-      input.children!.taskIdOf(continued.predecessorChildRunId),
-      input.children!.taskIdOf(continued.childRunId),
-    );
+    const sent = {
+      kind: 'continuation',
+      childRunId: continued.childRunId,
+      predecessorChildRunId: continued.predecessorChildRunId,
+    } as const;
+    return hostedRouteAnswer(input.children!, {
+      ...sent,
+      ...hostedRouteDetails(input.session.authority, sent),
+    });
   }
   // H4e-b2 decision 9: a broadcast commits each recipient under its own
   // position's ids. Every position is probed whatever the journaled
@@ -570,11 +586,24 @@ function sentMessageText(
     .extensionRecordsInDomain('team_state')
     .map((entry) => parseTeamState(entry.record))
     .find((each) => each.lifecycle !== 'deleted');
-  const missed = (team?.members ?? [])
-    .filter((_, index) => !reached.some((each) => each.position === index + 1))
-    .map((member) => member.name);
+  const chains = new HostedChildChains(
+    input.session.authority.extensionRecordsInDomain('child_run'),
+  );
+  // A member the call never committed a send to, or whose send reached a
+  // run that never started, did not get it; one that has ended since
+  // cannot take it by name either.
+  const missed: string[] = [];
+  const ended: string[] = [];
+  for (const [index, member] of (team?.members ?? []).entries()) {
+    const committed = reached.find((each) => each.position === index + 1);
+    if (committed?.arrived) continue;
+    if (isEndedMember(hostedMemberView(chains, member.childRunId)))
+      ended.push(member.name);
+    else missed.push(member.name);
+  }
+  const arrived = reached.filter((each) => each.arrived).length;
   return (
-    `The broadcast was interrupted after it reached ${reached.length} member${reached.length === 1 ? '' : 's'}; do not send it to them again.\n` +
+    `The broadcast was interrupted after it was sent to ${reached.length} member${reached.length === 1 ? '' : 's'}${arrived > 0 ? '; do not send it again to the members it reached' : ''}.\n` +
     reached
       .map(
         (each) => `- ${each.name ?? `position ${each.position}`}: ${each.text}`,
@@ -582,6 +611,9 @@ function sentMessageText(
       .join('\n') +
     (missed.length > 0
       ? `\nIt did not reach: ${missed.join(', ')}. Send to those members by name if they still need it.`
+      : '') +
+    (ended.length > 0
+      ? `\nIt did not reach ${ended.join(', ')}, which ${ended.length === 1 ? 'has' : 'have'} ended and cannot take it.`
       : '')
   );
 }

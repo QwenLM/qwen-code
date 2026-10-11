@@ -582,7 +582,7 @@ describe('the board', () => {
           ),
         ),
       ).toBe(
-        'Member "alice" has finished and cannot keep task #1 open. If it already did this task\'s work, from its launch prompt or a message you sent it, set status "completed" with this owner once its report is in. Otherwise give it the work with send_message to "alice" first, which continues it, and then update the task in the same turn, or set owner "" to unassign it.',
+        'Member "alice" cannot keep task #1 open: it has finished. If it already did this task\'s work, from its launch prompt or a message you sent it, set status "completed" with this owner once its report is in. Otherwise give it the work with send_message to "alice" first, which continues it, and then update the task in the same turn, or set owner "" to unassign it.',
       );
     // Naming the same owner again is still keeping it.
     expect(
@@ -1072,7 +1072,7 @@ describe('members through their continuation chains', () => {
     });
     expect(teams.memberView('run-alice').head?.childRunId).toBe('turn-1:c1');
     expect(await line('alice')).toBe(
-      `alice: completed — ${children.taskIdOf('turn-1:c1')} (its latest continuation never started: creation_failed; 1 message to it never arrived)`,
+      `alice: completed — ${children.taskIdOf('turn-1:c1')} (its latest continuation never started (creation_failed), so the work it carried did not arrive, nor did 1 message sent to it)`,
     );
     await teams.run(
       'task_create',
@@ -1091,7 +1091,7 @@ describe('members through their continuation chains', () => {
         ),
       ),
     ).toBe(
-      'Member "alice" has finished, and its latest continuation never started (creation_failed), so the work that continuation carried did not arrive. Send that work again with send_message to "alice", then update the task in the same turn.',
+      'Member "alice" has finished, and its latest continuation never started (creation_failed), so the work it carried did not arrive, nor did 1 message sent to it. Send that work again with send_message to "alice", then update the task in the same turn.',
     );
   });
 
@@ -1160,7 +1160,9 @@ describe('members through their continuation chains', () => {
         'turn-1:own',
         'turn-1:',
       ),
-    ).toContain('Task #1 updated (status: in_progress, owner: alice).');
+    ).toContain(
+      'Task #1 updated (status: in_progress, owner: alice). "alice" was not notified: task_update records the board only. A send_message earlier in this turn gave alice work; if it did not carry this task, give it with send_message to "alice".',
+    );
     // A message from turn-1 to running bob, handed over and read: bob is
     // recorded after it completed.
     const messages = new HostedSessionMessageSession(
@@ -1286,7 +1288,7 @@ describe('members through their continuation chains', () => {
           'turn-4:',
         ),
       ),
-    ).toContain('has finished and cannot keep task #1 open');
+    ).toContain('cannot keep task #1 open: it has finished');
   });
 
   it('does not count a message of this Turn that was cancelled', async () => {
@@ -1325,5 +1327,68 @@ describe('members through their continuation chains', () => {
         ),
       ),
     ).toContain('Member "bob" has finished. If it already did');
+  });
+
+  it('does not count a message of this Turn that its target rejected', async () => {
+    await createTeam();
+    await addMember('bob');
+    await teams.run(
+      'task_create',
+      { subject: 'test', description: 'test' },
+      'turn:create',
+    );
+    const messages = new HostedSessionMessageSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      children,
+      undefined,
+    );
+    await sendTo('run-bob', 'test it', 'turn-1:m1');
+    await children.dispatchStarted('run-bob', {
+      dispatchId: 'dispatch-run-bob',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach('run-bob', 'session-run-bob');
+    await messages.handover('msg_turn-1_m1', 'session-run-bob');
+    await messages.settle('msg_turn-1_m1', 'rejected');
+    await children.settleCompleted('run-bob', {
+      result: Buffer.from('done', 'utf8'),
+      receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+      messageCount: 1,
+    });
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'bob' },
+          'turn-1:own',
+          'turn-1:',
+        ),
+      ),
+    ).toContain('Member "bob" has finished. If it already did');
+  });
+
+  it('does not count the launch of this Turn as work given', async () => {
+    // Decision 7 counts sends: a member launched and finished in this Turn
+    // did the work its launch prompt carried, which the lead records as
+    // completed once the report is in.
+    await createTeam();
+    await addMember('carol', 'turn-1:carol');
+    await settle('turn-1:carol');
+    await teams.run(
+      'task_create',
+      { subject: 'test', description: 'test' },
+      'turn:create',
+    );
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'carol' },
+          'turn-1:own',
+          'turn-1:',
+        ),
+      ),
+    ).toContain('Member "carol" has finished. If it already did');
   });
 });

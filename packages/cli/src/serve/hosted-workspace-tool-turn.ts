@@ -114,13 +114,14 @@ import {
   broadcastMessageId,
   broadcastRunId,
   hostedCallKey,
-  hostedOpenTeamChainMember,
   hostedPromptKey,
-  neverStartedReason,
+  hostedRouteDetails,
+  messagesSentToIt,
+  neverStartedClause,
+  neverStartedPhrase,
   teamMemberPreamble,
 } from './hosted-member-chain.js';
 import { MANAGED_TEAM_LEADER } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
-import type { ChildSessionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
 import {
@@ -529,49 +530,86 @@ export function hostedMessageContinuedText(
 type HostedChildMessageRoute = Awaited<
   ReturnType<HostedChildAgentSession['sendToChild']>
 >;
+type HostedSentRoute = Exclude<HostedChildMessageRoute, { kind: 'refused' }>;
 
-/** H4e-b2: why a member's newest continuation did not take its work. */
-function neverStartedNote(
-  neverStarted: ChildSessionRun | undefined,
-  route: { readonly childRunId: string },
+/** H4e-b2: the continuation taken before this one never started. */
+function previousNote(route: HostedSentRoute): string {
+  const previous = route.previousNeverStarted;
+  if (previous === undefined) return '';
+  return ` Its previous continuation ${neverStartedClause(previous)}; ${previous.cancelled ? 'send that work again only if it is still wanted and this message does not carry it' : 'send that work again unless this message carries it'}.`;
+}
+
+/**
+ * The answer of one send, to a member by name or to a task id: a member
+ * is named and its result labeled (H4e-b2 decisions 3 and 6), and a run
+ * that never started is told, since a failed child sends no notification.
+ * A replay or a recovered answer may find the run it reached proved since
+ * that it never started.
+ */
+export function hostedRouteAnswer(
+  children: HostedChildAgentSession,
+  route: HostedSentRoute,
 ): string {
-  // A replay can find its own committed continuation proven never started
-  // since; the note names only an earlier one.
-  return neverStarted === undefined ||
-    neverStarted.childRunId === route.childRunId
-    ? ''
-    : ` Its previous continuation never started (${neverStartedReason(neverStarted)}), so the work that one carried did not arrive.`;
+  const task = children.taskIdOf(route.childRunId);
+  const member = route.member;
+  const own = route.ownNeverStarted;
+  if (own !== undefined) {
+    const told =
+      route.kind === 'message'
+        ? `Message was queued for ${member === undefined ? `child agent ${task}` : `member "${member.name}" as task ${task}`}, which ${neverStartedClause(own)}, this one included.`
+        : `${member === undefined ? `Child agent ${children.taskIdOf(route.predecessorChildRunId)}` : `Member "${member.name}"`} had completed; continued it as task ${task}, which ${neverStartedPhrase(own)}, so this message did not arrive${own.lostMessages > 0 ? `, nor did ${messagesSentToIt(own.lostMessages)}` : ''}.`;
+    // A launch that never started has no earlier run to send to again.
+    const resend =
+      own.predecessorChildRunId === null
+        ? ''
+        : ` ${own.cancelled ? 'If it is still wanted, send' : 'Send'} what did not arrive again with send_message to ${member === undefined ? `task_id "${children.taskIdOf(own.predecessorChildRunId)}"` : `"${member.name}"`}.`;
+    return told + resend + previousNote(route);
+  }
+  if (route.kind === 'message')
+    return member === undefined
+      ? hostedMessageToChildText(task)
+      : `Message queued for delivery to member "${member.name}" (task ${task}). It arrives as its next input once its current turn ends. There is no inline reply: the member answers through its result notification or a message to you.`;
+  return (
+    (member === undefined
+      ? hostedMessageContinuedText(
+          children.taskIdOf(route.predecessorChildRunId),
+          task,
+        )
+      : `Member "${member.name}" had completed; continued it as task ${task} with your message as its next instruction. Its result arrives labeled "${member.name}".`) +
+    previousNote(route)
+  );
 }
 
 /** H4e-b2: one broadcast recipient's line in the call's answer. */
-function teamRouteText(
+function hostedRouteLine(
   children: HostedChildAgentSession,
   route: HostedChildMessageRoute,
-  neverStarted?: ChildSessionRun,
 ): string {
   if (route.kind === 'refused') return `not reached: ${route.reason}`;
+  const task = children.taskIdOf(route.childRunId);
+  const own = route.ownNeverStarted;
   if (route.kind === 'message')
-    return `queued for its running task ${children.taskIdOf(route.childRunId)}`;
-  return `had completed; continued as task ${children.taskIdOf(route.childRunId)}.${neverStartedNote(neverStarted, route)}`;
+    return own === undefined
+      ? `queued for its running task ${task}.`
+      : `queued for task ${task}, which ${neverStartedPhrase(own)}, so the message did not arrive.`;
+  return (
+    (own === undefined
+      ? `had completed; continued as task ${task}.`
+      : `had completed; continued as task ${task}, which ${neverStartedPhrase(own)}, so the message did not arrive.`) +
+    previousNote(route)
+  );
 }
 
-/** H4e-b2: the answer of a send by name, naming the member. */
-function teamRouteAnswer(
-  children: HostedChildAgentSession,
-  route: Exclude<HostedChildMessageRoute, { kind: 'refused' }>,
-  name: string | undefined,
-  neverStarted?: ChildSessionRun,
-): string {
-  if (name === undefined)
-    return route.kind === 'message'
-      ? hostedMessageToChildText(children.taskIdOf(route.childRunId))
-      : hostedMessageContinuedText(
-          children.taskIdOf(route.predecessorChildRunId),
-          children.taskIdOf(route.childRunId),
-        );
-  if (route.kind === 'message')
-    return `Message queued for delivery to member "${name}" (task ${children.taskIdOf(route.childRunId)}). It arrives as its next input once its current turn ends. There is no inline reply: the member answers through its result notification or a message to you.`;
-  return `Member "${name}" had completed; continued it as task ${children.taskIdOf(route.childRunId)} with your message as its next instruction. Its result arrives labeled "${name}".${neverStartedNote(neverStarted, route)}`;
+/** One recipient a broadcast call committed a send to. */
+export interface HostedBroadcastRecipient {
+  readonly position: number;
+  /** The member name, while a team still lists the chain. */
+  readonly name: string | undefined;
+  /** The roster entry's run the recipient's chain started from. */
+  readonly rootChildRunId: string;
+  /** False when the run it reached proved it never started. */
+  readonly arrived: boolean;
+  readonly text: string;
 }
 
 /**
@@ -591,23 +629,12 @@ export function hostedBroadcastCommitted(input: {
   readonly senderSessionId: string;
   readonly promptId: string;
   readonly callId: string;
-}): Array<{
-  readonly position: number;
-  readonly name: string | undefined;
-  /** The roster entry's run the recipient's chain started from. */
-  readonly rootChildRunId: string;
-  readonly text: string;
-}> {
+}): HostedBroadcastRecipient[] {
   const chains = new HostedChildChains(
     input.authority.extensionRecordsInDomain('child_run'),
   );
   const teams = input.authority.extensionRecordsInDomain('team_state');
-  const found: Array<{
-    readonly position: number;
-    readonly name: string | undefined;
-    readonly rootChildRunId: string;
-    readonly text: string;
-  }> = [];
+  const found: HostedBroadcastRecipient[] = [];
   for (let position = 1; position <= HOSTED_BROADCAST_POSITIONS; position++) {
     const message = input.messages?.message(
       broadcastMessageId({
@@ -620,22 +647,33 @@ export function hostedBroadcastCommitted(input: {
     const continued = input.children.record(
       broadcastRunId(input.promptId, input.callId, position),
     );
-    let route: HostedChildMessageRoute;
+    let sent:
+      | { kind: 'message'; childRunId: string }
+      | {
+          kind: 'continuation';
+          childRunId: string;
+          predecessorChildRunId: string;
+        };
     if (message?.direction === 'outbound')
-      route = { kind: 'message', childRunId: message.childRunId };
+      sent = { kind: 'message', childRunId: message.childRunId };
     else if (continued?.predecessorChildRunId)
-      route = {
+      sent = {
         kind: 'continuation',
         childRunId: continued.childRunId,
         predecessorChildRunId: continued.predecessorChildRunId,
       };
     else continue;
+    const route = {
+      ...sent,
+      ...hostedRouteDetails(input.authority, sent),
+    };
     const rootChildRunId = chains.root(route.childRunId);
     found.push({
       position,
       name: hostedTeamMembership(teams, rootChildRunId)?.name,
       rootChildRunId,
-      text: teamRouteText(input.children, route),
+      arrived: route.ownNeverStarted === undefined,
+      text: hostedRouteLine(input.children, route),
     });
   }
   return found;
@@ -679,7 +717,7 @@ export function hostedBroadcastAnyCommitted(input: {
 export const HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL: FunctionDeclaration = {
   name: 'send_message',
   description:
-    'Send a message to a member of your team by name (to), to every member at once (to: "*"), or to a child agent this Session launched by the task_id its launch returned; give exactly one of to and task_id. A running member or child receives it as its next input once its current turn ends. One that completed is continued as a new background task with your message as its next instruction, together with its earlier instructions and results; its result arrives as a notification, labeled with a member\'s name. A failed, cancelled or stopping one cannot receive messages. There is no inline reply: the recipient answers through its result notification or by messaging you. A message is not a board change: record the work with task_update in the same turn.',
+    'Send a message to a member of your team by name (to), to every member at once (to: "*"), or to a child agent this Session launched by the task_id its launch returned; give exactly one of to and task_id. A running member or child receives it as its next input once its current turn ends. One that completed is continued as a new background task with your message as its next instruction, together with its earlier instructions and results; its result arrives as a notification, and a member\'s result is labeled with its name. A failed, cancelled or stopping one, or one that completed after a stop was requested, cannot receive messages. There is no inline reply: the recipient answers through its result notification or by messaging you. A message is not a board change: record the work with task_update in the same turn.',
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -2077,7 +2115,7 @@ export class HostedWorkspaceToolTurn {
             (typeof args['to'] !== 'string' || !args['to'].trim())
           ) {
             validationError =
-              'Hosted send_message to must be a member name, or "*" for every member.';
+              'Hosted send_message "to" must be a member name, or "*" for every member.';
           } else if (
             teamForm &&
             isBroadcast(args['to']) &&
@@ -3506,19 +3544,8 @@ export class HostedWorkspaceToolTurn {
     }
     if (route.kind === 'refused') return answer(route.reason, true);
     this.agentDispatched.add(request.call.callId);
-    if (route.kind === 'message') {
-      return answer(
-        hostedMessageToChildText(this.childAgents!.taskIdOf(route.childRunId)),
-        false,
-      );
-    }
-    return answer(
-      hostedMessageContinuedText(
-        this.childAgents!.taskIdOf(route.predecessorChildRunId),
-        this.childAgents!.taskIdOf(route.childRunId),
-      ),
-      false,
-    );
+    // A member addressed by its task id is answered as one (H4e-b2).
+    return answer(hostedRouteAnswer(this.childAgents!, route), false);
   }
 
   /**
@@ -3597,7 +3624,7 @@ export class HostedWorkspaceToolTurn {
       ) {
         this.agentDispatched.add(callId);
         return answer(
-          `The message reached ${committed.length} member${committed.length === 1 ? '' : 's'} before its team changed; nothing more was sent.\n${committed
+          `The message was sent to ${committed.length} member${committed.length === 1 ? '' : 's'} before its team changed; nothing more was sent.\n${committed
             .map(
               (each) =>
                 `- ${each.name ?? `position ${each.position}`}: ${each.text}`,
@@ -3613,15 +3640,12 @@ export class HostedWorkspaceToolTurn {
         );
       if (team.members.length === 0)
         return answer(`Team "${team.name}" has no members yet.`, true);
-      // One index of the lead's runs reads every member's view.
-      const chains = new HostedChildChains(
-        this.session.authority.extensionRecordsInDomain('child_run'),
-      );
-      const views = team.members.map((member) =>
-        teams.memberView(member.childRunId, chains),
-      );
       const lines: string[] = [];
-      let reached = 0;
+      // Sent: the call committed a send to the member. Arrived: that send
+      // did not reach a run that proved it never started, which only a
+      // replay can find.
+      let sent = 0;
+      let arrived = 0;
       for (const [index, member] of team.members.entries()) {
         const position = index + 1;
         const route = await send(
@@ -3634,21 +3658,22 @@ export class HostedWorkspaceToolTurn {
           }),
           broadcastRunId(this.promptId, callId, position),
         );
-        if (route.kind !== 'refused') reached += 1;
-        lines.push(
-          `- ${member.name}: ${teamRouteText(children, route, views[index]!.neverStarted)}`,
-        );
+        if (route.kind !== 'refused') {
+          sent += 1;
+          if (route.ownNeverStarted === undefined) arrived += 1;
+        }
+        lines.push(`- ${member.name}: ${hostedRouteLine(children, route)}`);
       }
-      if (reached > 0) this.agentDispatched.add(callId);
-      if (reached === 0)
+      if (sent === 0)
         return answer(
           `The message reached no member:\n${lines.join('\n')}`,
           true,
         );
+      this.agentDispatched.add(callId);
       return answer(
-        reached === team.members.length
+        arrived === team.members.length
           ? `Message sent to every member of team "${team.name}". There is no inline reply: each member answers through its result notification or a message to you.\n${lines.join('\n')}`
-          : `Message delivered to ${reached} of ${team.members.length} members of team "${team.name}"; the others did not receive it.\n${lines.join('\n')}`,
+          : `Message sent to ${arrived} of ${team.members.length} members of team "${team.name}"; the others did not receive it.\n${lines.join('\n')}`,
         false,
       );
     }
@@ -3658,25 +3683,12 @@ export class HostedWorkspaceToolTurn {
       children.record(callKey) !== undefined
     ) {
       // The replay: sendToChild answers the committed send by its ids.
+      // The name and its label hold only while the member's team is open;
+      // a former member's continuation is a plain child (decision 6).
       const route = await send('', messageId, callKey);
       if (route.kind === 'refused') return answer(route.reason, true);
       this.agentDispatched.add(callId);
-      // The name and its label hold only while the member's team is open;
-      // a former member's continuation is a plain child (decision 6).
-      return answer(
-        teamRouteAnswer(
-          children,
-          route,
-          hostedOpenTeamChainMember(
-            this.session.authority.extensionRecordsInDomain('team_state'),
-            new HostedChildChains(
-              this.session.authority.extensionRecordsInDomain('child_run'),
-            ),
-            route.childRunId,
-          )?.name,
-        ),
-        false,
-      );
+      return answer(hostedRouteAnswer(children, route), false);
     }
     const team = teams.openTeam();
     if (team === undefined)
@@ -3687,7 +3699,7 @@ export class HostedWorkspaceToolTurn {
     const name = sanitizeName(to);
     if (name === MANAGED_TEAM_LEADER)
       return answer(
-        'You are the team leader: send_message to reaches a member, or "*" for every member.',
+        'You are the team leader: "to" names a member, or "*" for every member.',
         true,
       );
     const member = team.members.find((each) => each.name === name);
@@ -3696,7 +3708,6 @@ export class HostedWorkspaceToolTurn {
         `"${to}" is not a member of team "${team.name}". ${team.members.length > 0 ? `Members: ${team.members.map((each) => each.name).join(', ')}.` : 'It has no members yet.'}`,
         true,
       );
-    const before = teams.memberView(member.childRunId);
     const route = await send(
       children.taskIdOf(member.childRunId),
       messageId,
@@ -3708,10 +3719,7 @@ export class HostedWorkspaceToolTurn {
         true,
       );
     this.agentDispatched.add(callId);
-    return answer(
-      teamRouteAnswer(children, route, name, before.neverStarted),
-      false,
-    );
+    return answer(hostedRouteAnswer(children, route), false);
   }
 
   /**

@@ -404,10 +404,26 @@ describe('send_message to a child task (H4d-b)', () => {
       reason: null,
       started: false,
     });
+    // The next continuation says the one before it never started (H4e-b2),
+    // and a replay of that one says its own message never arrived.
+    const neverStarted = {
+      childRunId: 'prompt:call-9',
+      predecessorChildRunId: 'run-1',
+      reason: 'creation_failed',
+      cancelled: false,
+      lostMessages: 0,
+    };
     expect(await send(parent.children, 'second try', 'call-12')).toEqual({
       kind: 'continuation',
       childRunId: 'prompt:call-12',
       predecessorChildRunId: 'run-1',
+      previousNeverStarted: neverStarted,
+    });
+    expect(await send(parent.children, 'first try')).toEqual({
+      kind: 'continuation',
+      childRunId: 'prompt:call-9',
+      predecessorChildRunId: 'run-1',
+      ownNeverStarted: neverStarted,
     });
   });
 
@@ -850,6 +866,7 @@ describe('team members over Session messages (H4e-b2)', () => {
       kind: 'continuation',
       childRunId: 'prompt:c1',
       predecessorChildRunId: 'run-a',
+      member: { name: 'alice', teamName: 'review' },
     });
     expect(await promptOf(parent, 'prompt:c1')).toBe(
       `${teamMemberPreamble({ name: 'alice', teamName: 'review' })}fix it`,
@@ -891,7 +908,7 @@ describe('team members over Session messages (H4e-b2)', () => {
     );
     expect(await sendTo(parent.children, 'run-a', 'more', 'c1')).toEqual({
       kind: 'refused',
-      reason: `Child agent task ${parent.children.taskIdOf('run-a')} ran as "alice" of team "review", which is closing and takes no new work. Finish it with team_delete.`,
+      reason: `Member "alice" (task ${parent.children.taskIdOf('run-a')}) belongs to team "review", which is closing and takes no new work. Finish it with team_delete.`,
     });
     expect(parent.children.record('prompt:c1')).toBeUndefined();
   });
@@ -972,12 +989,23 @@ describe('team members over Session messages (H4e-b2)', () => {
       sentPrompt: 'review the change',
     });
     expect(replayed.envelope.prompt).toBe(`${preamble}review the change`);
-    await expect(
-      parent.children.admit({
-        ...params,
-        prompt: 'another change',
-        sentPrompt: 'another change',
-      }),
-    ).rejects.toThrow(ManagedSessionConflictError);
+    // Only the prompt is read for its form: every other field of the
+    // launch must match as committed.
+    for (const differs of [
+      { prompt: 'another change', sentPrompt: 'another change' },
+      {
+        description: 'audit another diff',
+        prompt: 'review the change',
+        sentPrompt: 'review the change',
+      },
+      {
+        definition: { ...DEFINITION, definitionRevision: 2 },
+        prompt: 'review the change',
+        sentPrompt: 'review the change',
+      },
+    ])
+      await expect(
+        parent.children.admit({ ...params, ...differs }),
+      ).rejects.toThrow(ManagedSessionConflictError);
   });
 });

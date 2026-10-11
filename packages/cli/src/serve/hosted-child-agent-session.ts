@@ -65,8 +65,10 @@ import { hostedTeamMembership } from './hosted-team-session.js';
 import {
   HostedChildChains,
   hostedOpenTeamChainMember,
+  hostedRouteDetails,
   isSentInstruction,
   teamMemberPreamble,
+  type HostedRouteDetails,
 } from './hosted-member-chain.js';
 import {
   stripDisplayControlChars,
@@ -395,14 +397,20 @@ export function boundedNotificationText(
  */
 export class ChildMessagesPendingError extends Error {}
 
-/** Where `send_message` to a child task went. */
+/**
+ * Where `send_message` to a child task went, with what its answer must
+ * tell about the run it reached (H4e-b2), read on the writes chain.
+ */
 export type ChildMessageRoute =
-  | { readonly kind: 'message'; readonly childRunId: string }
-  | {
+  | ({
+      readonly kind: 'message';
+      readonly childRunId: string;
+    } & HostedRouteDetails)
+  | ({
       readonly kind: 'continuation';
       readonly childRunId: string;
       readonly predecessorChildRunId: string;
-    }
+    } & HostedRouteDetails)
   | { readonly kind: 'refused'; readonly reason: string };
 
 export class HostedChildAgentSession {
@@ -487,9 +495,13 @@ export class HostedChildAgentSession {
     ),
   ): ChildAgentRun {
     // One definition of the head serves this routing and H4e-b2's member
-    // views alike.
+    // views alike. A chain starts at a committed run and the authority
+    // keeps a continuation's kind, so its head is a child agent run.
     const head = chains.head(run.childRunId);
-    return (head && this.record(head.childRunId)) ?? run;
+    const record = head && this.record(head.childRunId);
+    if (record === undefined)
+      throw new Error(`Child run ${run.childRunId} has no chain head.`);
+    return record;
   }
 
   /** Every message this Session sent to one child run, in any state. */
@@ -556,7 +568,7 @@ export class HostedChildAgentSession {
             `Session message ${params.messageId} was sent with different evidence.`,
           );
         }
-        return { kind: 'message', childRunId: message.childRunId };
+        return this.routed({ kind: 'message', childRunId: message.childRunId });
       }
       const continued = this.record(params.continuationRunId);
       if (continued !== undefined) {
@@ -574,11 +586,11 @@ export class HostedChildAgentSession {
             `Child run ${params.continuationRunId} was launched with different evidence.`,
           );
         }
-        return {
+        return this.routed({
           kind: 'continuation',
           childRunId: continued.childRunId,
           predecessorChildRunId: continued.predecessorChildRunId,
-        };
+        });
       }
       const run = this.runForTask(params.taskId);
       if (run === undefined) {
@@ -644,11 +656,19 @@ export class HostedChildAgentSession {
       }
       const head = this.chainHead(from, chains);
       const headTask = this.taskIdOf(head.childRunId);
+      // H4e-b2 decision 3: a member's refusal names the member.
+      const subject =
+        member === undefined
+          ? `Child agent task ${headTask}`
+          : `Member "${member.name}" (task ${headTask})`;
       if (!isTerminalRunState(head.run.state)) {
         if (head.stopRequested) {
           return {
             kind: 'refused',
-            reason: `Child agent task ${headTask} is being stopped and cannot receive messages.`,
+            reason:
+              member === undefined
+                ? `${subject} is being stopped and cannot receive messages.`
+                : `Member "${member.name}" is being stopped and cannot receive messages.`,
           };
         }
         if (params.closing) {
@@ -662,7 +682,7 @@ export class HostedChildAgentSession {
         if (sentBefore.length >= limits.maxPerRun) {
           return {
             kind: 'refused',
-            reason: `Child agent task ${headTask} has received its ${limits.maxPerRun} messages (budget_exhausted).`,
+            reason: `${subject} has received its ${limits.maxPerRun} messages (budget_exhausted).`,
           };
         }
         if (
@@ -671,7 +691,7 @@ export class HostedChildAgentSession {
         ) {
           return {
             kind: 'refused',
-            reason: `Child agent task ${headTask} has ${limits.maxInFlightPerRun} messages still on their way to it (count_limit); wait for them to arrive.`,
+            reason: `${subject} has ${limits.maxInFlightPerRun} messages still on their way to it (count_limit); wait for them to arrive.`,
           };
         }
         const contentRef = await this.store.resources.publish(
@@ -696,12 +716,19 @@ export class HostedChildAgentSession {
           { domain: 'session_message', record: body },
           TRUSTED,
         );
-        return { kind: 'message', childRunId: head.childRunId };
+        return this.routed({ kind: 'message', childRunId: head.childRunId });
       }
       if (head.stopReason !== 'completed' || head.stopRequested) {
+        // A member is relaunched under a new name: a plain agent launch
+        // would not join the team.
         return {
           kind: 'refused',
-          reason: `Child agent task ${headTask} ended (${head.run.state}: ${head.stopReason ?? 'unknown'}) and cannot receive messages; launch a new agent instead.`,
+          reason:
+            member === undefined
+              ? `${subject} ended (${head.run.state}: ${head.stopReason ?? 'unknown'}) and cannot receive messages; launch a new agent instead.`
+              : head.stopReason === 'completed'
+                ? `Member "${member.name}" completed after a stop was requested and cannot receive messages; for more work, launch a new member under a new name.`
+                : `Member "${member.name}" ended (${head.run.state}: ${head.stopReason ?? 'unknown'}) and cannot receive messages; for more work, launch a new member under a new name.`,
         };
       }
       // H4e-b2 decision 2: a member of an active team is continued like
@@ -711,7 +738,7 @@ export class HostedChildAgentSession {
       if (member !== undefined && member.team.lifecycle !== 'active') {
         return {
           kind: 'refused',
-          reason: `Child agent task ${headTask} ran as "${member.name}" of team "${member.team.name}", which is closing and takes no new work. Finish it with team_delete.`,
+          reason: `Member "${member.name}" (task ${headTask}) belongs to team "${member.team.name}", which is closing and takes no new work. Finish it with team_delete.`,
         };
       }
       // A continuation is a launch: it owes the launch admission (H4d-a
@@ -728,7 +755,10 @@ export class HostedChildAgentSession {
       if (!admission.admitted) {
         return {
           kind: 'refused',
-          reason: `Hosted child agent refused to continue task ${headTask} (${admission.reason}).`,
+          reason:
+            member === undefined
+              ? `Hosted child agent refused to continue task ${headTask} (${admission.reason}).`
+              : `Hosted child agent refused to continue member "${member.name}" (task ${headTask}) (${admission.reason}).`,
         };
       }
       const inputRef = await this.store.resources.publish(
@@ -751,12 +781,22 @@ export class HostedChildAgentSession {
         { domain: 'child_run', record: body },
         TRUSTED,
       );
-      return {
+      return this.routed({
         kind: 'continuation',
         childRunId: params.continuationRunId,
         predecessorChildRunId: head.childRunId,
-      };
+      });
     });
+  }
+
+  /** A committed route with what its answer must tell (H4e-b2). */
+  private routed<
+    Route extends {
+      readonly kind: 'message' | 'continuation';
+      readonly childRunId: string;
+    },
+  >(route: Route): Route & HostedRouteDetails {
+    return { ...route, ...hostedRouteDetails(this.store.authority, route) };
   }
 
   /**
