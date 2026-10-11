@@ -250,6 +250,38 @@ function withIdentity(
 }
 
 describe('TurnBoundaryCompactionEngine', () => {
+  it('preserves independent lifecycle transitions without constructing compacted tool cards', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    for (const [id, phase] of [
+      [1, 'started'],
+      [2, 'ended'],
+    ] as const)
+      engine.ingest({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'orphan',
+            _meta: { toolLifecycle: { v: 1, phase } },
+          },
+        },
+      });
+    engine.ingest(makeTurnComplete(3));
+    const frames = engine.snapshot().compactedTurns;
+    expect(frames).toHaveLength(3);
+    expect(
+      frames
+        .slice(0, 2)
+        .map(
+          (event) =>
+            (event.data as { update: { sessionUpdate: string } }).update
+              .sessionUpdate,
+        ),
+    ).toEqual(['tool_call_update', 'tool_call_update']);
+  });
+
   describe('basic compaction', () => {
     it('merges consecutive text chunks into a single event on turn_complete', () => {
       const engine = new TurnBoundaryCompactionEngine();
