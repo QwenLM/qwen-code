@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher;
 import com.alibaba.qwen.code.managedagent.store.EventTransport;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import java.time.Duration;
@@ -12,6 +15,8 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 class CompositeCommittedEventPublisherTest {
     @Test
@@ -151,6 +156,69 @@ class CompositeCommittedEventPublisherTest {
         publisher.publish(List.of(event(1)));
 
         assertThat(calls).containsExactly("first", "second");
+    }
+
+    @Test
+    void transportsReceiveTheWholeBatchUnchanged() {
+        SessionEventHub hub = new SessionEventHub();
+        List<EventRecord> received = new CopyOnWriteArrayList<>();
+        EventTransport recording = received::addAll;
+        CompositeCommittedEventPublisher publisher =
+                new CompositeCommittedEventPublisher(hub,
+                        List.of(recording));
+
+        publisher.publish(List.of(event(1), event(2)));
+
+        assertThat(received).extracting(EventRecord::sequence)
+                .containsExactly(1L, 2L);
+    }
+
+    @Test
+    void droppedBatchLogCarriesSessionIdentity() {
+        SessionEventHub hub = new SessionEventHub();
+        EventTransport failing = events -> {
+            throw new IllegalStateException("broker down");
+        };
+        CompositeCommittedEventPublisher publisher =
+                new CompositeCommittedEventPublisher(hub, List.of(failing));
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(
+                        CompositeCommittedEventPublisher.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        logger.addAppender(logged);
+        try {
+            publisher.publish(List.of(event(11), event(12), event(13)));
+        } finally {
+            logger.detachAppender(logged);
+        }
+
+        assertThat(logged.list).hasSize(1);
+        assertThat(logged.list.get(0).getFormattedMessage())
+                .contains("tenant=tenant").contains("session=session")
+                .contains("firstSequence=11").contains("lastSequence=13");
+    }
+
+    @Test
+    void containerCollectsTransportBeansIntoTheComposite() {
+        List<EventRecord> received = new CopyOnWriteArrayList<>();
+        new ApplicationContextRunner()
+                .withBean(SessionEventHub.class)
+                .withBean(EventTransport.class, () -> received::addAll)
+                .withBean(CompositeCommittedEventPublisher.class)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(
+                            CommittedEventPublisher.class);
+                    CommittedEventPublisher bean =
+                            context.getBean(CommittedEventPublisher.class);
+                    assertThat(bean).isInstanceOf(
+                            CompositeCommittedEventPublisher.class);
+                    bean.publish(List.of(event(1), event(2)));
+                    assertThat(received)
+                            .extracting(EventRecord::sequence)
+                            .containsExactly(1L, 2L);
+                });
     }
 
     private static EventRecord event(long sequence) {

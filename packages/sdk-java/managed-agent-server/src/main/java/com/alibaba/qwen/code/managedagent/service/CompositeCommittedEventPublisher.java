@@ -37,9 +37,16 @@ public class CompositeCommittedEventPublisher implements CommittedEventPublisher
             try {
                 transport.publish(events);
             } catch (RuntimeException failure) {
-                LOG.warn("EventTransport {} dropped {} committed events",
+                // One batch is one session (the hub keys it off the first
+                // record), so first/last carry the replayable identity.
+                EventRecord first = events.getFirst();
+                EventRecord last = events.getLast();
+                LOG.warn("EventTransport {} dropped {} committed events"
+                        + " tenant={} session={} firstSequence={}"
+                        + " lastSequence={}",
                         transport.getClass().getName(), events.size(),
-                        failure);
+                        first.tenantId(), first.sessionId(),
+                        first.sequence(), last.sequence(), failure);
             }
         }
     }

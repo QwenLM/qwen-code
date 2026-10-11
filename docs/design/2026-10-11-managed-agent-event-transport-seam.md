@@ -24,7 +24,11 @@ default-off flag.
 
 MQ1's stated prerequisites are met: [#13300](https://github.com/QwenLM/qwen-code/issues/13300)
 (H0c review follow-ups) closed and [#13265](https://github.com/QwenLM/qwen-code/issues/13265)
-(H3) merged, so the envelope keys are final.
+(H3) merged. One qualification on "the envelope keys are final": the frozen
+v1 envelope names `authoritative_journal` as its only stream, while this seam
+carries the public `managed_agent_event` stream — admitting a `public_event`
+stream value is a tracked contract extension MQ2 needs, not a re-opening of
+the frozen keys.
 
 ## Current state
 
@@ -89,17 +93,26 @@ than a claim.
 - No second wire for authoritative journal facts
   (`ManagedSessionStore.commit`); the parent design assigns that to MQ2 and
   forbids relabeling this seam as covering it.
-- No Java mirror of the envelope contract; the parent design defers the Java
-  fixture consumer to the transport slice.
+- No Java mirror of the envelope contract. The parent design's phase table
+  originally assigned the Java fixture consumer to the contract slice landing
+  in MQ1 (§7); the merged contract slice
+  [#13498](https://github.com/QwenLM/qwen-code/pull/13498) deferred it to the
+  transport slice (delivery ledger, #13498 row), and this slice keeps that
+  exclusion.
 - No change to `ManagedAgentStore`, the commit path, SSE endpoints, or the
   TypeScript side.
 
 ## Validation
 
 - New `CompositeCommittedEventPublisherTest`: default composition delivers to
-  the hub exactly; hub is called before transports; a throwing transport
-  neither propagates nor prevents hub and later-transport delivery; empty
-  list is a no-op; multiple transports are invoked in order.
+  the hub exactly; the whole batch reaches each transport unchanged; hub is
+  called before transports; a throwing transport neither propagates nor
+  prevents hub and later-transport delivery; a hub failure propagates and
+  skips transports; a transport's `Error` is not isolated; an empty list is a
+  no-op; transports run in injection order; the drop log carries
+  tenant/session/sequence identity; and a Spring context collects
+  `EventTransport` beans into the composite as the single
+  `CommittedEventPublisher` bean.
 - Existing suites unchanged and green: `SessionEventHubTest`,
   `SessionEventHubPinningTest`, `ManagedEventStreamServiceTest`,
   `ManagedEventReplayTest`, `ReplayFloorRetractionTest`, and

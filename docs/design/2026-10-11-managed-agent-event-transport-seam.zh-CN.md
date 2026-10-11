@@ -14,7 +14,10 @@
 
 MQ2 要把一个基于 broker 的生产者接到 after-commit 发布点。如果不先落地一个命名的组合点,MQ2 就不得不在同一个 diff 里既改 commit 路径与装配、又引入 broker 客户端,使其「flag 关闭时部署行为逐字节一致」的退出检查无法证明。MQ1 单独落地这个组合点,默认组合等于今天的进程内扇出,使 MQ2 的 diff 纯粹是默认关闭 flag 之后的增量。
 
-MQ1 声明的前置已满足:[#13300](https://github.com/QwenLM/qwen-code/issues/13300)(H0c 评审后续)已关闭、[#13265](https://github.com/QwenLM/qwen-code/issues/13265)(H3)已合并,信封键已定稿。
+MQ1 声明的前置已满足:[#13300](https://github.com/QwenLM/qwen-code/issues/13300)(H0c 评审后续)已关闭、[#13265](https://github.com/QwenLM/qwen-code/issues/13265)(H3)已合并。对「信封键已定稿」作一点限定:冻结的 v1 信封只把
+`authoritative_journal` 列为流取值,而本 seam 承载的是公开的
+`managed_agent_event` 流——为 MQ2 增补 `public_event` 取值是一项有跟踪的契约
+扩展,不是重新打开已冻结的键。
 
 ## 现状
 
@@ -46,11 +49,18 @@ try/catch 只包住新增的、默认为空的 transport 一侧。hub 调用保�
 
 - 无 broker 客户端、生产者、消费者或配置接线(MQ2)。
 - 不接权威 journal 事实的第二条线(`ManagedSessionStore.commit`);父设计把它划给 MQ2,并禁止把本 seam 重新标榜为覆盖它。
-- 不做信封契约的 Java 镜像;父设计把 Java fixture 消费方推迟到 transport 切片。
+- 不做信封契约的 Java 镜像。父设计阶段表(§7)原本把 Java fixture 消费方划给
+  落入 MQ1 的契约切片;已合入的契约切片 [#13498](https://github.com/QwenLM/qwen-code/pull/13498)
+  将其推迟到 transport 切片(交付台账 #13498 行),本切片维持该排除。
 - 不改 `ManagedAgentStore`、commit 路径、SSE 端点或 TypeScript 侧。
 
 ## 验证
 
-- 新增 `CompositeCommittedEventPublisherTest`:默认组合精确投递到 hub;hub 先于 transport 调用;抛异常的 transport 既不传播也不妨碍 hub 与后续 transport 的投递;空列表无操作;多 transport 按序调用。
+- 新增 `CompositeCommittedEventPublisherTest`:默认组合精确投递到 hub;整批
+  原样到达每个 transport;hub 先于 transport 调用;抛异常的 transport 既不传播
+  也不妨碍 hub 与后续 transport 的投递;hub 故障会传播并跳过 transport;
+  transport 的 `Error` 不被隔离;空列表无操作;多 transport 按序调用;丢弃日志
+  携带 tenant/session/序号身份;Spring 上下文把 `EventTransport` bean 收集进
+  组合体,且组合体是唯一的 `CommittedEventPublisher` bean。
 - 既有测试套件不改且保持绿色:`SessionEventHubTest`、`SessionEventHubPinningTest`、`ManagedEventStreamServiceTest`、`ManagedEventReplayTest`、`ReplayFloorRetractionTest` 与 `ManagedAgentServerIntegrationTest`——最后一个经真实 Spring 上下文断言 commit 到 hub 的投递,可证明组合体被装配为 store 的 publisher。
 - 模块的 `mvn verify` 门禁(checkstyle、spotbugs)通过。
