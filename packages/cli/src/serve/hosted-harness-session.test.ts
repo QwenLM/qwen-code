@@ -10873,7 +10873,11 @@ describe('Hosted Harness no-tool session', () => {
     await send('A', '3').expect(200);
   });
 
-  it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
+  it.each([
+    'hosted-workspace-files/1',
+    'hosted-workspace-shell/1',
+    'hosted-workspace-team-lead/1',
+  ])(
     'loads a renamed %s Session and verifies its retained title resources',
     async (toolProfile) => {
       const server = await app(true);
@@ -10922,7 +10926,7 @@ describe('Hosted Harness no-tool session', () => {
       damaged.mockRestore();
       const retry = await headers(
         supertest(server).post(`/session/${SESSION_ID}/load`),
-      ).send({ managedSessionStore: store() });
+      ).send({ managedSessionStore: store(), toolProfile });
       expect(retry.status).toBe(200);
       await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
         'X-Qwen-Client-Id',

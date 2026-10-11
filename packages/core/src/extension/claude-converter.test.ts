@@ -752,7 +752,7 @@ describe('convertClaudePluginPackage', () => {
       );
       const result = await convertPackage(dir, 'marketplace-mod');
 
-      expect(await loadModSource(result.convertedDir)).toBe(source);
+      expect((await loadModSource(result.convertedDir))?.source).toBe(source);
       expect(result.config.hooks).toEqual({
         SessionStart: [
           {
@@ -778,28 +778,66 @@ describe('convertClaudePluginPackage', () => {
     },
   );
 
-  it.each(['userConfig', 'dependencies'])(
-    'keeps unsupported Mod %s visible after marketplace conversion',
-    async (field) => {
-      const { result } = await layoutAndConvert(
-        'unsupported-mod-config',
-        { name: 'unsupported-mod', hooks: './custom/hooks.json' },
+  it('preserves Mod authoring metadata after marketplace conversion', async () => {
+    const userConfig = {
+      greeting: {
+        type: 'string',
+        title: 'Greeting',
+        description: 'A greeting',
+      },
+    };
+    const dependencies = [
+      { name: 'base', marketplace: 'example', version: '^1.0.0' },
+    ];
+    const { result } = await layoutAndConvert(
+      'unsupported-mod-config',
+      { name: 'unsupported-mod', hooks: './custom/hooks.json' },
+      {
+        '.claude-plugin/plugin.json': JSON.stringify({
+          name: 'unsupported-mod',
+          version: '1.0.0',
+          userConfig,
+          dependencies,
+        }),
+        'custom/hooks.json': JSON.stringify({
+          modules: ['./entry.js'],
+          hooks: {},
+        }),
+        'custom/entry.js': 'export function register() {}',
+      },
+    );
+    const definition = await loadModSource(result.convertedDir);
+    expect(definition?.userConfig).toEqual(userConfig);
+    expect(definition?.dependencies).toEqual(dependencies);
+  });
+
+  it.each([
+    { dependencies: [{ name: 'marketplace-base', version: '^2.0.0' }] },
+    { dependencies: [] },
+  ])(
+    'uses marketplace dependency declarations over plugin.json: $dependencies',
+    async ({ dependencies }) => {
+      const originalManifest = JSON.stringify({
+        name: 'consumer',
+        version: '1.0.0',
+        dependencies: ['plugin-base'],
+      });
+      const { dir, result } = await layoutAndConvert(
+        'marketplace-dependencies',
+        { name: 'consumer', dependencies },
         {
-          '.claude-plugin/plugin.json': JSON.stringify({
-            name: 'unsupported-mod',
-            version: '1.0.0',
-            [field]: { required: 'value' },
-          }),
-          'custom/hooks.json': JSON.stringify({
-            modules: ['./entry.js'],
-            hooks: {},
-          }),
-          'custom/entry.js': 'export function register() {}',
+          '.claude-plugin/plugin.json': originalManifest,
+          'hooks/hooks.json': JSON.stringify({ modules: ['./entry.js'] }),
+          'hooks/entry.js': 'export function register() {}',
         },
       );
-      await expect(loadModSource(result.convertedDir)).rejects.toThrow(
-        `Mod ${field} is not supported yet.`,
+
+      expect((await loadModSource(result.convertedDir))?.dependencies).toEqual(
+        dependencies,
       );
+      expect(
+        fs.readFileSync(path.join(dir, '.claude-plugin/plugin.json'), 'utf8'),
+      ).toBe(originalManifest);
     },
   );
 
