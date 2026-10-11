@@ -167,10 +167,8 @@ public final class ToolPublicationStore {
             String publicationToken, Access access) {
         String suppliedHash = ToolPublicationContract.tokenHash(publicationToken);
         Row row = publicationRow(scope, publicationId);
-        JsonNode binding = ToolPublicationContract.parseBytes("binding",
-                row.binding().getBytes(StandardCharsets.UTF_8));
-        require(ToolPublicationContract.bindingDigest(binding).equals(row.digest())
-                && equalHash(suppliedHash, row.tokenHash()) && "OPEN".equals(row.state()),
+        JsonNode binding = storedBinding(row.binding(), row.digest(), "Publication grant conflicts");
+        require(equalHash(suppliedHash, row.tokenHash()) && "OPEN".equals(row.state()),
                 "Publication grant conflicts");
         Original original = lockOriginal(binding);
         lockTenant(row.tenant());
@@ -423,8 +421,7 @@ public final class ToolPublicationStore {
                     "OPEN", expires, bytes));
         }
         require(row != null, "Publication does not exist");
-        JsonNode binding = ToolPublicationContract.parseBytes("binding", row.binding().getBytes(StandardCharsets.UTF_8));
-        require(ToolPublicationContract.bindingDigest(binding).equals(row.digest()), "Stored binding is corrupt");
+        JsonNode binding = storedBinding(row.binding(), row.digest(), "Stored binding is corrupt");
         if ("renew".equals(operation)) {
             require("OPEN".equals(row.state()) && equalHash(tokenHash, row.tokenHash()), "Publication is fenced");
             require(text(owner, "writerId").equals(text(binding, "writerId"))
@@ -822,8 +819,7 @@ public final class ToolPublicationStore {
         if (row != null) {
             require(row.tenant().equals(text(key, "tenantId")) && row.workspace().equals(text(key, "workspaceId"))
                     && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
-            binding = ToolPublicationContract.parseBytes("binding", row.binding().getBytes(StandardCharsets.UTF_8));
-            require(ToolPublicationContract.bindingDigest(binding).equals(row.digest()), "Stored binding is corrupt");
+            binding = storedBinding(row.binding(), row.digest(), "Stored binding is corrupt");
             require(candidate == null || ToolPublicationContract.bindingDigest(candidate).equals(row.digest()),
                     "Reservation replay conflicts");
         }
@@ -863,17 +859,20 @@ public final class ToolPublicationStore {
     }
 
     static void requireLockedBinding(Map<String, Object> row, JsonNode expected) {
-        JsonNode binding = ToolPublicationContract.parseBytes("binding",
-                ((String) row.get("binding_json")).getBytes(StandardCharsets.UTF_8));
-        require(ToolPublicationContract.bindingDigest(binding).equals(row.get("binding_digest"))
-                && binding.equals(expected), "Publication binding changed");
+        JsonNode binding = storedBinding((String) row.get("binding_json"),
+                (String) row.get("binding_digest"), "Publication binding changed");
+        require(binding.equals(expected), "Publication binding changed");
+    }
+
+    private static JsonNode storedBinding(String value, String digest, String message) {
+        JsonNode binding = ToolPublicationContract.parseBytes("binding", value.getBytes(StandardCharsets.UTF_8));
+        require(ToolPublicationContract.bindingDigest(binding).equals(digest), message);
+        return binding;
     }
 
     private JsonNode savedBinding(String scope, String publicationId) {
         Row row = publicationRow(scope, publicationId);
-        JsonNode binding = ToolPublicationContract.parseBytes("binding", row.binding().getBytes(StandardCharsets.UTF_8));
-        require(ToolPublicationContract.bindingDigest(binding).equals(row.digest()), "Stored binding is corrupt");
-        return binding;
+        return storedBinding(row.binding(), row.digest(), "Stored binding is corrupt");
     }
 
     void lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
@@ -912,8 +911,7 @@ public final class ToolPublicationStore {
             }
             return left.equals(right) ? 0 : 1;
         }, savedResult);
-        require(binding.equals(finished.path("binding")) && sameResult,
-                "Original settled Broker result conflicts with terminal result");
+        require(sameResult, "Original settled Broker result conflicts with terminal result");
         JsonNode terminal = finished.path("terminal");
         var publication = jdbc.queryForMap("SELECT producer_phase, finish_operation_id, finish_digest,"
                 + " terminal_resource_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"

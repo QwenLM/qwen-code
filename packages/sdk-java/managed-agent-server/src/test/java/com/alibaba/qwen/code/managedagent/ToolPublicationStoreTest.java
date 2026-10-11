@@ -48,14 +48,20 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
@@ -339,10 +345,11 @@ class ToolPublicationStoreTest {
     @CsvSource({"row-scope,apply", "row-scope,prepare", "binding-key,apply", "binding-key,prepare",
             "binding-id,apply", "binding-id,prepare", "digest,apply", "digest,prepare",
             "runtime-tenant,apply", "runtime-tenant,prepare", "runtime-workspace,apply", "runtime-workspace,prepare",
-            "runtime-generation,apply", "runtime-generation,prepare"})
+            "runtime-generation,apply", "runtime-generation,prepare",
+            "runtime-provisioner,apply", "runtime-provisioner,prepare"})
     void publicationTargetConflictRefusesBeforeChoosingPlacement(String conflict, String operation) {
         reserve();
-        if ("runtime-tenant".equals(conflict) || "runtime-workspace".equals(conflict)) {
+        if (conflict.startsWith("runtime-")) {
             var discovered = bindings.findById("binding-1");
             var repository = org.mockito.Mockito.mock(JdbcRuntimeBindingRepository.class);
             org.mockito.Mockito.when(repository.findById("binding-1")).thenReturn(discovered);
@@ -366,19 +373,28 @@ class ToolPublicationStoreTest {
             case "runtime-tenant" -> jdbc.update("UPDATE qwen_runtime_binding SET tenant_id = 'other-tenant'");
             case "runtime-workspace" -> jdbc.update("UPDATE qwen_runtime_binding SET workspace_id = 'other-workspace'");
             case "runtime-generation" -> jdbc.update("UPDATE qwen_runtime_binding SET runtime_generation = 2");
+            case "runtime-provisioner" -> jdbc.update("UPDATE qwen_runtime_binding SET provisioner_kind = ?",
+                    WorkspaceCsiReservationStore.PROVISIONER_KIND);
             default -> throw new AssertionError("Unexpected target conflict");
         }
         jdbc.update("DELETE FROM qwen_runtime_placement_guard");
         var before = producerTables();
         assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> {
-            if ("apply".equals(operation)) {
-                return store.apply(request("fence"), WRITER_TOKEN, null);
+            try {
+                if ("apply".equals(operation)) {
+                    return store.apply(request("fence"), WRITER_TOKEN, null);
+                }
+                return csiData(new java.util.HashMap<>()).prepareAdmission(binding.path("sessionKey"), "pub-1",
+                        "writer-1", 1, WRITER_TOKEN, JSON.createObjectNode().put("schemaVersion", 1));
+            } catch (RuntimeException failure) {
+                assertThat(jdbc.queryForList("SELECT * FROM qwen_runtime_placement_guard")).isEmpty();
+                assertThat(producerTables()).usingRecursiveComparison().isEqualTo(before);
+                throw failure;
             }
-            return csiData(new java.util.HashMap<>()).prepareAdmission(binding.path("sessionKey"), "pub-1",
-                    "writer-1", 1, WRITER_TOKEN, JSON.createObjectNode().put("schemaVersion", 1));
         })).isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("digest".equals(conflict) ? "Stored binding is corrupt"
-                        : "runtime-generation".equals(conflict) ? "Broker execution identity conflicts" : "scope conflicts");
+                .hasMessage("digest".equals(conflict) ? "Stored binding is corrupt"
+                        : conflict.startsWith("runtime-") ? "Original persisted Runtime scope conflicts"
+                        : "Publication scope conflicts");
         assertThat(jdbc.queryForList("SELECT * FROM qwen_runtime_placement_guard")).isEmpty();
         assertThat(producerTables()).usingRecursiveComparison().isEqualTo(before);
     }
@@ -718,8 +734,44 @@ class ToolPublicationStoreTest {
                 .path("state").asText()).isEqualTo("EXPIRED");
     }
 
-    @Test
-    void commitsLargeBlockedOutcomeThroughVerifiedCatalogObject() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void commitsLargeBlockedOutcomeThroughVerifiedCatalogObject(boolean ambient) {
+        List<String> lockOrder = new java.util.ArrayList<>();
+        initialize(new DelegatingDataSource(publicationDataSource()) {
+            @Override
+            public Connection getConnection() throws SQLException {
+                Connection connection = super.getConnection();
+                return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {Connection.class},
+                        (proxy, method, args) -> {
+                            try {
+                                Object result = method.invoke(connection, args);
+                                if (!method.getName().equals("prepareStatement")
+                                        || !(result instanceof PreparedStatement statement)) {
+                                    return result;
+                                }
+                                String sql = (String) args[0];
+                                return Proxy.newProxyInstance(getClass().getClassLoader(),
+                                        new Class<?>[] {PreparedStatement.class}, (prepared, call, values) -> {
+                                            if (call.getName().startsWith("execute")) {
+                                                if (sql.startsWith("INSERT INTO qwen_runtime_placement_guard")) {
+                                                    lockOrder.add("placement");
+                                                } else if (sql.startsWith("INSERT INTO qwen_tool_publication_tenant")) {
+                                                    lockOrder.add("retention");
+                                                }
+                                            }
+                                            try {
+                                                return call.invoke(statement, values);
+                                            } catch (InvocationTargetException failure) {
+                                                throw failure.getCause();
+                                            }
+                                        });
+                            } catch (InvocationTargetException failure) {
+                                throw failure.getCause();
+                            }
+                        });
+            }
+        });
         reserve();
         Map<String, byte[]> objects = new java.util.HashMap<>();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
@@ -773,8 +825,15 @@ class ToolPublicationStoreTest {
                         admission.path("resourceId").asText(), "managed-tool-outcome", 1,
                         admission.path("byteLength").asLong(), admission.path("digest").asText(), null)));
         var admissions = new ToolPublicationAdmissionStore(jdbc, manager, sessions, data);
-        assertThat(admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit)
-                .path("decision").asText()).isEqualTo("blocked");
+        lockOrder.clear();
+        JsonNode receipt = ambient ? new TransactionTemplate(manager).execute(status ->
+                admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit))
+                : admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit);
+        assertThat(receipt.path("decision").asText()).isEqualTo("blocked");
+        if (ambient) {
+            assertThat(lockOrder).contains("retention");
+            assertThat(lockOrder.getFirst()).isEqualTo("placement");
+        }
         var changedReplay = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 journal.revision, journal.sequence, "different-transaction", "recordToolResult", "execution-1",
                 admission.path("digest").asText(), journal.sequence + 1, journal.sequence + 1, 1,
@@ -783,8 +842,10 @@ class ToolPublicationStoreTest {
                 digest(records), commit.resources());
         assertThatThrownBy(() -> admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, changedReplay))
                 .hasMessageContaining("different content");
-        assertThat(admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit)
-                .path("decision").asText()).isEqualTo("blocked");
+        JsonNode replay = ambient ? new TransactionTemplate(manager).execute(status ->
+                admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit))
+                : admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit);
+        assertThat(replay).isEqualTo(receipt);
         assertThat(sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN).bytes())
                 .isEqualTo(outcome.toString().getBytes(StandardCharsets.UTF_8));

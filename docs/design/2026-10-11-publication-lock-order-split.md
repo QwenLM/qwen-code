@@ -29,6 +29,11 @@ before it can retain later locks. Standalone preflight retains its existing
 transaction boundaries. Reuse the qualified original Runtime while following
 the existing K1 retention path.
 
+The in-tree HTTP controllers call these stores without an ambient transaction.
+The ambient clause qualifies store-level composition exercised by test-owned
+transactions; it does not establish a controller-managed transaction or full
+HTTP E2E coverage.
+
 After locking the publication row, compare the complete binding and digest with
 the preflight target. Admission and quarantine also constrain their locked row
 queries to the original tenant, Workspace and Session. A stale or conflicting
@@ -45,9 +50,12 @@ Use a fixed main baseline and candidate with the same concurrency schedules.
 Confirm a competing placement owner does not deadlock with publication
 mutation or admission preflight. Test standalone and ambient transactions.
 Verify stored-row scope, binding key, publication ID, digest, persisted Runtime
-tenant, Workspace and generation conflicts refuse before selecting placement
-and roll back publication, quota and journal changes. Keep the ordinary
-missing-Session reservation and its exact replay available.
+tenant, Workspace, generation and provisioner conflicts refuse before selecting
+placement, checking guard and producer state inside the refusing transaction
+as well as after rollback. Record the ordinary ambient receipt's executed SQL
+to check placement precedes retention, and preserve its exact replay and
+outcome bytes. Keep the ordinary missing-Session reservation and its exact
+replay available.
 
 Run the affected publication/admission tests, static Java checks, packaging,
 root build/typecheck, independent database verification and two clean full-diff

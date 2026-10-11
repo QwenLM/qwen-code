@@ -25,6 +25,10 @@ tenant、Workspace、generation 和 provisioner 字段以及发现的 binding。
 preflight 在可能保留后续锁之前获取同一已校验 placement。独立 preflight
 保留已有事务边界。沿用 K1 retention 路径时复用已校验的原始 Runtime。
 
+仓库内 HTTP controller 调用这些 store 时没有外层事务。外层事务契约针对
+store 组合，由测试拥有的事务验证；它不证明 controller 管理的事务或完整
+HTTP E2E 覆盖。
+
 Publication 行加锁后，比较完整 binding 和摘要是否与 preflight 目标一致。
 Admission 和 quarantine 的加锁行查询也限定原始 tenant、Workspace 和
 Session。过期或冲突的目标应拒绝，不能操作另一条 publication。
@@ -38,8 +42,10 @@ metadata 可能保留；这不证明 admission 成功，也不证明发生了文
 用固定主干基线和候选执行相同并发调度。确认竞争 placement 的事务不会与
 publication mutation 或 admission preflight 死锁。覆盖独立事务和外层事务。
 验证持久行 scope、binding key、publication ID、摘要、持久 Runtime tenant、
-Workspace 和 generation 冲突会在选择 placement 前拒绝，并回滚 publication、
-quota 和 journal 变更。普通缺少 Session 的 reservation 和精确重放继续可用。
+Workspace、generation 和 provisioner 冲突会在选择 placement 前拒绝，
+在拒绝的事务内以及回滚后检查 guard 和 producer 状态。记录普通外层 receipt
+实际执行的 SQL，检查 placement 先于 retention，并保留精确重放和 outcome
+字节。普通缺少 Session 的 reservation 和精确重放继续可用。
 
 执行受影响 publication/admission 测试、Java 静态检查、打包、根目录
 build/typecheck、独立数据库验证和两次干净的完整 diff 自审。报告实际数据库

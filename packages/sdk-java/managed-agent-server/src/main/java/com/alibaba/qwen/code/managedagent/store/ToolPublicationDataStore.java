@@ -1460,10 +1460,6 @@ public final class ToolPublicationDataStore {
         grants.lockStagedPlacement(key, publicationId);
     }
 
-    void lockPublicationPlacement(JsonNode key, String publicationId) {
-        grants.lockPublicationPlacement(key, publicationId);
-    }
-
     void lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
         grants.lockOriginalSettledResult(key, publicationId, finished);
     }
