@@ -120,6 +120,285 @@ class RuntimeHarnessDrainTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"READY", "ACQUIRING", "RELEASING"})
+    void restartedBrokerReleasesOriginalLiveSessionDuringDrain(String state) throws Exception {
+        var binding = ready();
+        var saved = bindings.admitSession(sessions, candidate(binding, "original"));
+        assertNotNull(sessions.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.valueOf(state), Instant.now())));
+        try (var service = restoredService(bindings, Duration.ofSeconds(2))) {
+            service.requestHarnessDrain("tenant", "harness");
+            assertTrue(service.release("harness", "original").toCompletableFuture().get());
+            assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(scope, "original").getState());
+            assertEquals(1, provisioner.observations);
+            assertEquals(1, transport.releases);
+            assertEquals(0, transport.acquires);
+            assertEquals(0, transport.attestations);
+            assertEquals(0, provisioner.provisions);
+            assertEquals(0, provisioner.stops);
+            assertTrue(binding.sameIdentity(bindings.findById(binding.getBindingId())));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedAdoptedReleaseReobservesTheOriginalWorkerWithoutRestart(boolean detach) throws Exception {
+        var binding = ready();
+        var saved = bindings.admitSession(sessions, candidate(binding, "original"));
+        assertNotNull(sessions.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, Instant.now())));
+        transport.loseReleaseReply = true;
+        try (var service = restoredService(bindings, Duration.ofSeconds(2))) {
+            service.requestHarnessDrain("tenant", "harness");
+            var first = detach ? service.release("harness", "original").toCompletableFuture()
+                    : service.drainHarnessSession("tenant", "harness").toCompletableFuture();
+            var failure = assertThrows(ExecutionException.class, () -> first.get(5, TimeUnit.SECONDS));
+            assertEquals("runtime_session_release_failed", assertInstanceOf(RuntimeBrokerException.class, failure.getCause()).getCode());
+            assertEquals(RuntimeSessionRecord.State.RELEASING, sessions.findById(scope, "original").getState());
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals(1, provisioner.observations);
+            assertEquals(1, transport.releases);
+            assertEquals(0, provisioner.stops);
+
+            provisioner.usable = false;
+            provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                    evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+            provisioner.stop = new CompletableFuture<>();
+            var retry = detach ? service.release("harness", "original").toCompletableFuture()
+                    : service.drainHarnessSession("tenant", "harness").toCompletableFuture();
+            assertFalse(retry.isDone());
+            assertEquals(RuntimeSessionRecord.State.RELEASING, sessions.findById(scope, "original").getState());
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals(detach ? 3 : 2, provisioner.observations);
+            assertEquals(1, provisioner.stops);
+            assertEquals(1, transport.releases);
+            provisioner.stop.complete(receipt(binding));
+            retry.get(5, TimeUnit.SECONDS);
+
+            var retired = bindings.findById(binding.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, retired.getState());
+            assertTrue(retired.getDrainReceipt().matches(retired));
+            assertEquals(binding.getGeneration(), retired.getGeneration());
+            assertEquals(binding.getProvisionSeed(), retired.getProvisionSeed());
+            assertEquals(binding.getResourceHandle(), retired.getResourceHandle());
+            assertEquals(binding.getLease().getRuntimeInstanceId(), retired.getLease().getRuntimeInstanceId());
+            assertEquals(binding.getLease().getEndpoint(), retired.getLease().getEndpoint());
+            assertEquals(binding.getLease().getToken(), retired.getLease().getToken());
+            assertEquals(binding.getLease().getLeaseId(), retired.getLease().getLeaseId());
+            assertEquals(binding.getLease().getEpoch(), retired.getLease().getEpoch());
+            assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(scope, "original").getState());
+            assertEquals(0, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertTrue(service.release("harness", "original").toCompletableFuture().get());
+            service.drainHarnessSession("tenant", "harness").toCompletableFuture().get();
+            assertEquals(1, provisioner.stops);
+            assertEquals(1, transport.releases);
+            assertEquals(0, transport.acquires);
+            assertEquals(0, transport.attestations);
+            assertEquals(0, provisioner.provisions);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"handle", "runtime", "lease", "epoch", "endpoint", "unfenced"})
+    void restoredLiveReleaseRequiresTheOriginalIdentityAndDrainFence(String mismatch) throws Exception {
+        var binding = ready();
+        var saved = bindings.admitSession(sessions, candidate(binding, "original"));
+        assertNotNull(sessions.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, Instant.now())));
+        var lease = binding.getLease();
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.ready(
+                "handle".equals(mismatch) ? new RuntimeResourceHandle("local-process", 2, java.util.Map.of("resource", "other")) : binding.getResourceHandle(),
+                "endpoint".equals(mismatch) ? URI.create("http://127.0.0.1:9998") : lease.getEndpoint(),
+                "runtime".equals(mismatch) ? "other-runtime" : lease.getRuntimeInstanceId(),
+                "lease".equals(mismatch) ? "other-lease" : lease.getLeaseId(),
+                "epoch".equals(mismatch) ? lease.getEpoch() + 1 : lease.getEpoch()));
+        try (var service = restoredService(bindings, Duration.ofSeconds(2))) {
+            if (!"unfenced".equals(mismatch)) {
+                service.requestHarnessDrain("tenant", "harness");
+            }
+            assertThrows(ExecutionException.class, () -> service.release("harness", "original").toCompletableFuture().get());
+            assertEquals(RuntimeSessionRecord.State.READY, sessions.findById(scope, "original").getState());
+            assertEquals(0, transport.releases);
+            assertEquals(0, transport.acquires);
+            assertEquals(0, provisioner.stops);
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"READY", "ACQUIRING", "RELEASING"})
+    void absentOriginalWorkerReleasesSavedSessionsOnlyAfterStopProof(String state) throws Exception {
+        var binding = ready();
+        for (String id : java.util.List.of("one", "two")) {
+            var saved = bindings.admitSession(sessions, candidate(binding, id));
+            assertNotNull(sessions.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.valueOf(state), Instant.now())));
+        }
+        provisioner.usable = false;
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        provisioner.stop = new CompletableFuture<>();
+        try (var service = service()) {
+            service.requestHarnessDrain("tenant", "harness");
+            var close = service.drainHarnessSession("tenant", "harness").toCompletableFuture();
+            assertFalse(close.isDone());
+            assertEquals(2, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals(1, provisioner.stops);
+            assertEquals(0, transport.releases);
+            provisioner.stop.complete(receipt(binding));
+            close.get(5, TimeUnit.SECONDS);
+            var retired = bindings.findById(binding.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, retired.getState());
+            assertTrue(retired.getDrainReceipt().matches(retired));
+            assertEquals(binding.getGeneration(), retired.getGeneration());
+            assertEquals(binding.getResourceHandle(), retired.getResourceHandle());
+            assertEquals(0, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertEquals(1, provisioner.observations);
+            assertEquals(0, transport.releases);
+            assertEquals(0, transport.acquires);
+            assertEquals(0, provisioner.provisions);
+            service.drainHarnessSession("tenant", "harness").toCompletableFuture().get();
+            assertEquals(1, provisioner.stops);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"READY", "ACQUIRING", "RELEASING"})
+    void restoredHookDetachDrainsTheAbsentOriginalWorkerBeforeReleasingSessions(String state) throws Exception {
+        var binding = ready();
+        for (String id : java.util.List.of("original", "earlier-owner")) {
+            var saved = bindings.admitSession(sessions, candidate(binding, id));
+            assertNotNull(sessions.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.valueOf(state), Instant.now())));
+        }
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        provisioner.stop = new CompletableFuture<>();
+        try (var service = restoredService(bindings, Duration.ofSeconds(2))) {
+            service.requestHarnessDrain("tenant", "harness");
+            var release = service.release("harness", "original").toCompletableFuture();
+            assertFalse(release.isDone());
+            assertEquals(2, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            provisioner.stop.complete(receipt(binding));
+            assertTrue(release.get(5, TimeUnit.SECONDS));
+            var retired = bindings.findById(binding.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, retired.getState());
+            assertTrue(retired.getDrainReceipt().matches(retired));
+            assertEquals(binding.getGeneration(), retired.getGeneration());
+            assertEquals(binding.getResourceHandle(), retired.getResourceHandle());
+            assertEquals(0, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertEquals(2, provisioner.observations);
+            assertEquals(1, provisioner.stops);
+            assertEquals(0, transport.releases);
+            assertEquals(0, transport.acquires);
+            assertEquals(0, provisioner.provisions);
+            assertTrue(service.release("harness", "earlier-owner").toCompletableFuture().get());
+            assertEquals(1, provisioner.stops);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "handle", "lease", "unknown"})
+    void missingOrForeignAbsenceEvidenceCannotStopTheOriginalWorker(String mismatch) throws Exception {
+        var binding = ready();
+        bindings.admitSession(sessions, candidate(binding, "original"));
+        var loss = evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST);
+        if ("handle".equals(mismatch) || "lease".equals(mismatch)) {
+            loss = new RuntimeRecoveryEvidence(loss.evidenceId(), loss.fact(), loss.source(), loss.observedAt(), loss.hostDomain(),
+                    loss.provisionRequestId(), loss.runtimeInstanceId(), loss.runtimeIncarnation(),
+                    "lease".equals(mismatch) ? "other-lease" : loss.leaseId(), loss.epoch(),
+                    "handle".equals(mismatch) ? new RuntimeResourceHandle("local-process", 2, java.util.Map.of("resource", "other")) : loss.resourceHandle());
+        }
+        provisioner.observation = CompletableFuture.completedFuture("missing".equals(mismatch) ? RuntimeObservation.notFound()
+                : "unknown".equals(mismatch) ? RuntimeObservation.unknown(binding.getResourceHandle())
+                        : RuntimeObservation.notFound(loss, null));
+        try (var service = service()) {
+            service.requestHarnessDrain("tenant", "harness");
+            assertThrows(ExecutionException.class, () -> service.drainHarnessSession("tenant", "harness").toCompletableFuture().get());
+            assertEquals(1, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals(0, provisioner.stops);
+            assertEquals(0, transport.releases);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"rejected", "foreign"})
+    void unconfirmedOriginalStopCannotReleaseTheSavedSession(String failure) throws Exception {
+        var binding = ready();
+        bindings.admitSession(sessions, candidate(binding, "original"));
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        provisioner.stop = "rejected".equals(failure)
+                ? CompletableFuture.failedFuture(new RuntimeBrokerException(409, "workspace_close_identity_unverified", "Unknown original PID", false))
+                : CompletableFuture.completedFuture(new RuntimeDrainReceipt("other-binding", binding.getGeneration(),
+                        binding.getProvisionSeed().getProvisionRequestId(), binding.getResourceHandle(), Instant.now()));
+        try (var service = service()) {
+            service.requestHarnessDrain("tenant", "harness");
+            assertThrows(ExecutionException.class, () -> service.drainHarnessSession("tenant", "harness").toCompletableFuture().get());
+            assertEquals(1, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals(0, transport.releases);
+            assertEquals(1, provisioner.stops);
+        }
+    }
+
+    @Test
+    void stoppedSessionReleaseResumesFromThePersistedReceipt() throws Exception {
+        var binding = ready();
+        bindings.admitSession(sessions, candidate(binding, "original"));
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        var interrupted = (RuntimeBindingRepository) Proxy.newProxyInstance(RuntimeBindingRepository.class.getClassLoader(),
+                new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, arguments) -> {
+                    if (method.getName().equals("completeStoppedSessionRelease")) {
+                        throw new IllegalStateException("Broker stopped after persisting the receipt");
+                    }
+                    try {
+                        return method.invoke(bindings, arguments);
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        try (var first = restoredService(interrupted, Duration.ofSeconds(2))) {
+            first.requestHarnessDrain("tenant", "harness");
+            assertThrows(ExecutionException.class, () -> first.drainHarnessSession("tenant", "harness").toCompletableFuture().get());
+            assertEquals(RuntimeSessionRecord.State.RELEASING, sessions.findById(scope, "original").getState());
+            assertTrue(bindings.findById(binding.getBindingId()).getDrainReceipt().matches(binding));
+        }
+        try (var second = service()) {
+            second.drainHarnessSession("tenant", "harness").toCompletableFuture().get();
+            assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(scope, "original").getState());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, bindings.findById(binding.getBindingId()).getState());
+            assertEquals(1, provisioner.stops);
+            assertEquals(1, provisioner.observations);
+            assertEquals(0, transport.releases);
+        }
+    }
+
+    @Test
+    void expiredDrainCannotPersistALateReceiptOrReleaseTheOriginalSession() throws Exception {
+        var binding = ready();
+        bindings.admitSession(sessions, candidate(binding, "original"));
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        var late = new CompletableFuture<RuntimeDrainReceipt>();
+        provisioner.stop = late;
+        try (var first = service(Duration.ofMillis(600)); var second = service()) {
+            first.requestHarnessDrain("tenant", "harness");
+            var expired = first.drainHarnessSession("tenant", "harness").toCompletableFuture();
+            assertThrows(ExecutionException.class, () -> expired.get(6, TimeUnit.SECONDS));
+            provisioner.stop = new CompletableFuture<>();
+            var resumed = second.drainHarnessSession("tenant", "harness").toCompletableFuture();
+            late.complete(receipt(binding));
+            assertFalse(resumed.isDone());
+            assertEquals(1, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            provisioner.stop.complete(receipt(binding));
+            resumed.get(5, TimeUnit.SECONDS);
+            assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(scope, "original").getState());
+            assertEquals(0, transport.releases);
+        }
+    }
+
+    @ParameterizedTest
     @CsvSource({"PROVISIONING,false", "PROVISIONING,true", "RECOVERY_BLOCKED,false", "RECOVERY_BLOCKED,true"})
     @DisabledOnOs(OS.WINDOWS)
     void closeRetiresUnstartedBindingsBeforeTheirHandleWasSaved(String state, boolean intentExists,
@@ -315,8 +594,9 @@ class RuntimeHarnessDrainTest {
         }
     }
 
-    @Test
-    void unknownExecutionBlocksReleaseAndStop() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void unknownExecutionBlocksReleaseAndStop(boolean absent) throws Exception {
         var binding = ready();
         var session = bindings.admitSession(sessions, candidate(binding, "one"));
         var prepared = ToolExecutionRecord.prepared("execution", "key", binding.getBindingId(), binding.getGeneration(),
@@ -324,6 +604,10 @@ class RuntimeHarnessDrainTest {
         executions.findOrCreate(prepared);
         var claimed = executions.claimDispatch("execution", "dispatcher", Duration.ofSeconds(10));
         assertNotNull(executions.compareAndSet(claimed, claimed.withUnknown(), "dispatcher", claimed.getDispatchGeneration()));
+        if (absent) {
+            provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                    evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        }
         try (var service = service()) {
             service.requestHarnessDrain("tenant", "harness");
             assertThrows(Exception.class, () -> service.drainHarnessSession("tenant", "harness").toCompletableFuture().get());
@@ -551,6 +835,19 @@ class RuntimeHarnessDrainTest {
         return new RuntimeBrokerService(ignored -> CompletableFuture.failedFuture(
                 new IllegalStateException("Current authorization/mount is unavailable")), provisioner, transport,
                 bindings, sessions, executions, UUID.randomUUID().toString(), leaseDuration, leaseDuration);
+    }
+
+    private RuntimeBrokerService restoredService(RuntimeBindingRepository registry, Duration leaseDuration) {
+        var resolver = new HarnessSessionResolver() {
+            public java.util.concurrent.CompletionStage<RuntimeScope> resolve(String harnessSessionId) {
+                throw new AssertionError("Close must not resolve current authorization or mount");
+            }
+            public java.util.concurrent.CompletionStage<String> resolveTenant(String harnessSessionId) {
+                return CompletableFuture.completedFuture(scope.getTenantId());
+            }
+        };
+        return new RuntimeBrokerService(resolver, provisioner, transport, registry, sessions, executions,
+                UUID.randomUUID().toString(), leaseDuration, leaseDuration);
     }
 
     private RuntimeBrokerService warmingService() {
