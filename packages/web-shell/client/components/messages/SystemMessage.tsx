@@ -422,6 +422,24 @@ export const SystemMessage = memo(function SystemMessage({
     contextCompressionContent ?? visionBridgeContent ?? content;
 
   const taskKind = stringField('kind');
+  const authorRecord =
+    typeof notificationData?.['author'] === 'object' &&
+    notificationData['author'] !== null
+      ? (notificationData['author'] as {
+          agentName?: unknown;
+        })
+      : undefined;
+  const authorName =
+    typeof authorRecord?.agentName === 'string' && authorRecord.agentName
+      ? authorRecord.agentName.split('/').filter(Boolean).pop()
+      : undefined;
+  const activityAuthor =
+    source === 'teammate_activity' &&
+    authorName &&
+    teammate &&
+    authorName !== teammate.name
+      ? { name: authorName, direction: `from @${authorName}` }
+      : undefined;
   const taskCommandLabel = stringField('commandLabel');
   const taskDescription = stringField('description');
   const taskEventCount = numberField('eventCount');
@@ -478,6 +496,11 @@ export const SystemMessage = memo(function SystemMessage({
         {teammate && (
           <span className={styles.teammateChip} title={teammate.name}>
             @{teammate.name}
+          </span>
+        )}
+        {source === 'teammate_activity' && activityAuthor && (
+          <span className={styles.teammateChip} title={activityAuthor.name}>
+            {activityAuthor.direction}
           </span>
         )}
         <div

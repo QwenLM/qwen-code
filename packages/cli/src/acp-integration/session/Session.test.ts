@@ -1406,10 +1406,22 @@ describe('Session', () => {
           text: 'writer → checker: sky sentence',
         },
         _meta: {
+          // The recipient names the frame, matching OpenAI's agent_message
+          // where `agent.agent_name` is the recipient's path…
           agent: {
-            agentName: '/root/writer',
+            agentName: '/root/checker',
             depth: 1,
             kind: 'teammate',
+          },
+          backgroundTask: {
+            kind: 'peer',
+            status: 'message',
+            // …and the sender travels as the structured author field.
+            author: {
+              agentName: '/root/writer',
+              depth: 1,
+              kind: 'teammate',
+            },
           },
         },
       });
