@@ -5880,6 +5880,61 @@ describe('createDaemonSessionActions', () => {
     expect(addNotice).not.toHaveBeenCalled();
   });
 
+  it('asks the current session to send its queued mid-turn messages now', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      sendMidTurnMessagesNow: vi.fn(async () => ({ requested: true })),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.sendMidTurnMessagesNow({ sessionId: 'session-a' }),
+    ).resolves.toEqual({ requested: true });
+    expect(session.sendMidTurnMessagesNow).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends a restored row now against its own session', async () => {
+    const base = createMockSession('session-a', 'client-a');
+    const sendMidTurnMessagesNow = vi.fn(async () => ({ requested: false }));
+    const session = {
+      ...base,
+      client: { ...base.client, sendMidTurnMessagesNow },
+      sendMidTurnMessagesNow: vi.fn(),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.sendMidTurnMessagesNow({ sessionId: 'session-b' }),
+    ).resolves.toEqual({ requested: false });
+    expect(sendMidTurnMessagesNow).toHaveBeenCalledWith('session-b', {
+      clientId: 'client-a',
+    });
+    expect(session.sendMidTurnMessagesNow).not.toHaveBeenCalled();
+  });
+
+  it('uses the restored session persisted client id to send its row now', async () => {
+    vi.stubGlobal('window', {
+      sessionStorage: { getItem: vi.fn(() => 'client-b') },
+    });
+    try {
+      const base = createMockSession('session-a', 'client-a');
+      const sendMidTurnMessagesNow = vi.fn(async () => ({ requested: true }));
+      const session = {
+        ...base,
+        client: { ...base.client, sendMidTurnMessagesNow },
+      };
+      const { actions } = createActionsHarness({ session });
+
+      await actions.sendMidTurnMessagesNow({ sessionId: 'session-b' });
+
+      expect(sendMidTurnMessagesNow).toHaveBeenCalledWith('session-b', {
+        clientId: 'client-b',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('resolves undefined from getMidTurnMessages when no session exists', async () => {
     const { actions } = createActionsHarness();
 

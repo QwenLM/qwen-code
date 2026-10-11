@@ -51,6 +51,8 @@ import {
   assertManagedSessionDomainEnabled,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  ManagedSessionWritesStoppedError,
+  type ManagedSessionDomain,
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
@@ -58,6 +60,7 @@ import type { HarnessAgentWaitRun } from '@qwen-code/qwen-code-core/managed-runt
 import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   ManagedSessionStoreHttpError,
+  ManagedSessionStoreTransportError,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -82,14 +85,19 @@ import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   childLaunchAdmission,
+  childRunEndedText,
   childWorkspaceAnswerSuffix,
 } from './hosted-child-agent-session.js';
+import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
+import { MANAGED_SESSION_MESSAGE_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { sanitizeName } from '@qwen-code/qwen-code-core/agents/team/teamHelpers.js';
 import {
   HOSTED_TEAM_TOOLS,
   HOSTED_TEAM_TOOL_NAMES,
   HostedTeamRefusal,
   hostedTeamArgumentError,
+  hostedTeamMembership,
   type HostedTeamMembership,
   type HostedTeamSession,
 } from './hosted-team-session.js';
@@ -98,11 +106,22 @@ import {
   MANAGED_CHILD_LIMITS,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import {
-  managedExtensionRecordKey,
-  managedTaskId,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
+import {
+  HOSTED_BROADCAST_POSITIONS,
+  HostedChildChains,
+  broadcastMessageId,
+  broadcastRunId,
+  hostedCallKey,
+  hostedPromptKey,
+  hostedRouteDetails,
+  neverStartedClause,
+  neverStartedPhrase,
+  teamMemberPreamble,
+} from './hosted-member-chain.js';
+import { MANAGED_TEAM_LEADER } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
 import {
@@ -205,6 +224,21 @@ function shellHistoryId(executionCallId: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+// H4d-b: a refusal the store makes at commit (a closing Session, a rule the
+// authority holds) is a send_message call's answer, never a failed turn. A
+// conflict and the store's own transient faults fail the call like any
+// other store fault: a refusal answer would tell the model a message that
+// may yet commit was never sent.
+function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
+  return (
+    cause instanceof ManagedSessionRecordError &&
+    !(cause instanceof ManagedSessionConflictError) &&
+    !(cause instanceof ManagedSessionStoreHttpError) &&
+    !(cause instanceof ManagedSessionStoreTransportError) &&
+    !(cause instanceof ManagedSessionWritesStoppedError)
+  );
+}
+
 // H3: background admissions exist only while the child_run domain is
 // enabled for commits; otherwise the turn keeps its foreground refusals.
 function childRunAdmissionsEnabled(): boolean {
@@ -239,6 +273,17 @@ function childAgentAdmissionsEnabled(): boolean {
   }
 }
 
+// H4d-b: session message admissions exist only while the session_message
+// domain is enabled for commits.
+function sessionMessageAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('session_message');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // H4e-b1: the team tools, and the agent tool's `name`, exist only while
 // both lead-side team domains are enabled for commits.
 function teamAdmissionsEnabled(): boolean {
@@ -263,6 +308,15 @@ const APPROVAL_REFUSALS = {
   cancelled: 'The turn was cancelled before this tool call ran.',
   unanswered:
     'An earlier approval request in this turn expired unanswered, so this tool call was not asked about or run.',
+} as const;
+
+// H4b: the two mount refusals a child agent answers with. Exported so
+// admission binds its assertions to the marker, not to prose a reword may
+// change without changing behaviour.
+export const HOSTED_CHILD_MOUNT_REFUSALS = {
+  sessionOwner:
+    "the Session's Hook catalog or MCP owner holds or will acquire the Workspace mount",
+  turn: 'this Turn holds the Workspace mount',
 } as const;
 
 const pathProperty = {
@@ -390,6 +444,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'edit',
   'run_shell_command',
   'agent',
+  'send_message',
   'team_create',
   'task_create',
   'task_update',
@@ -423,6 +478,354 @@ export const HOSTED_AGENT_TOOL: FunctionDeclaration = {
       },
     },
     required: ['description', 'prompt'],
+    additionalProperties: false,
+  },
+};
+
+const SEND_MESSAGE_TEXT_SCHEMA = {
+  type: 'string',
+  description: 'The message text.',
+  minLength: 1,
+};
+
+/**
+ * H4d-b: a parent's durable message to one of its child agent tasks. A
+ * running child takes it as its next input; a completed child is
+ * continued as a new background run with the message as its instruction.
+ */
+export const HOSTED_SEND_MESSAGE_TO_CHILD_TOOL: FunctionDeclaration = {
+  name: 'send_message',
+  description:
+    'Send a message to a child agent this Session launched, by the task_id its launch returned. A running child receives it as its next input once its current turn ends. A child that completed is continued as a new background task with your message as its next instruction, together with its earlier instructions and results; its result arrives as a notification like the first. A failed or cancelled child cannot receive messages. There is no inline reply: the child answers through its completion notification or by messaging you.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      task_id: {
+        type: 'string',
+        description: 'The task id the child agent launch returned.',
+      },
+      message: SEND_MESSAGE_TEXT_SCHEMA,
+    },
+    required: ['task_id', 'message'],
+    additionalProperties: false,
+  },
+};
+
+/** H4d-b: the answers of a committed send_message, which recovery repeats
+ * for a call an interrupted turn committed but never answered. */
+export const HOSTED_MESSAGE_TO_PARENT_TEXT =
+  "Message queued for delivery to the parent agent. It arrives as the parent's next input once its current turn ends.";
+
+export function hostedMessageToChildText(taskId: string): string {
+  return `Message queued for delivery to child agent ${taskId}. It arrives as the child's next input once its current turn ends. There is no inline reply: the child answers through its completion notification or a message to you. Do not relaunch the task while waiting.`;
+}
+
+export function hostedMessageContinuedText(
+  predecessorTaskId: string,
+  taskId: string,
+): string {
+  return `Child agent ${predecessorTaskId} had completed; continued it as ${taskId} with your message as its next instruction. Its result arrives as a durable notification input; either task id reaches the newest run.`;
+}
+
+type HostedChildMessageRoute = Awaited<
+  ReturnType<HostedChildAgentSession['sendToChild']>
+>;
+type HostedSentRoute = Exclude<HostedChildMessageRoute, { kind: 'refused' }>;
+
+/**
+ * H4e-b2: the continuation taken before this one never started, so the
+ * work it carried and the messages it lost are asked for again — unless
+ * the send carries them, or, when this send did not arrive either, the
+ * resend it asks for.
+ */
+function previousNote(route: HostedSentRoute): string {
+  const previous = route.previousNeverStarted;
+  if (previous === undefined) return '';
+  const lost = previous.lostMessages > 0;
+  const what = `that work${lost ? ' and those messages' : ''}`;
+  const them = lost ? 'them' : 'it';
+  const carrier =
+    route.ownNeverStarted === undefined
+      ? 'this message'
+      : 'your resend of this message';
+  return ` Its previous continuation ${neverStartedClause(previous)}; ${
+    previous.cancelled
+      ? `send ${what} again only if ${lost ? 'they are' : 'it is'} still wanted and ${carrier} does not carry ${them}`
+      : `send ${what} again unless ${carrier} carries ${them}`
+  }.`;
+}
+
+/**
+ * The answer of one send, to a member by name or to a task id: a member
+ * is named and its result labeled (H4e-b2 decisions 3 and 6), and a run
+ * that never started is told, since a failed child sends no notification.
+ * A replay or a recovered answer may find the run it reached proved since
+ * that it never started.
+ */
+export function hostedRouteAnswer(
+  children: HostedChildAgentSession,
+  route: HostedSentRoute,
+): string {
+  const task = children.taskIdOf(route.childRunId);
+  const member = route.member;
+  const own = route.ownNeverStarted;
+  if (own !== undefined) {
+    const told =
+      route.kind === 'message'
+        ? `Message was queued for ${member === undefined ? `child agent ${task}` : `member "${member.name}" as task ${task}`}, which ${neverStartedPhrase(own)}, so this message did not arrive.`
+        : `${member === undefined ? `Child agent ${children.taskIdOf(route.predecessorChildRunId)}` : `Member "${member.name}"`} had completed; continued it as task ${task}, which ${neverStartedPhrase(own)}, so this message did not arrive.`;
+    // Each answer asks again only for its own message: what else that run
+    // carried or lost belongs to its own calls' answers and to the next
+    // send's note. A launch that never started ended its member or child.
+    const resend =
+      own.predecessorChildRunId !== null
+        ? ` ${own.cancelled ? 'If it is still wanted, send it' : 'Send it'} again with send_message to ${member === undefined ? `task_id "${children.taskIdOf(own.predecessorChildRunId)}"` : `"${member.name}"`}.`
+        : member === undefined
+          ? ` That child agent has ended; ${own.cancelled ? 'if this work is still wanted, launch a new agent for it' : 'launch a new agent for this work'}.`
+          : ` Member "${member.name}" has ended; ${own.cancelled ? 'if this work is still wanted, launch a new member under a new name for it' : 'for more work, launch a new member under a new name'}.`;
+    return told + resend + previousNote(route);
+  }
+  // A message whose delivery ended with no receipt did not arrive; what a
+  // resend meets depends on the chain now.
+  if (route.deliveryFailed !== undefined) {
+    const { state, chain } = route.deliveryFailed;
+    const told = `Message was queued for ${member === undefined ? `child agent ${task}` : `member "${member.name}" (task ${task})`}, but its delivery was ${state}, so it did not arrive.`;
+    const address =
+      member === undefined ? `task_id "${task}"` : `"${member.name}"`;
+    if (chain === 'open')
+      return `${told} Send it again with send_message to ${address} if it is still needed.`;
+    if (chain === 'settling')
+      return `${told} Its latest continuation is being stopped before it started; if that continuation ends without starting, send it again with send_message to ${address} if it is still needed.`;
+    return member === undefined
+      ? `${told} That child agent has ended; launch a new agent for this work if it is still needed.`
+      : `${told} Member "${member.name}" has ended; for more work, launch a new member under a new name.`;
+  }
+  if (route.kind === 'message')
+    return member === undefined
+      ? hostedMessageToChildText(task)
+      : `Message queued for delivery to member "${member.name}" (task ${task}). It arrives as its next input once its current turn ends. There is no inline reply: the member answers through its result notification or a message to you.`;
+  return (
+    (member === undefined
+      ? hostedMessageContinuedText(
+          children.taskIdOf(route.predecessorChildRunId),
+          task,
+        )
+      : `Member "${member.name}" had completed; continued it as task ${task} with your message as its next instruction. Its result arrives labeled "${member.name}".`) +
+    previousNote(route)
+  );
+}
+
+/** Whether a committed send reached its recipient as far as is known. */
+function hostedRouteArrived(route: HostedSentRoute): boolean {
+  return (
+    route.ownNeverStarted === undefined && route.deliveryFailed === undefined
+  );
+}
+
+/** H4e-b2: one broadcast recipient's line in the call's answer. */
+function hostedRouteLine(
+  children: HostedChildAgentSession,
+  route: HostedChildMessageRoute,
+): string {
+  if (route.kind === 'refused') return `not reached: ${route.reason}`;
+  const task = children.taskIdOf(route.childRunId);
+  const own = route.ownNeverStarted;
+  if (route.kind === 'message')
+    return own !== undefined
+      ? `queued for task ${task}, which ${neverStartedPhrase(own)}, so the message did not arrive.`
+      : route.deliveryFailed !== undefined
+        ? `queued for task ${task}, but its delivery was ${route.deliveryFailed.state}, so the message did not arrive.${route.deliveryFailed.chain === 'ended' ? ' It has ended and takes no messages.' : ''}`
+        : `queued for its running task ${task}.`;
+  return (
+    (own === undefined
+      ? `had completed; continued as task ${task}.`
+      : `had completed; continued as task ${task}, which ${neverStartedPhrase(own)}, so the message did not arrive.`) +
+    previousNote(route)
+  );
+}
+
+/** One recipient a broadcast call committed a send to. */
+export interface HostedBroadcastRecipient {
+  readonly position: number;
+  /** The member name, while a team still lists the chain. */
+  readonly name: string | undefined;
+  /** The roster entry's run the recipient's chain started from. */
+  readonly rootChildRunId: string;
+  /** False when the run it reached proved it never started, or the
+   * message's delivery ended with no receipt. */
+  readonly arrived: boolean;
+  readonly text: string;
+}
+
+/**
+ * H4e-b2 decision 9: what one broadcast call committed, recipient by
+ * recipient, found under each position's ids. Recovery and the PostToolUse
+ * dispatch evidence probe all positions whatever the journaled arguments
+ * say, since a hook may have rewritten the input the call executed.
+ */
+export function hostedBroadcastCommitted(input: {
+  readonly authority: {
+    extensionRecordsInDomain(
+      domain: ManagedSessionDomain,
+    ): ReadonlyArray<{ readonly record: unknown }>;
+  };
+  readonly children: HostedChildAgentSession;
+  readonly messages: HostedSessionMessageSession | undefined;
+  readonly senderSessionId: string;
+  readonly promptId: string;
+  readonly callId: string;
+}): HostedBroadcastRecipient[] {
+  const chains = new HostedChildChains(
+    input.authority.extensionRecordsInDomain('child_run'),
+  );
+  const teams = input.authority.extensionRecordsInDomain('team_state');
+  const found: HostedBroadcastRecipient[] = [];
+  for (let position = 1; position <= HOSTED_BROADCAST_POSITIONS; position++) {
+    const message = input.messages?.message(
+      broadcastMessageId({
+        senderSessionId: input.senderSessionId,
+        turnId: input.promptId,
+        callId: input.callId,
+        position,
+      }),
+    );
+    const continued = input.children.record(
+      broadcastRunId(input.promptId, input.callId, position),
+    );
+    let sent:
+      | { kind: 'message'; childRunId: string; messageId: string }
+      | {
+          kind: 'continuation';
+          childRunId: string;
+          predecessorChildRunId: string;
+        };
+    if (message?.direction === 'outbound')
+      sent = {
+        kind: 'message',
+        childRunId: message.childRunId,
+        messageId: message.messageId,
+      };
+    else if (continued?.predecessorChildRunId)
+      sent = {
+        kind: 'continuation',
+        childRunId: continued.childRunId,
+        predecessorChildRunId: continued.predecessorChildRunId,
+      };
+    else continue;
+    const route = {
+      ...sent,
+      ...hostedRouteDetails(
+        input.authority,
+        sent,
+        sent.kind === 'message' ? sent.messageId : undefined,
+      ),
+    };
+    const rootChildRunId = chains.root(route.childRunId);
+    found.push({
+      position,
+      name: hostedTeamMembership(teams, rootChildRunId)?.name,
+      rootChildRunId,
+      arrived: hostedRouteArrived(route),
+      text: hostedRouteLine(input.children, route),
+    });
+  }
+  return found;
+}
+
+/**
+ * Whether one call committed any broadcast recipient: the same ids as
+ * `hostedBroadcastCommitted`, probed without indexing the lead's runs, so
+ * the PostToolUse dispatch evidence stays cheap for every send.
+ */
+export function hostedBroadcastAnyCommitted(input: {
+  readonly children: HostedChildAgentSession;
+  readonly messages: HostedSessionMessageSession | undefined;
+  readonly senderSessionId: string;
+  readonly promptId: string;
+  readonly callId: string;
+}): boolean {
+  for (let position = 1; position <= HOSTED_BROADCAST_POSITIONS; position++) {
+    if (
+      input.messages?.message(
+        broadcastMessageId({
+          senderSessionId: input.senderSessionId,
+          turnId: input.promptId,
+          callId: input.callId,
+          position,
+        }),
+      )?.direction === 'outbound' ||
+      input.children.record(
+        broadcastRunId(input.promptId, input.callId, position),
+      )?.predecessorChildRunId
+    )
+      return true;
+  }
+  return false;
+}
+
+/**
+ * H4e-b2: the same tool beside the team tools, which also addresses a
+ * member by name and every member at once (decisions 3 and 4).
+ */
+export const HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL: FunctionDeclaration = {
+  name: 'send_message',
+  description:
+    'Send a message to a member of your team by name (to), to every member at once (to: "*"), or to a child agent this Session launched by the task_id its launch returned; give exactly one of to and task_id. A running member or child receives it as its next input once its current turn ends. One that completed is continued as a new background task with your message as its next instruction, together with its earlier instructions and results; its result arrives as a notification, and a member\'s result is labeled with its name. A failed, cancelled or stopping one, or one that completed after a stop was requested, cannot receive messages. There is no inline reply: the recipient answers through its result notification or by messaging you. A message is not a board change: record the work with task_update in the same turn.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      to: {
+        type: 'string',
+        description:
+          'A member name of your team, or "*" for every member. Use task_id instead for a child agent that is not a member.',
+      },
+      task_id: {
+        type: 'string',
+        description: 'The task id a child agent launch returned.',
+      },
+      message: SEND_MESSAGE_TEXT_SCHEMA,
+    },
+    required: ['message'],
+    additionalProperties: false,
+  },
+};
+
+/** H4e-b2 decision 4: `to` names every member at once. */
+function isBroadcast(to: unknown): boolean {
+  return typeof to === 'string' && to.trim() === '*';
+}
+
+/**
+ * H4e-b2 decision 4: the team form's input with its recipients first. The
+ * approval card previews only the input's first 8 KiB, so a long message
+ * must never push `to` or `task_id` out of it.
+ */
+export function hostedTeamMessageInput(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...(args['to'] === undefined ? {} : { to: args['to'] }),
+    ...(args['task_id'] === undefined ? {} : { task_id: args['task_id'] }),
+    ...args,
+  };
+}
+
+/** H4d-b: a child Session's durable message to the parent that launched it. */
+export const HOSTED_SEND_MESSAGE_TO_PARENT_TOOL: FunctionDeclaration = {
+  name: 'send_message',
+  description:
+    "Send a message to the parent agent that launched this Session, for a question or progress it needs before you finish. It arrives as the parent's next input once the parent's current turn ends. Your final answer still reaches the parent as your result, so do not repeat it here.",
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      to: {
+        type: 'string',
+        enum: ['parent'],
+        description: 'The recipient: always "parent".',
+      },
+      message: SEND_MESSAGE_TEXT_SCHEMA,
+    },
+    required: ['to', 'message'],
     additionalProperties: false,
   },
 };
@@ -593,10 +996,7 @@ export async function journaledToolResultIds(
  * resumed Hook results both name the same run again and again.
  */
 export function hostedChildRunIdFor(promptId: string, callId: string): string {
-  const promptKey = promptId.endsWith(':accept:notify')
-    ? createHash('sha256').update(promptId).digest('hex').slice(0, 16)
-    : promptId;
-  return `${promptKey}:${callId}`;
+  return hostedCallKey(promptId, callId);
 }
 
 /**
@@ -683,6 +1083,7 @@ export class HostedWorkspaceToolTurn {
   private readonly childDepth: number;
   private readonly childWorkspaces: boolean;
   private readonly childConsumption: (childRunId: string) => void;
+  private readonly messages?: HostedSessionMessageSession;
   private readonly teams?: HostedTeamSession;
 
   constructor(
@@ -725,6 +1126,7 @@ export class HostedWorkspaceToolTurn {
         readonly childWorkspaces?: boolean;
         readonly queueConsumption: (childRunId: string) => void;
       };
+      messages?: HostedSessionMessageSession;
       teams?: HostedTeamSession;
     },
   ) {
@@ -740,6 +1142,7 @@ export class HostedWorkspaceToolTurn {
     this.childWorkspaces = extras?.childAgents?.childWorkspaces === true;
     this.childConsumption =
       extras?.childAgents?.queueConsumption ?? (() => undefined);
+    this.messages = extras?.messages;
     this.teams = extras?.teams;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
@@ -835,8 +1238,33 @@ export class HostedWorkspaceToolTurn {
                 : HOSTED_AGENT_TOOL,
             ]
           : []),
+      // H4d-b: the same Sessions message along their lineage — a parent
+      // to the child tasks it launched, a child to its own parent.
+      ...(this.sendMessageRole() === 'parent'
+        ? [
+            this.teamsAdmitted()
+              ? HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL
+              : HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
+          ]
+        : this.sendMessageRole() === 'child'
+          ? [HOSTED_SEND_MESSAGE_TO_PARENT_TOOL]
+          : []),
     ];
     return this.advertised;
+  }
+
+  /** Which side of its lineage this Session's send_message addresses. */
+  private sendMessageRole(): 'parent' | 'child' | undefined {
+    if (
+      this.messages === undefined ||
+      (this.shell === undefined && this.backgroundLane === undefined) ||
+      !sessionMessageAdmissionsEnabled()
+    )
+      return undefined;
+    if (this.messages.lineage !== undefined) return 'child';
+    return this.childDepth === 0 && childAgentAdmissionsEnabled()
+      ? 'parent'
+      : undefined;
   }
 
   /**
@@ -858,6 +1286,13 @@ export class HostedWorkspaceToolTurn {
       )
     )
       return 'Hosted team member cannot launch in the same batch as team_create or team_delete; let the team change land first.';
+    if (
+      batch.some(
+        (other) =>
+          other.name === 'send_message' && isBroadcast(other.args['to']),
+      )
+    )
+      return 'Hosted team member cannot launch in the same batch as send_message to "*"; let the join land first.';
     // A recovered foreground wait (#13708) answers the batch's other
     // launches as plain background starts, which would hide the join.
     if (
@@ -883,16 +1318,13 @@ export class HostedWorkspaceToolTurn {
     return undefined;
   }
 
-  // The mount the Session already holds counts exactly like this Turn's
-  // own acquisition: `acquired` tracks only what this Turn took through
-  // the (possibly shared) broker, while the Hook catalog or MCP owner can
-  // hold the same Workspace mount until their Session-scoped close. A
-  // foreground child must not launch against either hold.
-  private sessionHoldsMount(): boolean {
+  // Result command Hooks can acquire after child admission and retain
+  // the mount until Session close, so count their future hold as well.
+  private sessionOwnerMayHoldMount(): boolean {
     return (
-      this.acquired ||
       (this.mcp?.mountHeld ?? false) ||
-      (this.hooks?.mountHeld ?? false)
+      (this.hooks?.mountHeld ?? false) ||
+      (this.hooks?.hasMountableToolResultHooks ?? false)
     );
   }
 
@@ -1207,6 +1639,18 @@ export class HostedWorkspaceToolTurn {
         // otherwise read as a hybrid between the two before the third hop.
         this.childAgents?.record(this.childRunIdFor(call.callId)) !==
           undefined ||
+        this.messages?.message(this.messageIdFor(call.callId)) !== undefined ||
+        // H4e-b2: a broadcast's recipients commit under their own ids.
+        (call.name === 'send_message' &&
+          this.childAgents !== undefined &&
+          hostedBroadcastAnyCommitted({
+            children: this.childAgents,
+            messages: this.messages,
+            senderSessionId:
+              this.session.authority.sessionHeader.sessionKey.sessionId,
+            promptId: this.promptId,
+            callId: call.callId,
+          })) ||
         intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
@@ -1433,6 +1877,7 @@ export class HostedWorkspaceToolTurn {
         let monitorAdmitted = false;
         let agentAdmitted = false;
         let agentBackground = true;
+        let messageAdmitted = false;
         const team =
           mcpInput === undefined && HOSTED_TEAM_TOOL_NAMES.includes(call.name);
         if (mcpInput) {
@@ -1605,7 +2050,8 @@ export class HostedWorkspaceToolTurn {
           // The deliberate refusals below keep their texts whenever the
           // Agent call is not admitted.
           agentAdmitted = this.agentsAdmitted();
-          const named = this.teamsAdmitted() && args['name'] !== undefined;
+          const teamsOn = this.teamsAdmitted();
+          const named = teamsOn && args['name'] !== undefined;
           const unsupportedKey = Object.keys(args).find(
             (key) =>
               ![
@@ -1634,7 +2080,7 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
           } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, name, model and subagent_type belong to the legacy Agent tool.`;
+            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, ${teamsOn ? '' : 'name, '}model and subagent_type belong to the legacy Agent tool.`;
           } else if (
             args['isolation'] !== undefined &&
             args['isolation'] !== 'worktree'
@@ -1647,29 +2093,15 @@ export class HostedWorkspaceToolTurn {
           } else if (named && !agentBackground) {
             validationError =
               'Hosted team member always runs in the background; omit run_in_background or set it to true.';
-          } else if (!agentBackground && this.sessionHoldsMount()) {
-            // v1: a foreground child waits out the parent's own wait, and
-            // the shared Workspace's mount is held by exactly that wait —
-            // its child could never borrow it. The hold can belong to an
-            // owner this Turn never counts on its own flag: the Session's
-            // Hook catalog or MCP owner acquired and retains the mount
-            // until their Session-scoped close. Refuse before the
-            // deadlock rather than let both Turns burn down to the
-            // deadline.
-            validationError =
-              'Hosted child agent run_in_background=false is unavailable while this Turn holds the Workspace mount; run it in the background or let the current tool work finish first in a fresh turn.';
-          } else if (
-            agentBackground &&
-            (this.mcp?.mountHeld === true || this.hooks?.mountHeld === true)
-          ) {
-            // The background recommendation dies with this owner: a Session
-            // -scoped mount (Hook catalog, MCP owner) survives the Turn, so
-            // the launched child cannot warm its own until the Session
-            // closes — the ordinary turn-wait workaround does not release
-            // it either. Turn-owned mounts at their finish do release, so
-            // only the Session-owned holds are gated on the background arm.
-            validationError =
-              'Hosted child agent run_in_background=true is unavailable while the Session’s Hook catalog or MCP owner holds the Workspace mount, which ends when the Session closes; launch after the owner closes or from a Session without the mount held.';
+          } else if (this.sessionOwnerMayHoldMount()) {
+            validationError = `Hosted child agent is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
+          } else if (!agentBackground && this.acquired) {
+            // A foreground child cannot borrow its waiting parent's mount.
+            // Ordered after the Session-owner arm: a Session-scoped mount
+            // outlives this Turn, so the background and fresh-turn advice
+            // here would not release it. Swapping the two arms hands a
+            // Session-owned hold advice that cannot act on it.
+            validationError = `Hosted child agent run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
           } else if (
             !agentBackground &&
             calls.some((other) => other.name !== 'agent')
@@ -1694,6 +2126,80 @@ export class HostedWorkspaceToolTurn {
             validationError = this.memberBatchError(call, source);
           }
           input = { ...args };
+        } else if (call.name === 'send_message') {
+          const args = call.args;
+          const role = this.sendMessageRole();
+          messageAdmitted = role !== undefined;
+          // H4e-b2: beside the team tools, the lead also addresses a member
+          // by name, or every member with "*".
+          const teamForm = role === 'parent' && this.teamsAdmitted();
+          const keys =
+            role === 'child'
+              ? ['to', 'message']
+              : teamForm
+                ? ['to', 'task_id', 'message']
+                : ['task_id', 'message'];
+          const unsupportedKey = Object.keys(args).find(
+            (key) => !keys.includes(key),
+          );
+          const text = args['message'];
+          if (role === undefined) {
+            validationError =
+              'Hosted session messages are unavailable on this Session profile.';
+          } else if (unsupportedKey !== undefined) {
+            validationError =
+              role === 'child'
+                ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
+                : teamForm
+                  ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. Pass to (a member name, or "*" for every member) or task_id, and message; other Sessions belong to the legacy tool.`
+                  : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; teams and other Sessions belong to the legacy tool.`;
+          } else if (role === 'child' && args['to'] !== 'parent') {
+            validationError =
+              'Hosted send_message from a child Session addresses only to "parent".';
+          } else if (
+            teamForm &&
+            (args['to'] === undefined) === (args['task_id'] === undefined)
+          ) {
+            validationError =
+              'Hosted send_message takes exactly one of to (a member name, or "*" for every member) and task_id.';
+          } else if (
+            teamForm &&
+            args['to'] !== undefined &&
+            (typeof args['to'] !== 'string' || !args['to'].trim())
+          ) {
+            validationError =
+              'Hosted send_message "to" must be a member name, or "*" for every member.';
+          } else if (
+            teamForm &&
+            isBroadcast(args['to']) &&
+            source.some(
+              (other) =>
+                other !== call &&
+                (other.name === 'team_create' ||
+                  other.name === 'team_delete' ||
+                  (other.name === 'agent' && other.args['name'] !== undefined)),
+            )
+          ) {
+            // A re-driven batch then reads the roster the broadcast read.
+            validationError =
+              'Hosted send_message to "*" cannot share a batch with team_create, team_delete or a member launch; let the roster change land first.';
+          } else if (
+            role === 'parent' &&
+            args['to'] === undefined &&
+            (typeof args['task_id'] !== 'string' || !args['task_id'].trim())
+          ) {
+            validationError =
+              'Hosted send_message requires the task_id a child agent launch returned.';
+          } else if (typeof text !== 'string' || !text.trim()) {
+            validationError =
+              'Hosted send_message requires a nonempty message.';
+          } else if (
+            Buffer.byteLength(text, 'utf8') >
+            MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes
+          ) {
+            validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
+          }
+          input = teamForm ? hostedTeamMessageInput(args) : { ...args };
         } else if (team) {
           validationError = hostedTeamArgumentError(call.name, call.args);
           input = { ...call.args };
@@ -1741,6 +2247,7 @@ export class HostedWorkspaceToolTurn {
           monitoring: mcpInput === undefined && monitorAdmitted,
           agent: mcpInput === undefined && agentAdmitted,
           agentBackground,
+          message: mcpInput === undefined && messageAdmitted,
           team,
         };
       });
@@ -1799,10 +2306,15 @@ export class HostedWorkspaceToolTurn {
     // child's wait is exactly the deadlock a shared Workspace creates
     // (parent turn held, child tool call queued behind it forever). v1
     // therefore takes the mount only for a batch with at least one
-    // non-agent tool. H4e-b1's team tools touch only the journal.
+    // non-agent tool. A session message (H4d-b) commits a record and
+    // touches no Runtime either, and H4e-b1's team tools touch only
+    // the journal.
     if (
       !this.acquired &&
-      requests.some((request) => request.agent !== true && !request.team)
+      requests.some(
+        (request) =>
+          request.agent !== true && request.message !== true && !request.team,
+      )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
       await this.acquire(false, signal);
@@ -2058,9 +2570,9 @@ export class HostedWorkspaceToolTurn {
         if (refusals[ordinal] !== undefined) continue;
         // A child-agent launch has no Runtime execution to reserve: the
         // control plane's relay owns its side effect, so it never enters
-        // the Broker pipeline below. Nor does a team tool, which commits
-        // only to this Session's journal.
-        if (request.agent || request.team) continue;
+        // the Broker pipeline below. Nor does a session message or a team
+        // tool, which commit only to this Session's journal.
+        if (request.agent || request.message || request.team) continue;
         if (request.mcp) {
           const renewed = this.mcp!.toolInput(
             request.call.name,
@@ -2423,6 +2935,12 @@ export class HostedWorkspaceToolTurn {
         if (request.agent) {
           responses.push(
             ...(await this.acceptChildAgent(request, model, signal, messageId)),
+          );
+          continue;
+        }
+        if (request.message) {
+          responses.push(
+            ...(await this.acceptSessionMessage(request, model, signal)),
           );
           continue;
         }
@@ -2990,6 +3508,283 @@ export class HostedWorkspaceToolTurn {
     return hostedChildRunIdFor(this.promptId, callId);
   }
 
+  /** The message id one send_message call mints, replay-stable. */
+  private messageIdFor(callId: string): string {
+    return sessionMessageId({
+      senderSessionId:
+        this.session.authority.sessionHeader.sessionKey.sessionId,
+      turnId: this.promptId,
+      callId,
+    });
+  }
+
+  /**
+   * H4d-b: commit one `send_message` and answer the call. The message only
+   * opens its sender's outbox entry (or a continuation launch); the control
+   * plane's relay hands it over, so nothing here waits on the target.
+   * A re-driven batch names the same message or continuation again.
+   */
+  private async acceptSessionMessage(
+    request: { call: ToolCallRequestInfo },
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    const answer = async (text: string, failed: boolean): Promise<Part[]> => {
+      const parts = failed
+        ? convertToFunctionErrorResponse(
+            request.call.name,
+            request.call.callId,
+            [],
+            text,
+          )
+        : convertToFunctionResponse(request.call.name, request.call.callId, [
+            { text },
+          ]);
+      await this.commit('tool_result', parts, model);
+      return parts;
+    };
+    if (signal.aborted) {
+      return answer(
+        'The turn was cancelled before this message was sent.',
+        true,
+      );
+    }
+    const authority = this.session.authority;
+    const text = request.call.args['message'] as string;
+    const messageId = this.messageIdFor(request.call.callId);
+    const callKey = this.childRunIdFor(request.call.callId);
+    if (this.messages!.lineage !== undefined) {
+      try {
+        await this.messages!.sendToParent({
+          text,
+          messageId,
+          executionCallId: callKey,
+          closing: authority.currentActivation?.phase !== 'active',
+        });
+      } catch (cause) {
+        if (!isMessageRefusal(cause)) throw cause;
+        return answer(
+          `The message to the parent was refused: ${cause.message}`,
+          true,
+        );
+      }
+      this.agentDispatched.add(request.call.callId);
+      return answer(HOSTED_MESSAGE_TO_PARENT_TEXT, false);
+    }
+    if (typeof request.call.args['to'] === 'string') {
+      return this.acceptTeamMessage(
+        request,
+        request.call.args['to'],
+        text,
+        answer,
+        signal,
+      );
+    }
+    const taskId = (request.call.args['task_id'] as string).trim();
+    let route: Awaited<ReturnType<HostedChildAgentSession['sendToChild']>>;
+    try {
+      route = await this.childAgents!.sendToChild({
+        taskId,
+        text,
+        messageId,
+        continuationRunId: callKey,
+        executionCallId: callKey,
+        closing: authority.currentActivation?.phase !== 'active',
+        childWorkspaces: this.childWorkspaces,
+      });
+    } catch (cause) {
+      if (!isMessageRefusal(cause)) throw cause;
+      return answer(`The message was refused: ${cause.message}`, true);
+    }
+    if (route.kind === 'refused') return answer(route.reason, true);
+    this.agentDispatched.add(request.call.callId);
+    // A member addressed by its task id is answered as one (H4e-b2).
+    return answer(hostedRouteAnswer(this.childAgents!, route), false);
+  }
+
+  /**
+   * H4e-b2 decisions 3 and 4: the lead's `send_message` to a member by
+   * name, or to every member with "*". A name routes exactly as the task
+   * id of the member's first run does, under the ids the task_id form
+   * mints for the call; each broadcast recipient has its own ids, where no
+   * single send or launch can reach them. A replay finds what the call
+   * committed before it resolves `to`, so it answers the committed send
+   * even after the team has changed.
+   */
+  private async acceptTeamMessage(
+    request: { call: ToolCallRequestInfo },
+    to: string,
+    text: string,
+    answer: (text: string, failed: boolean) => Promise<Part[]>,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    const children = this.childAgents!;
+    const teams = this.teams!;
+    const { callId } = request.call;
+    const callKey = this.childRunIdFor(callId);
+    const closing =
+      this.session.authority.currentActivation?.phase !== 'active';
+    const send = async (
+      taskId: string,
+      messageId: string,
+      continuationRunId: string,
+    ): Promise<HostedChildMessageRoute> => {
+      try {
+        return await children.sendToChild({
+          taskId,
+          text,
+          messageId,
+          continuationRunId,
+          executionCallId: callKey,
+          closing,
+          childWorkspaces: this.childWorkspaces,
+        });
+      } catch (cause) {
+        if (!isMessageRefusal(cause)) throw cause;
+        return { kind: 'refused', reason: cause.message };
+      }
+    };
+    if (isBroadcast(to)) {
+      const senderSessionId =
+        this.session.authority.sessionHeader.sessionKey.sessionId;
+      const team = teams.openTeam();
+      const committed = hostedBroadcastAnyCommitted({
+        children,
+        messages: this.messages,
+        senderSessionId,
+        promptId: this.promptId,
+        callId,
+      })
+        ? hostedBroadcastCommitted({
+            authority: this.session.authority,
+            children,
+            messages: this.messages,
+            senderSessionId,
+            promptId: this.promptId,
+            callId,
+          })
+        : [];
+      // A replay sends only to the roster the first run read: the batch
+      // rule keeps it unchanged, so a team deleted or replaced since means
+      // the broadcast answers for the recipients it reached and sends to
+      // nobody new.
+      if (
+        committed.length > 0 &&
+        (team === undefined ||
+          committed.some(
+            (each) =>
+              team.members[each.position - 1]?.childRunId !==
+              each.rootChildRunId,
+          ))
+      ) {
+        this.agentDispatched.add(callId);
+        return answer(
+          `The message was sent to ${committed.length} member${committed.length === 1 ? '' : 's'} before its team changed; nothing more was sent.\n${committed
+            .map(
+              (each) =>
+                `- ${each.name ?? `position ${each.position}`}: ${each.text}`,
+            )
+            .join('\n')}`,
+          false,
+        );
+      }
+      if (team === undefined)
+        return answer(
+          'No open team: create one with team_create, or address a child agent by task_id.',
+          true,
+        );
+      if (team.members.length === 0)
+        return answer(`Team "${team.name}" has no members yet.`, true);
+      const lines: string[] = [];
+      // Sent: the call committed a send to the member. Arrived: that send
+      // did not reach a run that proved it never started, nor did its
+      // delivery fail, which only a replay can find.
+      let sent = 0;
+      let arrived = 0;
+      // A cancelled Turn sends to no further member: each send may launch
+      // a continuation, which spends the Session's launches.
+      let cancelled = false;
+      for (const [index, member] of team.members.entries()) {
+        const position = index + 1;
+        if (signal.aborted) {
+          cancelled = true;
+          lines.push(`- ${member.name}: not sent: the turn was cancelled.`);
+          continue;
+        }
+        const route = await send(
+          children.taskIdOf(member.childRunId),
+          broadcastMessageId({
+            senderSessionId,
+            turnId: this.promptId,
+            callId,
+            position,
+          }),
+          broadcastRunId(this.promptId, callId, position),
+        );
+        if (route.kind !== 'refused') {
+          sent += 1;
+          if (hostedRouteArrived(route)) arrived += 1;
+        }
+        lines.push(`- ${member.name}: ${hostedRouteLine(children, route)}`);
+      }
+      if (sent === 0)
+        return answer(
+          `The message reached no member:\n${lines.join('\n')}`,
+          true,
+        );
+      this.agentDispatched.add(callId);
+      return answer(
+        arrived === team.members.length
+          ? `Message sent to every member of team "${team.name}". There is no inline reply: each member answers through its result notification or a message to you.\n${lines.join('\n')}`
+          : `Message sent to ${sent} of ${team.members.length} members of team "${team.name}"${arrived < sent ? `, but it did not arrive at ${sent - arrived} of them` : ''}${cancelled ? `; the turn was cancelled before the rest` : ''}. Send it by name to any member below that did not get it and still needs it.\n${lines.join('\n')}`,
+        false,
+      );
+    }
+    const messageId = this.messageIdFor(callId);
+    if (
+      this.messages!.message(messageId) !== undefined ||
+      children.record(callKey) !== undefined
+    ) {
+      // The replay: sendToChild answers the committed send by its ids.
+      // The name and its label hold only while the member's team is open;
+      // a former member's continuation is a plain child (decision 6).
+      const route = await send('', messageId, callKey);
+      if (route.kind === 'refused') return answer(route.reason, true);
+      this.agentDispatched.add(callId);
+      return answer(hostedRouteAnswer(children, route), false);
+    }
+    const team = teams.openTeam();
+    if (team === undefined)
+      return answer(
+        'No open team: create one with team_create, or address a child agent by task_id.',
+        true,
+      );
+    const name = sanitizeName(to);
+    if (name === MANAGED_TEAM_LEADER)
+      return answer(
+        'You are the team leader: "to" names a member, or "*" for every member.',
+        true,
+      );
+    const member = team.members.find((each) => each.name === name);
+    if (member === undefined)
+      return answer(
+        `"${to}" is not a member of team "${team.name}". ${team.members.length > 0 ? `Members: ${team.members.map((each) => each.name).join(', ')}.` : 'It has no members yet.'}`,
+        true,
+      );
+    const route = await send(
+      children.taskIdOf(member.childRunId),
+      messageId,
+      callKey,
+    );
+    if (route.kind === 'refused')
+      return answer(
+        `The message to member "${name}" was refused: ${route.reason}`,
+        true,
+      );
+    this.agentDispatched.add(callId);
+    return answer(hostedRouteAnswer(children, route), false);
+  }
+
   /**
    * H4b: launch one child Session and complete the call through its own
    * arm. The intent commits before any physical effect; the control
@@ -3034,22 +3829,6 @@ export class HostedWorkspaceToolTurn {
       definitionRevision: 1,
       definitionDigest: authority.sessionHeader.definitionRef.digest,
     };
-    // The envelope bound is enforced by the admission's byte_limit
-    // refusal — but the encoder throws a size error before that branch
-    // can ever answer. Translate the throw into the same refusal: an
-    // over-size prompt is a model-correctable argument error, never a
-    // recovery-blocked Turn.
-    let envelopeBytes: number;
-    try {
-      envelopeBytes = encodeChildLaunchEnvelope({
-        description,
-        prompt,
-        definition,
-      }).byteLength;
-    } catch (cause) {
-      if (!(cause instanceof ManagedSessionRecordError)) throw cause;
-      envelopeBytes = Number.POSITIVE_INFINITY;
-    }
     // H4e-b1: a named launch is a team member. Its team checks run before
     // the launch commits anything; a replay whose run is already on the
     // roster has nothing left to join, and one whose team changed since
@@ -3079,6 +3858,27 @@ export class HostedWorkspaceToolTurn {
           unjoined = cause.message;
         }
       }
+    }
+    // H4e-b2 decision 5: a member's launch prompt opens with its preamble,
+    // part of the envelope and so of its bound. A replay goes on with the
+    // committed envelope, whose preamble may follow a team changed since.
+    const launchPrompt =
+      member === undefined ? prompt : teamMemberPreamble(member) + prompt;
+    // The envelope bound is enforced by the admission's byte_limit
+    // refusal — but the encoder throws a size error before that branch
+    // can ever answer. Translate the throw into the same refusal: an
+    // over-size prompt is a model-correctable argument error, never a
+    // recovery-blocked Turn.
+    let envelopeBytes: number;
+    try {
+      envelopeBytes = encodeChildLaunchEnvelope({
+        description,
+        prompt: launchPrompt,
+        definition,
+      }).byteLength;
+    } catch (cause) {
+      if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+      envelopeBytes = Number.POSITIVE_INFINITY;
     }
     // Quotas gate NEW children only: a re-driven batch names the same
     // run id, and `children.admit` answers that replay identically —
@@ -3118,7 +3918,8 @@ export class HostedWorkspaceToolTurn {
       rootSessionId: key.sessionId,
       completion: request.agentBackground ? 'sent' : 'tool',
       description,
-      prompt,
+      prompt: launchPrompt,
+      sentPrompt: prompt,
       definition,
       workspaceMode,
       workingDirectory: '.',
@@ -3153,9 +3954,7 @@ export class HostedWorkspaceToolTurn {
         signal,
       );
     }
-    const taskId = managedTaskId(
-      managedExtensionRecordKey(key.sessionId, 'child_run', childRunId),
-    );
+    const taskId = managedChildTaskId(key.sessionId, childRunId);
     if (member !== undefined && joining) {
       const joined = await this.teams!.join({
         teamId: member.teamId,
@@ -3254,7 +4053,12 @@ export class HostedWorkspaceToolTurn {
     let answer: (text: string) => Part[];
     let text: string;
     try {
-      text = await this.teams!.run(name, args, this.childRunIdFor(callId));
+      text = await this.teams!.run(
+        name,
+        args,
+        this.childRunIdFor(callId),
+        `${hostedPromptKey(this.promptId)}:`,
+      );
       answer = (each) =>
         convertToFunctionResponse(name, callId, [{ text: each }]);
     } catch (cause) {
@@ -3314,7 +4118,7 @@ export class HostedWorkspaceToolTurn {
             request.call.name,
             request.call.callId,
             [],
-            `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
+            childRunEndedText(record),
           );
           if (!journaled?.has(request.call.callId))
             await this.commit('tool_result', ended, model);
