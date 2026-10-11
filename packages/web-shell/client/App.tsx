@@ -13701,6 +13701,10 @@ export function App({
   const hiddenAtRef = useRef<number | null>(null);
   const lastRecapBlockCountRef = useRef(0);
   const autoRecapVersionRef = useRef(0);
+  // Kept in sync on every render so the in-flight promise callback can check
+  // the *current* toggle state, not the one captured when the call was made.
+  const autoRecapEnabledRef = useRef(autoRecapEnabled);
+  autoRecapEnabledRef.current = autoRecapEnabled;
   useEffect(() => {
     lastRecapBlockCountRef.current = 0;
     autoRecapVersionRef.current += 1;
@@ -13742,6 +13746,7 @@ export function App({
           // echoes the id back), not a real race; the epoch/connection checks
           // catch those. Kept so it is not simplified away as redundant.
           if (
+            !autoRecapEnabledRef.current ||
             autoRecapVersionRef.current !== version ||
             !owner.isCurrent() ||
             connectionRef.current.sessionId !== sessionId ||
@@ -13756,6 +13761,7 @@ export function App({
                 version: autoRecapVersionRef.current,
                 userBlockId: currentUserBlockId,
                 streamingState: streamingStateRef.current,
+                autoRecapEnabled: autoRecapEnabledRef.current,
               },
               result: result.sessionId,
             });

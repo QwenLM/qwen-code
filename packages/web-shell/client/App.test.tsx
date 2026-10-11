@@ -23919,6 +23919,24 @@ describe('App session callbacks', () => {
     expect(visibleRecapTexts()).toEqual([]);
   });
 
+  it('discards an automatic recap when Show Session Recap is turned off while the request is in flight', async () => {
+    const { recap, rerender } = await triggerAutoRecap();
+    // The recap call is pending. The user now disables the toggle.
+    testState.settings = [
+      showSessionRecapSetting(false),
+      recapAwayThresholdSetting(3),
+    ];
+    rerender();
+    await flush();
+
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-1', recap: 'In-flight recap' });
+      await recap.promise;
+    });
+
+    expect(visibleRecapTexts()).toEqual([]);
+  });
+
   it('keeps only the newest automatic recap across away cycles', async () => {
     const first = deferred<{ sessionId: string; recap: string | null }>();
     const second = deferred<{ sessionId: string; recap: string | null }>();
