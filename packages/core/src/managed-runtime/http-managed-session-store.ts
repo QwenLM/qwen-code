@@ -1716,6 +1716,7 @@ export function collectNestedResourceRefs(
   }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
