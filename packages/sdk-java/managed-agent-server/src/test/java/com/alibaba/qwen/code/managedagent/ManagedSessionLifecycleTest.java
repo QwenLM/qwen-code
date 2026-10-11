@@ -855,6 +855,15 @@ class ManagedSessionLifecycleTest {
                     .when(faulted).abandonSessionRename(org.mockito.ArgumentMatchers.eq(tenant),
                             org.mockito.ArgumentMatchers.eq("key"), org.mockito.ArgumentMatchers.eq(sessionId), anyLong(), anyString());
         }
+        // recover()'s only precondition is Harness availability, while createOrLoad and
+        // rename never consult it: gating from the insert onwards keeps the 50 ms
+        // coordinator off this row without changing what the inline attempt does.
+        doAnswer(call -> {
+            harness.setAvailable(false);
+            return store.beginSessionRename(call.getArgument(0), call.getArgument(1),
+                    call.getArgument(2), call.getArgument(3), call.getArgument(4));
+        }).when(faulted).beginSessionRename(anyString(), anyString(), anyString(),
+                anyString(), anyString());
         ManagedAgentService subject = new ManagedAgentService(faulted,
                 new RequestDigests(), null, harness, null);
         if ("cleanup".equals(phase)) {
@@ -867,18 +876,47 @@ class ManagedSessionLifecycleTest {
                         assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
                         assertThat(error.getCode()).isEqualTo("hosted_harness_unavailable");
                     });
+            // Park before pinning the retired state: claimRename takes (PENDING AND
+            // available_at <= now) OR (RUNNING AND lease_until <= now), so both columns
+            // have to move to keep the row out of reach once the gate is lifted.
+            assertThat(jdbc.update("UPDATE managed_session_rename_delivery"
+                            + " SET available_at = ?, lease_until = ? WHERE tenant_id = ?"
+                            + " AND session_id = ?",
+                    Long.MAX_VALUE, Long.MAX_VALUE, tenant, sessionId)).isEqualTo(1);
+            if ("cleanup".equals(phase)) {
+                // abandonSessionRename threw, so retryRename never ran: the row stays
+                // RUNNING under the dead inline owner and the command stays PENDING.
+                assertThat(jdbc.queryForObject("SELECT delivery_state FROM"
+                                + " managed_session_rename_delivery WHERE tenant_id = ?"
+                                + " AND session_id = ?", String.class, tenant, sessionId))
+                        .isEqualTo("RUNNING");
+                assertThat(jdbc.queryForObject("SELECT command_status FROM"
+                                + " managed_agent_command WHERE tenant_id = ?"
+                                + " AND operation = 'RENAME_SESSION' AND idempotency_key = 'key'",
+                        String.class, tenant)).isEqualTo("PENDING");
+            } else {
+                assertThat(jdbc.queryForObject("SELECT command_status FROM"
+                                + " managed_agent_command WHERE tenant_id = ?"
+                                + " AND operation = 'RENAME_SESSION' AND idempotency_key = 'key'",
+                        String.class, tenant)).isEqualTo("FAILED");
+            }
         } finally {
             harness.setAvailable(true);
         }
-        if ("cleanup".equals(phase)) {
-            jdbc.update("UPDATE managed_session_rename_delivery SET lease_until = 0"
-                    + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
-        } else {
-            assertThat(jdbc.queryForObject("SELECT command_status FROM"
-                            + " managed_agent_command WHERE tenant_id = ?"
-                            + " AND operation = 'RENAME_SESSION' AND idempotency_key = 'key'",
-                    String.class, tenant)).isEqualTo("FAILED");
-        }
+        // Hand the row back to the recovery path and wait for it to settle. A retry that
+        // loses the claim to the coordinator legitimately answers 503 "already being
+        // delivered", so the trailing PATCH is only deterministic once the delivery has
+        // completed and it replays; timing out here would also prove the row was never
+        // re-queued.
+        assertThat(jdbc.update("UPDATE managed_session_rename_delivery"
+                        + " SET available_at = 0, lease_until = 0 WHERE tenant_id = ?"
+                        + " AND session_id = ?", tenant, sessionId)).isEqualTo(1);
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(jdbc.queryForObject("SELECT command_status FROM"
+                                + " managed_agent_command WHERE tenant_id = ?"
+                                + " AND operation = 'RENAME_SESSION'"
+                                + " AND idempotency_key = 'key'",
+                        String.class, tenant)).isEqualTo("COMPLETED"));
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"renamed\"}"), tenant, "key")
