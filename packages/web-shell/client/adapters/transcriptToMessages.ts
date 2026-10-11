@@ -642,6 +642,9 @@ export function transcriptBlocksToDaemonMessages(
           loadedToolIds.has(getString(task, 'toolUseId') ?? ''))
       )
         continue;
+      const teammate = teammateOfAgent(
+        (block as DaemonTextTranscriptBlock).agent,
+      );
       messages.push({
         id: block.id,
         role: 'system',
@@ -652,6 +655,7 @@ export function transcriptBlocksToDaemonMessages(
           ...task,
           awaitingProcessing,
         },
+        ...(teammate ? { teammate } : {}),
         timestamp: blockTime,
         sourceBlockIds: [block.id],
       });
