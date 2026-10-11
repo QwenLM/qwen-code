@@ -180,9 +180,13 @@ export const renameCommand: SlashCommand = {
       // future regressions don't leak an interval timer).
       let outcome: Awaited<ReturnType<typeof tryGenerateSessionTitle>>;
       try {
-        const userDisplayTexts =
-          config.getChatRecordingService()?.getUserDisplayTextsForTitle?.() ??
-          [];
+        const recorder = config.getChatRecordingService();
+        // Outside projection mode the recorded texts are raw request text,
+        // not projections — passing them would drop payload-less turns from
+        // the title input, so fall back to the full history instead.
+        const userDisplayTexts = recorder?.hasDisplayProjectionForTitle?.()
+          ? (recorder.getUserDisplayTextsForTitle?.() ?? [])
+          : [];
         const lastDisplayText = userDisplayTexts.at(-1)?.trim();
         const titleDisplayTexts = lastDisplayText?.match(
           /^\/(?:rename|tag)(?:\s+--auto)?$/i,

@@ -408,6 +408,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       undefined,
       {
         displayText: '',
+        displayProjection: false,
         hookContext: '',
         embeddedResources: [
           {
@@ -452,6 +453,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       undefined,
       {
         displayText: '',
+        displayProjection: false,
         hookContext: '',
         embeddedResources: [
           {
@@ -476,10 +478,12 @@ describe('ChatRecordingService - auto-title trigger', () => {
     });
     await flushMicrotasks();
 
+    // No projection anywhere in the session: the title input is the full
+    // history, not the recorded texts.
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
       mockConfig,
       expect.any(AbortSignal),
-      [undefined],
+      [],
     );
   });
 
@@ -487,6 +491,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
     mockOk('Inspect embedded resource replay');
     chatRecordingService.recordUserMessage('', undefined, {
       displayText: '',
+      displayProjection: false,
       hookContext: '',
       embeddedResourcesTruncated: true,
     });
@@ -504,7 +509,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
       mockConfig,
       expect.any(AbortSignal),
-      [undefined],
+      [],
     );
   });
 
@@ -516,6 +521,90 @@ describe('ChatRecordingService - auto-title trigger', () => {
     );
 
     expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual(['']);
+  });
+
+  it('keeps an empty client projection as a title projection marker beside embedded resources', () => {
+    // R8-1: a trusted ACP parent can send promptDisplayText '' on a prompt
+    // that also carries an inline text resource. The projection marker must
+    // win over the resource-only shape: tracking undefined would read as "no
+    // projection" and fall back to the raw model history — precisely the
+    // content the client hid behind the empty projection.
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden channel instructions' }],
+      undefined,
+      {
+        displayText: '',
+        hookContext: '',
+        displayProjection: true,
+        embeddedResources: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/selection',
+              mimeType: 'application/json',
+              text: '{"items":["example"]}',
+            },
+          },
+        ],
+      },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual(['']);
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(true);
+  });
+
+  it('titles a session mixing a client projection with a raw-text turn', async () => {
+    // R8-1 loss arm: the projection decision and the per-turn text are
+    // separate answers. A raw-text record (displayProjection:false) must
+    // contribute its text — tracking undefined would leave ['', undefined],
+    // whose projection-mode dialog is empty and loses the title even though
+    // the second turn is fully visible.
+    mockOk('Advisor Review Session');
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden channel instructions' }],
+      undefined,
+      {
+        displayText: '',
+        hookContext: '',
+        displayProjection: true,
+        embeddedResources: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/selection',
+              mimeType: 'application/json',
+              text: '{"items":["example"]}',
+            },
+          },
+        ],
+      },
+    );
+    chatRecordingService.recordUserMessage(
+      [{ text: '/advisor check my work' }],
+      undefined,
+      {
+        displayText: '/advisor check my work',
+        displayProjection: false,
+        hookContext: '',
+      },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+      '',
+      '/advisor check my work',
+    ]);
+
+    await assistantTurn();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      ['', '/advisor check my work'],
+    );
+    expect(findCustomTitleRecord()?.systemPayload).toEqual({
+      customTitle: 'Advisor Review Session',
+      titleSource: 'auto',
+    });
   });
 
   it('keeps an explicit display projection as a title projection marker', () => {
@@ -532,10 +621,10 @@ describe('ChatRecordingService - auto-title trigger', () => {
 
   it('does not treat a resource-carrying raw-text record as a title projection marker', () => {
     // The ACP record site writes displayProjection:false when displayText is
-    // the raw request text rather than a client projection. Without the
-    // marker, one ordinary prompt carrying an inline resource flips the
-    // whole session into projection mode and drops every payload-less turn
-    // from the title input.
+    // the raw request text rather than a client projection. The raw text
+    // still contributes to the tracked texts, but the session must NOT flip
+    // into projection mode — that would drop every payload-less turn from
+    // the title input.
     chatRecordingService.recordUserMessage([{ text: 'hi' }]);
     chatRecordingService.recordUserMessage(
       [{ text: 'here is the log @context://example/selection' }],
@@ -559,8 +648,9 @@ describe('ChatRecordingService - auto-title trigger', () => {
 
     expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
       undefined,
-      undefined,
+      'here is the log @context://example/selection',
     ]);
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(false);
   });
 
   it('restores resource-only records without a title projection marker', () => {
@@ -582,6 +672,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
         },
         systemPayload: {
           displayText: '',
+          displayProjection: false,
           hookContext: '',
           embeddedResources: [
             {
@@ -625,6 +716,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
         message: { role: 'user', parts: [{ text: '' }] },
         systemPayload: {
           displayText: '',
+          displayProjection: false,
           hookContext: '',
           embeddedResourcesTruncated: true,
         },

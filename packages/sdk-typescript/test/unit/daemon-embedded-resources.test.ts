@@ -450,6 +450,129 @@ describe('daemon embedded text resources', () => {
     expect(onTruncation).not.toHaveBeenCalled();
   });
 
+  it('bounds the per-block aggregate when many in-bounds resources fold into one turn', () => {
+    // R2-2 count leg: the live echo folds every resource of one prompt into
+    // a single user block, and trimming never evicts the newest block. Each
+    // resource below is inside BOTH per-resource bounds (~195 KB of real
+    // JSON, ~1.04M estimate units of non-text payload), so admission alone
+    // retains all 256 — pinning the store far over budget with no eviction
+    // able to reclaim it. The per-block aggregate cap (the writer's own
+    // per-prompt journal budget, in the same real-JSON-byte unit) admits
+    // only the first and reports the rest.
+    const maxRetainedBytes = 512 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    const floodResource = (index: number) => ({
+      type: 'resource',
+      resource: {
+        uri: `context://example/flood/${index}`,
+        mimeType: 'application/json',
+        text: '',
+      },
+      _meta: { nums: Array.from({ length: 65_000 }, (_, i) => 10 + (i % 90)) },
+    });
+    store.dispatch(
+      Array.from(
+        { length: 256 },
+        (_, index) => normalizeDaemonEvent(frame(floodResource(index)))[0]!,
+      ),
+    );
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    expect(onTruncation).toHaveBeenCalled();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources!.length).toBeLessThan(256);
+    expect(block.embeddedResources!.length).toBeGreaterThan(0);
+  });
+
+  it('skeletonizes a scalar flood nested past the estimator depth cap', () => {
+    // R2-2 depth leg: 80,000 empty objects are ~240 KB of real JSON — under
+    // the writer-parity byte ceiling — but nested so the flood array sits
+    // past the estimator's depth cap, the walk returns 0 for it and the
+    // resource is retained whole (80k live objects pinned in the newest
+    // block). The estimate walk must fail closed: unmeasurable counts as
+    // over-bounds, so the payload falls back to the skeleton.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    let wrapper: Record<string, unknown> = {
+      entries: Array.from({ length: 80_000 }, () => ({})),
+    };
+    for (let i = 0; i < 15; i++) {
+      wrapper = { nested: wrapper };
+    }
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: { uri: 'context://example/objects', text: '' },
+          _meta: wrapper,
+        }),
+      )[0]!,
+    );
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    const retained = block.embeddedResources![0]!;
+    expect(retained).not.toHaveProperty('_meta');
+    expect(retained.resource.uri).toBe('context://example/objects');
+  });
+
+  it('converges the skeleton cascade when the bounded text alone exceeds the ceiling', () => {
+    // R2-2 cascade leg: the text cut bounds UTF-16 code units
+    // (MAX_TEXT_BLOCK_LENGTH) but the ceiling is real UTF-8 bytes, so 100k
+    // three-byte characters survive every prior cut (~300 KB of real JSON)
+    // and the cascade terminated still over ceiling. Emptying the text is
+    // the converging last resort; the display identity (uri, mimeType)
+    // survives.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: 'context://example/wide',
+            mimeType: 'text/plain',
+            text: '\u754c'.repeat(100_000),
+          },
+        }),
+      )[0]!,
+    );
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    const retained = block.embeddedResources![0]!;
+    expect(retained.resource.text).toBe('');
+    expect(retained.resource.uri).toBe('context://example/wide');
+    expect(retained.resource.mimeType).toBe('text/plain');
+    expect(onTruncation).toHaveBeenCalledWith({
+      kind: 'text',
+      blockId: block.id,
+      sourceRecordIds: ['r1'],
+    });
+  });
+
   it('bounds the estimate-unit charge of a scalar flood that passes the byte ceiling', () => {
     // The estimator bills a flat 16 units per number/boolean regardless of
     // JSON width, so real JSON bytes and retainedBytes disagree by ~21x on

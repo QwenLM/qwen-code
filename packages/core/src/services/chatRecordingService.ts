@@ -1232,6 +1232,15 @@ export class ChatRecordingService {
     | undefined;
   private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
   /**
+   * Separate from the per-turn texts: one `string | undefined` slot cannot
+   * answer both "is this session in client-projection mode?" and "what text
+   * does this turn contribute?". A raw-text record (displayProjection ===
+   * false) contributes its text below without flipping this flag, so a
+   * session with no projection still titles from the full history, while a
+   * projection session never falls back to the hidden model context.
+   */
+  private displayProjectionForTitle = false;
+  /**
    * How many auto-title attempts have been made this process.
    *
    * We don't commit to "one attempt per session" because the first assistant
@@ -1423,6 +1432,7 @@ export class ChatRecordingService {
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
+    this.displayProjectionForTitle = false;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
@@ -1475,18 +1485,21 @@ export class ChatRecordingService {
   }
 
   // A record whose displayText is raw request text (displayProjection
-  // === false) hides no model context, unlike a channel projection marker —
-  // it must not flip the title projection on, or the session loses
-  // auto-titling. Legacy payloads predate the marker, so absence falls back
-  // to the shape heuristic: a resource-only record stores displayText ''.
+  // === false) hides no model context, unlike a projection record — it
+  // contributes its text without flipping the session into projection mode.
+  // Legacy payloads predate the marker, so a marker-less payload keeps the
+  // historical behavior: any recorded displayText was a projection. A
+  // projection record must keep tracking its displayText even when it is ''
+  // (and even beside embedded resources): tracking undefined would read as
+  // "no projection" and fall back to the raw history the client hid.
   private trackUserDisplayTextForTitlePayload(
     payload: UserPromptRecordPayload | undefined,
   ): void {
+    if (payload !== undefined && payload.displayProjection !== false) {
+      this.displayProjectionForTitle = true;
+    }
     this.trackUserDisplayTextForTitle(
-      payload?.displayProjection === false ||
-        (payload?.displayText === '' &&
-          ((payload.embeddedResources?.length ?? 0) > 0 ||
-            payload.embeddedResourcesTruncated === true))
+      payload?.displayProjection === false && payload.displayText === ''
         ? undefined
         : payload?.displayText,
     );
@@ -2398,6 +2411,10 @@ export class ChatRecordingService {
     return this.userDisplayTextsForTitle;
   }
 
+  hasDisplayProjectionForTitle(): boolean {
+    return this.displayProjectionForTitle;
+  }
+
   recordGoalRuntimeMessage(
     message: PartListUnion,
     goalContext: GoalTurnPermit,
@@ -2909,7 +2926,11 @@ export class ChatRecordingService {
         const outcome = await tryGenerateSessionTitle(
           this.config,
           controller.signal,
-          this.userDisplayTextsForTitle,
+          // Outside projection mode the recorded texts must not stand in for
+          // the conversation: a raw-text record's displayText is the request
+          // text, and projecting only payload-carrying turns would drop every
+          // payload-less turn from the title input.
+          this.displayProjectionForTitle ? this.userDisplayTextsForTitle : [],
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;

@@ -326,6 +326,38 @@ describe('tryGenerateSessionTitle', () => {
     expect(prompt).not.toContain('hidden second instructions');
   });
 
+  it('titles from the visible text of a mixed projection/raw-text history', async () => {
+    // R8-1: an empty projection entry means "user-authored text empty", not
+    // "no content": a following raw-text turn is fully visible and must carry
+    // the title on its own.
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Advisor Review Session' },
+    });
+
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      ['', '/advisor check my work'],
+    );
+
+    expect(outcome).toEqual({
+      ok: true,
+      title: 'Advisor Review Session',
+      modelUsed: 'qwen-turbo',
+    });
+    const call = generateJson.mock.calls[0][0] as {
+      contents: Content[];
+    };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('/advisor check my work');
+    expect(prompt).not.toContain('hidden channel instructions');
+  });
+
   it('treats an all-empty display projection as intentionally empty', async () => {
     const { config, generateJson } = makeConfig({
       fastModel: 'qwen-turbo',

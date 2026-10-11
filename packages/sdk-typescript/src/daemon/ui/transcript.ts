@@ -85,17 +85,20 @@ const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
  * signature on DaemonEmbeddedResource lets a large `blob` or vendor key
  * ride past the text bound; past this ceiling the resource falls back to
  * the display skeleton, which is itself re-measured against the same
- * ceiling.
+ * ceiling. The same constant also bounds the summed real JSON bytes of one
+ * block's `embeddedResources`: the live echo folds a whole prompt's
+ * resources into a single block, and trimming never evicts the newest
+ * block, so admission alone cannot keep the store within budget.
  */
 const MAX_EMBEDDED_RESOURCE_BYTES = 256 * 1024;
 /**
- * Estimate-unit bound on one retained resource's non-text payload — the
- * retention budget's own unit (`estimateRetainedBytes`, with the separately
- * bounded text arm excluded). The byte ceiling alone cannot bound what the
- * store accounts: the estimator bills a flat 16 units per number/boolean
- * regardless of JSON width, so a payload that passes the byte ceiling can
- * still pin the newest block — which trimming never evicts — several times
- * over `maxRetainedBytes`. Sized above the largest writer-parity witness (a
+ * Estimate-unit bound on one retained resource's non-text payload
+ * (`estimateRetainedBytes`, with the separately bounded text arm excluded).
+ * The byte ceiling alone cannot bound what a scalar flood pins on the heap:
+ * the estimator bills a flat 16 units per number/boolean regardless of JSON
+ * width, so a payload that passes the byte ceiling can still hold the
+ * newest block — which trimming never evicts — at several times its charged
+ * bytes in live objects. Sized above the largest writer-parity witness (a
  * scalar-heavy `_meta` the writer journaled at ~80 KB of real JSON charges
  * ~641k units) so replay keeps it, and far below the empty-object flood
  * (~5.1M units) that exists only to pin the store.
@@ -481,23 +484,41 @@ function applyDaemonTranscriptEvent(
         return JSON.stringify(candidate) === serializedRetained;
       });
       if (!duplicate) {
-        block.embeddedResources = [...resources, cloneJsonLike(retained)];
-        if (incomingFingerprint !== undefined || fingerprints !== undefined) {
-          block.embeddedResourceFingerprints = appendFingerprint(
-            fingerprints,
-            resources.length,
-            incomingFingerprint,
-          );
-        }
+        // Per-block aggregate bound in the same real-JSON-byte unit as the
+        // per-resource ceiling: the live echo folds every resource of one
+        // prompt into this single block, and retention trimming never evicts
+        // the newest block, so without a summed cap the block pins the store
+        // over budget no matter how each resource fares against the
+        // per-resource bounds. Sized at the writer's per-prompt journal
+        // budget, so replaying a journaled turn never trips it; the excess
+        // is dropped with the same truncation report as a skeleton cut.
+        const aggregateBytes =
+          resources.reduce((sum, entry) => sum + realJsonBytesOf(entry), 0) +
+          realJsonBytesOf(retained);
         if (
-          incomingUriFingerprint !== undefined ||
-          uriFingerprints !== undefined
+          !Number.isFinite(next.maxRetainedBytes) ||
+          aggregateBytes <= MAX_EMBEDDED_RESOURCE_BYTES
         ) {
-          block.embeddedResourceUriFingerprints = appendFingerprint(
-            uriFingerprints,
-            resources.length,
-            incomingUriFingerprint,
-          );
+          block.embeddedResources = [...resources, cloneJsonLike(retained)];
+          if (incomingFingerprint !== undefined || fingerprints !== undefined) {
+            block.embeddedResourceFingerprints = appendFingerprint(
+              fingerprints,
+              resources.length,
+              incomingFingerprint,
+            );
+          }
+          if (
+            incomingUriFingerprint !== undefined ||
+            uriFingerprints !== undefined
+          ) {
+            block.embeddedResourceUriFingerprints = appendFingerprint(
+              uriFingerprints,
+              resources.length,
+              incomingUriFingerprint,
+            );
+          }
+        } else {
+          reportTextTruncation(next, block.id, block.sourceRecordIds);
         }
       }
       block.updatedAt = next.now;
@@ -2566,13 +2587,18 @@ function realJsonBytesOf(value: DaemonEmbeddedResource): number {
  * True when a retained resource exceeds either bound: the writer-parity
  * ceiling in real JSON bytes, or the retention budget's own estimate units
  * for the non-text payload (the text arm is bounded separately at
- * MAX_TEXT_BLOCK_LENGTH). The skeleton cascade re-runs the same combined
+ * MAX_TEXT_BLOCK_LENGTH). The estimate walk fails closed at its depth cap:
+ * a payload nested past what the walk can measure is treated as over-bounds
+ * rather than charged 0. The skeleton cascade re-runs the same combined
  * test after each cut.
  */
 function overEmbeddedResourceBounds(value: DaemonEmbeddedResource): boolean {
+  const depthTruncated = { current: false };
+  const estimate = estimateRetainedBytes(value, 0, depthTruncated);
   return (
     realJsonBytesOf(value) > MAX_EMBEDDED_RESOURCE_BYTES ||
-    estimateRetainedBytes(value) - value.resource.text.length * 2 >
+    depthTruncated.current ||
+    estimate - value.resource.text.length * 2 >
       MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE
   );
 }
@@ -2699,6 +2725,15 @@ function boundEmbeddedResource(
         clipped = true;
       }
     }
+    // The text cut is what makes the cascade converge: it is bounded in
+    // UTF-16 code units (MAX_TEXT_BLOCK_LENGTH), but the ceiling is real
+    // UTF-8 bytes, so 100k three-byte characters pass the text cut and still
+    // overflow the ceiling. Emptying the text is the last resort — the
+    // uri/mimeType display identity survives.
+    if (overEmbeddedResourceBounds(skeleton) && skeleton.resource.text !== '') {
+      skeleton.resource.text = '';
+      clipped = true;
+    }
   }
   if (clipped) {
     reportTextTruncation(state, block.id, block.sourceRecordIds);
@@ -2723,9 +2758,24 @@ function reportTextTruncation(
  * as 2 bytes per UTF-16 code unit; records/arrays add a small per-entry
  * overhead. Deliberately approximate: it drives the retention byte budget,
  * not billing. The walk is bounded by the same depth cap as cloning.
+ *
+ * `depthTruncated`, when supplied, is set the moment the cap cuts the walk
+ * off: callers that gate retention on this estimate (the embedded-resource
+ * bounds check) must fail closed on it — a payload the walk could not
+ * measure counts as over-bounds, not as free. The store's own accounting
+ * passes no tracker and keeps the historical partial estimate, so a deep
+ * tool payload is under-charged exactly as before rather than blowing the
+ * whole window away.
  */
-function estimateRetainedBytes(value: unknown, depth = 0): number {
-  if (depth > MAX_CLONE_DEPTH) return 0;
+function estimateRetainedBytes(
+  value: unknown,
+  depth = 0,
+  depthTruncated?: { current: boolean },
+): number {
+  if (depth > MAX_CLONE_DEPTH) {
+    if (depthTruncated !== undefined) depthTruncated.current = true;
+    return 0;
+  }
   if (typeof value === 'string') return value.length * 2;
   if (typeof value === 'number' || typeof value === 'boolean') return 16;
   // Binary payloads (Blob/File, ArrayBuffer, typed-array/DataView views) carry
@@ -2739,14 +2789,16 @@ function estimateRetainedBytes(value: unknown, depth = 0): number {
   if (Array.isArray(value)) {
     let total = 32;
     for (const entry of value) {
-      total += estimateRetainedBytes(entry, depth + 1);
+      total += estimateRetainedBytes(entry, depth + 1, depthTruncated);
     }
     return total;
   }
   if (isRecord(value)) {
     let total = 64;
     for (const [key, entry] of Object.entries(value)) {
-      total += key.length * 2 + estimateRetainedBytes(entry, depth + 1);
+      total +=
+        key.length * 2 +
+        estimateRetainedBytes(entry, depth + 1, depthTruncated);
     }
     return total;
   }
@@ -2756,6 +2808,21 @@ function estimateRetainedBytes(value: unknown, depth = 0): number {
 export function estimateDaemonTranscriptBlockBytes(
   block: DaemonTranscriptBlock,
 ): number {
+  // A user block's embedded resources are charged in the writer's own unit —
+  // real JSON bytes via `realJsonBytesOf`, the same unit as the per-resource
+  // ceiling and the per-block aggregate cap — so one quantity governs
+  // admission, the block charge, and the store budget. The structural
+  // estimate stays for every other field: charging the estimate here instead
+  // would bill a scalar-heavy but journaled payload several times its real
+  // size, and a real-byte-sized text at half.
+  if (block.kind === 'user' && block.embeddedResources !== undefined) {
+    const { embeddedResources, ...rest } = block;
+    let total = estimateRetainedBytes(rest);
+    for (const resource of embeddedResources) {
+      total += realJsonBytesOf(resource);
+    }
+    return total;
+  }
   return estimateRetainedBytes(block);
 }
 
