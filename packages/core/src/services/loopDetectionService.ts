@@ -209,12 +209,12 @@ const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
  *
  * It is deliberately not consumed by the loop detector, which has no call
  * site here: that module's own per-turn cap rollback stays `Retry`-only, and
- * its `ModelFallback` early return in `checkAlwaysOnSafeties` classifies a
- * fallback the opposite way on purpose (a fallback cannot have streamed
- * calls, and clearing the detector's streak evidence per round-trip would
- * silence the consecutive-identical and stagnation guards). A restart-style
- * event added here does NOT propagate to the detector; add it there
- * separately and justify it.
+ * `checkAlwaysOnSafeties` already treats a fallback as a no-op through its
+ * non-`ToolCallRequest` early return (a fallback cannot have streamed calls,
+ * and clearing the detector's streak evidence per round-trip would silence
+ * the consecutive-identical and stagnation guards). A restart-style event
+ * added here does NOT propagate to the detector; add it there separately and
+ * justify it.
  */
 export function isAttemptRestartEvent(event: ServerLlmStreamEvent): boolean {
   return (
@@ -775,19 +775,6 @@ export class LoopDetectionService {
     // round-trip rather than resetting to zero.
     if (event.type === LlmEventType.Finished) {
       this.turnToolCallTotalCommitted = this.turnToolCallTotal;
-      return false;
-    }
-
-    // The fallback chain only runs when the failed attempt yielded no
-    // candidate output (llm-chat gates it on !streamYieldedAnyChunk, and a
-    // streamed functionCall counts as candidate output), so a fallback
-    // attempt counted no tool call: there is nothing to roll back, and the
-    // streak/repeat evidence accumulated by earlier committed round-trips
-    // must survive the switch — the chain is per-request, so a
-    // capacity-limited primary can prefix every round-trip of one turn with
-    // ModelFallback, and clearing the evidence here would silence these
-    // guards for the rest of the turn.
-    if (event.type === LlmEventType.ModelFallback) {
       return false;
     }
 

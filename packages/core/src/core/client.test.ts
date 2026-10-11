@@ -8690,8 +8690,9 @@ Other open files:
       // cannot arrive after its own attempt's calls (llm-chat only runs the
       // chain when the failed attempt yielded no candidate output and a
       // streamed functionCall counts as candidate output), so here the
-      // rollback is a no-op either way — the detector-side arm is pinned by
-      // the ModelFallback cases in loopDetectionService.test.ts.
+      // rollback is a no-op either way. The detector needs no matching arm:
+      // checkAlwaysOnSafeties ignores every non-ToolCallRequest event, which
+      // the ModelFallback cases in loopDetectionService.test.ts pin.
       expect(
         fallbackEvents.filter(
           (event) => event.type === LlmEventType.LoopDetected,
