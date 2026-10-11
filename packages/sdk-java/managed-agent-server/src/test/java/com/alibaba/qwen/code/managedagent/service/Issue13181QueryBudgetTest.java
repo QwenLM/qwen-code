@@ -1807,7 +1807,7 @@ class Issue13181QueryBudgetTest {
                     new ManagedWorkspaceRegistry(jdbc);
             ManagedAgentProperties properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(workspaceFilesEnabled);
-            store = new ManagedAgentStore(jdbc, JSON, clock, hub,
+            store = new ManagedAgentStore(jdbc, JSON, clock, hub::publish,
                     registry, properties);
             service = new ManagedAgentService(store, new RequestDigests(),
                     mock(HarnessCoordinator.class),
