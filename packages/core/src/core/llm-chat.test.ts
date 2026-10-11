@@ -13141,6 +13141,80 @@ describe('LlmChat', async () => {
       expect(deliveredText).toBe(text);
     });
 
+    it.each([
+      ['the same', 'msg_base', 'Alpha shared recovery suffix and continuation'],
+      [
+        'a distinct',
+        'msg_continuation',
+        'Alpha shared recovery suffixshared recovery suffix and continuation',
+      ],
+    ])(
+      'delivers what history keeps when the continuation is %s Responses message',
+      async (_label, continuationId, expected) => {
+        const base = { id: 'msg_base', phase: 'final_answer' };
+        const continuation = { id: continuationId, phase: 'final_answer' };
+        const streams = [
+          makeStream([
+            makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS'),
+          ]),
+          makeStream([
+            makeChunk(
+              [
+                {
+                  text: 'Alpha shared recovery suffix',
+                  responsesMessage: base,
+                } as Part,
+              ],
+              'MAX_TOKENS',
+            ),
+          ]),
+          makeStream([
+            ...[...'shared recovery suffix'].map((text) =>
+              makeChunk([{ text, responsesMessage: continuation } as Part]),
+            ),
+            makeChunk(
+              [
+                {
+                  text: ' and continuation',
+                  responsesMessage: continuation,
+                } as Part,
+              ],
+              'STOP',
+            ),
+          ]),
+        ];
+        let callIndex = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'write a long essay' },
+          'prompt-recovery-responses-message-overlap',
+        );
+
+        let deliveredText = '';
+        for await (const event of stream) {
+          if (event.type === StreamEventType.RETRY && !event.isContinuation) {
+            deliveredText = '';
+          } else if (event.type === StreamEventType.CHUNK) {
+            deliveredText += (event.value.candidates?.[0]?.content?.parts ?? [])
+              .map((part) => part.text ?? '')
+              .join('');
+          }
+        }
+
+        const lastEntry = chat.getHistory().at(-1)!;
+        const historyText = lastEntry.parts
+          ?.map((part) => part.text ?? '')
+          .join('');
+        expect(lastEntry.role).toBe('model');
+        expect(historyText).toBe(expected);
+        expect(deliveredText).toBe(historyText);
+      },
+    );
+
     it('does not mutate a buffered terminal overlap chunk', async () => {
       const streams = [
         makeStream([

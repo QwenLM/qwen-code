@@ -1190,13 +1190,25 @@ function stripRecoveryOverlapFromParts(
 }
 
 function stripRecoveryOverlapFromChunks(
-  previousText: string,
+  previousParts: Part[] | undefined,
   chunks: readonly GenerateContentResponse[],
   onFullyReplayedPart?: (part: Part) => void,
 ): GenerateContentResponse[] {
   const allParts = chunks.flatMap(
     (chunk) => chunk.candidates?.[0]?.content?.parts ?? [],
   );
+  // Mirror appendRecoveryContinuationParts: distinct Responses messages keep
+  // their overlapping text in history, so delivery must not strip it either.
+  const previousTextPart = previousParts?.findLast(isPlainTextPart);
+  const continuationTextPart = allParts.find(isPlainTextPart);
+  if (
+    previousTextPart &&
+    continuationTextPart &&
+    !sameResponsesMessage(previousTextPart, continuationTextPart)
+  ) {
+    return [...chunks];
+  }
+  const previousText = getPlainTextFromParts(previousParts);
   const replay = {
     remaining: getRecoveryReplayLength(previousText, allParts),
   };
@@ -5799,7 +5811,7 @@ export class LlmChat {
               }
               recoveryDeliveryResolved = true;
               const chunks = stripRecoveryOverlapFromChunks(
-                recoveryDeliveryBaseText,
+                recoveryBaseModelContent.parts,
                 recoveryDeliveryChunks,
                 (part) => {
                   if (part.partMetadata) {
