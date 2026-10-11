@@ -444,6 +444,52 @@ describe('HostedMonitorLoop', () => {
     await closeLoop(rig);
   });
 
+  it('settles a failed close park at the watch exit that follows it (#13856)', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    await rig.loop.start(params({}));
+
+    rig.executor.onLine?.('one');
+    await rig.clock.advance(1_000);
+    // The held-Runtime drain could not prove its stop, so the close parks
+    // this loop and fails: the Session and its publisher stay alive.
+    await rig.loop.stop('runtime_lost');
+    expect(committed(rig.authority).run).toMatchObject({
+      state: 'recovery_blocked',
+      execution: 'outcome_unknown',
+    });
+
+    // Nothing proved the watch stopped, and it ends here: that evidence
+    // still settles the record the park left open.
+    await rig.executor.exitNaturally();
+    await rig.loop.done;
+    expect(committed(rig.authority)).toMatchObject({
+      stopReason: 'exited',
+      run: { state: 'settled', execution: 'settled' },
+    });
+    await closeLoop(rig);
+  });
+
+  it('upgrades a failed close park when the retry drain proves the stop (#13856)', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    await rig.loop.start(params({}));
+
+    rig.executor.onLine?.('one');
+    await rig.clock.advance(1_000);
+    await rig.loop.stop('runtime_lost');
+    expect(committed(rig.authority).run.state).toBe('recovery_blocked');
+
+    // The retried close drained, so its stop call is proven and must not be
+    // skipped over the earlier park.
+    await rig.loop.stop('stop_requested');
+    expect(committed(rig.authority)).toMatchObject({
+      stopReason: 'stop_requested',
+      run: { state: 'cancelled', execution: 'settled' },
+    });
+    await closeLoop(rig);
+  });
+
   it('flushes the buffer and settles exited when the watch ends', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);

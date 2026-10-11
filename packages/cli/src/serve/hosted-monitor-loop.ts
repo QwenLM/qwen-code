@@ -278,20 +278,24 @@ export class HostedMonitorLoop {
    * it accurately blocked instead of reporting a stopped task that never
    * stopped. A loop that parked on an unproven auto-stop is still stoppable
    * here, so the close's proven drain upgrades that parked record to the
-   * requested stop instead of leaving it blocked forever (#13856).
+   * requested stop instead of leaving it blocked forever. The runtime_lost
+   * arm parks the same open way: the failed close that asks for it keeps the
+   * Session and its publisher alive for a retry, and that retry's proven
+   * drain — or the watch's own end — still owes the record its settlement
+   * (#13856).
    */
   async stop(
     settle: 'stop_requested' | 'runtime_lost' = 'stop_requested',
   ): Promise<void> {
     if (this.settled) return;
     this.ended = true;
-    this.settled = true;
     this.disarm();
     await this.handle?.terminate();
     if (settle === 'runtime_lost') {
       await this.monitors.blockedRuntimeLost(this.monitorId);
       return;
     }
+    this.settled = true;
     await this.monitors.settleStopRequested(this.monitorId);
   }
 
