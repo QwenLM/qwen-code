@@ -48,6 +48,14 @@
     "metadata": { "$ref": "#/$defs/metadata" }
   },
   "$defs": {
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
     "block": {
       "oneOf": [
         { "$ref": "#/$defs/userBlock" },
@@ -80,6 +88,7 @@
         "createdAt": { "const": 0 },
         "updatedAt": { "const": 0 },
         "text": { "type": "string", "maxLength": 409600 },
+        "author": { "$ref": "#/$defs/author" },
         "streaming": { "const": false },
         "collapsed": { "type": "boolean" },
         "parentToolCallId": {
@@ -112,6 +121,7 @@
         "createdAt": { "const": 0 },
         "updatedAt": { "const": 0 },
         "text": { "type": "string", "maxLength": 409600 },
+        "author": { "$ref": "#/$defs/author" },
         "streaming": { "const": false },
         "collapsed": { "type": "boolean" },
         "parentToolCallId": {

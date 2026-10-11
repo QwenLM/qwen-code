@@ -95,6 +95,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+// This file's settings resolution is built on the mocked `os.homedir`, so
+// the ambient `QWEN_HOME` must not redirect it: test-setup.ts pins the
+// variable to an empty directory to keep the suite off the operator's real
+// settings. Tests that exercise `QWEN_HOME` itself set it in-body.
+delete process.env['QWEN_HOME'];
+
 // Resolve the (mocked) user-settings path once at module load. Tests mock
 // `os.homedir`, so the value is stable across the suite. Production callers
 // must keep going through `getUserSettingsPath()` to pick up `QWEN_HOME`
@@ -4227,6 +4233,41 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  it.each([true, false])(
+    'excludes workspace pluginConfigs when trusted=%s',
+    (isTrusted) => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              pluginConfigs: { example: { options: { greeting: 'user' } } },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              pluginConfigs: {
+                example: { options: { greeting: 'workspace', injected: true } },
+              },
+            });
+          return '{}';
+        },
+      );
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.pluginConfigs).toEqual({
+        example: { options: { greeting: 'user' } },
+      });
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('pluginConfigs'),
+        ),
+      ).toBe(true);
+    },
+  );
+
   describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
     it.each([undefined, 0, 25])(
       'ignores workspace memory budget zero while preserving user budget %s',
@@ -4260,6 +4301,15 @@ describe('Settings Loading and Merging', () => {
         }
       },
     );
+
+    it('lists both memory budgets as workspace-restricted', () => {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'memory.agentMaxTurns',
+      );
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'memory.agentTimeoutMinutes',
+      );
+    });
 
     it('selects the complete highest-priority operator Mem0 config', () => {
       const mem0 = { baseUrl: 'https://system.example', protocol: 'mem0-v3' };
@@ -4368,7 +4418,9 @@ describe('Settings Loading and Merging', () => {
         workspacePayload[section][key] =
           key === 'allowedInsecureVoiceBaseUrls'
             ? ['http://voice.example/v1']
-            : true;
+            : key === 'agentMaxTurns' || key === 'agentTimeoutMinutes'
+              ? 0 // numeric budgets; 0 disables the limit, the value being guarded against
+              : true;
       }
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {

@@ -357,6 +357,66 @@ describe('useSessionArtifacts', () => {
     ]);
   });
 
+  it('keeps cached artifacts visible and reconciles after reconnect with the same owner', async () => {
+    const reconcileLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts
+      .mockResolvedValueOnce({ artifacts: [artifact('cached-artifact')] })
+      .mockReturnValueOnce(reconcileLoad.promise);
+    await renderHookHost();
+    const cachedArtifacts = latestState?.artifacts;
+
+    for (const status of ['disconnected', 'connecting']) {
+      sdkMock.connection.status = status;
+      await rerenderHookHost();
+      expect(latestState?.artifacts).toBe(cachedArtifacts);
+      expect(latestState?.artifactById.has('cached-artifact')).toBe(true);
+      expect(latestState?.loading).toBe(false);
+      expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledOnce();
+    }
+
+    sdkMock.connection.status = 'connected';
+    await rerenderHookHost();
+    expect(latestState?.artifacts).toBe(cachedArtifacts);
+    expect(latestState?.hydrated).toBe(true);
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      reconcileLoad.resolve({ artifacts: [artifact('reconciled-artifact')] });
+      await reconcileLoad.promise;
+    });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'reconciled-artifact',
+    ]);
+    expect(latestState?.hydrated).toBe(true);
+  });
+
+  it.each(['session', 'workspace'])(
+    'does not show another %s artifact cache while disconnected',
+    async (scope) => {
+      Object.assign(sdkMock.connection, { workspaceCwd: '/workspace/a' });
+      sdkMock.actions.loadArtifacts.mockResolvedValueOnce({
+        artifacts: [artifact('cached-artifact')],
+      });
+      await renderHookHost();
+      expect(latestState?.artifactById.has('cached-artifact')).toBe(true);
+
+      sdkMock.connection.status = 'disconnected';
+      Object.assign(
+        sdkMock.connection,
+        scope === 'session'
+          ? { sessionId: 'session-b' }
+          : { workspaceCwd: '/workspace/b' },
+      );
+      sdkMock.ownerVersion += 1;
+      await rerenderHookHost();
+
+      expect(latestState?.artifacts).toEqual([]);
+      expect(latestState?.artifactById.size).toBe(0);
+      expect(latestState?.hydrated).toBe(false);
+      expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledOnce();
+    },
+  );
+
   it('keeps an empty result visible while refreshing the same session', async () => {
     const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     const refreshLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();

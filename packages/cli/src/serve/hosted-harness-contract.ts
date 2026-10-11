@@ -44,6 +44,8 @@ export function createHostedHarnessContract(
     }),
     bootId: bootId.toLowerCase(),
     capabilityDigest,
+    lifecycleProtocolVersion: 1,
+    titleProtocolVersion: 1,
   });
 }
 

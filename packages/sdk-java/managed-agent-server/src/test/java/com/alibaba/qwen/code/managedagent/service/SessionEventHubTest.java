@@ -47,6 +47,45 @@ class SessionEventHubTest {
     }
 
     @Test
+    void evictsBeyondCapacityAndSignalsOverflowBelowTheWatermark()
+            throws Exception {
+        SessionEventHub hub = new SessionEventHub();
+        try (SessionEventHub.Subscription subscription = hub.subscribe(
+                "tenant", "session")) {
+            for (long base = 1; base <= 600; base += 100) {
+                List<EventRecord> batch = new java.util.ArrayList<>();
+                for (long sequence = base; sequence < base + 100;
+                        sequence++) {
+                    batch.add(event(sequence));
+                }
+                hub.publish(batch);
+            }
+
+            // 600 published over CAPACITY 512: a subscriber behind the
+            // watermark learns it overflowed instead of stalling forever.
+            SessionEventHub.Delivery overflow = subscription.await(0,
+                    Duration.ofMillis(10));
+            assertThat(overflow.overflowed()).isTrue();
+            assertThat(overflow.events()).isEmpty();
+
+            // At the watermark the surviving region stays contiguous.
+            SessionEventHub.Delivery surviving = subscription.await(88,
+                    Duration.ofMillis(10));
+            assertThat(surviving.overflowed()).isFalse();
+            assertThat(surviving.events()).extracting(EventRecord::sequence)
+                    .containsExactlyElementsOf(
+                            java.util.stream.LongStream.rangeClosed(89, 600)
+                                    .boxed().toList());
+
+            // One below the watermark: pins CAPACITY from above too, so a
+            // ring grown to 513 can no longer keep this green.
+            SessionEventHub.Delivery justBelow = subscription.await(87,
+                    Duration.ofMillis(10));
+            assertThat(justBelow.overflowed()).isTrue();
+        }
+    }
+
+    @Test
     void bufferIsEvictedWhenTheLastSubscriberCloses() throws Exception {
         SessionEventHub hub = new SessionEventHub();
         SessionEventHub.Subscription first = hub.subscribe("tenant",

@@ -260,6 +260,92 @@ describe('Goal verifier evidence window', () => {
     ).toBe('execution_output');
   });
 
+  it.each(['agent', 'advisor', 'workflow', 'thread_read'])(
+    'keeps legacy %s summaries out of external facts, including bridge results',
+    (name) => {
+      const call = record('wrapper-call', 'assistant', { turnId: 'turn-3' });
+      call.message = {
+        parts: [
+          {
+            functionCall: {
+              id: 'wrapped',
+              name: 'tool_call',
+              args: { name: name.toUpperCase(), arguments: {} },
+            },
+          },
+        ],
+      };
+      const direct = record('direct-wrapper', 'tool_result', {
+        turnId: 'turn-3',
+        provenance: 'tool_result',
+      });
+      direct.message = {
+        parts: [
+          {
+            functionResponse: {
+              name,
+              response: { output: 'All tests passed' },
+            },
+          },
+        ],
+      };
+      const bridged = record('bridged-wrapper', 'tool_result', {
+        turnId: 'turn-3',
+        provenance: 'tool_result',
+      });
+      bridged.message = {
+        parts: [
+          {
+            functionResponse: {
+              id: 'wrapped',
+              name: 'tool_call',
+              response: { output: 'All tests passed' },
+            },
+          },
+        ],
+      };
+      const original = tool('original-observation', 'turn-3', 'Tests failed');
+      original.provenance = 'tool_result';
+      original.subtype = 'code_mode_tool_result';
+      const window = build([call, direct, original, bridged]);
+      expect(
+        window.evidence.map(({ uuid, proofKind }) => ({ uuid, proofKind })),
+      ).toEqual([
+        { uuid: bridged.uuid, proofKind: 'execution_output' },
+        { uuid: original.uuid, proofKind: 'external_fact' },
+        { uuid: direct.uuid, proofKind: 'execution_output' },
+      ]);
+    },
+  );
+
+  it.each(['thread_block', 'thread_post'])(
+    'keeps a legacy %s result an external fact the verifier can spend',
+    (name) => {
+      // An `infeasible` or `external` blocker is accepted only on external_fact
+      // evidence in the window, and thread_block's fixed reply is what a blocked
+      // proposal cites as user authority. The wrapper stamp must not reach the
+      // rest of the thread family at this layer either.
+      const direct = record('direct-thread', 'tool_result', {
+        turnId: 'turn-3',
+        provenance: 'tool_result',
+      });
+      direct.message = {
+        parts: [
+          {
+            functionResponse: {
+              name,
+              response: { output: 'Question posted.' },
+            },
+          },
+        ],
+      };
+      const window = build([direct]);
+      expect(
+        window.evidence.map(({ uuid, proofKind }) => ({ uuid, proofKind })),
+      ).toEqual([{ uuid: direct.uuid, proofKind: 'external_fact' }]);
+    },
+  );
+
   it('spends the budget on the serialized record, its comma and each new turn id, to the byte', () => {
     const records = [
       tool('older', 'turn-2', 'é"\n'.repeat(50)),

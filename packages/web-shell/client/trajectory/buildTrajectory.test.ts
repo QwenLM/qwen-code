@@ -523,6 +523,7 @@ describe('buildTrajectory', () => {
         'background_notification',
         'cron',
         'mid_turn_message_injected',
+        'agent_mention',
       ]) {
         const { turns, rows } = buildTrajectory([
           block(textBlock('user')),
@@ -661,3 +662,15 @@ it.each(['goal_runtime', 'goal_control'])(
     ).toEqual([1, 1]);
   },
 );
+
+it('preserves execution identity without replacing the persistent row key', () => {
+  const trajectory = buildTrajectory([
+    requestTiming({ executionId: 'execution-1' }, 'record-1'),
+  ]);
+  expect(trajectory.rows[0]).toMatchObject({
+    kind: 'request',
+    executionId: 'execution-1',
+    key: 'req:record-1',
+  });
+  expect(trajectory.rows).toHaveLength(1);
+});

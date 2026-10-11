@@ -244,17 +244,17 @@ RestoreSet 是有版本、不可变的跨存储 manifest，绑定稳定集合 ID
 
 组件完成和 manifest 发布之间丢 ACK 时查询原 operation，不另造恢复集合或提前解屏障。全部组件核验、条件发布成功后才按当前权限释放维护屏障；失败保留持久进度并由原 operation 收敛。备份成功只证明所声明边界，不批准将来恢复。
 
-共同时间戳不是一致性证明；[MySQL binlog/PITR](https://dev.mysql.com/doc/refman/8.0/en/point-in-time-recovery-binlog.html)和 GTID 不证明外部副作用，[VolumeSnapshot](https://kubernetes.io/blog/2020/12/10/kubernetes-1.20-volume-snapshot-moves-to-ga/)不自动提供应用一致性。`RestoreBundle` 仍是单 Session 的恢复响应，读取已验证集合里的合法基础；RestoreSet 不代替 authority。封闭记录/引用、minimumReader 及 capability 规则见[存储规范](managed-agent-session-storage.zh-CN.md#restore-set)。
+共同时间戳不是一致性证明；[MySQL binlog/PITR](https://dev.mysql.com/doc/refman/8.0/en/point-in-time-recovery-binlog.html)和 GTID 不证明外部副作用，[VolumeSnapshot](https://kubernetes.io/blog/2020/12/10/kubernetes-1.20-volume-snapshot-moves-to-ga/)不自动提供应用一致性。`RestoreBundle` 仍是单 Session 的恢复响应，读取已验证集合里的合法基础；RestoreSet 不代替 authority。封闭记录/引用、minimumReader 及 capability 规则，见集成预览文档 `managed-agent-session-storage.zh-CN.md` 的存储规范（`#restore-set`）。
 
 <a id="quarantined-restore"></a>
 
 ### 9.2 隔离恢复与缺失区间
 
-恢复启动默认隔离，不派发、不自动唤醒、不运行 GC；普通读取也须等 §9.3 的完整当前安全依据。旧 Java/Harness 的存储写权与旧 Runtime 的物理写通道分别隔离，新 DB epoch 或凭据版本不能证明旧 Shell 停止。原节点/存储证明、RWOP 和同卷交接遵守 [Endpoint §17](2026-09-21-managed-runtime-endpoint-recovery.zh-CN.md#hosted-runtime-profile)。
+恢复启动默认隔离，不派发、不自动唤醒、不运行 GC；普通读取也须等 §9.3 的完整当前安全依据。旧 Java/Harness 的存储写权与旧 Runtime 的物理写通道分别隔离，新 DB epoch 或凭据版本不能证明旧 Shell 停止。原节点/存储证明、RWOP 和同卷交接，遵守集成预览文档 `2026-09-21-managed-runtime-endpoint-recovery.zh-CN.md` 的 Endpoint §17（`#hosted-runtime-profile`）。
 
 从备份边界到恢复隔离完成之间，必须依靠不随该备份丢失的原持久账本、受保护备份/审计及原 owner 证据枚举执行缺口。恢复库自己没有 command/dispatch 行不是未执行证明。仅当现有证据可覆盖完整区间、原效果已结算且结果/history/消费位置一致时才允许续跑；区间无法枚举就阻塞可能受影响的全部 Session/Workspace，不能把已知子集当作完整清单。原执行查询不 provision/prepare/execute。
 
-重放删除/密钥撤销事实后只恢复仍有资格的资源。真实 ACL 权威不可用或尚可能是回滚旧版本时，不签新 grant、不开放普通读取；技术恢复成功不恢复用户旧权限。`accepted_unresolved` 仅关闭业务案件，物理 UNKNOWN 保留，不生成工具成功、不解卷、不恢复原模型。新任务也不能绕开原卷屏障，见[对账](managed-agent-recovery-operations.zh-CN.md#unknown-reconciliation)及[撤权](managed-agent-control-protocol.zh-CN.md#dynamic-authorization)。
+重放删除/密钥撤销事实后只恢复仍有资格的资源。真实 ACL 权威不可用或尚可能是回滚旧版本时，不签新 grant、不开放普通读取；技术恢复成功不恢复用户旧权限。`accepted_unresolved` 仅关闭业务案件，物理 UNKNOWN 保留，不生成工具成功、不解卷、不恢复原模型。新任务也不能绕开原卷屏障，见集成预览文档 `managed-agent-recovery-operations.zh-CN.md` 的对账（`#unknown-reconciliation`）与集成预览文档 `managed-agent-control-protocol.zh-CN.md` 的动态授权契约（`#dynamic-authorization`）。
 
 <a id="recovery-safety-watermark"></a>
 
@@ -268,7 +268,7 @@ RestoreSet 是有版本、不可变的跨存储 manifest，绑定稳定集合 ID
 
 恢复验证期间的并发删除/撤权也不能漏掉：开放读取/签发 grant 前重新核验当前权威与安全水位，并让后续读取/续租持续服从当前权限。跨系统读取不冒充分布式原子事务；无法形成有效准入屏障时继续隔离。没有证据时，普通 SSE/历史/Range/export/回执内容均 blocked，仅可经独立授权的隔离诊断访问必要材料，不唤醒模型、不允许普通导出。
 
-删除/撤销依据至少覆盖所有仍能恢复相关旧数据的备份与副本，不能按短命令幂等 TTL 清除。该前置属于 G/W1 完整灾备开放条件，不强迫 C/E＋W0 在线闭环新增基础设施。缺少它可以报告备份存在或恢复未验证，不能宣称安全自动恢复。
+删除/撤销依据至少覆盖所有仍能恢复相关旧数据的备份与副本，不能按短命令幂等 TTL 清除。本文出现的阶段标记（`C`、`D`、`E`、`G`、`W0`、`W1`、`O4`）指提案 #12380 的分阶段交付切片，不是本文内部的阶段编号。该前置属于 G/W1 完整灾备开放条件，不强迫 C/E＋W0 在线闭环新增基础设施。缺少它可以报告备份存在或恢复未验证，不能宣称安全自动恢复。
 
 <a id="compliance-deletion"></a>
 
@@ -291,7 +291,7 @@ RestoreSet 是有版本、不可变的跨存储 manifest，绑定稳定集合 ID
 
 删除约束必须在任意灾备开放读取前重放。[OSS delete marker](https://www.alibabacloud.com/help/en/oss/developer-reference/deleteobject)不等于历史版本已清除；已交付的用户导出无法技术追回，不能无依据承诺清理它。密钥擦除只有所有相关可解密副本及可恢复 key 路径都不可恢复才成立，不销毁他人共享 key，不同时承诺彻底擦除和完整恢复。
 
-RPO/RTO、保留窗口、具体 CSI 驱动、备份删除及供应商契约尚未选定，不猜数值；未配置/未验证时相应自动恢复或 GC 不开放。UNKNOWN 不是无限期保留敏感数据的法律依据，需独立保留策略和有权合规处理；业务风险接受也不伪造物理结算。更细生命周期与引用规则见[Session 存储](managed-agent-session-storage.zh-CN.md#deletion-settlement)。
+RPO/RTO、保留窗口、具体 CSI 驱动、备份删除及供应商契约尚未选定，不猜数值；未配置/未验证时相应自动恢复或 GC 不开放。UNKNOWN 不是无限期保留敏感数据的法律依据，需独立保留策略和有权合规处理；业务风险接受也不伪造物理结算。更细生命周期与引用规则，见集成预览文档 `managed-agent-session-storage.zh-CN.md` 的删除结算（`#deletion-settlement`）。
 
 ## 10. 后端选择与部署配置
 
@@ -319,6 +319,15 @@ qwen:
 
 运行时不能按一次请求任意切换 MySQL/PG 或 MQ。切换需暂停写入、排空或保存检查点、迁移数据、核对序号与摘要，再切换并恢复；不能通过双跑工具或双写两个数据库模拟无损切换。
 
+### 10.1 P2 EventTransport 首选候选：RocketMQ LiteTopic
+
+设计基线注记（2026-10-10，issue [#13200](https://github.com/QwenLM/qwen-code/issues/13200)）：可选 P2 `EventTransport` 适配器的首选候选定为 **Apache RocketMQ LiteTopic（5.5.0+，RIP-83）**，对上文配置样例中未加限定的 `rocketmq` 条目作出限定。详细的后继设计——信封不变量、LiteTopic 与 Redis Streams 的对比、阶段计划与故障矩阵——见 [EventTransport：Managed Agent 控制面的 MQ 分发](2026-10-04-managed-agent-event-transport.zh-CN.md)。本注记只记录四点基线：
+
+1. **边界。** 事件接受路径不变：Session 序号、Turn 状态与 Harness 游标在单一 SQL 事务中提交，提交后直推 SSE（`ManagedAgentStore.publishAfterCommit`）。LiteTopic 只承载分发副本，不替代单事务原子性、writer fencing 或公开 Session 续传游标。
+2. **命中场景。** P2 多实例 SSE 节点通知；阶段 H4 父子 Session 间 durable messaging（Supervisor–Worker 按 TaskID 建 LiteTopic 的模式与之同构）；阶段 H5 Channels 的 outbox dispatch。经典 Topic 或泛 MQ 适配器不适合按 Session 建通道，LiteTopic 适合。注意 H4 的投递语义（at-least-once 加幂等 apply）不同于 P2 的临时通知扇出，H4 的排序与去重要求由 H4 契约确定而非继承自本基线——不得假定 P2 适配器配置原样适用于 H4。
+3. **前提。** RocketMQ 5.5.0+ 并开启 `enableLmq=true`、`enableMultiDispatch=true`、`storeType=defaultRocksDB`，部署 NameServer、Broker 与 Proxy。沿用第 1 节「不为 SSE 额外部署 MQ」的原则，接入以已有该版本的现成 RocketMQ 平台为条件。P2 门禁开启时，适配器必须在启动时校验这些 broker 能力，不匹配即 fail fast，而不是静默降级为经典 Topic——并入上文所述的启动能力校验。
+4. **明确不做。** 接受路径不引 MQ（P4 MQ-first 仍是第 12 节的远期门禁，需先完成持久化源日志）；P2 门禁开启前不动工；H4 传输选型等 H4 契约。
+
 ## 11. 故障语义
 
 | 故障点                         | 处理与可承诺的边界                                                        |
@@ -333,7 +342,7 @@ qwen:
 | 租约切换后旧 Java/Harness 回来 | 数据库接受事务和私有日志提交均校验 generation；MQ 顺序能力不承担此防护。  |
 | 工具结果未知或 Workspace 缺失  | `recovery_blocked`，不自动执行第二次，也不创建空工作区冒充恢复。          |
 
-所有查询、重放、资源下载与内部通知都保留租户鉴权。`X-Qwen-Tenant-Id` 是可信入口传递的范围，不是身份凭证。MQ 内部元数据和私有 Harness 记录不得直接透传前端；保留当前显式公开投影及敏感字段过滤。Hosted 按[动态授权契约](managed-agent-control-protocol.zh-CN.md#dynamic-authorization)在现有 SSE 和每个后续内容交付边界核对当前 ACL，不把连接建立时的权限当成永久资格。内部原 ID 收件可继续，但不会恢复用户读取或模型推进。
+所有查询、重放、资源下载与内部通知都保留租户鉴权。`X-Qwen-Tenant-Id` 是可信入口传递的范围，不是身份凭证。MQ 内部元数据和私有 Harness 记录不得直接透传前端；保留当前显式公开投影及敏感字段过滤。Hosted 按集成预览文档 `managed-agent-control-protocol.zh-CN.md` 的动态授权契约（`#dynamic-authorization`）在现有 SSE 和每个后续内容交付边界核对当前 ACL，不把连接建立时的权限当成永久资格。内部原 ID 收件可继续，但不会恢复用户读取或模型推进。
 
 ## 12. 落地顺序与代码改造
 
@@ -380,4 +389,4 @@ P4 是明确的后续设计门槛，不是当前接口已经实现的能力。�
 
 上线前需明确：现有 RocketMQ 平台及版本、活跃 Session 数与事件速率、续传窗口 `W`、最大可容忍积压、数据库/MQ 确认的故障保证、历史与资源保留期、允许的恢复点和恢复时间。接口和分阶段设计不依赖立刻确定这些数值；容量、清理和跨节点恢复的生产配置依赖它们。
 
-参考现有方案：集成快照中的 `docs/design/2026-09-19-managed-agent-spring-server.zh-CN.md`、`docs/design/2026-09-20-managed-agent-dual-path-web-shell.zh-CN.md`、`docs/design/managed-agent-session-storage.md` 与 `docs/design/managed-agent-session-harness-runtime.md`。本文补充其存储与事件边界，不把已有设计文档视作功能验证结果。
+参考现有方案：本仓库中的 [2026-09-19 Managed Agent Spring server](2026-09-19-managed-agent-spring-server.zh-CN.md) 与 [2026-09-20 双通道 WebShell](2026-09-20-managed-agent-dual-path-web-shell.zh-CN.md);集成快照中的 `managed-agent-session-storage.md` 与 `managed-agent-session-harness-runtime.md`。本文补充其存储与事件边界，不把已有设计文档视作功能验证结果。

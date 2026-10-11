@@ -33,10 +33,16 @@ public final class JdbcRuntimeBrokerSchema {
             addColumn(statement, "qwen_runtime_binding", "loss_evidence_json", "LONGTEXT");
             addColumn(statement, "qwen_runtime_binding", "stop_evidence_json", "LONGTEXT");
             addColumn(statement, "qwen_runtime_binding", "drain_receipt_json", "LONGTEXT");
+            addColumn(statement, "qwen_runtime_harness_drain", "phase", "VARCHAR(32) NOT NULL DEFAULT 'DRAINING'");
+            addColumn(statement, "qwen_runtime_harness_drain", "operation_id", "VARCHAR(128)");
+            addColumn(statement, "qwen_runtime_harness_drain", "claim_generation", "BIGINT NOT NULL DEFAULT 0");
+            addColumn(statement, "qwen_runtime_harness_drain", "claim_lease_until", "BIGINT");
             addColumn(statement, "qwen_tool_execution", "abandoned_at", "DATETIME(6)");
             addColumn(statement, "qwen_tool_execution", "loss_evidence_id", "VARCHAR(512)");
             addColumn(statement, "qwen_tool_execution", "authorized_dispatch_generation", "BIGINT");
             addColumn(statement, "qwen_tool_execution", "authorized_binding_version", "BIGINT");
+            addIndex(statement, "qwen_runtime_binding", "qwen_runtime_storage_bindings_idx", "storage_id, binding_id");
+            addIndex(statement, "qwen_runtime_session", "idx_runtime_session_id", "runtime_session_id");
         } catch (SQLException exception) {
             throw JdbcRepositorySupport.failure(exception);
         }
@@ -65,6 +71,34 @@ public final class JdbcRuntimeBrokerSchema {
             java.sql.ResultSetMetaData columns = result.getMetaData();
             for (int index = 1; index <= columns.getColumnCount(); index++) {
                 if (column.equalsIgnoreCase(columns.getColumnName(index))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void addIndex(Statement statement, String table, String index, String columns)
+            throws SQLException {
+        if (hasIndex(statement, table, index)) {
+            return;
+        }
+        try {
+            statement.execute("CREATE INDEX " + index + " ON " + table + " (" + columns + ")");
+        } catch (SQLException failure) {
+            if (!hasIndex(statement, table, index)) {
+                throw failure;
+            }
+        }
+    }
+
+    private static boolean hasIndex(Statement statement, String table, String index) throws SQLException {
+        Connection connection = statement.getConnection();
+        var metadata = connection.getMetaData();
+        String tableName = metadata.storesUpperCaseIdentifiers() ? table.toUpperCase(java.util.Locale.ROOT) : table;
+        try (var indexes = metadata.getIndexInfo(connection.getCatalog(), null, tableName, false, false)) {
+            while (indexes.next()) {
+                if (index.equalsIgnoreCase(indexes.getString("INDEX_NAME"))) {
                     return true;
                 }
             }

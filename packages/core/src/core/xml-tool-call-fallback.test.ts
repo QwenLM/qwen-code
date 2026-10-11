@@ -1000,4 +1000,44 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
       remainingText: text,
     });
   });
+
+  it('does not dispatch a call quoted inside a parameter value', () => {
+    // A write_file whose content documents this dialect with an unfenced
+    // example call. The outer block is rejected by its own guard — the lazy
+    // body ends at the quoted block's closer — and the rescan then matched
+    // that quoted call on its own merits and ran it, while the write the user
+    // asked for stayed behind as prose. Markup a value quotes is that value's
+    // own text, so it must stay data. See #13492.
+    const quoted = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    const text = invoke(
+      'write_file',
+      param('file_path', 'doc.md') + param('content', `Usage:\n${quoted}\n`),
+    );
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('still dispatches a real call that follows a value quoting one', () => {
+    // The skip is scoped to the value that owns the quoted markup: a sibling
+    // call outside it is a real call and must still run.
+    const quoted = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    const documented = invoke(
+      'write_file',
+      param('content', `Usage:\n${quoted}\n`),
+    );
+    const text = documented + '\n' + invoke('read_file', param('p', 'b.ts'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { p: 'b.ts' } },
+    ]);
+  });
 });

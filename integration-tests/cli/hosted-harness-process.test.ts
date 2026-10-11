@@ -554,13 +554,14 @@ describe(
     it("keeps the caller's HOME, QWEN_HOME and environment out of the child", async () => {
       vi.stubEnv('QWEN_HOME', 'caller-qwen-home');
       vi.stubEnv('HOSTED_CALLER_ONLY', 'leaked');
+      vi.stubEnv('QWEN_CODE_MODELS_DEV_REFRESH', 'on');
       try {
         cli = new HostedHarnessProcess();
         await expect(
           cli.start('http://127.0.0.1:9/v1', {
             args: [
               '-e',
-              'const e = process.env; process.stdout.write(JSON.stringify([e.HOME, e.USERPROFILE, e.QWEN_HOME, e.HOSTED_CALLER_ONLY]))',
+              'const e = process.env; process.stdout.write(JSON.stringify([e.HOME, e.USERPROFILE, e.QWEN_HOME, e.HOSTED_CALLER_ONLY, e.QWEN_CODE_MODELS_DEV_REFRESH]))',
             ],
           }),
         ).rejects.toThrow('Hosted CLI exited');
@@ -574,6 +575,7 @@ describe(
         cli.root,
         path.join(cli.root, '.qwen'),
         null,
+        'off',
       ]);
     });
 

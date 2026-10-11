@@ -45,7 +45,7 @@ class WorkspaceRuntimeTransportTest {
                 .thenReturn(CompletableFuture.completedFuture(Map.of("state", "ACKNOWLEDGED")));
         assertThat(acknowledge(fixture)).containsEntry("state", "ACKNOWLEDGED");
         verify(fixture.resolver()).savedBinding(fixture.session().getHarnessSessionId());
-        verify(fixture.resolver(), never()).resolve(any());
+        verify(fixture.resolver(), never()).resolve(any(), any());
         verifyNoInteractions(fixture.ownership());
         verify(fixture.http()).acknowledgeCsi(fixture.lease(), fixture.session(), fixture.boot(), fixture.pod(),
                 fixture.request(), fixture.capture());
@@ -56,7 +56,7 @@ class WorkspaceRuntimeTransportTest {
     @Test
     void dedicatedWorkspaceExemptionDoesNotOpenTheExistingGenericRoutes() throws Exception {
         var fixture = fixture();
-        when(fixture.resolver().resolve(any())).thenThrow(WorkspaceExecutionStore.unavailable());
+        when(fixture.resolver().resolve(any(), any())).thenThrow(WorkspaceExecutionStore.unavailable());
         Map<String, Object> reference = Map.of("runtimeProtocol", 3, "callId", "original");
         unavailable(() -> fixture.transport().statusV3(fixture.lease(), fixture.session(), reference, 0));
         unavailable(() -> fixture.transport().cancelV3(fixture.lease(), fixture.session(), reference));
@@ -100,7 +100,7 @@ class WorkspaceRuntimeTransportTest {
                 3, true, null, null, 0, 1, null, Instant.now(), Instant.now()));
         unavailable(() -> acknowledge(fixture));
         verifyNoInteractions(fixture.http(), fixture.ownership());
-        verify(fixture.resolver(), never()).resolve(any());
+        verify(fixture.resolver(), never()).resolve(any(), any());
     }
 
     @Test

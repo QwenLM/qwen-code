@@ -72,6 +72,7 @@ import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
+import { appendAutoMemoryContext } from '../memory/request-context.js';
 import { completedToolCallBoundary } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
@@ -156,6 +157,7 @@ import {
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import { markApiHistoryPrompt } from '../services/session-api-history.js';
+import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
 
 export { InvalidStreamError };
 
@@ -651,6 +653,23 @@ interface TryCompressOptions {
    * counts from double-counting the previous model output.
    */
   precomputedEffectiveTokens?: number;
+  /**
+   * Context ceiling the server itself reported when it rejected the request
+   * with a context-overflow error (#13432). Forwarded to the compression
+   * service so reactive sizing runs against that ceiling instead of the
+   * window inferred from the model id, which the error just contradicted.
+   * Deliberately not read back through `getObservedServerInputLimit`: that
+   * map is informational and is only recorded on the omni-media degrade path,
+   * so a plain text session never populates it.
+   */
+  observedServerCeiling?: number;
+  /**
+   * Whether `observedServerCeiling` bounds the window (`'total'`) or only the
+   * prompt/input allowance (`'input'`), from the wording that reported it.
+   * Forwarded so the service can refuse to size an output budget against a
+   * bound the server never stated on the window (#13876).
+   */
+  observedServerCeilingKind?: 'input' | 'total';
   /** Per-request overrides needed to preserve the main request cache prefix. */
   requestGenerationConfig?: GenerateContentConfig;
   /**
@@ -658,7 +677,9 @@ interface TryCompressOptions {
    * this instead of the active route, so an in-send compression never
    * re-adopts counts the active route retained while the request targets
    * another one (#9506). Omitted by between-sends callers (manual
-   * `/compress`), which compress the active route's state.
+   * `/compress`), which compress the active route's state. Forwarded to the
+   * compression service with `observedServerCeiling` so the ceiling only
+   * bounds a side-query that resolves to the route that reported it (#13876).
    */
   requestRouteKey?: string;
   /**
@@ -2588,7 +2609,10 @@ export class LlmChat {
         requestHistory.push({ role: 'user', parts: reattachParts });
       }
     }
-    return requestHistory;
+    return appendAutoMemoryContext(
+      requestHistory,
+      this.config.getAutoMemoryContext?.() ?? '',
+    );
   }
 
   private getRequestHistoryForRoute(
@@ -2731,6 +2755,9 @@ export class LlmChat {
       originalTokenCount,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
+      observedServerCeiling: options?.observedServerCeiling,
+      observedServerCeilingKind: options?.observedServerCeilingKind,
+      requestRouteKey: options?.requestRouteKey,
       requestGenerationConfig: options?.requestGenerationConfig,
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
@@ -4270,6 +4297,14 @@ export class LlmChat {
                         isEstimated: reactiveOriginalTokenCountIsEstimated,
                       },
                       precomputedEffectiveTokens: reactiveOriginalTokenCount,
+                      // The ceiling this very error reported. Sizing the
+                      // retry against the inferred window instead re-posts the
+                      // oversize history to the server that just rejected it
+                      // (#13432). `limitKind` says whether that number bounds
+                      // the window or only the prompt: an input bound cannot
+                      // size the output budget (#13876).
+                      observedServerCeiling: contextOverflow.limitTokens,
+                      observedServerCeilingKind: contextOverflow.limitKind,
                       requestGenerationConfig: params.config,
                       requestRouteKey,
                       trigger: 'auto',
@@ -5810,6 +5845,16 @@ export class LlmChat {
       // text, which then leaks into the next turn via appendCuratedContent.
       const lastEntry = this.history[this.history.length - 1];
       if (lastEntry && isSystemReminderContent(lastEntry)) {
+        break;
+      }
+      // Same rule for a user entry that is only session multi-agent context
+      // (an `agent_message` / `agent_mention` envelope, rebuilt on resume from
+      // its own record): it is durable conversation, not an orphaned prompt.
+      // Every part must match, so a failed prompt that carried a spliced
+      // envelope ahead of the user's text still pops as a whole.
+      // TODO(multi-agent): that whole-entry pop drops the spliced envelope
+      // from live history for the rest of the process (resume restores it).
+      if (lastEntry && isAgentEnvelopeContent(lastEntry)) {
         break;
       }
       strippedEntries.unshift(this.history.pop()!);

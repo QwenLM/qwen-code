@@ -12,7 +12,10 @@ import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   type ManagedSessionStoreHttpError,
 } from './http-managed-session-store.js';
-import { MANAGED_SESSION_LIMITS } from './managed-session-records.js';
+import {
+  MANAGED_SESSION_EVENT_KINDS,
+  MANAGED_SESSION_LIMITS,
+} from './managed-session-records.js';
 
 interface ContractFixture {
   contractVersion: number;
@@ -26,11 +29,14 @@ interface ContractFixture {
     maxTransactionBytes: number;
     maxTransactionEvents: number;
     maxJsonDepth: number;
+    maxEventBytes: number;
+    maxCommitMarkerBytes: number;
     minimumWriterTokenLength: number;
     maximumWriterTokenLength: number;
     minimumLeaseDurationMs: number;
     maximumLeaseDurationMs: number;
   };
+  eventKinds: string[];
   sessionKey: {
     tenantId: string;
     workspaceId: string;
@@ -75,6 +81,8 @@ describe('Managed Session store shared contract', () => {
       'writerToken',
     ]);
     expect(Object.keys(fixture.limits).sort()).toEqual([
+      'maxCommitMarkerBytes',
+      'maxEventBytes',
       'maxInlineResourceBytes',
       'maxJsonDepth',
       'maxResourcesPerTransaction',
@@ -105,6 +113,15 @@ describe('Managed Session store shared contract', () => {
     expect(MANAGED_SESSION_LIMITS.maxJsonDepth).toBe(
       fixture.limits.maxJsonDepth,
     );
+    // The per-kind line caps the Java store enforces at commit time.
+    expect(MANAGED_SESSION_LIMITS.maxEventBytes).toBe(
+      fixture.limits.maxEventBytes,
+    );
+    expect(MANAGED_SESSION_LIMITS.maxCommitMarkerBytes).toBe(
+      fixture.limits.maxCommitMarkerBytes,
+    );
+    // The event-kind vocabulary the Java store mirrors at commit time.
+    expect([...MANAGED_SESSION_EVENT_KINDS]).toEqual(fixture.eventKinds);
 
     for (const resource of fixture.resources) {
       const bytes = Buffer.from(resource.utf8, 'utf8');

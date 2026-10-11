@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionService } from '../services/sessionService.js';
 import {
   getSessionWriterLockPath,
@@ -18,14 +18,38 @@ import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js'
 import {
   readManagedSessionTitleInfoSync,
   readManagedSessionSourceSync,
+  readSessionTitleInfoFromFileSync,
 } from '../utils/sessionStorageUtils.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
 
+const enablement = vi.hoisted(() => ({ sessionMetadata: true }));
+
+// Lets a test disable session_metadata as a build that removed the domain
+// would: the enabled list is a constant, so enablement flips only here.
+vi.mock('./managed-session-records.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./managed-session-records.js')>();
+  return {
+    ...actual,
+    assertManagedSessionDomainEnabled: (
+      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+    ) => {
+      if (domain === 'session_metadata' && !enablement.sessionMetadata) {
+        throw new actual.ManagedSessionRecordError(
+          `domain ${domain} is registered but not enabled for submission.`,
+        );
+      }
+      actual.assertManagedSessionDomainEnabled(domain);
+    },
+  };
+});
+
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
+  enablement.sessionMetadata = true;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -111,6 +135,51 @@ function renameCommand(commandId: string) {
 }
 
 describe('managed session metadata', () => {
+  it('fences delayed hosted titles across cold reopen and recorder renames', async () => {
+    const harness = await createHarness();
+    const write = (
+      authority: LocalManagedSessionAuthority,
+      revision: string,
+      title: string,
+    ) =>
+      authority.commitDomainRecord(
+        renameCommand(`hosted-title:${revision}`),
+        {
+          domain: 'session_metadata',
+          content: { title, managedRenameRevision: revision },
+        },
+        { class: 'trusted_entry' },
+      );
+    await withAuthority(harness, async (authority) => {
+      await write(authority, '2', 'B');
+      const sequence = authority.committedSequence;
+      await expect(write(authority, '1', 'A')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      expect(authority.committedSequence).toBe(sequence);
+      await write(authority, '2', 'B');
+      expect(authority.committedSequence).toBe(sequence);
+      await authority.commitDomainRecord(
+        renameCommand('recorder-title'),
+        { domain: 'session_metadata', content: { title: 'Manual' } },
+        { class: 'trusted_entry' },
+      );
+    });
+    await withAuthority(harness, async (authority) => {
+      const sequence = authority.committedSequence;
+      await expect(write(authority, '1', 'A')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      expect(authority.committedSequence).toBe(sequence);
+      await write(authority, '3', 'A');
+    });
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      )?.title,
+    ).toBe('A');
+  });
   it('projects a renamed title into the synchronous directory read', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
@@ -176,6 +245,323 @@ describe('managed session metadata', () => {
     expect(body.previousRecordRef?.resourceId).toBe(refs[0].resourceId);
   });
 
+  it('replays a retried domain record command without publishing again', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const content = {
+        title: 'First title',
+        titleSource: 'auto',
+      } as const;
+      const first = await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        { domain: 'session_metadata', content },
+        { class: 'trusted_entry' },
+      );
+      const sequence = authority.committedSequence;
+      const bodies = path.join(
+        harness.runtimeBaseDir,
+        'resources',
+        sessionId,
+        'managed-session_metadata',
+      );
+      const published = (await fs.readdir(bodies)).length;
+
+      const replay = await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        { domain: 'session_metadata', content },
+        { class: 'trusted_entry' },
+      );
+      expect(replay.revision).toBe(1);
+      expect(replay.recordRef).toEqual(first.recordRef);
+      expect(replay.receipt).toMatchObject({ replayed: true });
+      expect(authority.committedSequence).toBe(sequence);
+      expect((await fs.readdir(bodies)).length).toBe(published);
+
+      // A retry still returns its own committed revision after a later one.
+      const second = await authority.commitDomainRecord(
+        renameCommand('cmd-rename-2'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Second title', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+      expect(second.revision).toBe(2);
+      const stale = await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        { domain: 'session_metadata', content },
+        { class: 'trusted_entry' },
+      );
+      expect(stale.revision).toBe(1);
+      expect(stale.recordRef).toEqual(first.recordRef);
+      expect(stale.receipt).toMatchObject({ replayed: true });
+      expect((await fs.readdir(bodies)).length).toBe(published + 1);
+
+      await expect(
+        authority.commitDomainRecord(
+          { ...renameCommand('cmd-rename-1'), contentDigest: 'e'.repeat(64) },
+          { domain: 'session_metadata', content },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/different content/);
+      // Refused before publishing: no third body beside the two committed.
+      expect((await fs.readdir(bodies)).length).toBe(published + 1);
+    });
+  });
+
+  it('replays a retried domain record command after a cold reopen', async () => {
+    const harness = await createHarness();
+    let firstRef: ManagedSessionDurableRef | undefined;
+    await withAuthority(harness, async (authority) => {
+      firstRef = (
+        await authority.commitDomainRecord(
+          renameCommand('cmd-rename-1'),
+          {
+            domain: 'session_metadata',
+            content: { title: 'First title', titleSource: 'auto' },
+          },
+          { class: 'trusted_entry' },
+        )
+      ).recordRef;
+    });
+
+    await withAuthority(
+      harness,
+      async (authority) => {
+        const replay = await authority.commitDomainRecord(
+          renameCommand('cmd-rename-1'),
+          {
+            domain: 'session_metadata',
+            content: { title: 'First title', titleSource: 'auto' },
+          },
+          { class: 'trusted_entry' },
+        );
+        expect(replay.revision).toBe(1);
+        expect(replay.recordRef).toEqual(firstRef);
+        expect(replay.receipt).toMatchObject({ replayed: true });
+      },
+      { create: false },
+    );
+  });
+
+  it('replays a committed domain record after its domain was disabled', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const first = await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      const bodies = path.join(
+        harness.runtimeBaseDir,
+        'resources',
+        sessionId,
+        'managed-session_metadata',
+      );
+      const published = (await fs.readdir(bodies)).length;
+      enablement.sessionMetadata = false;
+      await expect(
+        authority.commitDomainRecord(
+          renameCommand('cmd-rename-1'),
+          {
+            domain: 'session_metadata',
+            content: { title: 'First title', titleSource: 'auto' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).resolves.toMatchObject({
+        recordRef: first.recordRef,
+        receipt: { replayed: true },
+      });
+      await expect(
+        authority.commitDomainRecord(
+          renameCommand('cmd-rename-2'),
+          {
+            domain: 'session_metadata',
+            content: { title: 'Second title', titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/not enabled for submission/);
+      // Refused before publishing: the refusal leaves no body behind.
+      expect((await fs.readdir(bodies)).length).toBe(published);
+    });
+  });
+
+  it('refuses a stale or foreign command before publishing it', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      const bodies = path.join(
+        harness.runtimeBaseDir,
+        'resources',
+        sessionId,
+        'managed-session_metadata',
+      );
+      const published = (await fs.readdir(bodies)).length;
+      await expect(
+        authority.commitDomainRecord(
+          { ...renameCommand('cmd-rename-2'), expectedSequence: 99 },
+          {
+            domain: 'session_metadata',
+            content: { title: 'Stale title', titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/does not match the committed sequence/);
+      await expect(
+        authority.commitDomainRecord(
+          {
+            ...renameCommand('cmd-rename-3'),
+            sessionKey: { ...sessionKey, sessionId: 'another-session' },
+          },
+          {
+            domain: 'session_metadata',
+            content: { title: 'Foreign title', titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/does not match this session/);
+      // A committed command retried under a foreign session key must not
+      // resolve as a replay of this session's record either.
+      await expect(
+        authority.commitDomainRecord(
+          {
+            ...renameCommand('cmd-rename-1'),
+            sessionKey: { ...sessionKey, sessionId: 'another-session' },
+          },
+          {
+            domain: 'session_metadata',
+            content: { title: 'Foreign title', titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/does not match this session/);
+      expect((await fs.readdir(bodies)).length).toBe(published);
+    });
+  });
+
+  it('refuses a retry of a command committed without a domain record', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      const bodies = path.join(
+        harness.runtimeBaseDir,
+        'resources',
+        sessionId,
+        'managed-session_metadata',
+      );
+      const published = (await fs.readdir(bodies)).length;
+      // The command key is spent on an input, so its transaction holds no
+      // domain record for the retried commit to replay.
+      const shared = renameCommand('cmd-shared-input');
+      await authority.submitInput(shared, {
+        inputId: 'shared-1',
+        turnId: 'shared-1',
+        source: 'user',
+        contentRef: await harness.store.publish(
+          'managed-input',
+          Buffer.from('{"text":"hello"}', 'utf8'),
+        ),
+        deadline: null,
+        admissionRef: await harness.store.publish(
+          'managed-admission',
+          Buffer.from('{}', 'utf8'),
+        ),
+        wakeReason: 'input',
+      });
+      const sequence = authority.committedSequence;
+      await expect(
+        authority.commitDomainRecord(
+          shared,
+          {
+            domain: 'session_metadata',
+            content: { title: 'Shared title', titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/committed without a domain record/);
+      expect(authority.committedSequence).toBe(sequence);
+      expect((await fs.readdir(bodies)).length).toBe(published);
+    });
+  });
+
+  it('refuses a retry of a committed command under a different domain', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      // The command identity is spent on session_metadata: retrying it for
+      // another domain refuses rather than resolving with that record.
+      await expect(
+        authority.commitDomainRecord(
+          renameCommand('cmd-rename-1'),
+          { domain: 'goal_state', content: { goal: 'another domain' } },
+          { class: 'trusted_entry' },
+        ),
+      ).rejects.toThrow(/committed without a domain record/);
+      expect(authority.domainRecord('goal_state')).toBeUndefined();
+    });
+  });
+
+  it('keeps the authority-composed envelope over colliding content keys', async () => {
+    const harness = await createHarness();
+    let recordRef!: ManagedSessionDurableRef;
+    await withAuthority(harness, async (authority) => {
+      recordRef = (
+        await authority.commitDomainRecord(
+          renameCommand('cmd-rename-collide'),
+          {
+            domain: 'session_metadata',
+            content: {
+              title: 'x',
+              revision: 999,
+              previousRecordRef: 'bogus',
+              operationId: 'caller-chosen',
+            },
+          },
+          { class: 'trusted_entry' },
+        )
+      ).recordRef;
+    });
+
+    const body = JSON.parse(
+      (await harness.store.read(recordRef)).toString('utf8'),
+    ) as {
+      operationId: string;
+      revision: number;
+      previousRecordRef: unknown;
+      title: string;
+    };
+    expect(body.operationId).toBe('cmd-rename-collide');
+    expect(body.revision).toBe(1);
+    expect(body.previousRecordRef).toBeNull();
+    expect(body.title).toBe('x');
+  });
+
   it.each([
     ['session_metadata', 'missing'],
     ['session_metadata', 'incomplete'],
@@ -196,6 +582,14 @@ describe('managed session metadata', () => {
                   ? { title: value, titleSource: 'manual' }
                   : {
                       record: {
+                        uuid: `rec-source-${value}`,
+                        parentUuid: null,
+                        sessionId,
+                        timestamp: '2026-09-01T10:00:00.000Z',
+                        type: 'system',
+                        subtype: 'session_source',
+                        cwd: '/workspace',
+                        version: 'test',
                         systemPayload: { sourceType: 'fork', sourceId: value },
                       },
                     },
@@ -377,13 +771,51 @@ describe('managed session metadata', () => {
     ).toBeUndefined();
   });
 
+  it('defers to the legacy reader when marker text is glued onto a legacy line', async () => {
+    const harness = await createHarness();
+    // A torn append can glue unparseable marker-looking text onto a valid
+    // legacy line; quoted marker text is not a Managed header record.
+    const customTitle = JSON.stringify({
+      uuid: 'legacy-1',
+      parentUuid: null,
+      sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'system',
+      subtype: 'custom_title',
+      customTitle: 'Legacy title',
+      titleSource: 'manual',
+    });
+    await fs.writeFile(
+      harness.transcriptPath,
+      `${customTitle} and the raw bytes "subtype":"managed_session_header_v1" landed here\n`,
+      'utf8',
+    );
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toBeUndefined();
+    // The callers compose managed ?? legacy, so the custom title survives.
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ) ?? readSessionTitleInfoFromFileSync(harness.transcriptPath),
+    ).toEqual({ title: 'Legacy title', source: 'manual' });
+  });
+
   it('refuses a registered domain that is not enabled', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
       await expect(
         authority.commitDomainRecord(
-          renameCommand('cmd-schedule'),
-          { domain: 'schedule', content: {} },
+          renameCommand('cmd-team-message'),
+          // team_message is in the domain vocabulary but not in the
+          // enabled list. child_run is per-kind exempt here; every
+          // H-family body hits the extension funnel first instead.
+          { domain: 'team_message', content: {} },
           { class: 'trusted_entry' },
         ),
       ).rejects.toThrow(/registered but not enabled for submission/);
@@ -658,6 +1090,14 @@ describe('maintenance on a sealed managed session', () => {
         domain: 'session_source',
         content: {
           record: {
+            uuid: 'rec-source-channel',
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-09-01T10:00:00.000Z',
+            type: 'system',
+            subtype: 'session_source',
+            cwd: '/workspace',
+            version: 'test',
             systemPayload: { sourceType: 'channel', sourceId: 'managed' },
           },
         },

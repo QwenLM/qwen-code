@@ -52,6 +52,10 @@ public final class PublicationJournalFixture {
             + ToolPublicationContract.PRODUCER_BYTES
             + ToolPublicationContract.ADMISSION_BYTES;
     public static final String ACTIVATION_ID = "activation-1";
+    /** The commit-marker record line, byte-stable: the marker byte cap and
+     * the shared contract fixture pin its shape. */
+    public static final String COMMIT_MARKER =
+            "{\"subtype\":\"managed_session_commit_v1\"}\n";
 
     public final JdbcTemplate jdbc;
     public final DataSourceTransactionManager manager;
@@ -184,13 +188,11 @@ public final class PublicationJournalFixture {
                         new ManagedSessionStoreModels.AcquireWriterRequest(
                                 "workspace-1", "writer-1", 300000L)));
         append("session.create", "{}\n{}\n", 0, List.of(), null);
-        ObjectNode intent = JSON.createObjectNode()
-                .put("executionCallId", "execution-1")
-                .put("outcomeSource", "runtime");
-        intent.set("argsRef", binding.get("argsRef"));
         append("tool.dispatch",
                 event(1, "activation.changed", activation("active"))
-                        + event(2, "tool.intent", intent) + "{}\n", 2,
+                        + event(2, "tool.intent",
+                                intentPayload(binding.get("argsRef")))
+                        + COMMIT_MARKER, 2,
                 List.of(resource(binding.get("argsRef"), args),
                         resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
@@ -229,28 +231,86 @@ public final class PublicationJournalFixture {
         return result;
     }
 
-    public ObjectNode activation(String phase) {
-        return JSON.createObjectNode().put("activationId", ACTIVATION_ID)
-                .put("epoch", 1).put("phase", phase)
+    /** An activation.changed payload the authority's reader accepts: an
+     * open phase holds its lease and install and no boundary, a closed one
+     * holds its boundary. */
+    public static ObjectNode activation(String phase) {
+        ObjectNode activation = JSON.createObjectNode()
+                .put("activationId", ACTIVATION_ID)
+                .put("epoch", 1).put("workerId", "worker-1");
+        activation.set("subject", activationSubject());
+        activation.put("phase", phase)
                 .put("expiresAt", System.currentTimeMillis() + 180000);
+        if ("active".equals(phase) || "installing".equals(phase)) {
+            activation.put("leaseDurationMs", 300000);
+            activation.set("installRef", ref("install-1", "managed-install",
+                    JSON.createObjectNode()));
+            activation.putNull("boundaryRef");
+        } else {
+            activation.putNull("leaseDurationMs");
+            activation.putNull("installRef");
+            activation.set("boundaryRef", ref("boundary-1",
+                    "managed-boundary", JSON.createObjectNode()));
+        }
+        return activation;
+    }
+
+    /** A tool.intent payload the authority's reader accepts. */
+    public static ObjectNode intentPayload(JsonNode argsRef) {
+        ObjectNode intent = JSON.createObjectNode()
+                .put("executionCallId", "execution-1")
+                .put("batchId", "batch-1").put("ordinal", 1)
+                .put("outcomeSource", "runtime");
+        intent.set("argsRef", argsRef);
+        intent.set("toolDefinitionRef", ref("tooldef-1",
+                "managed-tool-definition", JSON.createObjectNode()
+                        .put("toolName", "run_shell_command")));
+        return intent;
+    }
+
+    /** A checkpoint.committed payload the authority's reader accepts. */
+    public static ObjectNode checkpointPayload(String checkpointId) {
+        ObjectNode payload = JSON.createObjectNode()
+                .put("checkpointId", checkpointId)
+                .put("coveredSequence", 2);
+        payload.putNull("previousCheckpointId");
+        payload.set("stateRef", ref("checkpoint-state-1",
+                "managed-checkpoint-state", JSON.createObjectNode()));
+        payload.putNull("boundary");
+        return payload;
+    }
+
+    /** The activation subject the event lines carry, scope and all. */
+    private static ObjectNode activationSubject() {
+        return JSON.createObjectNode().put("type", "activation")
+                .put("scopeId", "activation-1")
+                .put("activationId", ACTIVATION_ID).put("epoch", 1);
     }
 
     public String event(long number, String kind, JsonNode payload) {
         return event(number, kind, payload, binding.get("sessionKey"), 1);
     }
 
-    /** The same event line with a caller-chosen scope and version. */
-    public String event(long number, String kind, JsonNode payload,
+    /** The same event line with a caller-chosen scope and version, in the
+     * envelope the authority's composer writes. */
+    public static String event(long number, String kind, JsonNode payload,
             JsonNode sessionKey, int v) {
+        return ExtensionRecordJournal.line(sessionKey.path("sessionId")
+                .asText(), "managed_session_event_v1",
+                eventNode(number, kind, payload, sessionKey, v));
+    }
+
+    /** The event one line of {@link #event} carries. */
+    public static ObjectNode eventNode(long number, String kind,
+            JsonNode payload, JsonNode sessionKey, int v) {
         ObjectNode event = JSON.createObjectNode().put("v", v)
                 .put("sequence", number).put("kind", kind);
         event.set("sessionKey", sessionKey);
         event.set("payload", payload);
-        event.set("subject", JSON.createObjectNode().put("type", "activation")
-                .put("activationId", ACTIVATION_ID).put("epoch", 1));
-        return JSON.createObjectNode()
-                .put("subtype", "managed_session_event_v1")
-                .set("managedSession", event) + "\n";
+        event.put("eventId", "event-" + number);
+        event.put("occurredAt", 1_000L * number);
+        event.set("subject", activationSubject());
+        return event;
     }
 
     public void append(String operation, String records, int events,

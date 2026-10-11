@@ -1250,3 +1250,16 @@ describe('UserMessage', () => {
     warn.mockRestore();
   });
 });
+
+describe('UserMessage author', () => {
+  it('names the agent that posted the message', () => {
+    const container = render(
+      <UserMessage
+        content="@writer your turn"
+        author={{ name: 'reviewer', color: '#f80' }}
+      />,
+    );
+    expect(container.textContent).toContain('reviewer');
+    expect(container.textContent).toContain('@writer your turn');
+  });
+});

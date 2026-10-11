@@ -115,7 +115,10 @@ function sequentialInput(
   const output = result.output.hookSpecificOutput;
   return {
     ...effective,
-    ...(output?.['updatedInput'] && typeof output['updatedInput'] === 'object'
+    // PreToolUse replacements are validated by the shared helper above.
+    ...(event !== HookEventName.PreToolUse &&
+    output?.['updatedInput'] &&
+    typeof output['updatedInput'] === 'object'
       ? { tool_input: output['updatedInput'] }
       : {}),
     ...(typeof output?.['updatedPrompt'] === 'string'
@@ -378,6 +381,71 @@ export class HostedHookSession {
       this.recoveredBrokers.delete(id);
       this.releasedOwners.add(id);
     }
+  }
+
+  /**
+   * Whether this Session's Hook owner currently holds the Workspace
+   * mount — the tool turn must not mistake that hold for its own
+   * acquisition-free state when a foreground child would need the mount.
+   */
+  get mountHeld(): boolean {
+    return this.acquired;
+  }
+
+  /**
+   * Whether this Session's Hook catalog holds an eligible command Hook on a
+   * tool-result event. Such a Hook acquires the Session-owned mount when its
+   * results complete — possibly after child-agent admission — so a child
+   * must not be admitted while one exists.
+   *
+   * Scans the catalog without the `matcher` predicate dispatch applies, and
+   * that breadth is the intent. A foreground child cannot share a batch with
+   * a non-agent tool, so the only PostToolUse its parent fires that turn
+   * carries `tool_name: 'agent'` and a narrower matcher could never match;
+   * but a background child outlives the turn and later tools can match it.
+   *
+   * The `null` agent id matches this path's `hooks.fire(...)` payloads, which
+   * never carry `agent_id`, so an agent-scoped Hook never counts here.
+   */
+  get hasMountableToolResultHooks(): boolean {
+    // Only settled executions are spent: an unsettled once-Hook is what
+    // executeHook re-drives on a restored Session, and re-driving it takes
+    // the Session-owned mount. dispatch keeps its own broader set.
+    const usedOnce = new Set(
+      this.executions()
+        .filter(
+          (entry) =>
+            entry.run.state !== 'recovery_blocked' &&
+            (entry.resultRef !== null ||
+              entry.run.execution === 'not_started_proven'),
+        )
+        .map((entry) => entry.onceKey),
+    );
+    return (
+      this.catalog?.hooks.some(
+        (hook) =>
+          hook.config.type === HookType.Command &&
+          this.isHookEligible(hook, usedOnce, null) &&
+          (hook.eventName === HookEventName.PostToolUse ||
+            hook.eventName === HookEventName.PostToolUseFailure ||
+            hook.eventName === HookEventName.PostToolBatch),
+      ) ?? false
+    );
+  }
+
+  private isHookEligible(
+    hook: ManagedHookDescriptor,
+    usedOnce: ReadonlySet<string | null>,
+    agentId: string | null,
+  ): boolean {
+    return (
+      hook.enabled !== false &&
+      hook.sourceTrusted !== false &&
+      (!hook.owner || hook.owner.sessionId === this.key.sessionId) &&
+      (!hook.agentScope ||
+        (hook.owner !== undefined && hook.owner.agentId === agentId)) &&
+      (!hook.onceKey || !usedOnce.has(hook.onceKey))
+    );
   }
 
   get hasPendingOperations(): boolean {
@@ -660,13 +728,11 @@ export class HostedHookSession {
       const hooks = this.catalog!.hooks.filter(
         (hook) =>
           hook.eventName === event &&
-          hook.enabled !== false &&
-          hook.sourceTrusted !== false &&
-          (!hook.owner || hook.owner.sessionId === this.key.sessionId) &&
-          (!hook.agentScope ||
-            (hook.owner !== undefined &&
-              hook.owner.agentId === (fields['agent_id'] ?? null))) &&
-          (!hook.onceKey || !usedOnce.has(hook.onceKey)) &&
+          this.isHookEligible(
+            hook,
+            usedOnce,
+            (fields['agent_id'] as string | undefined) ?? null,
+          ) &&
           (!hook.matcher ||
             !target?.target ||
             matchesHookPattern(
@@ -761,6 +827,7 @@ export class HostedHookSession {
       await this.commit('hook_execution', occurrenceId, marker);
     }
     if (marker.run.execution === 'intent') {
+      await this.broker.authorizeLifecycle();
       marker = {
         ...marker,
         run: { ...marker.run, state: 'running', execution: 'dispatch_started' },
@@ -926,6 +993,7 @@ export class HostedHookSession {
           return cancelBeforeDispatch();
         if (hook.config.type === HookType.Prompt && !prompt)
           throw new Error('Hook model activation is unavailable.');
+        await this.broker.authorizeLifecycle();
         record = {
           ...record,
           run: {
@@ -1114,8 +1182,17 @@ export class HostedHookSession {
       );
       this.recoveredBrokers.set(record.runtimeSessionId, broker);
     }
-    if (current && !reacquire) await this.acquire();
-    else await broker.acquire();
+    if (current && !reacquire) {
+      await this.acquire();
+      if (this.options.lifecycleAuthority?.() && broker.runtime)
+        await broker.acquire({
+          runtimeBindingId: broker.runtime.bindingId,
+          generation: broker.runtime.generation,
+        });
+    } else
+      await broker.acquire(
+        reacquire && record.run.runtime ? record.run.runtime : undefined,
+      );
     if (
       !broker.runtime ||
       this.executions().some(
@@ -1271,6 +1348,19 @@ export class HostedHookSession {
       this.children = { sequence, byOccurrence };
     }
     return this.children.byOccurrence.get(occurrenceId) ?? [];
+  }
+
+  async settleOccurrence(occurrenceId: string): Promise<void> {
+    const marker = await this.status(occurrenceId);
+    if (
+      !marker.resultRef ||
+      this.childrenOf(occurrenceId).some(
+        (child) =>
+          child.run.state === 'recovery_blocked' ||
+          (!child.resultRef && child.run.execution !== 'not_started_proven'),
+      )
+    )
+      throw new HostedHookRecoveryRequiredError();
   }
 
   async status(id: string, cancel = false): Promise<HookExecution> {
@@ -1498,8 +1588,16 @@ export class HostedHookSession {
       : output;
   }
 
-  async drain(): Promise<void> {
-    for (const record of this.executions()) {
+  async drain(
+    excludedOccurrences: ReadonlySet<string> = new Set(),
+  ): Promise<void> {
+    const prior = () =>
+      this.executions().filter(
+        (record) =>
+          !excludedOccurrences.has(record.hookExecutionId) &&
+          !excludedOccurrences.has(record.occurrenceId),
+      );
+    for (const record of prior()) {
       if (!record.resultRef) await this.status(record.hookExecutionId, true);
     }
     await Promise.allSettled(
@@ -1508,7 +1606,7 @@ export class HostedHookSession {
     await Promise.allSettled(
       [...this.occurrences.values()].map((occurrence) => occurrence.result),
     );
-    for (const record of this.executions()) {
+    for (const record of prior()) {
       const latest = await this.status(record.hookExecutionId, true);
       if (!latest.resultRef && latest.run.execution !== 'not_started_proven')
         throw new HostedHookRecoveryRequiredError();

@@ -38,6 +38,14 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
+    'packages/cli/src/serve/workspace-recovery-worker.ts',
+    {
+      reason:
+        'The private offline migration worker pins deployment-owned QWEN_HOME and its retained file-history volume before validating recovery evidence.',
+      accesses: { 'key:QWEN_HOME': 2 },
+    },
+  ],
+  [
     'packages/acp-bridge/src/session-control-plane.ts',
     {
       reason: 'The ACP bridge debug switch is process-scoped.',
@@ -216,11 +224,56 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/session-agents/adapters/claude-cli.ts',
+    {
+      reason:
+        "A session agent runs the user's own Claude Code CLI as a child process, so it inherits the daemon process environment (with nested-Claude markers scrubbed).",
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/adapters/codex-app-server.ts',
+    {
+      reason:
+        "A session agent runs the user's own Codex CLI as a child process, so it inherits the daemon process environment (CODEX_HOME, auth).",
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/program-probe.ts',
+    {
+      reason:
+        'Probing which agent CLIs are installed reads the process PATH and the QWEN_AGENT_*_PATH overrides of the daemon process.',
+      accesses: { whole: 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/orchestrator.ts',
+    {
+      reason:
+        'The session_send MCP child re-runs this CLI; its entry point is process-scoped, mirroring managed-runtime-session-worker.',
+      accesses: { 'key:QWEN_CLI_ENTRY': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-ledger.ts',
+    {
+      reason:
+        'The worker keeps its Shell process groups in a ledger the host named in the launch environment — read once and scrubbed so its own commands never inherit the path; its process-table queries read a full environment ' +
+        'only to force the ps locale, and its Windows stop path resolves taskkill from the process-scoped OS root.',
+      accesses: {
+        'computed:MANAGED_RUNTIME_LEDGER_ENV': 2,
+        'key:SystemRoot': 1,
+        whole: 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-runtime-session-worker.ts',
     {
       reason:
         "A Managed session's host starts its Runtime worker from its own CLI entry and process environment, as a Legacy host's commands inherit it.",
-      accesses: { 'key:QWEN_CLI_ENTRY': 1, whole: 2 },
+      accesses: { 'key:QWEN_CLI_ENTRY': 1, whole: 3 },
     },
   ],
   [

@@ -30,6 +30,7 @@ import type {
   ResponsesApiInputItem,
   ResponsesSSEEvent,
 } from './types.js';
+import { ToolCallTool } from '../../tools/tool-call.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { getThoughtSummary } from '../../utils/thoughtUtils.js';
 import {
@@ -1297,10 +1298,13 @@ describe('normalizeResponsesParameters', () => {
     expect(normalizeResponsesParameters(schema)).toEqual({
       type: 'object',
       properties: {
-        nested: { type: 'object', properties: {} },
-        list: { type: 'array', items: { type: 'object', properties: {} } },
+        nested: { type: 'object', properties: {}, additionalProperties: true },
+        list: {
+          type: 'array',
+          items: { type: 'object', properties: {}, additionalProperties: true },
+        },
       },
-      anyOf: [{ type: 'object', properties: {} }],
+      anyOf: [{ type: 'object', properties: {}, additionalProperties: true }],
     });
   });
 
@@ -1314,8 +1318,8 @@ describe('normalizeResponsesParameters', () => {
     expect(normalizeResponsesParameters(schema)).toEqual({
       type: 'object',
       properties: {},
-      oneOf: [{ type: 'object', properties: {} }],
-      allOf: [{ type: 'object', properties: {} }],
+      oneOf: [{ type: 'object', properties: {}, additionalProperties: true }],
+      allOf: [{ type: 'object', properties: {}, additionalProperties: true }],
     });
   });
 
@@ -1341,12 +1345,51 @@ describe('normalizeResponsesParameters', () => {
     expect(result).not.toBe(schema);
     expect(result).toEqual({
       type: 'object',
-      properties: { nested: { type: 'object', properties: {} } },
+      properties: {
+        nested: { type: 'object', properties: {}, additionalProperties: true },
+      },
     });
   });
 
   it('passes through undefined', () => {
     expect(normalizeResponsesParameters(undefined)).toBeUndefined();
+  });
+
+  it('keeps a nested open object open, and an explicit closed one closed', () => {
+    expect(
+      normalizeResponsesParameters({
+        type: 'object',
+        properties: {
+          open: { type: 'object' },
+          closed: { type: 'object', additionalProperties: false },
+          typed: { type: 'object', additionalProperties: { type: 'string' } },
+        },
+      }),
+    ).toEqual({
+      type: 'object',
+      properties: {
+        open: { type: 'object', properties: {}, additionalProperties: true },
+        closed: { type: 'object', properties: {}, additionalProperties: false },
+        typed: {
+          type: 'object',
+          properties: {},
+          additionalProperties: { type: 'string' },
+        },
+      },
+    });
+  });
+
+  it("keeps tool_call's arguments open on the Responses wire (#12889)", () => {
+    const bridge = new ToolCallTool().schema;
+    const normalized = normalizeResponsesParameters(
+      bridge.parametersJsonSchema as Record<string, unknown>,
+    ) as { properties: Record<string, Record<string, unknown>> };
+
+    expect(normalized.properties['arguments']).toMatchObject({
+      type: 'object',
+      properties: {},
+      additionalProperties: true,
+    });
   });
 });
 

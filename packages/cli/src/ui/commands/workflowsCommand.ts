@@ -4,12 +4,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  WorkflowTask,
+  WorkflowSnapshot,
+} from '@qwen-code/qwen-code-core';
 import {
   isActiveWorkflowStatus,
   isTerminalWorkflowStatus,
+} from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
+import {
   listWorkflowSnapshots,
-} from '@qwen-code/qwen-code-core';
+  readWorkflowSnapshot,
+} from '@qwen-code/qwen-code-core/agents/workflow-snapshot.js';
+import {
+  buildFailureLines,
+  MAX_FAILURE_LINE_CHARS,
+  REPORTED_FAILURE_KEYS,
+  reportedFailureLines,
+} from '@qwen-code/qwen-code-core/agents/workflow-failure-lines.js';
+import { isWorkflowRunId } from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
+import {
+  sanitizeWorkflowText,
+  truncateWorkflowText,
+} from '@qwen-code/qwen-code-core/agents/workflow-result-format.js';
+import {
+  buildWorkflowResultPreview,
+  MAX_WORKFLOW_RESULT_PREVIEW_CHARS,
+  type WorkflowResultPreview,
+} from '@qwen-code/qwen-code-core/agents/workflow-result-preview.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
@@ -103,7 +126,108 @@ function rowLine(entry: WorkflowTask, now: number): string {
   return `  ${entry.runId.padEnd(20)} ${entry.status.padEnd(10)} ${runtime.padStart(8)}  ${label}${phase}${counts}${phaseCount}${budgetChip}${errorTail}`;
 }
 
-function detailLines(entry: WorkflowTask, now: number): string[] {
+/** Matches the bound the registry puts on a run's error when it fails. */
+const MAX_DETAIL_ERROR_CHARS = 4_096;
+
+/** A detail view rendered from disk rather than from the live registry. */
+interface SnapshotSource {
+  snapshot: WorkflowSnapshot;
+  /** Set only once the file is confirmed to hold this run. */
+  file?: string;
+}
+
+/** Arrays and objects with nothing but more of the same, such as `[{}]`. */
+function isHollow(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  return Object.values(value).every(isHollow);
+}
+
+/**
+ * An older snapshot's result with the reported-failure fields plain JSON
+ * emptied left out: `{ errors: [new Error('x')] }` was stored as
+ * `{ errors: [{}] }`, which says nothing about what failed.
+ */
+function withoutHollowFailures(result: unknown): unknown {
+  if (typeof result !== 'object' || result === null || Array.isArray(result)) {
+    return result;
+  }
+  const kept: Record<string, unknown> = { ...result };
+  for (const key of REPORTED_FAILURE_KEYS) {
+    try {
+      if (isHollow(kept[key])) delete kept[key];
+    } catch {
+      // Nested too deep to check; show it as stored.
+    }
+  }
+  return kept;
+}
+
+/**
+ * Whether plain JSON may have emptied an older snapshot's result: an object
+ * can have held an Error, Map, or Set, and an unserializable result was
+ * replaced with a placeholder. Strings, numbers, and booleans are kept whole.
+ */
+function mayHaveLostDetail(result: unknown): boolean {
+  return (
+    (typeof result === 'object' && result !== null) ||
+    (typeof result === 'string' && result.startsWith('(non-JSON-serializable '))
+  );
+}
+
+/**
+ * The preview a completed run is shown with. A live entry is rendered from
+ * its value; a snapshot uses the preview it stored, or, when it predates
+ * them, whatever its plain-JSON `result` kept. `legacy` marks an older
+ * snapshot whose result may be missing detail.
+ */
+function resultPreviewFor(
+  entry: WorkflowTask,
+  source: SnapshotSource | undefined,
+): { preview?: WorkflowResultPreview; legacy: boolean } {
+  if (entry.status !== 'completed') return { legacy: false };
+  if (!source) {
+    return { preview: buildWorkflowResultPreview(entry.result), legacy: false };
+  }
+  const { snapshot } = source;
+  if (snapshot.resultPreview) {
+    return { preview: snapshot.resultPreview, legacy: false };
+  }
+  // Without a stored preview an absent `result` is not "returned nothing":
+  // older snapshots dropped undefined and never-recorded alike.
+  if (!Object.hasOwn(snapshot, 'result')) return { legacy: true };
+  const { result } = snapshot;
+  return {
+    preview: {
+      ...buildWorkflowResultPreview(result),
+      reportedFailures: reportedFailureLines(withoutHollowFailures(result)),
+    },
+    legacy: mayHaveLostDetail(result),
+  };
+}
+
+function indent(text: string, prefix: string): string {
+  return text
+    .split('\n')
+    .map((line) => prefix + line)
+    .join('\n');
+}
+
+/** Persisted path of a run, when this Config's storage holds it. */
+async function confirmedSnapshotFile(
+  config: Config,
+  runId: string,
+): Promise<string | undefined> {
+  if (!isWorkflowRunId(runId) || !config.storage) return undefined;
+  return (await readWorkflowSnapshot(config, runId))
+    ? config.storage.getWorkflowRunSnapshotPath(runId)
+    : undefined;
+}
+
+function detailLines(
+  entry: WorkflowTask,
+  now: number,
+  source?: SnapshotSource,
+): string[] {
   const lines: string[] = [];
   const endTime = entry.endTime ?? now;
   const runtime = formatDuration(endTime - entry.startTime, {
@@ -137,7 +261,14 @@ function detailLines(entry: WorkflowTask, now: number): string[] {
     `  cap         : ${entry.tokenBudgetTotal !== null ? formatTokenCount(entry.tokenBudgetTotal) : '(no cap)'}`,
   );
   if (entry.error) {
-    lines.push(`  error       : ${entry.error}`);
+    const error = truncateWorkflowText(
+      sanitizeWorkflowText(entry.error),
+      MAX_DETAIL_ERROR_CHARS,
+    );
+    lines.push(`  error       : ${error.split('\n').join('\n    ')}`);
+  }
+  if (source?.file) {
+    lines.push(`  snapshotFile: ${source.file}`);
   }
   if (entry.phases.length > 0) {
     lines.push('');
@@ -161,6 +292,52 @@ function detailLines(entry: WorkflowTask, now: number): string[] {
     lines.push(`  Logs (last ${entry.recentLogs.length})`);
     for (const line of entry.recentLogs) {
       lines.push(`    ${line}`);
+    }
+  }
+  if (source && source.snapshot.dispatches === undefined) {
+    lines.push('', '  Failed agents: not recorded in this snapshot');
+  } else {
+    const failures = buildFailureLines(entry);
+    if (failures.length > 0) {
+      const count = entry.dispatches.filter(
+        (d) => d.status === 'failed',
+      ).length;
+      lines.push('', `  Failed agents (${count})`);
+      for (const line of failures) lines.push(indent(line, '    '));
+    }
+  }
+  const { preview, legacy } = resultPreviewFor(entry, source);
+  // A stored preview is re-cleaned: the file is outside this process's control.
+  const reported = (preview?.reportedFailures ?? []).map((line) =>
+    truncateWorkflowText(sanitizeWorkflowText(line), MAX_FAILURE_LINE_CHARS),
+  );
+  if (reported.length > 0) {
+    lines.push('', '  Reported failures');
+    for (const line of reported) lines.push(indent(line, '    '));
+  }
+  if (entry.status === 'completed') {
+    lines.push('', '  Result');
+    if (!preview) {
+      lines.push('    (this snapshot did not record a result)');
+    } else {
+      // Cleaning can widen a stored preview (a tab becomes two spaces), so
+      // it is bounded again and the cut reported alongside a stored one.
+      const sanitized = sanitizeWorkflowText(preview.text);
+      const text = truncateWorkflowText(
+        sanitized,
+        MAX_WORKFLOW_RESULT_PREVIEW_CHARS,
+      );
+      lines.push(indent(text, '    '));
+      if (preview.truncated || text !== sanitized) {
+        lines.push(
+          `    (preview truncated to ${MAX_WORKFLOW_RESULT_PREVIEW_CHARS} characters)`,
+        );
+      }
+    }
+    if (legacy) {
+      lines.push(
+        '    (older snapshot: result details such as Error, Map, and Set values may be incomplete)',
+      );
     }
   }
   return lines;
@@ -298,6 +475,7 @@ export const workflowsCommand: SlashCommand = {
     // the user sees a clear error instead of an empty listing.
     if (trimmedArgs.length > 0) {
       let target = registry.get(trimmedArgs);
+      let source: SnapshotSource | undefined;
       if (!target) {
         // Fall back to a persisted snapshot — the run may predate this CLI
         // process (the in-memory registry dies with the process, the
@@ -305,7 +483,13 @@ export const workflowsCommand: SlashCommand = {
         const snapshot = (await listWorkflowSnapshots(config)).find(
           (s) => s.runId === trimmedArgs,
         );
-        if (snapshot) target = snapshotToTask(snapshot);
+        if (snapshot) {
+          target = snapshotToTask(snapshot);
+          source = {
+            snapshot,
+            file: await confirmedSnapshotFile(config, snapshot.runId),
+          };
+        }
       }
       if (!target) {
         return {
@@ -317,7 +501,7 @@ export const workflowsCommand: SlashCommand = {
       return {
         type: 'message' as const,
         messageType: 'info' as const,
-        content: detailLines(target, Date.now()).join('\n'),
+        content: detailLines(target, Date.now(), source).join('\n'),
       };
     }
 

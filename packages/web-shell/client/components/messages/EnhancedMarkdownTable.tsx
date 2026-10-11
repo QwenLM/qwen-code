@@ -21,6 +21,7 @@ import {
 } from 'react';
 import { useI18n } from '../../i18n';
 import { useInteractionBlocker } from '../../interactionBlockContext';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import {
   warnClipboardWriteFailure,
   writeClipboardText,
@@ -60,6 +61,8 @@ import {
   CopyIcon,
   FilterIcon,
   GripVerticalIcon,
+  Maximize2Icon,
+  Minimize2Icon,
   MinusIcon,
   PlusIcon,
   Rows3Icon,
@@ -72,6 +75,7 @@ import {
   TooltipTrigger,
 } from '../ui/tooltip';
 import styles from './EnhancedMarkdownTable.module.css';
+import markdownStyles from './Markdown.module.css';
 
 type TableElement = ReactElement<{
   children?: ReactNode;
@@ -217,6 +221,38 @@ function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
       ),
     )
   );
+}
+
+function handleShadowDialogTab(event: ReactKeyboardEvent<HTMLDivElement>) {
+  const panel = event.currentTarget;
+  if (
+    event.key !== 'Tab' ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.defaultPrevented ||
+    !(panel.getRootNode() instanceof ShadowRoot)
+  )
+    return;
+  // Radix checks document.activeElement, which is the shadow host.
+  const active = getShadowAwareActiveElement(panel);
+  if (!active || !panel.contains(active)) return;
+  const tabbable = Array.from(
+    panel.querySelectorAll<HTMLElement>(
+      'a[href], button, input, select, textarea, [tabindex]',
+    ),
+  ).filter(
+    (element) =>
+      element.tabIndex >= 0 &&
+      !element.matches(':disabled') &&
+      element.getClientRects().length > 0,
+  );
+  const first = tabbable[0];
+  const last = tabbable[tabbable.length - 1];
+  if (event.shiftKey ? active === first || active === panel : active === last) {
+    event.preventDefault();
+    (event.shiftKey ? last : first)?.focus();
+  }
 }
 
 function hasNativeSelection(): boolean {
@@ -1200,6 +1236,7 @@ function ColumnFilterMenu({
   return (
     <PopoverContent
       id={id}
+      onKeyDown={handleShadowDialogTab}
       data-markdown-table-filter-owner={id}
       align="end"
       sideOffset={2}
@@ -1359,6 +1396,7 @@ function CustomColumnsPopover({
       </PopoverTrigger>
       <PopoverContent
         align="end"
+        onKeyDown={handleShadowDialogTab}
         className={`${styles.columnsPopover} max-h-[min(520px,calc(100vh-16px))] w-80 max-w-[85vw] gap-0 overflow-auto p-0`}
       >
         <div className="flex items-center gap-3 border-b px-3 py-3">
@@ -1469,6 +1507,7 @@ export function EnhancedTable({
   const { language, t } = useI18n();
   const registerInteractionBlocker = useInteractionBlocker();
   const tableId = useId();
+  const [fullscreen, setFullscreen] = useState(false);
   const [sort, setSort] = useState<SortState | null>(null);
   const [filters, setFilters] = useState<Record<number, ColumnFilter>>({});
   const [selection, setSelection] = useState<SelectionRange | null>(null);
@@ -1516,8 +1555,18 @@ export function EnhancedTable({
   const copiedSelectionGenRef = useRef(0);
   const copiedCellDialogGenRef = useRef(0);
   const mountedRef = useRef(true);
-  const shellRef = useRef<HTMLDivElement | null>(null);
+  const [shell, setShell] = useState<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const fullscreenButtonRef = useRef<HTMLButtonElement | null>(null);
+  const inlineHeightRef = useRef(0);
+  const scrollPositionRef = useRef({ top: 0, left: 0 });
+  const attachScroller = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    if (node) {
+      node.scrollTop = scrollPositionRef.current.top;
+      node.scrollLeft = scrollPositionRef.current.left;
+    }
+  }, []);
   const frozenHeaderCellRef = useRef<HTMLTableCellElement | null>(null);
   const detailToggleAnchorRef = useRef<{
     element: HTMLElement;
@@ -1571,6 +1620,7 @@ export function EnhancedTable({
   // value box, which is what a read-only input would do.
   const handleCellDialogKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      handleShadowDialogTab(event);
       // Cmd/Ctrl+A only. The browser's own select-all is keyed to the physical
       // key, so match `code` as well: on a Cyrillic or Greek layout the A key
       // reports `key === 'ф'` and matching `key` alone would let the keystroke
@@ -1745,8 +1795,8 @@ export function EnhancedTable({
   useEffect(() => {
     if (!columnContextMenu) return;
     const closeMenu = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (!columnContextMenuRef.current?.contains(target)) {
+      const menu = columnContextMenuRef.current;
+      if (!menu || !event.composedPath().includes(menu)) {
         setColumnContextMenu(null);
       }
     };
@@ -1771,12 +1821,9 @@ export function EnhancedTable({
 
   useEffect(() => {
     const clearActiveColumnOnOutsideMouseDown = (event: MouseEvent) => {
-      const target = event.target;
-      if (
-        target instanceof Node &&
-        !shellRef.current?.contains(target) &&
-        !columnContextMenuRef.current?.contains(target)
-      ) {
+      const path = event.composedPath();
+      const menu = columnContextMenuRef.current;
+      if (shell && !path.includes(shell) && (!menu || !path.includes(menu))) {
         setActiveColumn(null);
       }
     };
@@ -1799,13 +1846,12 @@ export function EnhancedTable({
       );
       document.removeEventListener('keydown', clearActiveColumnOnEscape);
     };
-  }, [cellDialog, columnContextMenu, openFilterMenu]);
+  }, [cellDialog, columnContextMenu, openFilterMenu, shell]);
 
   useEffect(() => {
     if (!selection) return;
     const clearSelectionOnOutsideMouseDown = (event: MouseEvent) => {
-      const target = event.target;
-      if (target instanceof Node && !shellRef.current?.contains(target)) {
+      if (shell && !event.composedPath().includes(shell)) {
         stopDragging();
         setSelection(null);
       }
@@ -1817,7 +1863,7 @@ export function EnhancedTable({
         clearSelectionOnOutsideMouseDown,
       );
     };
-  }, [selection, stopDragging]);
+  }, [selection, shell, stopDragging]);
 
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
@@ -1963,6 +2009,11 @@ export function EnhancedTable({
     if (!cellDialog) return;
     return registerInteractionBlocker();
   }, [cellDialog, registerInteractionBlocker]);
+
+  useEffect(() => {
+    if (!fullscreen) return;
+    return registerInteractionBlocker();
+  }, [fullscreen, registerInteractionBlocker]);
 
   useEffect(() => {
     if (!cellDialog) return;
@@ -2122,7 +2173,7 @@ export function EnhancedTable({
       detailToggleAnchorRef.current = {
         element: rowElement,
         scrollContainer: findVerticalScrollContainer(
-          shellRef.current?.parentElement ?? null,
+          shell?.parentElement ?? null,
         ),
         top: rowElement.getBoundingClientRect().top,
       };
@@ -2134,10 +2185,9 @@ export function EnhancedTable({
   };
 
   const openCellDialog = (rowKey: string, columnIndex: number) => {
+    const activeElement = getShadowAwareActiveElement(shell);
     cellDialogFocusReturnRef.current =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
+      activeElement instanceof HTMLElement ? activeElement : null;
     setSelection(null);
     setOpenFilterMenu(null);
     setDetailRowKey(null);
@@ -2218,7 +2268,6 @@ export function EnhancedTable({
       setFrozenColumnShadowLeft(null);
       return;
     }
-    const shell = shellRef.current;
     const frozenHeader = frozenHeaderCellRef.current;
     if (!shell || !frozenHeader) return;
     const updateShadowPosition = () => {
@@ -2243,6 +2292,7 @@ export function EnhancedTable({
     freezeFirstColumn,
     frozenColumnIndex,
     orderedVisibleColumnIndexes,
+    shell,
   ]);
 
   const startColumnResize = (
@@ -2386,11 +2436,13 @@ export function EnhancedTable({
   const getTouchCell = (
     touch: ReactTouchEvent<HTMLTableCellElement>['touches'][number],
   ) => {
-    const element = document.elementFromPoint(touch.clientX, touch.clientY);
+    const root = shell?.getRootNode();
+    const hitTestRoot = root instanceof ShadowRoot ? root : document;
+    const element = hitTestRoot.elementFromPoint(touch.clientX, touch.clientY);
     const cell = element?.closest<HTMLTableCellElement>(
       '[data-row-index][data-column-index]',
     );
-    if (!cell || !shellRef.current?.contains(cell)) return null;
+    if (!cell || !shell?.contains(cell)) return null;
     const rowIndex = Number(cell.dataset.rowIndex);
     const columnIndex = Number(cell.dataset.columnIndex);
     if (!Number.isInteger(rowIndex) || !Number.isInteger(columnIndex)) {
@@ -2547,15 +2599,46 @@ export function EnhancedTable({
     );
   };
 
-  return (
+  const changeFullscreen = (open: boolean) => {
+    if (open)
+      inlineHeightRef.current = shell?.getBoundingClientRect().height ?? 0;
+    const scroller = containerRef.current;
+    if (scroller) {
+      scrollPositionRef.current = {
+        top: scroller.scrollTop,
+        left: scroller.scrollLeft,
+      };
+    }
+    setOpenFilterMenu(null);
+    setColumnContextMenu(null);
+    setFullscreen(open);
+  };
+  const fullscreenLabel = t(
+    fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+  );
+  const tableContent = (
     <div
-      ref={shellRef}
+      ref={setShell}
       className={`${styles.tableShell} ${densityClassName(density)} ${
         freezeFirstColumn ? styles.hasFrozenColumn : ''
-      } ${isDragging ? styles.dragging : ''}`}
+      } ${isDragging ? styles.dragging : ''} ${fullscreen ? styles.fullscreenTable : ''}`}
     >
       <TooltipProvider delayDuration={300}>
         <div className={styles.toolbar}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                ref={fullscreenButtonRef}
+                className={styles.iconButton}
+                type="button"
+                onClick={() => changeFullscreen(!fullscreen)}
+                aria-label={fullscreenLabel}
+              >
+                {fullscreen ? <Minimize2Icon /> : <Maximize2Icon />}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">{fullscreenLabel}</TooltipContent>
+          </Tooltip>
           <span className={styles.summary}>{rowSummary}</span>
           {activeFilterCount > 0 && (
             <span className={styles.selection}>
@@ -2743,7 +2826,7 @@ export function EnhancedTable({
         </div>
       </TooltipProvider>
       <div
-        ref={containerRef}
+        ref={attachScroller}
         className={styles.scroller}
         tabIndex={0}
         onCopy={handleCopy}
@@ -3084,6 +3167,7 @@ export function EnhancedTable({
               event.preventDefault();
               cellDialogRef.current?.focus();
             }}
+            onCloseAutoFocus={(event) => event.preventDefault()}
             onKeyDown={handleCellDialogKeyDown}
             tabIndex={-1}
           >
@@ -3121,5 +3205,42 @@ export function EnhancedTable({
         )}
       </Dialog>
     </div>
+  );
+
+  return (
+    <Dialog open={fullscreen} onOpenChange={changeFullscreen}>
+      {fullscreen ? (
+        <div
+          className={styles.fullscreenPlaceholder}
+          style={{ height: inlineHeightRef.current }}
+          aria-hidden="true"
+        />
+      ) : (
+        tableContent
+      )}
+      <DialogContent
+        className={`${markdownStyles.content} top-0 left-0 flex h-dvh w-full max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none p-0 ring-0 sm:max-w-none data-open:animate-none data-closed:animate-none`}
+        showCloseButton={false}
+        aria-describedby={undefined}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          containerRef.current?.focus({ preventScroll: true });
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          fullscreenButtonRef.current?.focus({ preventScroll: true });
+        }}
+        onKeyDown={handleShadowDialogTab}
+        onEscapeKeyDown={(event) => {
+          if (columnContextMenu) {
+            event.preventDefault();
+            setColumnContextMenu(null);
+          }
+        }}
+      >
+        <DialogTitle className="sr-only">{t('common.fullscreen')}</DialogTitle>
+        {fullscreen && tableContent}
+      </DialogContent>
+    </Dialog>
   );
 }

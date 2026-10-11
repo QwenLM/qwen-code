@@ -284,6 +284,8 @@ export class ManagedRuntimeProviderWorker {
     identity: ManagedRuntimeProviderSession,
     operation: ManagedRuntimeProviderOperation,
   ): Promise<unknown> {
+    if (operation.kind === 'workspace-context')
+      return this.executor.readWorkspaceContext(identity.runtimeSessionId);
     if (operation.kind === 'raw-file-history')
       return this.executor.controlFileHistory(
         identity.harnessSessionId,

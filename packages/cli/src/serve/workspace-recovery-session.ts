@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -30,6 +31,10 @@ import {
   type ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
+  MANAGED_MESSAGE_PART_KIND,
+  readManagedMessageBody,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
+import {
   MANAGED_TOOL_RESULT_KINDS,
   isToolResultEnvelopeOf,
   isToolResultPageAt,
@@ -51,6 +56,10 @@ import {
 } from './managed-workspace-binding.js';
 import { parseHostedFileHistoryRecord } from './hosted-file-history-protocol.js';
 import { readHostedApprovalDefinition } from './hosted-tool-approval.js';
+import {
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
+} from './hosted-workspace-profiles.js';
 
 export interface RecoverySessionSource {
   readonly sessionId: string;
@@ -160,6 +169,7 @@ const DOMAINS = [
 ];
 const RESOURCE_KINDS = new Set([
   'managed-definition',
+  'managed-agent-instructions',
   'managed-root',
   'managed-input',
   'managed-admission',
@@ -172,6 +182,8 @@ const RESOURCE_KINDS = new Set([
   'managed-action-options',
   'managed-action-decision',
   'managed-message',
+  'managed-message-part',
+  'managed-message-chunks',
   'managed-turn-result',
   'managed-compaction-summary',
   'managed-checkpoint',
@@ -281,6 +293,7 @@ function settledCheckpoint(checkpoint: HarnessCheckpointV1): boolean {
 export async function verifyRecoverySession(
   source: RecoverySessionSource,
   io: RecoverySessionIO,
+  purpose: 'recovery' | 'migration' = 'recovery',
 ): Promise<{ fileHistory: 'captured' | 'not_captured' }> {
   encodeManagedContextBinding(source.binding);
   const head = source.head;
@@ -306,6 +319,9 @@ export async function verifyRecoverySession(
             head.writerLeaseUntil === null))),
     'invalid pinned retirement',
   );
+  if (purpose === 'migration') {
+    requireValue(Boolean(head || retirement), 'uninitialized migration member');
+  }
   let revision = 0;
   let sequence = 0;
   let commitDigest: string | null = null;
@@ -369,6 +385,14 @@ export async function verifyRecoverySession(
       for (const [filePath, backup] of Object.entries(
         snapshot.trackedFileBackups,
       )) {
+        if (purpose === 'migration') {
+          requireValue(
+            !path.isAbsolute(filePath) &&
+              path.normalize(filePath) === filePath &&
+              filePath !== '.',
+            'external migration history path',
+          );
+        }
         requireValue(!backup.failed, 'file history backup failed');
         if (backup.backupFileName !== null) {
           await io.verifyBackup({
@@ -746,20 +770,31 @@ export async function verifyRecoverySession(
         'invalid genesis',
       );
       const definition = object(json(await read(header.definitionRef)));
+      // The /2 profiles are the same Hosted files/shell surfaces plus glob;
+      // the W1b bundle doc puts Hosted files and Shell profiles inside the
+      // capture closure, so one /2 Session must not abort recovery of the
+      // whole shared storage.
       requireValue(
         definition['engine'] === 'managed' &&
           definition['sessionId'] === source.sessionId &&
           definition['mcpServers'] === undefined &&
           (definition['toolProfile'] === undefined ||
-            ['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
-              definition['toolProfile'] as string,
-            )),
+            isHostedWorkspaceProfile(definition['toolProfile'])),
         'unsupported Hosted profile',
       );
+      if (purpose === 'migration') {
+        requireValue(
+          definition['toolProfile'] === 'hosted-workspace-files/1' &&
+            definition['hookCatalog'] === undefined &&
+            definition['mcpServers'] === undefined &&
+            definition['captureBytes'] === undefined,
+          'unsupported migration profile',
+        );
+      }
       requireValue(
         readHostedApprovalDefinition(definition) &&
           (definition['captureBytes'] === undefined ||
-            (definition['toolProfile'] === 'hosted-workspace-shell/1' &&
+            (isHostedWorkspaceShellProfile(definition['toolProfile']) &&
               Number.isSafeInteger(definition['captureBytes']) &&
               (definition['captureBytes'] as number) >= 1 &&
               (definition['captureBytes'] as number) <= 2 ** 41)),
@@ -899,7 +934,7 @@ export async function verifyRecoverySession(
               : null;
       if (recordRef) {
         const record = readerRecord(
-          json(await read(durableRef(recordRef))),
+          json(await readManagedMessageBody(read, durableRef(recordRef))),
           source.sessionId,
         );
         if (event.kind === 'message.committed')
@@ -961,11 +996,22 @@ export async function verifyRecoverySession(
         'checkpoint closure owner conflicts',
       );
       await enqueueRefs(state, io);
+    } else if (ref.kind === 'managed-agent-instructions') {
+      requireValue(
+        bytes.byteLength <= 64 * 1024,
+        'agent instructions exceed 64 KiB',
+      );
+      new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     } else if (ref.kind === 'managed-api-history') {
       const history = json(bytes);
       requireValue(Array.isArray(history), 'invalid API history');
       await enqueueRefs(history, io);
-    } else if (ref.kind !== MANAGED_TOOL_RESULT_KINDS.content)
+    } else if (
+      // A message part is a raw byte slice of its document, not JSON, and
+      // references nothing.
+      ref.kind !== MANAGED_TOOL_RESULT_KINDS.content &&
+      ref.kind !== MANAGED_MESSAGE_PART_KIND
+    )
       await enqueueRefs(json(bytes), io);
     await io.completeReference(ref);
   }

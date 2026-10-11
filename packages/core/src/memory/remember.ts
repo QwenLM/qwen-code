@@ -90,10 +90,7 @@ async function buildCleanMemorySystemPrompt(
       await readUserAutoMemoryIndex().catch(() => null),
       /* userSection */ undefined,
       /* teamSection */ undefined,
-      // The remember agent needs the full protocol (type definitions, scope
-      // routing, exclusion rules) to write correct memories — do not remove.
       {
-        forceFullProtocol: true,
         keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(
           // The vocabulary is advisory prompt context: an unreadable user
           // root must not fail the run, but the failure is logged so a
@@ -144,10 +141,7 @@ async function buildCleanMemorySystemPrompt(
     projectIndex,
     userMemory,
     /* teamSection */ undefined,
-    // The remember agent needs the full protocol (type definitions, scope routing,
-    // exclusion rules) to write correct memories — do not remove.
     {
-      forceFullProtocol: true,
       keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(
         [...userDocs, ...projectDocs],
         { scopes: scope === 'project' ? ['project'] : ['user', 'project'] },
@@ -239,8 +233,8 @@ export async function runManagedRememberByAgent(params: {
     params.scope,
   );
   // The remember agent's system prompt already embeds the full managed
-  // auto-memory protocol and MEMORY.md indexes (buildCleanMemorySystemPrompt
-  // with forceFullProtocol). AgentCore.buildChatSystemPrompt would otherwise
+  // auto-memory protocol and MEMORY.md indexes (buildCleanMemorySystemPrompt;
+  // the full protocol is the only path). AgentCore.buildChatSystemPrompt would otherwise
   // append config.getAutoMemoryPrompt() a second time, duplicating the entire
   // section — and in clean mode re-injecting parent-session memory into the
   // intended blank-slate agent. Zero it out for every mode so the section is

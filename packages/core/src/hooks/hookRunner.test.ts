@@ -20,6 +20,7 @@ import type {
   CommandHookConfig,
   HookConfig,
   HookInput,
+  PreToolUseInput,
   UserPromptExpansionInput,
   UserPromptSubmitInput,
 } from './types.js';
@@ -582,6 +583,83 @@ describe('HookRunner', () => {
     it('should call onHookStart and onHookEnd callbacks', async () => {
       scriptSpawn(0, 'result');
       await expectCallbacks('executeHooksSequential', cmd('echo test'), true);
+    });
+
+    // The tool_input the second of two PreToolUse hooks reads from stdin.
+    const nextToolInput = async (firstOutput: Record<string, unknown>) => {
+      const secondProcess = createMockProcess(0, '{}');
+      mockSpawn
+        .mockImplementationOnce(() =>
+          createMockProcess(0, JSON.stringify(firstOutput)),
+        )
+        .mockImplementationOnce(() => secondProcess);
+      await hookRunner.executeHooksSequential(
+        [cmd('echo first'), cmd('echo second')],
+        HookEventName.PreToolUse,
+        createMockInput({
+          hook_event_name: HookEventName.PreToolUse,
+          tool_input: { path: 'a', keep: true },
+        } as Partial<HookInput>),
+      );
+      return JSON.parse(secondProcess.stdin.write.mock.calls[0]?.[0] as string)
+        .tool_input;
+    };
+
+    it('passes a PreToolUse updatedInput to the next hook as the whole input', async () => {
+      expect(
+        await nextToolInput({
+          hookSpecificOutput: {
+            updatedInput: { path: 'b' },
+            tool_input: { legacy: true },
+          },
+        }),
+      ).toEqual({ path: 'b' });
+    });
+
+    it('still merges the legacy tool_input into the next hook input', async () => {
+      expect(
+        await nextToolInput({
+          hookSpecificOutput: { tool_input: { path: 'b' } },
+        }),
+      ).toEqual({ path: 'b', keep: true });
+    });
+
+    it('leaves the next hook input unchanged for an invalid updatedInput', async () => {
+      expect(
+        await nextToolInput({
+          hookSpecificOutput: { updatedInput: ['b'], tool_input: { x: 1 } },
+        }),
+      ).toEqual({ path: 'a', keep: true });
+    });
+
+    it('gives each PreToolUse function hook its own input copy', async () => {
+      const seen: unknown[] = [];
+      const input = createMockInput({
+        hook_event_name: HookEventName.PreToolUse,
+        tool_input: { path: 'a' },
+      } as Partial<HookInput>);
+      const fn = (callback: (input: HookInput) => void): HookConfig => ({
+        type: HookType.Function,
+        errorMessage: 'failed',
+        callback: async (hookInput) => {
+          callback(hookInput);
+          return true;
+        },
+      });
+      await hookRunner.executeHooksSequential(
+        [
+          fn((hookInput) => {
+            (hookInput as PreToolUseInput).tool_input['path'] = 'mutated';
+          }),
+          fn((hookInput) =>
+            seen.push((hookInput as PreToolUseInput).tool_input),
+          ),
+        ],
+        HookEventName.PreToolUse,
+        input,
+      );
+      expect(seen).toEqual([{ path: 'a' }]);
+      expect(input).toMatchObject({ tool_input: { path: 'a' } });
     });
   });
 
@@ -1351,6 +1429,11 @@ describe('HookRunner', () => {
       expect(mockSpawn.mock.calls[0][2].detached).toBe(
         process.platform !== 'win32',
       );
+      // Hiding the console is a Windows-only flag: nothing changes for POSIX
+      // users, who keep the process group they rely on for cancellation.
+      expect(mockSpawn.mock.calls[0][2].windowsHide).toBe(
+        process.platform === 'win32',
+      );
       expect(killSpy).not.toHaveBeenCalled();
     });
 
@@ -1663,6 +1746,11 @@ describe('HookRunner', () => {
 
       expect(result.error?.message).toBe('Hook execution cancelled (aborted)');
       expect(mockSpawn.mock.calls[0][2].detached).toBe(false);
+      // The hook child is created without hiding its console, while the very
+      // same file hides the console of the taskkill child used to reap it. On
+      // Windows the hook child therefore inherits the parent's ConPTY console,
+      // so a `powershell -WindowStyle Hidden` hook minimizes Windows Terminal.
+      expect(mockSpawn.mock.calls[0][2].windowsHide).toBe(true);
       expect(mockExecFile).toHaveBeenCalledWith(
         expect.stringMatching(/\\System32\\taskkill\.exe$/i),
         ['/f', '/t', '/pid', mockProcess.pid.toString()],

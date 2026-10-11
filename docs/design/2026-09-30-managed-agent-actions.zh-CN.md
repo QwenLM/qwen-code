@@ -51,6 +51,9 @@ Harness 遵循 Java 创建 Hosted Session 时已经以 `approvalMode` 发送的�
 | `default`   | `read_file`                         | `write_file`、`edit` 与 `run_shell_command` |
 | `auto-edit` | `read_file`、`write_file` 与 `edit` | `run_shell_command`                         |
 
+`/2` 搜索 profile 在 `default` 与 `auto-edit` 下还预批准 `glob`；见
+[搜索 profile 设计](2026-10-01-hosted-workspace-search-profile.zh-CN.md)。
+
 每种模式列出的是它预批准的工具，因此之后加入配置的工具在有人把它列入之前都会被询问。Java 目前选择的文件配置 `hosted-workspace-files/1` 没有 shell 工具，因此 `auto-edit` 在其中什么都不询问；shell 那一行适用于 `hosted-workspace-shell/1`。
 
 对于工具配置，`plan` 与 `auto` 返回 `400 invalid_hosted_approval`：plan 模式需要自己的规划语义，auto 模式需要分类器，而 Hosted 路径两者都没有。超出范围的超时也返回同样的错误；`yolo` 从不等待，因此忽略超时。没有工具配置的 Session 继续忽略该模式，因为它不运行工具。
@@ -125,6 +128,12 @@ Session Store 已经会读取每一行已提交的 journal 来投影 Stage H 记
 - **列表：** `GET …/actions` 与 WebShell `actions/query` 按从新到旧分页列出 Session 中 `requested` 的 Action，使用 Turn 列表的游标与 limit 规则。
 - **读取：** `GET …/actions/{actionId}` 与 WebShell `actions/get` 返回任何状态的 Action；已决定的 Action 带有 `decision_receipt_id`。
 - **回答：** `POST …/actions/{actionId}/responses` 与 WebShell `actions/respond` 以 `202` 返回 `action_response` command operation。受理前按 Action 的类型、版本、选项、状态与过期时间检查请求。该 operation 在 D4 的幂等域（租户、Session、类型、actor 与键）内幂等。worker 把它转发到 Harness 路由，失败的尝试按 dispatch 退避回到 pending；与 D4 一样，没有最后一次尝试。worker 以 Java 从 journal 投影出的 Action 为准判断结果，从不根据时钟或仅凭失败的调用推断：Harness 已记录的决定可能已经让调用运行，只是它的回答丢失了，或者 Harness 已经重启。Harness 在返回 `200` 之前已经提交了决定，因此投影中已经能看到它。投影出的 Action 进入终态后，该 operation 才完成：若为 `decided` 且决定与本次回答相同（Java 按第 5.4 节的确切决定编码比较摘要），以 `action_resolution`（`decided`，带决定回执）完成；否则以其结束状态（`action_expired`、`action_cancelled` 或 `action_already_resolved`）完成，并通过 `failure_code`（WebShell 为 `failureCode`）公开。Harness 返回 `400` 时以该错误完成。Action 仍为 `requested` 时（例如在恢复阻塞的 Session 上），operation 保持 `running`。WebShell 请求增加 `requestId`。
+
+#### 审批投递恢复
+
+调度器可能丢失附着缓存，而 Harness 仍持有 Workspace Session 的待处理审批。审批 worker 使用已有的被动附着协议恢复该引用，即使 `verified-workspace-recovery-enabled` 为 `false`。投递前仍检查当前的审批答复执行授权与挂载。Harness 仍验证 writer boot、租户、Workspace、Store 地址、已固定的工具配置与审批模式。可变授权或注册表状态造成的拒绝仍可重试；结构性的绑定或存储不匹配仍进入终态。这不会开启更广泛的 Workspace 冷恢复，也不改变恢复配置的默认值。若被动加载创建 runtime snapshot，其待恢复标记仍由 writer boot 围栏约束。附着恢复或审批投递尚未结束时，worker 会续租已认领的 operation，避免缓慢加载使其他副本接管仍在正常进行的投递。
+
+Harness connector 不可用的副本仍通过相同的公共路由受理并持久化有效答复，但不扫描或分派仍为 requested 的 Action 进行投递。它保持这些任务的认领与重试时间不变，让共用数据库且启用了 Harness 的调度器完成投递。对于 journal 投影已经证明 Action 终态的答复，它仍可直接结算，无需认领任务或调用 Harness。公共 API 与 WebShell 的审批集成流程在每次回答前清空 connector 缓存，要求原 operation 以一次决定和预期文件效果完成；协调器回归测试检查禁用的 connector 从不认领或调度答复，并且能结算已由 journal 证明终态的答复。
 
 ### 6.3 检查
 

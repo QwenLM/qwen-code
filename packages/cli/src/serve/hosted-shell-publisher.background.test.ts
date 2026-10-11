@@ -17,7 +17,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { parseChildShellRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
@@ -55,14 +55,13 @@ vi.mock(
       assertManagedSessionDomainEnabled: (
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
-        if (
-          domain === 'child_run'
-            ? !enablement.childRun
-            : domain === 'monitor_run'
-              ? !enablement.monitorRun
-              : true
-        ) {
+        if (domain === 'monitor_run' ? !enablement.monitorRun : true) {
           actual.assertManagedSessionDomainEnabled(domain);
+        }
+      },
+      assertManagedSessionChildRunKindEnabled: (kind: string) => {
+        if (!enablement.childRun) {
+          actual.assertManagedSessionChildRunKindEnabled(kind);
         }
       },
     };
@@ -365,7 +364,7 @@ it('runs the background exit leg: revise, seal, settle as one evidence', async (
   await prepared.sink.write('stderr', Buffer.from('warn'));
 
   // The record's output manifest advanced to what the live capture shows.
-  let record = parseChildRun(
+  let record = parseChildShellRun(
     session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record.outputRef?.kind).toBe(MANAGED_TOOL_RESULT_KINDS.manifest);
@@ -396,7 +395,7 @@ it('runs the background exit leg: revise, seal, settle as one evidence', async (
 
   // The record settled with exactly that evidence, and the manifest's
   // physical fields read the same exit.
-  record = parseChildRun(
+  record = parseChildShellRun(
     session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record).toMatchObject({
@@ -575,7 +574,7 @@ it('retries a finalize that failed once instead of caching the refusal forever',
   expect(failed.status).toBeGreaterThanOrEqual(400);
   const envelope = await prepared.sink.finalize('success', [], undefined);
   expect(envelope.capture?.captureStatus).toBe('complete');
-  const record = parseChildRun(
+  const record = parseChildShellRun(
     session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record).toMatchObject({
@@ -701,7 +700,7 @@ it('completes a refused exit settle on the record’s own attach, without a clie
   });
   // The record refuses a settle it cannot name as attached.
   expect(first.status).toBeGreaterThanOrEqual(400);
-  const unattached = parseChildRun(
+  const unattached = parseChildShellRun(
     session!.authority.extensionRecord('child_run', 'execution-late')!.record,
   );
   expect(unattached.stopReason).toBeNull();
@@ -713,7 +712,7 @@ it('completes a refused exit settle on the record’s own attach, without a clie
     { pid: 7 },
   );
   await publisher!.settleAttached('execution-late');
-  const record = parseChildRun(
+  const record = parseChildShellRun(
     session!.authority.extensionRecord('child_run', 'execution-late')!.record,
   );
   expect(record).toMatchObject({
@@ -789,7 +788,7 @@ it('re-drives a refused final forward on an attached record without any client a
   });
   expect(refused.status).toBeGreaterThanOrEqual(400);
   expect(advance).toHaveBeenCalledOnce();
-  const stranded = parseChildRun(
+  const stranded = parseChildShellRun(
     session!.authority.extensionRecord('child_run', 'execution-strand')!.record,
   );
   expect(stranded.stopReason).toBeNull();
@@ -799,7 +798,7 @@ it('re-drives a refused final forward on an attached record without any client a
   vi.useRealTimers();
   await vi.waitFor(
     () => {
-      const record = parseChildRun(
+      const record = parseChildShellRun(
         session!.authority.extensionRecord('child_run', 'execution-strand')!
           .record,
       );
@@ -880,13 +879,13 @@ it('heals a refused final forward through the bounded redrive when the store fla
   });
   expect(refused.status).toBeGreaterThanOrEqual(400);
   expect(
-    parseChildRun(
+    parseChildShellRun(
       session!.authority.extensionRecord('child_run', 'execution-flap')!.record,
     ).stopReason,
   ).toBeNull();
   await vi.advanceTimersByTimeAsync(0);
   expect(
-    parseChildRun(
+    parseChildShellRun(
       session!.authority.extensionRecord('child_run', 'execution-flap')!.record,
     ).stopReason,
   ).toBeNull();
@@ -896,7 +895,7 @@ it('heals a refused final forward through the bounded redrive when the store fla
   vi.useRealTimers();
   await vi.waitFor(
     () => {
-      const record = parseChildRun(
+      const record = parseChildShellRun(
         session!.authority.extensionRecord('child_run', 'execution-flap')!
           .record,
       );
@@ -996,7 +995,7 @@ it('waits an in-flight redrive inside the drain instead of closing past it (P2-A
   expect(answered).toBe(false);
   releaseGate();
   await closing;
-  const record = parseChildRun(
+  const record = parseChildShellRun(
     session!.authority.extensionRecord('child_run', 'execution-drain')!.record,
   );
   expect(record).toMatchObject({
@@ -1135,7 +1134,7 @@ it('waits a redrive whose backoff fires only while the drain is already waiting 
   releaseGateA();
   await vi.waitFor(() => {
     expect(
-      parseChildRun(
+      parseChildShellRun(
         session!.authority.extensionRecord('child_run', 'execution-a')!.record,
       ).stopReason,
     ).toBe('exited');
@@ -1149,7 +1148,7 @@ it('waits a redrive whose backoff fires only while the drain is already waiting 
   releaseGateB();
   await closing;
   for (const executionCallId of ['execution-a', 'execution-b']) {
-    const record = parseChildRun(
+    const record = parseChildShellRun(
       session!.authority.extensionRecord('child_run', executionCallId)!.record,
     );
     expect(record).toMatchObject({
@@ -1185,7 +1184,7 @@ it('advances the record when a blind-capture revision lands, without waiting for
     request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
   );
   const outputRef = () =>
-    parseChildRun(
+    parseChildShellRun(
       session!.authority.extensionRecord('child_run', 'execution-blind')!
         .record,
     ).outputRef;
@@ -1292,7 +1291,7 @@ it('swallows a refused write-arm forward and retries it on the next edging write
     ),
   ).rejects.toThrow('Shell publisher refused the request.');
   const outputRef = () =>
-    parseChildRun(
+    parseChildShellRun(
       session!.authority.extensionRecord('child_run', 'execution-write')!
         .record,
     ).outputRef;
@@ -1452,7 +1451,7 @@ it('retries the record forward a wedge threw once instead of latching its write'
   // The thrown arm retried on the next edging write instead of latching:
   // the record ends pinned at the very manifest the byte chain reached.
   expect(broken.mock.calls.length).toBeGreaterThanOrEqual(2);
-  const record = parseChildRun(
+  const record = parseChildShellRun(
     session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record.outputRef).toEqual(envelope.capture!.manifest!);
@@ -1488,7 +1487,7 @@ it('settles an unproven background end as a failure, never as an exit', async ()
     message: 'Background Shell ended without exit evidence.',
   });
   await r.registry.accept(prepared.identity, envelope);
-  const record = parseChildRun(
+  const record = parseChildShellRun(
     session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
   );
   expect(record).toMatchObject({

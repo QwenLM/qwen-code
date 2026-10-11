@@ -102,6 +102,7 @@ import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import {
   BWRAP_MIGRATION_MESSAGE,
+  stripUtf8Bom,
   validateExecutionSandboxSelection,
 } from './execution-sandbox-settings.js';
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
@@ -111,6 +112,7 @@ import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { agentsCommand } from '../commands/agents.js';
 import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
@@ -883,6 +885,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    // Register `qwen agents` (join a coordinator; session_send MCP server)
+    .command(agentsCommand)
     .command(batchCommand)
     // Register update command
     .command(updateCommand)
@@ -932,6 +936,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
+      result._[0] === 'agents' ||
       result._[0] === 'board' ||
       result._[0] === 'batch' ||
       result._[0] === 'update' ||
@@ -1348,7 +1353,7 @@ function parseMcpConfig(
     if (fs.existsSync(mcpConfigArg)) {
       debugLogger.debug(`Reading MCP config from file: ${mcpConfigArg}`);
       const content = fs.readFileSync(mcpConfigArg, 'utf-8');
-      parsed = JSON.parse(stripJsonComments(content));
+      parsed = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
     } else {
       // Try parsing as JSON string
       debugLogger.debug('Parsing MCP config as JSON string');
@@ -1710,6 +1715,8 @@ export async function loadCliConfig(
     executionEngine?: SessionExecutionEngine;
     /** Where a Managed session's tools execute; see `ConfigParameters`. */
     managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'];
+    /** How the host learns an unproven worker stop; see `ConfigParameters`. */
+    onManagedEngineQuarantine?: ConfigParameters['onManagedEngineQuarantine'];
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
@@ -2489,6 +2496,7 @@ export async function loadCliConfig(
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
     sessionExecutionEngine: hostPolicy?.executionEngine,
     managedRuntimeEnvironment: hostPolicy?.managedRuntimeEnvironment,
+    onManagedEngineQuarantine: hostPolicy?.onManagedEngineQuarantine,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
