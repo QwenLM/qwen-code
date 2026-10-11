@@ -258,11 +258,15 @@ describe('extractClaims', () => {
 
   it('does not read a comma-grouped PR number as a count', () => {
     // The grouped count is claimed whole; the PR number next to it is not
-    // (red before the fix: the count claimed as `239 passed`).
+    // (red before the fix: the count claimed as `239 passed`). A `#`-prefixed
+    // reference beside the pass word is not a count either (`#13,881`).
     const claims = extractClaims('See PR 1,234 — 2,239 passed').filter(
       (c) => c.kind === 'count',
     );
     expect(claims.map((c) => c.text)).toEqual(['2,239 passed']);
+    expect(
+      extractClaims('CI on #13,881 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
   });
 
   it('does not claim the tail of a malformed grouped number', () => {
@@ -284,9 +288,10 @@ describe('extractClaims', () => {
   });
 
   it('does not glue a count onto the tail of a preceding numeric token', () => {
-    // A timestamp or date joins its digits with `:`, `.` or `-`; the grouped
+    // A numeric token joins its digits with punctuation — a timestamp `:`,
+    // a date `-`, a version `.`, a ratio `/`, a sum `+`; the grouped
     // alternative would otherwise open a new group there (`30,471`). The
-    // lookbehind keys on a digit before the separator, so these stay silent —
+    // lookbehind keys on a digit before any separator, so these stay silent —
     // fail-closed beats a fabricated figure.
     expect(
       extractClaims('2026-10-11T12:00:30,471 passed').filter(
@@ -299,16 +304,34 @@ describe('extractClaims', () => {
     expect(
       extractClaims('1.5,239 passed').filter((c) => c.kind === 'count'),
     ).toEqual([]);
+    expect(
+      extractClaims('2,239/2,500 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('12/30,471 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('ratio 3/4,471 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1,239+2,500 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
   });
 
   it('still reads a count after an unspaced separator comma', () => {
     // `1 failed,471 passed` — the comma is a segment separator, not a
     // grouping comma; `observedTestCounts` reads the same line, so the claim
-    // side must not go silent on it.
+    // side must not go silent on it. A letter before the separator is the
+    // other half of the guard's pass case (`Tests:2,239`).
     const claims = extractClaims('Tests: 1 failed,471 passed').filter(
       (c) => c.kind === 'count',
     );
     expect(claims.map((c) => c.text)).toEqual(['471 passed']);
+    expect(
+      extractClaims('Tests:2,239 passed')
+        .filter((c) => c.kind === 'count')
+        .map((c) => c.text),
+    ).toEqual(['2,239 passed']);
   });
 
   it('pulls path arguments out of a repro command', () => {
