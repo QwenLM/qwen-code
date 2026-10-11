@@ -3512,6 +3512,12 @@ describe('LlmChat', async () => {
       // producer→`tryCompress`→`compress()` hops, so dropping either forward
       // or swapping in `actualTokens` must turn it red (#13432).
       expect(reactiveOpts.observedServerCeiling).toBe(128_000);
+      // The route that reported the ceiling must travel with it, or the
+      // service cannot tell a retry on that route from a side-query on another
+      // one (#13876). Same producer→tryCompress→compress() hop.
+      expect(reactiveOpts.requestRouteKey).toBe(
+        mockConfig.getModelRouteIdentity(mockConfig.getModel()),
+      );
       expectStreamCalls(2);
       expect(requestAt(1).contents).toEqual(expectedRequestContents);
       expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);

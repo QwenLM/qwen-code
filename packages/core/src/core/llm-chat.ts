@@ -670,7 +670,9 @@ interface TryCompressOptions {
    * this instead of the active route, so an in-send compression never
    * re-adopts counts the active route retained while the request targets
    * another one (#9506). Omitted by between-sends callers (manual
-   * `/compress`), which compress the active route's state.
+   * `/compress`), which compress the active route's state. Forwarded to the
+   * compression service with `observedServerCeiling` so the ceiling only
+   * bounds a side-query that resolves to the route that reported it (#13876).
    */
   requestRouteKey?: string;
   /**
@@ -2747,6 +2749,7 @@ export class LlmChat {
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       observedServerCeiling: options?.observedServerCeiling,
+      requestRouteKey: options?.requestRouteKey,
       requestGenerationConfig: options?.requestGenerationConfig,
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,

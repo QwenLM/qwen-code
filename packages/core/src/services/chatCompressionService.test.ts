@@ -1369,6 +1369,11 @@ describe('ChatCompressionService.compress cache sharing', () => {
         firePostCompactEvent: resolvedFn(),
       }),
       getModel: () => 'test-model',
+      // Route-per-model stub mirroring the real Config's identity: a model
+      // argument keys that model's route, no argument keys the active one.
+      getModelRouteIdentity: vi.fn((model?: string) =>
+        model ? `${model}@route` : 'test-model@route',
+      ),
       getCompactionModel: vi.fn().mockReturnValue(options?.compactionModel),
       getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
       getAllConfiguredModels: vi
@@ -1845,6 +1850,111 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(
       coldInputEstimate + (request.config?.maxOutputTokens ?? 0),
     ).toBeLessThanOrEqual(OBSERVED_CEILING);
+  });
+
+  it('clamps the cold output budget when the compaction selector names the main route (#13432)', async () => {
+    // `getCompactionModel()` returns an `authType:id` selector, so picking the
+    // model the session already uses yields `openai:test-model` against
+    // `getModel()`'s `test-model`. That selector is a different *string* but the
+    // same *route*: the send layer resolves it to the main content generator
+    // (baseLlmClient.ts:861-871), so the ceiling reported by that endpoint
+    // describes this side-query and must bind. Sized against the inferred window
+    // instead, the unclamped 20_000 reserve overflows the real ceiling and the
+    // server rejects the recovery request itself.
+    const chunk = 'x'.repeat(4_000);
+    const history = Array.from({ length: 245 }, (_, i) =>
+      i % 2
+        ? modelText(`chunk-${i} ${chunk}`)
+        : userText(`chunk-${i} ${chunk}`),
+    );
+    const { coldSpy } = await expectCold(
+      {
+        history,
+        authType: AuthType.USE_OPENAI,
+        compactionModel: `openai:test-model`,
+        configuredModels: [
+          { id: 'test-model', contextWindowSize: INFERRED_WINDOW },
+        ],
+        contextWindowSize: INFERRED_WINDOW,
+        lastPromptTokenCountIsEstimated: true,
+      },
+      {
+        originalTokenCount: SERVER_REPORTED_ACTUAL,
+        precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+        observedServerCeiling: OBSERVED_CEILING,
+      },
+    );
+    const request = coldSpy.mock.calls[0]![1] as {
+      contents: Content[];
+      systemInstruction?: string;
+      model?: string;
+      config?: { maxOutputTokens?: number };
+    };
+    const coldInputEstimate =
+      estimateContentTokens(request.contents) +
+      Math.ceil((request.systemInstruction ?? '').length / 4);
+    // Fixture guard: the estimate sits where the clamp binds, so the
+    // assertions below are not vacuous.
+    expect(coldInputEstimate).toBeGreaterThan(
+      OBSERVED_CEILING - COMPACT_MAX_OUTPUT_TOKENS,
+    );
+    // The side-query really does carry the selector that resolves to main.
+    expect(request.model).toBe('openai:test-model');
+    expect(request.config?.maxOutputTokens).toBeLessThan(
+      COMPACT_MAX_OUTPUT_TOKENS,
+    );
+    expect(
+      coldInputEstimate + (request.config?.maxOutputTokens ?? 0),
+    ).toBeLessThanOrEqual(OBSERVED_CEILING);
+  });
+
+  it('does not clamp a side-query on another route against the reported ceiling (#13876)', async () => {
+    // The ceiling was reported by a request sent on a per-turn model override;
+    // the side-query runs on the main model's route, which the number never
+    // described. The fixture payload exceeds the ceiling, so applying it here
+    // shrinks the output budget toward 1 and the truncation guard then drops
+    // the summary — on every send, and `force` bypasses the failure breaker, so
+    // the session could never compact. Dropping the route check in the service
+    // makes maxOutputTokens fall below the reserve (red); the same fixture
+    // without the override key clamps, which the test above covers.
+    const chunk = 'x'.repeat(4_000);
+    const history = Array.from({ length: 245 }, (_, i) =>
+      i % 2
+        ? modelText(`chunk-${i} ${chunk}`)
+        : userText(`chunk-${i} ${chunk}`),
+    );
+    const { coldSpy, result } = await expectCold(
+      {
+        history,
+        contextWindowSize: INFERRED_WINDOW,
+        // An estimate-derived anchor keeps this run on the cold path for a
+        // reason independent of the ceiling, so this case isolates scoping.
+        lastPromptTokenCountIsEstimated: true,
+      },
+      {
+        originalTokenCount: SERVER_REPORTED_ACTUAL,
+        precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+        observedServerCeiling: OBSERVED_CEILING,
+        requestRouteKey: 'override-model@route',
+      },
+    );
+    const request = coldSpy.mock.calls[0]![1] as {
+      contents: Content[];
+      systemInstruction?: string;
+      model?: string;
+      config?: { maxOutputTokens?: number };
+    };
+    const coldInputEstimate =
+      estimateContentTokens(request.contents) +
+      Math.ceil((request.systemInstruction ?? '').length / 4);
+    // Fixture guard: the same payload sits in the regime where the clamp
+    // would bind, so the assertion below is not vacuous.
+    expect(coldInputEstimate).toBeGreaterThan(
+      OBSERVED_CEILING - COMPACT_MAX_OUTPUT_TOKENS,
+    );
+    expect(request.model).toBe('test-model');
+    expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
   });
 
   it('does not budget a cross-endpoint compaction pin against the main endpoint ceiling (#13432)', async () => {
