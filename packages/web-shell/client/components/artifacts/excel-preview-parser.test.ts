@@ -31,6 +31,61 @@ async function mergedWorkbook(rangesBySheet: string[][]) {
   return zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
 }
 
+async function columnWorkbook(min: number, max: number) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.addWorksheet('Columns').getCell('A1').value = 'Content';
+  const zip = await JSZip.loadAsync(await workbook.xlsx.writeBuffer());
+  const path = 'xl/worksheets/sheet1.xml';
+  const xml = await zip.file(path)!.async('string');
+  zip.file(
+    path,
+    xml.replace(
+      '<sheetData>',
+      `<cols><col min="${min}" max="${max}" width="10"/></cols><sheetData>`,
+    ),
+  );
+  return zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+}
+
+describe('Excel preview column loading limits', () => {
+  it.each([
+    [1, 16385],
+    [1, 4294967295],
+    [4294967295, 4294967295],
+    [0, 1],
+    [2, 1],
+    [1, 0],
+  ])('rejects column range %i:%i before materialization', async (min, max) => {
+    const bytes = await columnWorkbook(min, max);
+    const Column = new ExcelJS.Workbook().addWorksheet('Probe').getColumn(1)
+      .constructor as { fromModel: () => unknown };
+    // Keep malicious fixtures safe even if the load guard regresses.
+    const expand = vi.spyOn(Column, 'fromModel').mockImplementation(() => {
+      throw new Error('Column materialization reached');
+    });
+    try {
+      await expect(loadExcelWorkbook(bytes)).rejects.toThrow(
+        'Column definitions are outside the worksheet',
+      );
+      expect(expand).not.toHaveBeenCalled();
+    } finally {
+      expand.mockRestore();
+    }
+  });
+
+  it('accepts all 16,384 legal columns and preserves merges', async () => {
+    const workbook = await loadExcelWorkbook(await columnWorkbook(1, 16384));
+    const sheet = workbook.worksheets[0]!;
+    expect(sheet.getColumn(16384).width).toBe(10);
+    expect(projectExcelSheet(workbook, 0)).toMatchObject({
+      columns: 1,
+      rows: [[{ text: 'Content' }]],
+    });
+    const merged = await loadExcelWorkbook(await mergedWorkbook([['A1:B2']]));
+    expect(merged.worksheets[0]!.getCell('B2').master.address).toBe('A1');
+  });
+});
+
 describe('Excel preview merge loading limits', () => {
   it.each<[string, string[][], string]>([
     ['one huge range', [['A1:XFD1048576']], 'Merged ranges are too large'],

@@ -103,45 +103,62 @@ const mergeBudgets = new WeakMap<
   ExcelJS.Workbook,
   { cells: number; count: number }
 >();
-let mergeGuardInstalled = false;
+let loadGuardInstalled = false;
 
-function installMergeGuard() {
-  if (mergeGuardInstalled) return;
-  // ExcelJS 4.4.0 expands merges before load resolves; this private hook must
-  // stay covered by load tests when upgrading. Guard only preview workbooks.
+function installLoadGuard() {
+  if (loadGuardInstalled) return;
+  // ExcelJS 4.4.0 expands columns before merges in this setter. Validate both
+  // before allocation, only for preview workbooks; recheck the hook on upgrades.
   const prototype = Object.getPrototypeOf(
     new ExcelJS.Workbook().addWorksheet('guard'),
-  ) as {
-    _parseMergeCells(this: Worksheet, model: { mergeCells?: string[] }): void;
-  };
-  const parseMergeCells = prototype._parseMergeCells;
-  prototype._parseMergeCells = function (model) {
-    const budget = mergeBudgets.get(this.workbook);
-    if (budget) {
-      const ranges = model.mergeCells ?? [];
-      budget.count += ranges.length;
-      if (budget.count > MAX_EXCEL_PREVIEW_MERGES)
-        throw new RangeError('Too many merged ranges to preview.');
-      for (const range of ranges) {
-        const parts = range.split(':');
-        if (parts.length > 2) throw new Error('Invalid merged range.');
-        const a = address(parts[0]!);
-        const b = address(parts[1] ?? parts[0]!);
-        budget.cells +=
-          (Math.abs(b.row - a.row) + 1) * (Math.abs(b.column - a.column) + 1);
-        if (budget.cells > MAX_EXCEL_PREVIEW_MERGED_CELLS)
-          throw new RangeError('Merged ranges are too large to preview.');
+  );
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, 'model')!;
+  const setModel = descriptor.set!;
+  Object.defineProperty(prototype, 'model', {
+    ...descriptor,
+    set(
+      this: Worksheet,
+      model: { cols?: { min: number; max: number }[]; mergeCells?: string[] },
+    ) {
+      const budget = mergeBudgets.get(this.workbook);
+      if (budget) {
+        for (const column of model.cols ?? []) {
+          if (
+            !Number.isInteger(column.min) ||
+            !Number.isInteger(column.max) ||
+            column.min < 1 ||
+            column.max < column.min ||
+            column.max > 16_384
+          )
+            throw new RangeError(
+              'Column definitions are outside the worksheet.',
+            );
+        }
+        const ranges = model.mergeCells ?? [];
+        budget.count += ranges.length;
+        if (budget.count > MAX_EXCEL_PREVIEW_MERGES)
+          throw new RangeError('Too many merged ranges to preview.');
+        for (const range of ranges) {
+          const parts = range.split(':');
+          if (parts.length > 2) throw new Error('Invalid merged range.');
+          const a = address(parts[0]!);
+          const b = address(parts[1] ?? parts[0]!);
+          budget.cells +=
+            (Math.abs(b.row - a.row) + 1) * (Math.abs(b.column - a.column) + 1);
+          if (budget.cells > MAX_EXCEL_PREVIEW_MERGED_CELLS)
+            throw new RangeError('Merged ranges are too large to preview.');
+        }
       }
-    }
-    parseMergeCells.call(this, model);
-  };
-  mergeGuardInstalled = true;
+      setModel.call(this, model);
+    },
+  });
+  loadGuardInstalled = true;
 }
 
 export async function loadExcelWorkbook(
   data: ArrayBuffer,
 ): Promise<ExcelJS.Workbook> {
-  installMergeGuard();
+  installLoadGuard();
   const workbook = new ExcelJS.Workbook();
   mergeBudgets.set(workbook, { cells: 0, count: 0 });
   try {

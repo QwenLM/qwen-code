@@ -306,8 +306,8 @@ export function normalizeRepositoryUrl(repository) {
 
 /**
  * Produce fallback license text for packages that declare a known SPDX
- * license but ship no license file. Currently only MIT is covered, as it is
- * the only such declaration in the dependency graph.
+ * license but ship no license file. Only exact MIT declarations use this
+ * fallback; bundled packages with other licenses retain their original texts.
  *
  * @param {unknown} license - The `license` field from package.json
  * @param {unknown} author - The `author` field from package.json
@@ -405,6 +405,13 @@ export async function collectDependencies(
   }
 
   for (const depName of Object.keys(manifest.dependencies ?? {})) {
+    // Web Shell uses ExcelJS's prebuilt browser entry. These Node-only branches
+    // are not in that bundle; its actual embedded packages are inventoried below.
+    if (
+      packageName === 'exceljs' &&
+      ['archiver', 'unzipper', 'tmp'].includes(depName)
+    )
+      continue;
     await collectDependencies(depName, dir, dependenciesMap, visitedDirs);
   }
 }
@@ -457,15 +464,27 @@ async function main() {
 
     const dependencyEntries = Array.from(allDependencies.values());
 
-    const licensePromises = dependencyEntries.map(({ name, version, dir }) =>
-      getDependencyLicense(name, version, dir),
-    );
-
-    const dependencyLicenses = await Promise.all(licensePromises);
     const exceljs = dependencyEntries.find(({ name }) => name === 'exceljs');
-    if (exceljs) {
-      dependencyLicenses.push(...(await getExceljsBrowserNotices(exceljs.dir)));
-    }
+    const browserLicenses = exceljs
+      ? await getExceljsBrowserNotices(exceljs.dir)
+      : [];
+    const bundledLicenses = new Map(
+      browserLicenses.map((license) => [
+        `${license.name}@${license.version}`,
+        license,
+      ]),
+    );
+    const licensePromises = dependencyEntries.map(
+      ({ name, version, dir }) =>
+        bundledLicenses.get(`${name}@${version}`) ??
+        getDependencyLicense(name, version, dir),
+    );
+    const dependencyLicenses = [
+      ...(await Promise.all(licensePromises)),
+      ...browserLicenses.filter(
+        ({ name, version }) => !allDependencies.has(`${name}@${version}`),
+      ),
+    ];
 
     let noticeText =
       'This file contains third-party software notices and license terms.\n\n';

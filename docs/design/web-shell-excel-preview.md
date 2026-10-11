@@ -82,14 +82,16 @@ a hard memory sandbox. Before ExcelJS expands merges, reject workbooks with more
 than 100,000 merged cells in total or 10,000 merged ranges across all worksheets.
 These separate load-time budgets include off-screen sheets and prevent compact
 merge declarations from allocating unbounded cells or doing unbounded pairwise
-intersection checks. A worker-local hook wraps ExcelJS 4.4.0's private
-`_parseMergeCells`, applies only to registered preview workbooks, and retains
+intersection checks. Before column materialization, reject non-integer, reversed,
+or out-of-grid column definitions (valid columns are 1–16,384). A worker-local
+hook wraps ExcelJS 4.4.0's worksheet `model` setter, validates columns and merges
+before calling the original setter, applies only to registered preview workbooks, and retains
 separate budgets for concurrent loads. Keep the exact ExcelJS version pinned and
 revalidate this hook on upgrades. Invalid merge addresses fail closed. Rejection
 keeps the original downloadable. These guards do not bound general ZIP expansion
-or non-merge workbook memory. Download retains the existing separate file-size policy.
+or general workbook memory. Download retains the existing separate file-size policy.
 
-ExcelJS's prebuilt browser bundle includes packages outside its runtime dependency graph. Supplement the extension notices with original license texts for those embedded packages, verified against the pinned sourcemap sources. Notice generation checks the bundle hash and version so an upgrade requires reviewing this inventory.
+ExcelJS's prebuilt browser bundle includes packages outside its runtime dependency graph. Record original license texts for all 72 embedded dependency paths (68 package names), with source fingerprints and matching published versions, including nested copies and the original upstream saxes license omitted from its tarball. Source-identical releases cannot be distinguished from the bundle alone. Keep the ordinary dependency walk for nested distributions such as JSZip, but omit ExcelJS's Node-only archiver, unzipper, and tmp branches because the only production importer uses its browser entry. Other consumers of those packages remain included. Notice generation checks the browser entry, bundle hash and version so an upgrade requires reviewing this inventory; tests verify each source path and complete license body.
 
 ## Affected areas
 
@@ -118,7 +120,7 @@ still receive the download fallback. Verify bounded tabs with thousands of
 worksheets, navigation across groups, six-digit row numbers in a wide font,
 independent download failures, and sparse distant formatting without hole scans.
 
-Compare the browser sourcemap package inventory with generated notice headers and verify the supplementary original license texts are included. Reject a changed ExcelJS bundle until its inventory is refreshed.
+Reject zero, reversed, and out-of-grid column definitions before allocation, including a compact 4,294,967,295-column declaration; accept the valid 16,384-column boundary. Verify error, download, and reopening in the built browser. Compare every browser sourcemap dependency path and fingerprint with its versioned notice and complete original license body. Reject a changed ExcelJS version, browser entry, or bundle until its inventory is refreshed. Verify the logged notice count matches the emitted entries.
 
 ## Open questions
 

@@ -637,57 +637,71 @@ test('opens persisted attachment from message and Sources, then restores it afte
   expect(mock.textReads).toEqual([]);
 });
 
-test('rejects excessive merged area without losing the original download or crashing on reopen', async ({
-  page,
-}, info) => {
-  const zip = await JSZip.loadAsync(await workbookBytes());
-  const path = 'xl/worksheets/sheet1.xml';
-  const xml = await zip.file(path)!.async('string');
-  zip.file(
-    path,
-    xml.replace(
-      /<mergeCells[^>]*>[\s\S]*?<\/mergeCells>/,
-      '<mergeCells><mergeCell ref="A1:J10001"/></mergeCells>',
-    ),
-  );
-  const bytes = await zip.generateAsync({
-    type: 'nodebuffer',
-    compression: 'DEFLATE',
-  });
-  const scenario = createWebShellDaemonScenario({
-    events: [
-      toolCallEvent(
-        'make-workbook',
-        'Artifact',
-        { file_path: workbookPath },
-        { id: 1 },
+for (const kind of [
+  'excessive merged area',
+  'out-of-grid column definitions',
+]) {
+  test(`rejects ${kind} without losing the original download or crashing on reopen`, async ({
+    page,
+  }, info) => {
+    const zip = await JSZip.loadAsync(await workbookBytes());
+    const path = 'xl/worksheets/sheet1.xml';
+    const xml = await zip.file(path)!.async('string');
+    zip.file(
+      path,
+      kind === 'excessive merged area'
+        ? xml.replace(
+            /<mergeCells[^>]*>[\s\S]*?<\/mergeCells>/,
+            '<mergeCells><mergeCell ref="A1:J10001"/></mergeCells>',
+          )
+        : xml.replace(
+            '<sheetData>',
+            '<cols><col min="1" max="4294967295" width="10"/></cols><sheetData>',
+          ),
+    );
+    const bytes = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+    });
+    const scenario = createWebShellDaemonScenario({
+      events: [
+        toolCallEvent(
+          'make-workbook',
+          'Artifact',
+          { file_path: workbookPath },
+          { id: 1 },
+        ),
+        turnCompleteEvent('report', { id: 2 }),
+      ],
+      artifacts: [artifact()],
+    });
+    scenario.capabilities.features.push('session_artifacts');
+    const mock = await install(page, info, scenario, bytes);
+    await mock.open();
+    await page
+      .locator(
+        '[data-web-shell-message-list] [title="Quarterly workbook"] > button',
+      )
+      .click();
+    const preview = page.locator(previewSelector);
+    await expect(preview.getByRole('alert')).toContainText('too complex');
+    await expect(preview.getByRole('table')).toHaveCount(0);
+    const downloadPromise = page.waitForEvent('download');
+    await preview.getByRole('link', { name: /Download/i }).click();
+    expect(await readFile((await (await downloadPromise).path())!)).toEqual(
+      bytes,
+    );
+    await page.reload();
+    await expect(preview.getByRole('alert')).toContainText('too complex');
+    await page.screenshot({
+      path: info.outputPath(
+        kind === 'excessive merged area'
+          ? 'excel-merge-limit-mock-daemon.png'
+          : 'excel-column-limit-mock-daemon.png',
       ),
-      turnCompleteEvent('report', { id: 2 }),
-    ],
-    artifacts: [artifact()],
+    });
   });
-  scenario.capabilities.features.push('session_artifacts');
-  const mock = await install(page, info, scenario, bytes);
-  await mock.open();
-  await page
-    .locator(
-      '[data-web-shell-message-list] [title="Quarterly workbook"] > button',
-    )
-    .click();
-  const preview = page.locator(previewSelector);
-  await expect(preview.getByRole('alert')).toContainText('too complex');
-  await expect(preview.getByRole('table')).toHaveCount(0);
-  const downloadPromise = page.waitForEvent('download');
-  await preview.getByRole('link', { name: /Download/i }).click();
-  expect(await readFile((await (await downloadPromise).path())!)).toEqual(
-    bytes,
-  );
-  await page.reload();
-  await expect(preview.getByRole('alert')).toContainText('too complex');
-  await page.screenshot({
-    path: info.outputPath('excel-merge-limit-mock-daemon.png'),
-  });
-});
+}
 
 test('retains all content when peripheral empty cells carry formatting', async ({
   page,

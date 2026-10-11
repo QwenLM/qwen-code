@@ -27,7 +27,7 @@ describe('ExcelJS browser bundle notices', () => {
   );
   const exceljsDir = path.dirname(require.resolve('exceljs/package.json'));
 
-  it('ships original supplementary licenses for every embedded package', async () => {
+  it('ships original licenses for each embedded source path and version', async () => {
     const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
@@ -40,20 +40,18 @@ describe('ExcelJS browser bundle notices', () => {
           'utf-8',
         ),
       );
-      const packages = new Set(
-        sourceMap.sources
-          .filter((source) => source.includes('node_modules/'))
-          .map((source) => {
-            const tail = source.split('node_modules/').at(-1);
-            return tail
-              .split('/')
-              .slice(0, tail.startsWith('@') ? 2 : 1)
-              .join('/');
-          }),
-      );
-      expect(packages.size).toBe(68);
-      for (const name of packages) {
-        expect(notices).toContain(`\n${name}@`);
+      const sourcesByPackage = new Map();
+      for (const [index, source] of sourceMap.sources.entries()) {
+        if (!source.includes('node_modules/')) continue;
+        const tail = source.split('node_modules/').at(-1);
+        const name = tail
+          .split('/')
+          .slice(0, tail.startsWith('@') ? 2 : 1)
+          .join('/');
+        const prefix = source.slice(0, source.length - tail.length) + name;
+        const files = sourcesByPackage.get(prefix) ?? [];
+        files.push([source, sourceMap.sourcesContent[index]]);
+        sourcesByPackage.set(prefix, files);
       }
       const inventory = JSON.parse(
         await fs.readFile(
@@ -67,12 +65,43 @@ describe('ExcelJS browser bundle notices', () => {
       expect(createHash('sha256').update(mapBytes).digest('hex')).toBe(
         inventory.sourceMapSha256,
       );
+      expect(inventory.packages).toHaveLength(72);
+      expect(
+        new Set(inventory.packages.map(({ sourcePrefix }) => sourcePrefix)),
+      ).toEqual(new Set(sourcesByPackage.keys()));
       for (const dep of inventory.packages) {
+        const hash = createHash('sha256');
+        for (const [source, content] of sourcesByPackage
+          .get(dep.sourcePrefix)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+          hash.update(source).update('\0').update(content).update('\0');
+        }
+        expect(hash.digest('hex')).toBe(dep.sourceSha256);
+        expect(() => new URL(dep.repository)).not.toThrow();
         expect(notices).toContain(
           `${dep.name}@${dep.version}\n(${dep.repository})\n\n${dep.license}`,
         );
         expect(dep.license).toMatch(/Copyright|copyright/);
+        expect(dep.license).not.toContain('License text not found.');
       }
+      expect(notices).not.toContain('License text not found.');
+      const noticeCount = [
+        ...notices.matchAll(/^={60}\n(?=[^\n]+@[^\n]+\n\()/gm),
+      ].length;
+      expect(log).toHaveBeenCalledWith(`Total dependencies: ${noticeCount}`);
+      for (const key of [
+        'saxes@5.0.1',
+        'safer-buffer@2.1.2',
+        'jszip@3.10.1',
+        'buffer@5.2.1',
+        'inherits@2.0.3',
+      ]) {
+        expect(notices).toContain(`\n${key}\n`);
+      }
+      expect(
+        inventory.packages.find(({ name }) => name === 'browserify-rsa')
+          .repository,
+      ).toBe('https://github.com/crypto-browserify/browserify-rsa');
       expect(
         inventory.packages
           .filter(({ name }) => name === 'bn.js')
@@ -99,7 +128,7 @@ describe('ExcelJS browser bundle notices', () => {
         path.join(exceljsDir, 'dist/exceljs.min.js'),
       );
       await fs.writeFile(path.join(dir, 'dist/exceljs.min.js'), bundle);
-      expect(await getExceljsBrowserNotices(dir)).toHaveLength(41);
+      expect(await getExceljsBrowserNotices(dir)).toHaveLength(72);
       await fs.appendFile(
         path.join(dir, 'dist/exceljs.min.js'),
         '\n// changed',
@@ -108,6 +137,13 @@ describe('ExcelJS browser bundle notices', () => {
         'refresh its bundled license inventory',
       );
       await fs.writeFile(path.join(dir, 'dist/exceljs.min.js'), bundle);
+      await fs.writeFile(
+        path.join(dir, 'package.json'),
+        JSON.stringify({ ...manifest, browser: './dist/exceljs.js' }),
+      );
+      await expect(getExceljsBrowserNotices(dir)).rejects.toThrow(
+        'refresh its bundled license inventory',
+      );
       await fs.writeFile(
         path.join(dir, 'package.json'),
         JSON.stringify({ ...manifest, version: '4.5.0' }),
@@ -291,6 +327,25 @@ describe('collectDependencies', () => {
         dir: path.join(core, 'node_modules', 'nested'),
       },
     ]);
+  });
+
+  it('excludes only ExcelJS Node-only branches while retaining other consumers', async () => {
+    await writePackage(path.join(root, 'node_modules', 'exceljs'), {
+      name: 'exceljs',
+      version: '4.4.0',
+      dependencies: { archiver: '*', unzipper: '*', tmp: '*', jszip: '*' },
+    });
+    for (const name of ['archiver', 'unzipper', 'tmp', 'jszip']) {
+      await writePackage(path.join(root, 'node_modules', name), {
+        name,
+        version: '1.0.0',
+      });
+    }
+    const dependencies = new Map();
+    await collectDependencies('exceljs', root, dependencies, new Set());
+    expect([...dependencies.keys()]).toEqual(['exceljs@4.4.0', 'jszip@1.0.0']);
+    await collectDependencies('archiver', root, dependencies, new Set());
+    expect(dependencies.has('archiver@1.0.0')).toBe(true);
   });
 
   it('resolves each dependency from the nearest node_modules above it', async () => {
