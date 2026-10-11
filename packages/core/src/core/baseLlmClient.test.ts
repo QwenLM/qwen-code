@@ -318,6 +318,22 @@ describe('BaseLlmClient', () => {
 
       expect(await client.generateJson(defaultOptions)).toEqual(expected);
     });
+
+    it('recovers the object from prose when no tool call is returned', async () => {
+      // #13807: an endpoint configured with supportsForcedToolChoice: false
+      // receives no tool_choice=required and may apply the tool schema as a
+      // generation guide, answering with the object as plain text. The loose
+      // parser is the contract that keeps such side queries useful.
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('Here you go:\n{"color":"teal","count":3}'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      expect(await client.generateJson(defaultOptions)).toEqual({
+        color: 'teal',
+        count: 3,
+      });
+    });
   });
 
   describe('generateJson - Error Handling', () => {

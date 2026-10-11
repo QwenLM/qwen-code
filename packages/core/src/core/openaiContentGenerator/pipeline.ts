@@ -1333,8 +1333,14 @@ export class ContentGenerationPipeline {
       // classifier's respond_in_schema) can force the model to emit a tool
       // call instead of free-texting. Without this, thinking-heavy models
       // may consume the tiny output budget on reasoning and skip the tool.
+      // Endpoints that reject forced selection declare
+      // supportsForcedToolChoice: false, and the field is omitted (the OpenAI
+      // default) instead of shipping 'required' (#13807).
       const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
-      if (fcMode === 'ANY') {
+      if (
+        fcMode === 'ANY' &&
+        this.contentGeneratorConfig.supportsForcedToolChoice !== false
+      ) {
         (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
           'required';
       } else if (fcMode === 'NONE') {

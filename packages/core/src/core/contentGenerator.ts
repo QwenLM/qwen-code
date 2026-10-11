@@ -186,6 +186,10 @@ export type ContentGeneratorConfig = {
   // When true, the model rejects enable_thinking=false with a 400 error
   // (e.g. qwen3.8-max-preview), so thinking must never be disabled on the wire.
   thinkingMandatory?: boolean;
+  // When false, the endpoint rejects forced tool selection (`tool_choice:
+  // "required"`), so the pipeline must not force a tool call for structured
+  // side queries. Default: true (force, current behavior). See #13807.
+  supportsForcedToolChoice?: boolean;
   // Supported input modalities. Unsupported media types are replaced with text
   // placeholders. Leave undefined to use automatic detection from model name.
   modalities?: InputModalities;

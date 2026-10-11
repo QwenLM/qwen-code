@@ -2147,6 +2147,17 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
+          supportsForcedToolChoice: {
+            type: 'boolean',
+            label: 'Supports Forced Tool Choice',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Whether the provider supports forcing tool choice (tool_choice: "required"). Set false for endpoints that reject forced tool choice, such as Apple Foundation Models served through `fm serve`.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
         },
       },
     },

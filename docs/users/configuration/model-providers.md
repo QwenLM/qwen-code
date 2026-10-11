@@ -740,6 +740,20 @@ The configuration resolution follows a strict layering model with one crucial ru
 | 3        | `settings.model.generationConfig`             | Only used for **Runtime Models** (when no provider model is selected)                                    |
 | 4        | Content-generator defaults                    | Provider-specific defaults (e.g., OpenAI vs Gemini) - only for Runtime Models                            |
 
+### Forced tool choice opt-out
+
+Some endpoints reject `tool_choice: "required"` even though Qwen Code's agent loop needs to force a tool call. Apple Foundation Models served through `fm serve` is one such endpoint. Set `supportsForcedToolChoice` to `false` on the provider entry that targets it:
+
+```json
+{
+  "generationConfig": {
+    "supportsForcedToolChoice": false
+  }
+}
+```
+
+The field defaults to `true`. For Runtime Models it can also be set under `model.generationConfig` in settings. The opt-out applies to the Chat Completions wire only: it does not affect `wireApi: 'responses'` or the Anthropic wire (a documented non-goal).
+
 ### Dynamic values in `customHeaders`
 
 A `customHeaders` value may contain the placeholder `${session_id}`, which is
