@@ -44,6 +44,17 @@ The existing placement guard may be recreated for a qualified missing guard.
 If an ambient caller catches a later failure and commits, that metadata can
 remain; it does not establish successful admission or a file effect.
 
+## Risks and scope
+
+Ordinary `apply` and `prepareAdmission` now queue behind the tenant-wide
+placement guard, including standalone HTTP calls. A long placement holder can
+therefore delay publications in other Workspaces of the same tenant.
+
+K1/CSI mutations now acquire placement through the shared guard before the
+existing retirement check. This first acquisition has no statement timeout,
+so InnoDB's `innodb_lock_wait_timeout` bounds the lock wait rather than the
+retirement path's 10-second query timeout.
+
 ## Validation and acceptance
 
 Use a fixed main baseline and candidate with the same concurrency schedules.
@@ -56,6 +67,14 @@ as well as after rollback. Record the ordinary ambient receipt's executed SQL
 to check placement precedes retention, and preserve its exact replay and
 outcome bytes. Keep the ordinary missing-Session reservation and its exact
 replay available.
+
+Under `mysql-integration`, contend with a real same-tenant ordinary Session
+authorization holding placement. Cover ambient receipt, ambient admission plus
+receipt, standalone admission, standalone renew and ambient renew. Wait for
+InnoDB to report the competing transaction's lock wait before releasing the
+placement owner. Reversing placement and retention in standalone `apply` or
+`prepareAdmission` must fail these tests. Receipt cases also preserve exact
+replay and outcome bytes.
 
 Run the affected publication/admission tests, static Java checks, packaging,
 root build/typecheck, independent database verification and two clean full-diff

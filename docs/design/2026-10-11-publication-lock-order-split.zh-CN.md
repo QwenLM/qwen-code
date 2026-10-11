@@ -37,6 +37,16 @@ Session。过期或冲突的目标应拒绝，不能操作另一条 publication�
 placement guard 时允许重建。如果外层调用者捕获后续失败并提交事务，此
 metadata 可能保留；这不证明 admission 成功，也不证明发生了文件效果。
 
+## 风险和范围
+
+普通 `apply` 和 `prepareAdmission` 现在会等待租户级 placement guard，
+包括独立事务的 HTTP 调用。因此，长时间持有 placement 锁也会延迟同一租户
+其他 Workspace 的 publication。
+
+K1/CSI mutation 现在先通过共享 guard 获取 placement，再执行已有退役检查。
+第一次获取没有 statement timeout，因此锁等待由 InnoDB 的
+`innodb_lock_wait_timeout` 限制，而不是退役路径的 10 秒 query timeout。
+
 ## 验证和验收
 
 用固定主干基线和候选执行相同并发调度。确认竞争 placement 的事务不会与
@@ -46,6 +56,13 @@ Workspace、generation 和 provisioner 冲突会在选择 placement 前拒绝，
 在拒绝的事务内以及回滚后检查 guard 和 producer 状态。记录普通外层 receipt
 实际执行的 SQL，检查 placement 先于 retention，并保留精确重放和 outcome
 字节。普通缺少 Session 的 reservation 和精确重放继续可用。
+
+在 `mysql-integration` 下，与持有 placement 的同租户真实普通 Session
+authorization 竞争。覆盖外层 receipt、同一外层事务的 admission 加 receipt、
+独立 admission、独立 renew 和外层 renew。在 InnoDB 报告竞争事务的锁等待后
+才释放 placement 持有者。将独立 `apply` 或 `prepareAdmission` 中的
+placement 与 retention 顺序颠倒时，这些测试必须失败。Receipt 用例也保留
+精确重放和 outcome 字节。
 
 执行受影响 publication/admission 测试、Java 静态检查、打包、根目录
 build/typecheck、独立数据库验证和两次干净的完整 diff 自审。报告实际数据库
