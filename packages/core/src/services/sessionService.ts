@@ -4774,18 +4774,25 @@ function remapSystemPayloadForFork(
     const payload = record.systemPayload as
       | { uiEvent?: Record<string, unknown> }
       | undefined;
-    if (payload?.uiEvent?.['event.name'] === 'request_lifecycle') {
+    if (
+      payload?.uiEvent?.['event.name'] === 'request_lifecycle' ||
+      payload?.uiEvent?.['event.name'] === 'tool_lifecycle'
+    ) {
       const event = payload.uiEvent;
       return {
         ...payload,
         uiEvent: {
           ...event,
           sessionId: newSessionId,
-          promptId:
-            typeof event['promptId'] === 'string' &&
-            event['promptId'].startsWith(`${sourceSessionId}#`)
-              ? `${newSessionId}${event['promptId'].slice(sourceSessionId.length)}`
-              : event['promptId'],
+          ...(event['event.name'] === 'request_lifecycle'
+            ? {
+                promptId:
+                  typeof event['promptId'] === 'string' &&
+                  event['promptId'].startsWith(`${sourceSessionId}#`)
+                    ? `${newSessionId}${event['promptId'].slice(sourceSessionId.length)}`
+                    : event['promptId'],
+              }
+            : {}),
         },
       } as unknown as ChatRecord['systemPayload'];
     }
@@ -4929,7 +4936,11 @@ export function replayUiTelemetryFromConversation(
       | UiTelemetryRecordPayload
       | undefined;
     const uiEvent = payload?.uiEvent;
-    if (uiEvent && uiEvent['event.name'] !== 'request_lifecycle') {
+    if (
+      uiEvent &&
+      uiEvent['event.name'] !== 'request_lifecycle' &&
+      uiEvent['event.name'] !== 'tool_lifecycle'
+    ) {
       uiTelemetryService.addEvent(uiEvent as UiEvent, sessionId);
     }
   }

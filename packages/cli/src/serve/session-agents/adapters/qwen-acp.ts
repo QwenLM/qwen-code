@@ -458,6 +458,12 @@ export function createQwenAcpAdapter(
               update.sessionUpdate === 'tool_call_update') &&
             update.toolCallId
           ) {
+            if (
+              update._meta?.['toolLifecycle'] !== undefined &&
+              update.status === undefined &&
+              update.content === undefined
+            )
+              continue;
             if (update.sessionUpdate === 'tool_call') segmentText = '';
             const previous = steps.get(update.toolCallId);
             const step: SessionAgentStep = {
@@ -627,6 +633,7 @@ export function createQwenAcpAdapter(
 }
 
 interface SessionUpdateLike {
+  _meta?: Record<string, unknown>;
   sessionUpdate?: string;
   content?: { type?: string; text?: string };
   title?: string | null;

@@ -351,6 +351,7 @@ function writeDistPackageJson(rootDir, distDir) {
       'fzfWorker.js',
       'glob-search-worker.js',
       'codeModeHost.js',
+      'mod-worker.js',
       'sandboxBwrapRelay.js',
       'sandboxLandlockRelay.js',
       'sandboxFileWorker.js',

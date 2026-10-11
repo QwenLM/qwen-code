@@ -101,6 +101,15 @@ class ManagedAgentPropertiesTest {
                         .hasRootCauseMessage("Hosted Workspace files require"
                                 + " a supported Harness, Session Store and Session-isolated"
                                 + " local-process Broker with Workspace mounts"));
+        // A definition Session publishes instructions through the Session
+        // Store at Harness create, so the Harness implies the Store even
+        // when Workspace files are off.
+        context.withPropertyValues(
+                "qwen.managed-agent.harness.enabled=true",
+                "qwen.managed-agent.session-store.enabled=false")
+                .run(started -> assertThat(started).hasFailed()
+                        .getFailure().hasRootCauseInstanceOf(IllegalStateException.class)
+                        .hasRootCauseMessage("Hosted Harness requires the Managed Session Store"));
     }
 
     @Configuration(proxyBeanMethods = false)
@@ -288,6 +297,8 @@ class ManagedAgentPropertiesTest {
                 p -> p.getRuntimeBroker().setEnabled(false),
                 p -> p.getRuntimeBroker().setProvisioner("kubernetes"),
                 p -> p.getRuntimeBroker().setIsolationClass("workspace"),
+                // A merge waits for the child's close, which only a durable Broker runs.
+                p -> p.getRuntimeBroker().setDurableLocalProcess(false),
                 p -> p.getRuntimeBroker().setWorkspaceMounts(List.of()));
         for (Consumer<ManagedAgentProperties> change : invalid) {
             ManagedAgentProperties properties = new ManagedAgentProperties();

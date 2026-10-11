@@ -1736,6 +1736,283 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void reacquireSettlesAProvablyExitedBackgroundProcess() throws Exception {
+        // #13533 B1: a natural exit before a Broker restart must still
+        // settle from evidence when the Session is re-acquired — the scan
+        // otherwise skips PREPARED `:process` rows forever.
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "bg-exit");
+        String processId = admitDetachedBackgroundProcess(bindings, sessions,
+                executions, recovery, "call");
+
+        Map<String, Object> exited = new LinkedHashMap<>();
+        exited.put("operationId", "call");
+        exited.put("state", "exited");
+        exited.put("evidence", Map.of("exitCode", 0));
+        FakeTransport transport = new FakeTransport();
+        transport.controlResult = CompletableFuture.completedFuture(exited);
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                readyAdoptionProvisioner(), transport, bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            join(service.acquire(recovery.session.getSession()
+                    .getHarnessSessionId(), recovery.session
+                    .getRuntimeSessionId(), "bootstrap"));
+            ToolExecutionRecord settled = awaitExecution(executions,
+                    processId, ToolExecutionRecord.State.SETTLED);
+            assertEquals("exited", settled.getResult().get("state"));
+            assertTrue(transport.controls.stream().anyMatch(operation ->
+                    "shell-status".equals(operation.get("kind"))
+                            && processId.equals(operation.get("operationId"))));
+        }
+    }
+
+    @Test
+    void reacquireKeepsAnUnprovableBackgroundProcessHold() throws Exception {
+        // The same scan arm must never settle what the owner cannot prove:
+        // an unknown answer keeps the row and its hold.
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "bg-hold");
+        String processId = admitDetachedBackgroundProcess(bindings, sessions,
+                executions, recovery, "call");
+
+        FakeTransport transport = new FakeTransport();
+        transport.controlResult = CompletableFuture.completedFuture(
+                Map.of("operationId", "call", "state", "unknown"));
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                readyAdoptionProvisioner(), transport, bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            join(service.acquire(recovery.session.getSession()
+                    .getHarnessSessionId(), recovery.session
+                    .getRuntimeSessionId(), "bootstrap"));
+            await(() -> transport.controls.stream().anyMatch(operation ->
+                    "shell-status".equals(operation.get("kind"))
+                            && processId.equals(operation.get("operationId"))));
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    executions.findByExecutionCallId(processId).getState());
+            assertEquals("runtime_session_busy",
+                    failure(service.release(recovery.session.getSession()
+                            .getHarnessSessionId(), recovery.session
+                            .getRuntimeSessionId())).getCode());
+        }
+    }
+
+    @Test
+    void reacquireNeverFailsAnAcquireOnAnObservationFailure() throws Exception {
+        // The observation is best-effort maintenance: a broken control
+        // channel keeps the row's hold and must not fail the acquire.
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "bg-fault");
+        String processId = admitDetachedBackgroundProcess(bindings, sessions,
+                executions, recovery, "call");
+
+        FakeTransport transport = new FakeTransport();
+        transport.controlError = new AssertionError("control down");
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                readyAdoptionProvisioner(), transport, bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            join(service.acquire(recovery.session.getSession()
+                    .getHarnessSessionId(), recovery.session
+                    .getRuntimeSessionId(), "bootstrap"));
+            await(() -> transport.controls.stream().anyMatch(operation ->
+                    "shell-status".equals(operation.get("kind"))
+                            && processId.equals(operation.get("operationId"))));
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    executions.findByExecutionCallId(processId).getState());
+        }
+    }
+
+    @Test
+    void reacquireSkipsABackgroundRowWhoseInvocationIsGone() throws Exception {
+        // A row whose start invocation is not in the repository is nobody's
+        // to observe: the scan skips it without asking the owner anything.
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "bg-orphan");
+        bindings.releaseOperation(recovery.binding.getBindingId(), "recovery",
+                recovery.binding.getOperationGeneration());
+        String harness = recovery.session.getSession().getHarnessSessionId();
+        String runtimeSession = recovery.session.getRuntimeSessionId();
+        bindings.admitExecution(sessions, executions,
+                ToolExecutionRecord.prepared("orphan:process", "orphan:process",
+                        recovery.binding.getBindingId(),
+                        recovery.binding.getGeneration(), harness,
+                        runtimeSession, "turn", "call", "digest",
+                        Map.of("dispatchMode", "background_v3_process",
+                                "processOf", "missing", "sessionId",
+                                runtimeSession, "promptId", "turn", "callId",
+                                "call", "argsDigest", "digest")));
+
+        FakeTransport transport = new FakeTransport();
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                readyAdoptionProvisioner(), transport, bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            join(service.acquire(harness, runtimeSession, "bootstrap"));
+            Thread.sleep(200);
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    executions.findByExecutionCallId("orphan:process")
+                            .getState());
+            assertTrue(transport.controls.stream().noneMatch(operation ->
+                    "shell-status".equals(operation.get("kind"))));
+        }
+    }
+
+    @Test
+    void reacquireNeverWaitsOnABackgroundObservation() throws Exception {
+        // The scan's observation is maintenance, not a gate: an acquire
+        // must complete while the observation's control is still in flight.
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "bg-async");
+        String processId = admitDetachedBackgroundProcess(bindings, sessions,
+                executions, recovery, "call");
+
+        Map<String, Object> exited = new LinkedHashMap<>();
+        exited.put("operationId", "call");
+        exited.put("state", "exited");
+        exited.put("evidence", Map.of("exitCode", 0));
+        FakeTransport transport = new FakeTransport();
+        transport.controlResult = CompletableFuture.completedFuture(exited);
+        transport.controlEntered = new CountDownLatch(1);
+        transport.continueControl = new CountDownLatch(1);
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                readyAdoptionProvisioner(), transport, bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            join(service.acquire(recovery.session.getSession()
+                    .getHarnessSessionId(), recovery.session
+                    .getRuntimeSessionId(), "bootstrap"));
+            assertTrue(transport.controlEntered.await(10,
+                    TimeUnit.SECONDS));
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    executions.findByExecutionCallId(processId).getState());
+            transport.continueControl.countDown();
+            awaitExecution(executions, processId,
+                    ToolExecutionRecord.State.SETTLED);
+        }
+    }
+
+    @Test
+    void releaseSettlesWhileAScanObservationIsInFlight() throws Exception {
+        // A scan observation outstanding at release must not hold
+        // activeControls past the sweep's own proof: the sweep settles the
+        // row and the release succeeds (#13830 review).
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "bg-overlap");
+        String processId = admitDetachedBackgroundProcess(bindings, sessions,
+                executions, recovery, "call");
+
+        Map<String, Object> exited = new LinkedHashMap<>();
+        exited.put("operationId", "call");
+        exited.put("state", "exited");
+        exited.put("evidence", Map.of("exitCode", 0));
+        FakeTransport transport = new FakeTransport();
+        AtomicInteger controlCalls = new AtomicInteger();
+        CompletableFuture<Object> neverAnswered = new CompletableFuture<>();
+        transport.controlHandler = operation ->
+                controlCalls.incrementAndGet() == 1
+                        ? neverAnswered
+                        : CompletableFuture.completedFuture(exited);
+        RuntimeScope scope = recovery.binding.getRequest().getScope();
+        try (var service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(scope),
+                readyAdoptionProvisioner(), transport, bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(10),
+                Duration.ofSeconds(10))) {
+            String harness = recovery.session.getSession()
+                    .getHarnessSessionId();
+            String runtimeSession = recovery.session.getRuntimeSessionId();
+            join(service.acquire(harness, runtimeSession, "bootstrap"));
+            await(() -> controlCalls.get() >= 1);
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    executions.findByExecutionCallId(processId).getState());
+            assertTrue(join(service.release(harness, runtimeSession)));
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    executions.findByExecutionCallId(processId).getState());
+        }
+    }
+
+    /** Seeds a settled-detached invocation plus its live `:process` row. */
+    private static String admitDetachedBackgroundProcess(
+            RuntimeBindingRepository bindings,
+            RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions,
+            RuntimeRecoveryContract.Fixture recovery, String callSuffix) {
+        bindings.releaseOperation(recovery.binding.getBindingId(), "recovery",
+                recovery.binding.getOperationGeneration());
+        String harness = recovery.session.getSession().getHarnessSessionId();
+        String runtimeSession = recovery.session.getRuntimeSessionId();
+        ToolExecutionRecord invocation = recovery.prepare(callSuffix);
+        Map<String, Object> detached = new LinkedHashMap<>();
+        detached.put("state", "exited");
+        detached.put("executionStatus", "success");
+        executions.settlePrepared(invocation, detached, Instant.now());
+        String invocationId = invocation.getExecutionCallId();
+        String processId = invocationId + ":process";
+        bindings.admitExecution(sessions, executions,
+                ToolExecutionRecord.prepared(processId, processId,
+                        recovery.binding.getBindingId(),
+                        recovery.binding.getGeneration(), harness,
+                        runtimeSession, "turn", callSuffix, "digest",
+                        Map.of("dispatchMode", "background_v3_process",
+                                "processOf", invocationId, "sessionId",
+                                runtimeSession, "promptId", "turn", "callId",
+                                callSuffix, "argsDigest", "digest")));
+        return processId;
+    }
+
+    private static RuntimeProvisioner readyAdoptionProvisioner() {
+        return new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+                    RuntimeResourceHandle handle, RuntimeLease lastLease) {
+                return CompletableFuture.completedFuture(
+                        RuntimeObservation.ready(handle,
+                                URI.create("http://127.0.0.1:2345"),
+                                seed.getProvisionalRuntimeId(),
+                                seed.getLeaseId(), seed.getEpoch()));
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+    }
+
+
+    @Test
     void releaseSettlesARunningBackgroundShellOnceTheStopProvesIt() throws Exception {
         String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"tail -f\",\"is_background\":true}}";
         String digest = "sha256:" + HexFormat.of().formatHex(
@@ -5612,6 +5889,15 @@ class RuntimeBrokerServiceTest {
             lastLease = lease;
             lastSession = session;
             return acquireResult;
+        }
+
+        @Override
+        public CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
+                RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+            return CompletableFuture.completedFuture(new RuntimeAttestation(
+                    lease.getRuntimeInstanceId(), seed.getGatewayIncarnation(),
+                    lease.getLeaseId(), lease.getEpoch(), request.getScope(),
+                    seed.getProvisionRequestId(), request.getStorageId()));
         }
 
         @Override

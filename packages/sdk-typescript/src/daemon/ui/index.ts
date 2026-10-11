@@ -167,3 +167,14 @@ export type {
   ExecutionLifecycleEntry,
   ExecutionLifecycleState,
 } from './execution-lifecycle.js';
+
+export {
+  createToolLifecycleState,
+  extractToolLifecycle,
+  reduceToolLifecycle,
+} from './tool-lifecycle.js';
+export type {
+  DaemonToolLifecycle,
+  ToolLifecycleEntry,
+  ToolLifecycleState,
+} from './tool-lifecycle.js';
