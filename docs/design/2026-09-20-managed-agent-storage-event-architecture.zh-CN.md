@@ -319,6 +319,15 @@ qwen:
 
 运行时不能按一次请求任意切换 MySQL/PG 或 MQ。切换需暂停写入、排空或保存检查点、迁移数据、核对序号与摘要，再切换并恢复；不能通过双跑工具或双写两个数据库模拟无损切换。
 
+### 10.1 P2 EventTransport 首选候选：RocketMQ LiteTopic
+
+设计基线注记（2026-10-10，issue [#13200](https://github.com/QwenLM/qwen-code/issues/13200)）：可选 P2 `EventTransport` 适配器的首选候选定为 **Apache RocketMQ LiteTopic（5.5.0+，RIP-83）**，对上文配置样例中未加限定的 `rocketmq` 条目作出限定。详细的后继设计——信封不变量、LiteTopic 与 Redis Streams 的对比、阶段计划与故障矩阵——见 [EventTransport：Managed Agent 控制面的 MQ 分发](2026-10-04-managed-agent-event-transport.zh-CN.md)。本注记只记录四点基线：
+
+1. **边界。** 事件接受路径不变：Session 序号、Turn 状态与 Harness 游标在单一 SQL 事务中提交，提交后直推 SSE（`ManagedAgentStore.publishAfterCommit`）。LiteTopic 只承载分发副本，不替代单事务原子性、writer fencing 或公开 Session 续传游标。
+2. **命中场景。** P2 多实例 SSE 节点通知；阶段 H4 父子 Session 间 durable messaging（Supervisor–Worker 按 TaskID 建 LiteTopic 的模式与之同构）；阶段 H5 Channels 的 outbox dispatch。经典 Topic 或泛 MQ 适配器不适合按 Session 建通道，LiteTopic 适合。注意 H4 的投递语义（at-least-once 加幂等 apply）不同于 P2 的临时通知扇出，H4 的排序与去重要求由 H4 契约确定而非继承自本基线——不得假定 P2 适配器配置原样适用于 H4。
+3. **前提。** RocketMQ 5.5.0+ 并开启 `enableLmq=true`、`enableMultiDispatch=true`、`storeType=defaultRocksDB`，部署 NameServer、Broker 与 Proxy。沿用第 1 节「不为 SSE 额外部署 MQ」的原则，接入以已有该版本的现成 RocketMQ 平台为条件。P2 门禁开启时，适配器必须在启动时校验这些 broker 能力，不匹配即 fail fast，而不是静默降级为经典 Topic——并入上文所述的启动能力校验。
+4. **明确不做。** 接受路径不引 MQ（P4 MQ-first 仍是第 12 节的远期门禁，需先完成持久化源日志）；P2 门禁开启前不动工；H4 传输选型等 H4 契约。
+
 ## 11. 故障语义
 
 | 故障点                         | 处理与可承诺的边界                                                        |

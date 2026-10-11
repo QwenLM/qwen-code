@@ -147,7 +147,7 @@ describe('Managed Runtime container entry', () => {
     vi.spyOn(ManagedCsiMount.prototype, 'resolve').mockResolvedValue(
       boot.context.mountRoot,
     );
-    mockEphemeralListen();
+    const listen = mockEphemeralListen();
     const publicationInstall = vi.spyOn(
       RemoteShellResultPublisher.prototype,
       'install',
@@ -160,6 +160,7 @@ describe('Managed Runtime container entry', () => {
       true,
     );
     try {
+      expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');
       const binding = {
         tenantId: boot.context.tenantId,
         workspaceId: boot.context.workspaceId,

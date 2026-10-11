@@ -666,8 +666,18 @@ export class McpClient {
    * `status !== CONNECTED` — would silently omit it from the
    * non-interactive failure banner. The caller (manager) still catches
    * and logs; we just need the status registry to reflect reality.
+   *
+   * @param opts.preserveStatusOnFailure Leave the status untouched when
+   *   discovery fails, instead of flipping it to DISCONNECTED. For callers
+   *   that hold a live transport which must outlive a discovery failure —
+   *   the `readResource` lazy-spawn path, where `readResource()` itself
+   *   refuses to serve a non-CONNECTED client, so the flip would turn a
+   *   best-effort discovery into a failed read. Defaults to `false`.
    */
-  async discover(cliConfig: Config): Promise<void> {
+  async discover(
+    cliConfig: Config,
+    opts?: { preserveStatusOnFailure?: boolean },
+  ): Promise<void> {
     // legacy
     // `discover()` path (used by non-pool sessions and any direct
     // McpClient consumers) MUST apply config filters at discovery
@@ -682,8 +692,10 @@ export class McpClient {
     // (operators saw unexpected permission prompts) and include/
     // exclude filters were ignored. Now `discoverAndReturn` defaults
     // to applying filters; pool callers explicitly opt out.
-    const { tools, prompts, resources } =
-      await this.discoverAndReturn(cliConfig);
+    const { tools, prompts, resources } = await this.discoverAndReturn(
+      cliConfig,
+      { preserveStatusOnFailure: opts?.preserveStatusOnFailure },
+    );
     for (const tool of tools) {
       this.toolRegistry.registerTool(tool);
     }
@@ -728,6 +740,7 @@ export class McpClient {
    * Behavior mirrors `discover()` for error handling: status flips to
    * DISCONNECTED on any failure (so the global status registry +
    * `getFailedMcpServerNames()` reflect reality), then re-throws.
+   * `opts.preserveStatusOnFailure` opts out of the flip.
    *
    * Returns the same combined "no prompts or tools" error that `discover()`
    * raised previously, so callers that distinguish "server up but empty" from
@@ -740,10 +753,15 @@ export class McpClient {
    *   `SessionMcpView.applyTools` is the authoritative filter
    *   (otherwise pool-mode trust + filtering would apply twice
    *   inconsistently across sessions).
+   * @param opts.preserveStatusOnFailure Skip the DISCONNECTED flip.
+   *   See `discover()`. Defaults to `false`.
    */
   async discoverAndReturn(
     cliConfig: Config,
-    opts?: { applyConfigFilters?: boolean },
+    opts?: {
+      applyConfigFilters?: boolean;
+      preserveStatusOnFailure?: boolean;
+    },
   ): Promise<{
     tools: DiscoveredMCPTool[];
     prompts: DiscoveredMCPPrompt[];
@@ -783,7 +801,14 @@ export class McpClient {
 
       return { tools, prompts, resources };
     } catch (error) {
-      this.updateStatus(MCPServerStatus.DISCONNECTED);
+      // Skipped for `preserveStatusOnFailure` callers: "discovery found
+      // nothing" is not "the transport is down" — a transient list blip is
+      // indistinguishable from a server that advertises nothing, and the
+      // lazy-spawn read path's `readResource()` refuses to serve a client
+      // this flip just marked DISCONNECTED.
+      if (!opts?.preserveStatusOnFailure) {
+        this.updateStatus(MCPServerStatus.DISCONNECTED);
+      }
       // Same carrier as `connect()`'s catch: the manager swallows this error
       // for best-effort discovery; keep the cause retrievable for status
       // consumers (issue #9944). Gated like the status write so a server
