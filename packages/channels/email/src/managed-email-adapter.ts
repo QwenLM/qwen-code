@@ -440,13 +440,18 @@ export class ManagedEmailAdapter {
     // re-driven before any new mail, so the journal sees them in order.
     await this.resubmitPending();
     const upper = mailbox.uidNext - 1;
-    // A stalled instance binding leaves the search at lastUid: the mail
-    // above it is re-searched once the held claim's re-drive proves the
-    // binding answers again, never admitted to its destruction meanwhile.
+    // A stalled instance binding leaves the search at lastUid while it
+    // holds a claim: the mail above it is re-searched once the held
+    // claim's re-drive proves the binding answers again, never admitted
+    // to its destruction meanwhile. Once nothing is held — the claim
+    // dropped on a per-message verdict or un-rebuildable — the gate must
+    // reopen: no probe remains to lift the stall, and the streak, still
+    // above the limit, re-holds the next instance-scoped refusal without
+    // an extra drop.
     if (
       upper <= state.lastUid ||
       state.pending.length >= MANAGED_PENDING_LIMIT ||
-      this.instanceStalled
+      (this.instanceStalled && state.pending.length > 0)
     )
       return;
     const found = await client.search(
@@ -719,7 +724,11 @@ export class ManagedEmailAdapter {
       ) {
         if (INSTANCE_SCOPED_REFUSALS.has(String(code))) {
           this.instanceRefusalStreak += 1;
-          if (this.instanceRefusalStreak > INSTANCE_REFUSAL_DROP_LIMIT) {
+          const entry = state.pending.find((pending) => pending.uid === uid);
+          if (
+            entry?.held ||
+            this.instanceRefusalStreak > INSTANCE_REFUSAL_DROP_LIMIT
+          ) {
             // Instance-scoped, so every message meets the verdict
             // identically and no retry heals it: the claim is held and
             // the poll stalls — the mail above lastUid stays
@@ -728,6 +737,18 @@ export class ManagedEmailAdapter {
             // connected. The held claim's re-drive is the probe that
             // lifts the stall once the binding answers again.
             this.pendingEvents.set(uid, event);
+            if (!entry?.held) {
+              // The streak is in-memory: persist the hold with the
+              // claim, or a restart meets it with a zeroed streak and
+              // drops it as a first occurrence — destroying the mail
+              // the stall promised to keep.
+              state.pending = state.pending.map((pendingEntry) =>
+                pendingEntry.uid === uid
+                  ? { ...pendingEntry, held: true }
+                  : pendingEntry,
+              );
+              this.persist();
+            }
             if (!this.instanceStalled) {
               this.instanceStalled = true;
               this.log(

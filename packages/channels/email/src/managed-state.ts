@@ -25,6 +25,12 @@ export interface ManagedPendingEvent {
   uid: number;
   eventId: string;
   inputId?: string;
+  /**
+   * Set while the instance-scoped stall holds this claim: the streak
+   * that armed the stall is in-memory, so the marker is what keeps a
+   * restart from dropping the claim as a first occurrence.
+   */
+  held?: boolean;
 }
 
 /** The outcome one segment's send proved, persisted before its receipt. */

@@ -576,7 +576,7 @@ describe('managed email inbound', () => {
     // stall and is held, so the search stopped at it and the mail behind
     // it was never admitted.
     expect(state(adapter).pending).toEqual([
-      { uid: held, eventId: `1:${held}` },
+      { uid: held, eventId: `1:${held}`, held: true },
     ]);
     expect(state(adapter).lastUid).toBe(held);
     expect(plane.events).toEqual([]);
@@ -587,7 +587,7 @@ describe('managed email inbound', () => {
     // stall is never admitted to its destruction.
     expect(plane.submitAttempts).toBe(3);
     expect(state(adapter).pending).toEqual([
-      { uid: held, eventId: `1:${held}` },
+      { uid: held, eventId: `1:${held}`, held: true },
     ]);
     expect(state(adapter).lastUid).toBe(held);
     expect(plane.events).toEqual([]);
@@ -636,7 +636,7 @@ describe('managed email inbound', () => {
       // The first poison claim dropped (R3-1); the second tripped the
       // stall and is held, so the third was never admitted.
       expect(state(adapter).pending).toEqual([
-        { uid: held, eventId: `1:${held}` },
+        { uid: held, eventId: `1:${held}`, held: true },
       ]);
       expect(state(adapter).lastUid).toBe(held);
       expect(plane.events).toEqual([]);
@@ -645,7 +645,7 @@ describe('managed email inbound', () => {
       // The stall gates the search: mail arriving under it is never
       // admitted to its destruction either.
       expect(state(adapter).pending).toEqual([
-        { uid: held, eventId: `1:${held}` },
+        { uid: held, eventId: `1:${held}`, held: true },
       ]);
       expect(state(adapter).lastUid).toBe(held);
       expect(plane.events).toEqual([]);
@@ -722,6 +722,86 @@ describe('managed email inbound', () => {
       accountGeneration: 2,
       platformEventId: `2:${uid}`,
     });
+  });
+
+  it('reopens the search once a stalled claim drops on a per-message verdict (R7-1)', async () => {
+    // The stall's held claim can still meet a deterministic verdict that
+    // is not instance-scoped — a route conflict, a failing body — and
+    // drop. If the stall flag kept gating the search past that drop, no
+    // claim would remain to probe with and the mailbox would wedge for
+    // the rest of the process's life: the gate holds only while a claim
+    // is actually held. The streak stays above the limit, so the next
+    // instance-scoped refusal re-holds without an extra drop.
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [
+      { status: 404, code: 'workspace_not_found' },
+      { status: 404, code: 'workspace_not_found' },
+    ];
+    append(raw('one', 'first'));
+    const held = append(raw('two', 'second'));
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([
+      { uid: held, eventId: `1:${held}`, held: true },
+    ]);
+    // The held claim's re-drive meets a per-message verdict and drops.
+    plane.submitErrors = [{ status: 409, code: 'channel_route_conflict' }];
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([]);
+    // With nothing held the search reopens: the next mail is admitted.
+    const fifth = append(raw('five', 'fifth'));
+    await adapter.tick();
+    expect(plane.events.map((event) => event.text)).toEqual(['fifth']);
+    expect(state(adapter).lastUid).toBe(fifth);
+  });
+
+  it('keeps a stall-held claim across a restart instead of dropping it as a first occurrence (R7-2)', async () => {
+    // The streak and the stall flag are in-memory, but the claim they
+    // hold is persisted: an unmarked claim meets the restart with a
+    // zeroed streak, falls to the first-occurrence drop, and the mail
+    // the stall promised to keep is destroyed — one held message per
+    // process start for as long as the refusal persists. The held
+    // marker persists with the claim, so the restarted process re-holds
+    // and re-probes it instead.
+    const adapter = make();
+    await adapter.connect();
+    const submit = plane.submitInbound.bind(plane);
+    plane.submitInbound = async () => {
+      plane.submitAttempts += 1;
+      throw Object.assign(new Error('HTTP 404'), {
+        status: 404,
+        code: 'workspace_not_found',
+      });
+    };
+    append(raw('one', 'first'));
+    const held = append(raw('two', 'held mail'));
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([
+      { uid: held, eventId: `1:${held}`, held: true },
+    ]);
+    await adapter.disconnect();
+    const restartedLines: string[] = [];
+    const restarted = make(
+      {},
+      { log: (line: string) => restartedLines.push(line) },
+    );
+    await restarted.connect();
+    await restarted.tick();
+    // The held claim survives the restart: no first-occurrence drop, no
+    // "skipped" line, and the operator's stall hint is re-emitted.
+    expect(state(restarted).pending).toEqual([
+      { uid: held, eventId: `1:${held}`, held: true },
+    ]);
+    expect(plane.events).toEqual([]);
+    expect(restartedLines.join('\n')).not.toContain('the message is skipped');
+    expect(
+      restartedLines.some((line) => line.includes('stopped admitting')),
+    ).toBe(true);
+    // The binding answers again: the held mail is admitted, not lost.
+    plane.submitInbound = submit;
+    await restarted.tick();
+    expect(plane.events.map((event) => event.text)).toEqual(['held mail']);
+    expect(state(restarted).pending).toEqual([]);
   });
 
   it('re-drives an unrecognized 404 as a lost answer, never dropping the mail (R3-1)', async () => {
