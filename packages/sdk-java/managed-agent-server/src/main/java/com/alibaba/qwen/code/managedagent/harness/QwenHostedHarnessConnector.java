@@ -143,6 +143,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsFencedTitles() {
+        try {
+            return client().capabilities().getTitleProtocolVersion() == 1;
+        } catch (com.alibaba.qwen.code.daemon.DaemonException
+                | IllegalStateException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
     public boolean supportsLifecycle() {
         if (!isWorkspaceFilesAvailable()) {
             return false;
@@ -258,14 +268,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 if (!passiveManagedRuntimeRecovery) {
                     workspaceExecution.verifyMountForProbe(session.workspace());
                 }
-            } else if (passiveManagedRuntimeRecovery) {
+            } else if (passiveManagedRuntimeRecovery && loadExisting) {
                 workspaceExecution.authorizePassiveAttachment(session);
             } else {
                 workspaceExecution.authorize(session);
             }
         }
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
-        HarnessSessionRef attached = passiveManagedRuntimeRecovery
+        HarnessSessionRef attached = passiveManagedRuntimeRecovery && loadExisting
                 ? load(session, true) : attachments.get(key);
         if (attached == null) {
             AttachmentLock slot = attachmentLocks.compute(key,
@@ -279,8 +289,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             try {
                 attached = attachments.get(key);
                 if (attached == null) {
-                    attached = loadExisting ? load(session, false)
-                            : create(session);
+                    attached = loadExisting ? load(session, passiveManagedRuntimeRecovery)
+                            : create(session, passiveManagedRuntimeRecovery);
                     attachments.put(key, attached);
                 }
             } finally {
@@ -456,12 +466,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String sessionId,
             String actionId,
             JsonNode response) {
-        requireReadyForNewWork(tenantId, sessionId, true);
+        SessionRecord session = requireReadyForNewWork(tenantId, sessionId, true);
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef ref = attachments.get(key);
         if (ref == null) {
+            // A resident Harness refuses an ordinary load after the dispatcher loses its cache.
             doCreateOrLoad(tenantId, sessionId, true,
-                    workspaceExecution.verifiedRecoveryEnabled(), true);
+                    session.workspace() != null || workspaceExecution.verifiedRecoveryEnabled(), true);
             ref = attachments.get(key);
         }
         client().resolveAction(
@@ -492,6 +503,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public void rename(String tenantId, String sessionId, String title) {
         try {
             doRename(tenantId, sessionId, title);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public void rename(String tenantId, String sessionId, String title, long revision) {
+        try {
+            HarnessSessionRef ref = attachment(tenantId, sessionId, false);
+            client().updateSessionTitle(ref, title, revision);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -732,7 +754,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return attached;
     }
 
-    private void requireReadyForNewWork(String tenantId, String sessionId, boolean actionResponse) {
+    private SessionRecord requireReadyForNewWork(String tenantId, String sessionId, boolean actionResponse) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         requireShellApproval(session);
         if (session.workspace() != null) {
@@ -746,9 +768,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 workspaceExecution.authorize(session);
             }
         }
+        return session;
     }
 
-    private HarnessSessionRef create(SessionRecord session) {
+    private HarnessSessionRef create(SessionRecord session, boolean passiveManagedRuntimeRecovery) {
         try {
             CreateHarnessSession.Builder builder =
                     CreateHarnessSession.builder()
@@ -788,9 +811,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (error.getStatusCode() != 409) {
                 throw error;
             }
-            return load(session, false);
+            return load(session, passiveManagedRuntimeRecovery);
         } catch (SessionCreationOutcomeUnknownException error) {
-            return load(session, false);
+            return load(session, passiveManagedRuntimeRecovery);
         }
     }
 
