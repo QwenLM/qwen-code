@@ -69,7 +69,7 @@ async function dragBoldSubstring(
   await page.mouse.up();
 }
 
-test('partial mouse selection offers plain text and Markdown copying without changing whole-reply copy', async ({
+test('@smoke partial mouse selection offers plain text and Markdown copying without changing whole-reply copy', async ({
   page,
   context,
 }, testInfo) => {
@@ -130,7 +130,24 @@ test('partial mouse selection offers plain text and Markdown copying without cha
     expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(
       'bold',
     );
-    await button.click();
+    await button.evaluate(async (element) => {
+      const menu = element.closest('[data-slot="popover-content"]')!;
+      await Promise.all(
+        menu
+          .getAnimations({ subtree: true })
+          .map((animation) => animation.finished),
+      );
+    });
+    const buttonBox = await button.boundingBox();
+    await page.mouse.move(
+      buttonBox!.x + buttonBox!.width / 2,
+      buttonBox!.y + buttonBox!.height / 2,
+    );
+    await page.mouse.down();
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(
+      'bold',
+    );
+    await page.mouse.up();
     await expect(plain).toHaveCount(0);
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
       expected,
@@ -237,7 +254,7 @@ test('partial mouse selection offers plain text and Markdown copying without cha
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(reply);
 });
 
-test('copies through the real clipboard fallback from a ShadowRoot menu', async ({
+test('@smoke copies through the real clipboard fallback from a ShadowRoot menu', async ({
   page,
   context,
 }, testInfo) => {

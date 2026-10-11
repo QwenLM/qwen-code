@@ -546,6 +546,7 @@ function MermaidBlock({ code }: { code: string }) {
       ) : !svg ? (
         <div
           className={`${styles.mermaidBlock} ${styles.mermaidLoading} ${styles.mermaidInline}`}
+          data-selection-copy-ignore
         >
           <span>{t('mermaid.rendering')}</span>
         </div>
@@ -555,6 +556,7 @@ function MermaidBlock({ code }: { code: string }) {
             canPan && isDragging ? styles.mermaidDragging : ''
           }`}
           ref={viewportRef}
+          data-selection-copy-ignore
           style={diagramBox ? { height: diagramBox.canvasHeight } : undefined}
           onMouseDown={handleMouseDown}
           onDoubleClick={resetZoomAndPan}

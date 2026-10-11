@@ -3119,7 +3119,7 @@ export function EnhancedTable({
           </tbody>
         </table>
         {visibleRows.length === 0 && (
-          <div className={styles.emptyState}>
+          <div className={styles.emptyState} data-selection-copy-ignore>
             {table.rows.length === 0
               ? t('markdownTable.empty')
               : t('markdownTable.emptyFiltered')}

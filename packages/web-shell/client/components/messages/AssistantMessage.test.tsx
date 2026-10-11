@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
+import { getSelectedReplyContent } from '../../utils/selectionClipboard';
 import {
   TranscriptDocumentExpandedProvider,
   TranscriptRenderModeProvider,
@@ -1064,5 +1065,80 @@ describe('AssistantMessage squad replies', () => {
     expect(container.textContent).toBe('lead 这次无需动作');
     expect(container.querySelector('[data-squad-tag]')).toBeNull();
     expect(container.textContent).not.toContain('collab.');
+  });
+});
+
+describe('AssistantMessage selection copy gate', () => {
+  it.each([
+    ['interactive', false, true],
+    ['interactive', true, false],
+    ['readonly', false, false],
+    ['document', false, false],
+  ] as const)(
+    'mode=%s streaming=%s opens=%s',
+    async (mode, streaming, opens) => {
+      const container = render(
+        <AssistantMessage
+          content="Select **words** here."
+          isStreaming={streaming}
+        />,
+        'en',
+        mode,
+      );
+      const text = container.querySelector('strong')!.firstChild!;
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      for (const type of ['pointerdown', 'pointerup']) {
+        if (type === 'pointerup') {
+          window.getSelection()!.removeAllRanges();
+          window.getSelection()!.addRange(range);
+        }
+        const event = new MouseEvent(type, { bubbles: true, button: 0 });
+        Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+        await act(async () => text.parentElement!.dispatchEvent(event));
+      }
+      expect(!!document.querySelector('[data-slot="popover-content"]')).toBe(
+        opens,
+      );
+      window.getSelection()!.removeAllRanges();
+    },
+  );
+});
+
+describe('rendered code selection semantics', () => {
+  it('preserves the actual code language and omits its rendered header', async () => {
+    const container = render(
+      <AssistantMessage content={'```typescript\nconst answer = 42;\n```'} />,
+    );
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(container.querySelector('pre')).not.toBeNull(),
+      );
+    });
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    const value = getSelectedReplyContent(container, range)!;
+    expect(value.text).toBe('const answer = 42;');
+    expect(value.markdown).toBe('```typescript\nconst answer = 42;\n```');
+    expect(
+      container.querySelector(
+        '[data-selection-code-language="typescript"] pre',
+      ),
+    ).not.toBeNull();
+  });
+  it('omits the actual Mermaid loading placeholder from copied prose', () => {
+    vi.useFakeTimers();
+    const container = render(
+      <AssistantMessage
+        content={'Before\n\n```mermaid\ngraph TD; A-->B\n```\n\nAfter'}
+      />,
+    );
+    expect(container.textContent).toContain('Rendering diagram');
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    expect(getSelectedReplyContent(container, range)).toEqual({
+      text: 'Before\nAfter',
+      markdown: 'Before\n\nAfter',
+    });
   });
 });

@@ -1,14 +1,15 @@
 import TurndownService from 'turndown';
 
 const IGNORED =
-  '[data-selection-copy-ignore], [aria-hidden="true"]:not(.katex-html), .katex-mathml, button, select, input, textarea, svg, style, script';
+  '[data-selection-copy-ignore], [data-footnote-backref], [data-markdown-chart-loading], .markdown-chart-error, [aria-hidden="true"]:not(.katex-html), .katex-mathml, button, select, input, textarea, svg, style, script';
 const BLOCKS = /^(P|H[1-6]|DIV|SECTION|BLOCKQUOTE|UL|OL|LI|PRE|TR)$/;
 
 export function getReplySelectionRange(body: HTMLElement): Range | null {
   const root = body.getRootNode() as Document | ShadowRoot;
   const selection =
     (root as Document).getSelection?.() ?? body.ownerDocument.getSelection();
-  if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+  if (!selection || selection.isCollapsed || selection.rangeCount !== 1)
+    return null;
   let range = selection.getRangeAt(0);
   if (root instanceof ShadowRoot) {
     const composed = (
@@ -72,22 +73,15 @@ function cloneSelected(node: Node, range: Range): Node | null {
       : null;
   }
   const clone = node.cloneNode(false);
+  let ordinal = node instanceof HTMLOListElement ? node.start : 0;
   for (const child of node.childNodes) {
     const selected = cloneSelected(child, range);
-    if (selected) {
-      if (
-        clone instanceof HTMLOListElement &&
-        child instanceof HTMLLIElement &&
-        !clone.children.length
-      ) {
-        clone.start =
-          (node as HTMLOListElement).start +
-          Array.from(node.childNodes)
-            .filter((item) => item instanceof HTMLLIElement)
-            .indexOf(child);
-      }
-      clone.appendChild(selected);
+    if (clone instanceof HTMLOListElement && child instanceof HTMLLIElement) {
+      if (selected instanceof HTMLLIElement)
+        selected.dataset.selectionCopyOrdinal = String(ordinal);
+      ordinal++;
     }
+    if (selected) clone.appendChild(selected);
   }
   if (clone instanceof HTMLLIElement) {
     if (!clone.textContent?.trim() && !clone.querySelector('img')) return null;
@@ -99,20 +93,25 @@ function cloneSelected(node: Node, range: Range): Node | null {
     );
     if (onlyNestedLists) clone.dataset.selectionCopyListWrapper = '';
     const checkbox = (node as Element).querySelector<HTMLInputElement>(
-      ':scope > input[type="checkbox"][disabled]',
+      ':scope > input[type="checkbox"][disabled], :scope > p > input[type="checkbox"][disabled]:first-child',
     );
     if (checkbox && !onlyNestedLists) {
       const marker = clone.ownerDocument.createElement('span');
       marker.dataset.selectionCopyTask = checkbox.checked ? '[x] ' : '[ ] ';
       marker.textContent = marker.dataset.selectionCopyTask;
-      clone.prepend(marker);
+      const host =
+        checkbox.parentElement === node
+          ? clone
+          : clone.querySelector(':scope > p');
+      host?.prepend(marker);
     }
   }
   if (clone instanceof HTMLTableCellElement) {
     clone.dataset.copyColumn = String((node as HTMLTableCellElement).cellIndex);
   }
   return clone.hasChildNodes() ||
-    (node instanceof Element && ['BR', 'HR', 'IMG'].includes(node.tagName))
+    (node instanceof Element && ['BR', 'HR', 'IMG'].includes(node.tagName)) ||
+    node instanceof HTMLTableCellElement
     ? clone
     : null;
 }
@@ -156,6 +155,18 @@ const markdown = new TurndownService({
   headingStyle: 'atx',
   codeBlockStyle: 'fenced',
   bulletListMarker: '-',
+});
+markdown.addRule('orderedListItem', {
+  filter: (node) => node.hasAttribute('data-selection-copy-ordinal'),
+  replacement: (content, node) => {
+    const prefix = `${node.dataset.selectionCopyOrdinal}.  `;
+    const trailing = content.endsWith('\n') ? '\n' : '';
+    const indented = (content.replace(/^\n+|\n+$/g, '') + trailing).replace(
+      /\n/g,
+      `\n${' '.repeat(prefix.length)}`,
+    );
+    return prefix + indented + (node.nextSibling ? '\n' : '');
+  },
 });
 markdown.addRule('unselectedListAncestor', {
   filter: (node) => node.hasAttribute('data-selection-copy-list-wrapper'),
@@ -203,10 +214,7 @@ markdown.addRule('table', {
               (item) => Number(item.dataset.copyColumn) === column,
             );
           return cell
-            ? markdown
-                .turndown(cell.innerHTML)
-                .replace(/\n+/g, ' ')
-                .replace(/\|/g, '\\|')
+            ? markdown.turndown(cell).replace(/\n+/g, ' ').replace(/\|/g, '\\|')
             : '';
         })
         .join(' | ')} |`;
@@ -240,6 +248,7 @@ export function getSelectedReplyContent(body: HTMLElement, range: Range) {
   const selected = cloneSelected(body, range) as HTMLElement | null;
   if (!selected) return null;
   const text = plainText(selected).replace(/^\n+|\n+$/g, '');
-  if (!text.trim()) return null;
-  return { text, markdown: markdown.turndown(selected) };
+  const formatted = markdown.turndown(selected);
+  if (!text.trim() && !formatted.trim()) return null;
+  return { text, markdown: formatted };
 }

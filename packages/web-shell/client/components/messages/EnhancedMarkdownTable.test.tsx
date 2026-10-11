@@ -7,6 +7,7 @@ import { WebShellPortalRootContext } from '../../portalRoot';
 import { InteractionBlockContext } from '../../interactionBlockContext';
 import { immediateClipboardWrite } from '../../test/reactHarness';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import { getSelectedReplyContent } from '../../utils/selectionClipboard';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -3699,5 +3700,63 @@ describe('EnhancedMarkdownTable', () => {
     click(button(container, '筛选 Team'));
     expect(container.textContent).not.toContain('隐藏列');
     expect(container.textContent).not.toContain('升序排序');
+  });
+});
+
+describe('rendered table selection semantics', () => {
+  it('marks the real table interaction surface and omits toolbar/action chrome', () => {
+    const container = renderTable();
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    expect(
+      container.querySelector('[data-selection-copy-table] table'),
+    ).not.toBeNull();
+    expect(getSelectedReplyContent(container, range)).toEqual({
+      text: 'Team\tScore\nAlpha\t10\nBeta\t2\nGamma\t30',
+      markdown:
+        '| Team | Score |\n| --- | --- |\n| Alpha | 10 |\n| Beta | 2 |\n| Gamma | 30 |',
+    });
+    expect(
+      container
+        .querySelector('thead th')
+        ?.hasAttribute('data-selection-copy-ignore'),
+    ).toBe(true);
+    expect(
+      container
+        .querySelector('tbody td')
+        ?.hasAttribute('data-selection-copy-ignore'),
+    ).toBe(true);
+  });
+  it('omits an actual empty-table status from both copy projections', () => {
+    const container = renderTableContent(
+      <thead>
+        <tr>
+          <th>Name</th>
+        </tr>
+      </thead>,
+    );
+    expect(container.textContent).toContain('This table has no data.');
+    const before = document.createElement('p');
+    before.textContent = 'Before';
+    container.prepend(before);
+    const after = document.createElement('p');
+    after.textContent = 'After';
+    container.append(after);
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    const value = getSelectedReplyContent(container, range)!;
+    expect(value.text).toBe('Before\nName\nAfter');
+    expect(value.markdown).toBe('Before\n\n| Name |\n| --- |\n\nAfter');
+  });
+  it('omits expanded row details while keeping the visible table once', () => {
+    const container = renderTable();
+    click(button(container, 'View details for row 1'));
+    expect(container.textContent).toContain('Row details');
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    const value = getSelectedReplyContent(container, range)!;
+    expect(value.text).toBe('Team\tScore\nAlpha\t10\nBeta\t2\nGamma\t30');
+    expect(value.markdown).not.toContain('Row details');
+    expect(value.markdown.match(/Alpha/g)).toHaveLength(1);
   });
 });

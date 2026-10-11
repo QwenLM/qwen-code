@@ -203,6 +203,8 @@ describe('writeClipboardText (issue #9485)', () => {
     originalExecCommand = document.execCommand;
     document.execCommand = vi.fn(() => {
       const textarea = document.querySelector('textarea');
+      textarea?.focus();
+      expect(document.activeElement).toBe(textarea);
       parent = textarea?.parentElement ?? null;
       copiedValue =
         textarea?.value.slice(textarea.selectionStart, textarea.selectionEnd) ??

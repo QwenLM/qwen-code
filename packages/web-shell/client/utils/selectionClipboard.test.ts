@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import katex from 'katex';
 import {
   getReplySelectionRange,
@@ -9,6 +9,7 @@ import {
 const bodies: HTMLElement[] = [];
 afterEach(() => {
   for (const body of bodies.splice(0)) body.remove();
+  vi.restoreAllMocks();
   window.getSelection()?.removeAllRanges();
 });
 function fixture(html: string) {
@@ -292,5 +293,117 @@ describe('nested selection boundaries', () => {
     const range = document.createRange();
     range.selectNodeContents(body);
     expect(getSelectedReplyContent(body, range)!.text).toBe('42 sub');
+  });
+});
+
+describe('review regressions', () => {
+  it('keeps loose task state on the same line as its selected text', () => {
+    const body = fixture(
+      '<ul><li><p><input type="checkbox" checked disabled> Done</p></li><li><p><input type="checkbox" disabled> Pending</p></li></ul>',
+    );
+    const paragraphs = body.querySelectorAll('p');
+    const result = select(
+      body,
+      paragraphs[0].lastChild!,
+      1,
+      paragraphs[1].lastChild!,
+      8,
+    );
+    expect(result.markdown).toMatch(/-\s+\[x\][^\S\n]+Done/);
+    expect(result.markdown).toMatch(/-\s+\[ \][^\S\n]+Pending/);
+  });
+  it.each([
+    ['<td>Alpha</td><td></td><td>42</td>', 'Alpha\t\t42'],
+    ['<td></td><td>42</td><td></td>', '\t42\t'],
+  ])('retains selected empty table fields in %s', (cells, expected) => {
+    const body = fixture(
+      `<table><tr><th>Name</th><th>Value</th><th>Extra</th></tr><tr>${cells}</tr></table>`,
+    );
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyContent(body, range)!.text).toBe(
+      `Name\tValue\tExtra\n${expected}`,
+    );
+  });
+  it('keeps original ordinals across blank ordered-list items', () => {
+    const body = fixture(
+      '<ol start="3"><li>Third</li><li></li><li>Fifth</li></ol>',
+    );
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyContent(body, range)!.markdown).toMatch(
+      /^5\.\s+Fifth$/m,
+    );
+  });
+  it.each([
+    [
+      '<img src="https://example.com/diagram.png" alt="">',
+      '![](https://example.com/diagram.png)',
+    ],
+    ['<hr>', '* * *'],
+  ])('keeps Markdown-only selections: %s', (html, expected) => {
+    const body = fixture(html);
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyContent(body, range)).toEqual({
+      text: '',
+      markdown: expected,
+    });
+  });
+  it.each([
+    '<svg><text>Node A</text></svg>',
+    '<span data-markdown-chart-loading="true">Rendering chart</span>',
+    '<div class="markdown-chart-error">Chart render failed.</div>',
+    '<a data-footnote-backref href="#internal">↩</a>',
+  ])('excludes renderer chrome: %s', (html) => {
+    const body = fixture(`<p>Before</p>${html}<p>After</p>`);
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyContent(body, range)).toEqual({
+      text: 'Before\nAfter',
+      markdown: 'Before\n\nAfter',
+    });
+  });
+  it('retains hard line breaks', () => {
+    const body = fixture('<p>one<br>two</p>');
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyContent(body, range)!.text).toBe('one\ntwo');
+  });
+  it('rejects multiple disjoint ranges without affecting native selection', () => {
+    const body = fixture('<p>First</p><p>Second</p>');
+    const ranges = [...body.querySelectorAll('p')].map((p) => {
+      const range = document.createRange();
+      range.selectNodeContents(p);
+      return range;
+    });
+    vi.spyOn(document, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      rangeCount: 2,
+      getRangeAt: (index: number) => ranges[index],
+    } as Selection);
+    expect(getReplySelectionRange(body)).toBeNull();
+  });
+  it('uses composed ranges for a reply inside a ShadowRoot', () => {
+    const host = fixture('');
+    const shadow = host.attachShadow({ mode: 'open' });
+    const body = document.createElement('div');
+    body.textContent = 'Shadow reply';
+    shadow.append(body);
+    const outer = document.createRange();
+    outer.selectNode(host);
+    const composed = {
+      startContainer: body.firstChild!,
+      startOffset: 0,
+      endContainer: body.firstChild!,
+      endOffset: 6,
+    };
+    vi.spyOn(document, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      rangeCount: 1,
+      getRangeAt: () => outer,
+      getComposedRanges: () => [composed],
+    } as unknown as Selection);
+    expect(getReplySelectionRange(body)?.toString()).toBe('Shadow');
   });
 });

@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SelectionCopyMenu } from './SelectionCopyMenu';
+import { SelectionCopyMenu as TranscriptSelectionCopyMenu } from './SelectionCopyMenu.transcript-stub';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
 
@@ -15,6 +16,7 @@ afterEach(() => {
   portal?.remove();
   window.getSelection()?.removeAllRanges();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 function mount(
   enabled = true,
@@ -252,24 +254,149 @@ describe('SelectionCopyMenu', () => {
       document.execCommand = original;
     }
   });
-});
 
-it('leaves keyboard selections to native copying', async () => {
-  mount();
-  const text = container.querySelector('strong')!.firstChild!;
-  const range = document.createRange();
-  range.setStart(text, 0);
-  range.setEnd(text, 4);
-  window.getSelection()!.addRange(range);
-  for (const target of [
-    document.body,
-    container.querySelector('.reply-body')!,
-  ]) {
-    await act(async () =>
-      target.dispatchEvent(
-        new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }),
+  it('leaves keyboard selections to native copying', async () => {
+    mount();
+    const text = container.querySelector('strong')!.firstChild!;
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, 4);
+    window.getSelection()!.addRange(range);
+    for (const target of [
+      document.body,
+      container.querySelector('.reply-body')!,
+    ]) {
+      await act(async () =>
+        target.dispatchEvent(
+          new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }),
+        ),
+      );
+      expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
+    }
+  });
+
+  it('keeps the transcript body wrapper and class without interactive controls', () => {
+    mount();
+    act(() =>
+      root.render(
+        <TranscriptSelectionCopyMenu
+          className="export-body"
+          content="reply"
+          enabled={false}
+        >
+          <pre>export code</pre>
+        </TranscriptSelectionCopyMenu>,
       ),
     );
+    expect(container.querySelector('div.export-body > pre')?.textContent).toBe(
+      'export code',
+    );
+    expect(container.querySelector('button')).toBeNull();
+  });
+  it('closes on viewport resize and changed nonempty selection', async () => {
+    mount();
+    await choose();
+    act(() => window.dispatchEvent(new Event('resize')));
     expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
-  }
+    await choose();
+    act(() => {
+      const range = document.createRange();
+      range.selectNodeContents(container.querySelector('p')!);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
+  });
+  it.each([1, 2])(
+    'ignores mouse button %s without computing its path',
+    async (button) => {
+      mount();
+      await choose();
+      act(() => window.dispatchEvent(new Event('resize')));
+      for (const type of ['pointerdown', 'pointerup']) {
+        const event = new MouseEvent(type, { bubbles: true, button });
+        Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+        const path = vi.spyOn(event, 'composedPath');
+        await act(async () =>
+          container.querySelector('strong')!.dispatchEvent(event),
+        );
+        expect(path).not.toHaveBeenCalled();
+      }
+      expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
+    },
+  );
+  it('restores composer focus after a successful copy', async () => {
+    vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+    mount();
+    const composer = document.createElement('textarea');
+    container.append(composer);
+    composer.focus();
+    await choose();
+    await act(async () =>
+      (portal.querySelector('button') as HTMLButtonElement).click(),
+    );
+    expect(document.activeElement).toBe(composer);
+  });
+  it('leaves ignored diagram interactions alone with an existing selection', async () => {
+    mount();
+    await choose();
+    act(() => window.dispatchEvent(new Event('resize')));
+    const diagram = document.createElement('div');
+    diagram.setAttribute('data-selection-copy-ignore', '');
+    container.querySelector('.reply-body')!.append(diagram);
+    for (const type of ['pointerdown', 'pointerup']) {
+      const event = new MouseEvent(type, { bubbles: true, button: 0 });
+      Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+      await act(async () => diagram.dispatchEvent(event));
+    }
+    expect(window.getSelection()?.toString()).toBe('bold');
+    expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
+  });
+  it('dismisses after async reply reflow but ignores the initial observer callback', async () => {
+    let resized: () => void = () => {};
+    const disconnect = vi.fn();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(private callback: () => void) {}
+        observe(target: Element) {
+          if (target.matches('.reply-body')) resized = this.callback;
+        }
+        disconnect = disconnect;
+      },
+    );
+    mount();
+    const body = container.querySelector('.reply-body')!;
+    const rect = vi
+      .spyOn(body, 'getBoundingClientRect')
+      .mockReturnValue(new DOMRect(0, 0, 400, 100));
+    await choose();
+    act(() => resized());
+    expect(
+      portal.querySelector('[data-slot="popover-content"]'),
+    ).not.toBeNull();
+    rect.mockReturnValue(new DOMRect(0, 0, 400, 500));
+    act(() => resized());
+    expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
+    expect(disconnect).toHaveBeenCalled();
+  });
+  it('offers Markdown without an empty plain-text copy for an image with no alt', async () => {
+    mount();
+    const paragraph = container.querySelector('p')!;
+    paragraph.innerHTML = '<img src="https://example.com/image.png" alt="">';
+    for (const type of ['pointerdown', 'pointerup']) {
+      if (type === 'pointerup') {
+        const range = document.createRange();
+        range.selectNode(paragraph.firstChild!);
+        window.getSelection()!.addRange(range);
+      }
+      const event = new MouseEvent(type, { bubbles: true, button: 0 });
+      Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+      await act(async () => paragraph.dispatchEvent(event));
+    }
+    const buttons = portal.querySelectorAll('button');
+    expect(buttons[0].disabled).toBe(true);
+    expect(buttons[1].disabled).toBe(false);
+  });
 });

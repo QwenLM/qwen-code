@@ -60,10 +60,17 @@ export function SelectionCopyMenu({
       )
         close();
     };
+    const rect = body.getBoundingClientRect();
+    const observer = new ResizeObserver(() => {
+      const next = body.getBoundingClientRect();
+      if (next.width !== rect.width || next.height !== rect.height) close();
+    });
+    observer.observe(body);
     document.addEventListener('selectionchange', onSelectionChange);
     document.addEventListener('scroll', close, true);
     document.defaultView?.addEventListener('resize', close);
     return () => {
+      observer.disconnect();
       document.removeEventListener('selectionchange', onSelectionChange);
       document.removeEventListener('scroll', close, true);
       document.defaultView?.removeEventListener('resize', close);
@@ -87,25 +94,24 @@ export function SelectionCopyMenu({
     const body = bodyRef.current!;
     const document = body.ownerDocument;
     let selecting = false;
-    let selectingTable = false;
+    let selectingControl = false;
     const onPointerDown = (event: PointerEvent) => {
-      selectingTable = event
-        .composedPath()
-        .some(
-          (node) =>
-            node instanceof Element &&
-            node.hasAttribute('data-selection-copy-table'),
-        );
-      selecting =
-        event.pointerType === 'mouse' &&
-        event.button === 0 &&
-        event.composedPath().includes(body) &&
-        !selectingTable;
+      selecting = false;
+      selectingControl = false;
+      if (event.pointerType !== 'mouse' || event.button !== 0) return;
+      const path = event.composedPath();
+      selectingControl = path.some(
+        (node) =>
+          node instanceof Element &&
+          (node.hasAttribute('data-selection-copy-table') ||
+            node.hasAttribute('data-selection-copy-ignore')),
+      );
+      selecting = path.includes(body) && !selectingControl;
     };
     const onPointerUp = (event: PointerEvent) => {
       if (event.pointerType !== 'mouse' || event.button !== 0) return;
-      if (selectingTable) {
-        selectingTable = false;
+      if (selectingControl) {
+        selectingControl = false;
         setSelected(null);
         return;
       }
@@ -115,7 +121,7 @@ export function SelectionCopyMenu({
     };
     const cancel = () => {
       selecting = false;
-      selectingTable = false;
+      selectingControl = false;
     };
     document.addEventListener('pointerdown', onPointerDown, true);
     document.addEventListener('pointerup', onPointerUp, true);
@@ -127,9 +133,19 @@ export function SelectionCopyMenu({
     };
   }, [enabled, showSelection]);
   const copy = (value: string, button: HTMLButtonElement) => {
+    let previousFocus = button.ownerDocument.activeElement;
+    while (previousFocus?.shadowRoot?.activeElement)
+      previousFocus = previousFocus.shadowRoot.activeElement;
     button.focus({ preventScroll: true });
     void writeClipboardText(value)
-      .then(() => setSelected(null))
+      .then(() => {
+        setSelected(null);
+        if (
+          previousFocus instanceof HTMLElement &&
+          !menuRef.current?.contains(previousFocus)
+        )
+          previousFocus.focus({ preventScroll: true });
+      })
       .catch((error: unknown) => {
         const body = bodyRef.current;
         if (body && menuRef.current && selected) {
@@ -169,6 +185,7 @@ export function SelectionCopyMenu({
             <Button
               variant="ghost"
               className="justify-start font-normal"
+              disabled={!selected.text.trim()}
               onClick={(event) => copy(selected.text, event.currentTarget)}
             >
               <CopyIcon strokeWidth={1.5} />
