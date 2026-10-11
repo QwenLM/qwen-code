@@ -12272,6 +12272,49 @@ describe('LlmChat', async () => {
       expect(clear).not.toHaveBeenCalled();
     });
 
+    it('disarms every read when a PermissionRequest hook could have retargeted the cut one', async () => {
+      // A PermissionRequest `decision.updatedInput` rebuilds the call with new
+      // args (scheduler rebuildWithPermissionRequestInput) exactly like a
+      // PreToolUse rewrite, while history keeps the model-authored path.
+      const stat = { dev: 1, ino: 100 } as Stats;
+      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
+      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+      const markAllReadsEvictedFromHistory = vi.fn();
+      const clear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear,
+        markReadEvictedFromHistory,
+        markAllReadsEvictedFromHistory,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      mockConfig.hasHooksForEvent = (event: string) =>
+        event === 'PermissionRequest';
+      mockStreamsOnce(
+        streamOf(
+          modelChunk(
+            [fnCall('read_file', { file_path: 'a.txt' }, 'retargeted-read')],
+            undefined,
+            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+          ),
+        ),
+        textStream('done'),
+      );
+      await sendDrain('read', 'first');
+      await sendDrain(
+        [
+          fnResponse(
+            'read_file',
+            { output: 'x'.repeat(20_000) },
+            'retargeted-read',
+          ),
+        ],
+        'second',
+      );
+      expect(resultChars(1)).toBeLessThan(20_000);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
+      expect(markAllReadsEvictedFromHistory).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+    });
+
     it.each([
       ['pressure', 200_000],
       ['aggregate', 1_000],

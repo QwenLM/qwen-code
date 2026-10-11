@@ -3290,12 +3290,14 @@ export class LlmChat {
                 if (!stat || !fileReadCache.markReadEvictedFromHistory(stat))
                   unresolvedRead = true;
               }
-              // PreToolUse `updatedInput` replaces the executed args while
-              // history keeps the model-authored ones, so a hook can retarget
-              // a read off every path derivable here. Fail closed instead.
+              // A PreToolUse or PermissionRequest `updatedInput` replaces the
+              // executed args while history keeps the model-authored ones, so a
+              // hook can retarget a read off every path derivable here. Fail
+              // closed instead.
               if (
                 unresolvedRead ||
-                this.config.hasHooksForEvent?.('PreToolUse')
+                this.config.hasHooksForEvent?.('PreToolUse') ||
+                this.config.hasHooksForEvent?.('PermissionRequest')
               )
                 fileReadCache.markAllReadsEvictedFromHistory();
               if (paths.length > 0) {
