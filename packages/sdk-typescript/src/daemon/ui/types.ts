@@ -123,9 +123,12 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
 /**
  * Path-style producer identity for one frame.
  *
- * `agentName` is the stable, human-readable path from the session's root
- * agent; `depth` is 0 for the root. Clients can group by `agentName` without
- * walking `parentToolCallId` chains, and can key policy on it.
+ * `agentName` is derived from the spawning agent's path plus the subagent type,
+ * so it is stable within one run: clients can group by it without walking
+ * `parentToolCallId` chains, and can key in-session policy on it. It is not a
+ * durable id — renaming the agent definition renames the path, and a policy
+ * keyed on the old string silently stops matching. Key anything that must
+ * survive renames on `parentToolCallId` instead.
  */
 export interface DaemonAgentIdentity {
   agentName: string;

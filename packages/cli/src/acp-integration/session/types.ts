@@ -87,7 +87,15 @@ export function hasFullSessionContext(
  * `parentToolCallId`); it is the shape that is borrowed, not the spelling.
  */
 export interface AgentIdentity {
-  /** Path-style name from the session's root agent, e.g. `/root/security`. */
+  /**
+   * Path-style name from the session's root agent, e.g. `/root/security`.
+   *
+   * Derived from the spawning agent's path plus the subagent type, so it is
+   * stable within one run and safe to group or key in-session policy on — but
+   * it is not a durable id: renaming that agent definition renames the path,
+   * and a policy keyed on the old string silently stops matching. A consumer
+   * that must survive renames keys on `parentToolCallId` instead.
+   */
   agentName: string;
   /** 0 for the root agent, 1 for a direct subagent, and so on. */
   depth: number;
