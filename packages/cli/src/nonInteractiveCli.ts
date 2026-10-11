@@ -609,17 +609,30 @@ export async function runNonInteractive(
       })();
       return chatRecordingSettlement;
     };
+    const drainPendingMemoryTasks = async (): Promise<void> => {
+      const memoryTaskPromises = config
+        .getLlmClient()
+        .consumePendingMemoryTaskPromises();
+      if (memoryTaskPromises.length > 0) {
+        await Promise.allSettled(memoryTaskPromises);
+      }
+    };
     const emitResult = async (
       result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],
     ): Promise<void> => {
-      await settleBeforeTerminalOutput();
-      // Fire the callback only after a successful emit. The continue caller
-      // (session.ts) uses it to mark the result as delivered and swallow any
-      // later error; if emitResult itself throws, the flag must stay unset so
-      // the error still surfaces instead of losing both result and error.
-      adapter.emitResult(result);
-      options.onResultEmitted?.();
-      await modSession?.flushOutput();
+      try {
+        await settleBeforeTerminalOutput();
+        // Fire the callback only after a successful emit. The continue caller
+        // (session.ts) uses it to mark the result as delivered and swallow any
+        // later error; if emitResult itself throws, the flag must stay unset so
+        // the error still surfaces instead of losing both result and error.
+        adapter.emitResult(result);
+        options.onResultEmitted?.();
+        await modSession?.flushOutput();
+      } finally {
+        // Write the result first, but keep the invocation alive for memory writes.
+        await drainPendingMemoryTasks();
+      }
     };
 
     // Get readonly values once at the start
@@ -1796,6 +1809,7 @@ export async function runNonInteractive(
 
         if (outputFormat === OutputFormat.TEXT) {
           await settleBeforeTerminalOutput();
+          await drainPendingMemoryTasks();
           return 1;
         }
 
@@ -3242,12 +3256,6 @@ export async function runNonInteractive(
             await new Promise((r) => setTimeout(r, 100));
           }
 
-          const memoryTaskPromises = config
-            .getLlmClient()
-            .consumePendingMemoryTaskPromises();
-          if (memoryTaskPromises.length > 0) {
-            await Promise.allSettled(memoryTaskPromises);
-          }
           finalizeOneShotMonitors();
 
           const metrics = uiTelemetryService.getMetrics();
@@ -3425,6 +3433,8 @@ export async function runNonInteractive(
             }`,
           );
         }
+      } else {
+        await drainPendingMemoryTasks();
       }
       if (budgetExceeded) {
         // Always exit AFTER emitResult so STREAM_JSON / JSON consumers

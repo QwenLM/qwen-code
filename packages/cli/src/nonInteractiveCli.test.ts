@@ -20,7 +20,7 @@ import type {
   SessionMetrics,
   WorkflowApprovalRequestCallback,
 } from '@qwen-code/qwen-code-core';
-import type { CLIUserMessage } from './nonInteractive/types.js';
+import type { CLIMessage, CLIUserMessage } from './nonInteractive/types.js';
 import {
   executeToolCall,
   isTelemetrySdkInitialized,
@@ -3512,6 +3512,362 @@ describe('runNonInteractive', () => {
 
     expect(flush).toHaveBeenCalledOnce();
     expect(finalize).not.toHaveBeenCalled();
+  });
+
+  it('emits the terminal result before managed memory settles but waits before returning', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'Answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    let finishExtraction!: (count: number) => void;
+    let finishDream!: (count: number) => void;
+    let rejectDream!: (error: Error) => void;
+    const extraction = new Promise<number>((resolve) => {
+      finishExtraction = resolve;
+    });
+    const dream = new Promise<number>((resolve, reject) => {
+      finishDream = resolve;
+      rejectDream = reject;
+    });
+    mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValueOnce([
+      extraction,
+      dream,
+    ]);
+    const onResultEmitted = vi.fn();
+    let returned = false;
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-memory-order',
+      { onResultEmitted },
+    ).then((code) => {
+      returned = true;
+      return code;
+    });
+    const messages = (): CLIMessage[] =>
+      processStdoutSpy.mock.calls.map(
+        ([chunk]) => JSON.parse(String(chunk)) as CLIMessage,
+      );
+
+    try {
+      await vi.waitFor(() =>
+        expect(
+          mockLlmClient.consumePendingMemoryTaskPromises,
+        ).toHaveBeenCalled(),
+      );
+      expect(messages()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'assistant' }),
+          expect.objectContaining({
+            type: 'stream_event',
+            event: expect.objectContaining({ type: 'message_stop' }),
+          }),
+        ]),
+      );
+      await vi.waitFor(() =>
+        expect(
+          messages().filter((message) => message.type === 'result'),
+        ).toEqual([
+          expect.objectContaining({ is_error: false, result: 'Answer' }),
+        ]),
+      );
+      expect(onResultEmitted).toHaveBeenCalledOnce();
+      expect(returned).toBe(false);
+
+      finishExtraction(1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(returned).toBe(false);
+
+      rejectDream(new Error('Memory task failed'));
+      await expect(run).resolves.toBe(0);
+      expect(onResultEmitted).toHaveBeenCalledOnce();
+      expect(
+        messages().filter((message) => message.type === 'result'),
+      ).toHaveLength(1);
+    } finally {
+      finishExtraction(0);
+      finishDream(0);
+      await run;
+    }
+  });
+
+  describe('managed memory settlement on terminal paths', () => {
+    let finishMemory: (count: number) => void;
+    let rejectMemory: (error: Error) => void;
+
+    beforeEach(() => {
+      setupMetricsMock();
+      const memoryTask = new Promise<number>((resolve, reject) => {
+        finishMemory = resolve;
+        rejectMemory = reject;
+      });
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValueOnce([
+        memoryTask,
+      ]);
+    });
+
+    it.each([
+      { terminal: 'schema error', drainTurn: false, format: OutputFormat.JSON },
+      {
+        terminal: 'structured success',
+        drainTurn: false,
+        format: OutputFormat.STREAM_JSON,
+      },
+      {
+        terminal: 'structured success',
+        drainTurn: true,
+        format: OutputFormat.STREAM_JSON,
+      },
+    ])(
+      'emits $terminal before memory settles and waits before returning (drain=$drainTurn)',
+      async ({ terminal, drainTurn, format }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+          type: 'object',
+          properties: { summary: { type: 'string' } },
+          required: ['summary'],
+        });
+        const structuredResult = { summary: 'done' };
+        const plainTextTurn: ServerLlmStreamEvent[] = [
+          { type: LlmEventType.Content, value: 'Plain text answer' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ];
+        if (drainTurn) {
+          mockMonitorRegistry.setNotificationCallback.mockImplementation(
+            (callback) => {
+              callback?.(
+                'Monitor ready',
+                '<task-notification>ready</task-notification>',
+                {
+                  monitorId: 'memory-test-monitor',
+                  toolUseId: 'memory-test-tool',
+                  status: 'running',
+                  eventCount: 1,
+                },
+              );
+            },
+          );
+          mockLlmClient.sendMessageStream.mockReturnValueOnce(
+            createStreamFromEvents(plainTextTurn),
+          );
+        }
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents(
+            terminal === 'schema error'
+              ? plainTextTurn
+              : [
+                  {
+                    type: LlmEventType.ToolCallRequest,
+                    value: {
+                      callId: 'memory-test-structured',
+                      name: 'structured_output',
+                      args: structuredResult,
+                      isClientInitiated: false,
+                      prompt_id: 'prompt-memory-schema',
+                    },
+                  },
+                ],
+          ),
+        );
+        mockCoreExecuteToolCall.mockResolvedValue({
+          responseParts: [{ text: 'ok' }],
+        });
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Return structured output',
+          'prompt-memory-schema',
+          { onResultEmitted },
+        ).finally(() => {
+          settled = true;
+        });
+        const results = () =>
+          processStdoutSpy.mock.calls
+            .flatMap(
+              ([chunk]) =>
+                JSON.parse(String(chunk)) as CLIMessage | CLIMessage[],
+            )
+            .filter((message) => message.type === 'result');
+
+        try {
+          await vi.waitFor(() =>
+            expect(onResultEmitted).toHaveBeenCalledOnce(),
+          );
+          expect(results()).toEqual([
+            expect.objectContaining(
+              terminal === 'schema error'
+                ? {
+                    is_error: true,
+                    error: {
+                      message: expect.stringContaining('structured_output'),
+                    },
+                  }
+                : { is_error: false, structured_result: structuredResult },
+            ),
+          ]);
+          expect(
+            mockLlmClient.consumePendingMemoryTaskPromises,
+          ).toHaveBeenCalledOnce();
+          expect(settled).toBe(false);
+          finishMemory(1);
+          await expect(run).resolves.toBe(terminal === 'schema error' ? 1 : 0);
+          expect(results()).toHaveLength(1);
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
+            drainTurn ? 2 : 1,
+          );
+        } finally {
+          finishMemory(0);
+          await run;
+        }
+      },
+    );
+
+    it.each(['loop detection', 'already reported error'] as const)(
+      'drains memory before leaving TEXT mode after %s without duplicating output',
+      async (terminal) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.TEXT,
+        );
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            terminal === 'loop detection'
+              ? {
+                  type: LlmEventType.LoopDetected,
+                  value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+                }
+              : {
+                  type: LlmEventType.Error,
+                  value: {
+                    error: { message: '429 Too Many Requests', status: 429 },
+                  },
+                },
+          ]),
+        );
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-memory-text-error',
+          { onResultEmitted },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+
+        try {
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.consumePendingMemoryTaskPromises,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(settled).toBe(false);
+          expect(processStderrSpy).toHaveBeenCalledTimes(1);
+          expect(processStderrSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              terminal === 'loop detection'
+                ? 'Loop detection halted the run'
+                : '429 Too Many Requests',
+            ),
+          );
+          rejectMemory(new Error('Memory task failed'));
+          if (terminal === 'loop detection') {
+            await expect(run).resolves.toBe(1);
+          } else {
+            await expect(run).resolves.toBeInstanceOf(AlreadyReportedError);
+          }
+          expect(processStderrSpy).toHaveBeenCalledTimes(1);
+          expect(processStdoutSpy).not.toHaveBeenCalled();
+          expect(onResultEmitted).not.toHaveBeenCalled();
+        } finally {
+          finishMemory(0);
+          await run;
+        }
+      },
+    );
+
+    it.each(['emit', 'flush'] as const)(
+      'drains memory when terminal output %s fails and preserves the execution error',
+      async (failure) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        const executionError = new Error('Execution failed');
+        mockLlmClient.sendMessageStream.mockImplementation(() => {
+          throw executionError;
+        });
+        const outputError = new Error('Output failed');
+        const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+        const emitResult = vi.spyOn(adapter, 'emitResult');
+        const flushOutput = vi.fn().mockResolvedValue(undefined);
+        if (failure === 'emit') {
+          emitResult.mockImplementation(() => {
+            throw outputError;
+          });
+        } else {
+          flushOutput.mockRejectedValueOnce(outputError);
+        }
+        const modSession = {
+          initialize: vi.fn().mockResolvedValue(undefined),
+          flushLogs: vi.fn(),
+          flushOutput,
+        } as unknown as ModSession;
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-memory-output-failure',
+          { adapter, modSession, onResultEmitted },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+
+        try {
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.consumePendingMemoryTaskPromises,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(emitResult).toHaveBeenCalledOnce();
+          expect(onResultEmitted).toHaveBeenCalledTimes(
+            failure === 'emit' ? 0 : 1,
+          );
+          expect(flushOutput).toHaveBeenCalledTimes(failure === 'emit' ? 0 : 1);
+          expect(settled).toBe(false);
+          rejectMemory(new Error('Memory task failed'));
+          await expect(run).resolves.toBe(executionError);
+          expect(emitResult).toHaveBeenCalledOnce();
+          expect(onResultEmitted).toHaveBeenCalledTimes(
+            failure === 'emit' ? 0 : 1,
+          );
+        } finally {
+          finishMemory(0);
+          await run;
+        }
+      },
+    );
   });
 
   it('should handle a single tool call and respond', async () => {

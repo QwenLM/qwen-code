@@ -231,6 +231,8 @@ Output (streaming as events occur):
 
 When combined with `--include-partial-messages`, additional stream events are emitted in real-time (message_start, content_block_delta, etc.) for real-time UI updates.
 
+Pending managed auto-memory work does not delay the terminal `result` message in JSON or stream-JSON output. The CLI still waits for that work before finishing the invocation, so a one-shot process may remain running after the result is written.
+
 For JSON and stream-JSON output, textual `tool_result.content` values are
 bounded to 65,536 UTF-8 bytes after JSON string serialization. Oversized
 values are emitted as deterministic head/tail previews. The same bound applies
