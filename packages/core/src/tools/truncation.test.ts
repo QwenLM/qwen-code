@@ -830,7 +830,7 @@ describe('producer spill budget', () => {
       getTruncateToolOutputThreshold: () => 2000,
       getToolResultBytesWritten: () => MAX_SESSION_BYTES,
       trackToolResultBytes: vi.fn(),
-    } as Config;
+    } as unknown as Config;
     const content = 'x'.repeat(60_000);
 
     const skipped = await truncateToolOutput(cfg, 'shell', content, {
