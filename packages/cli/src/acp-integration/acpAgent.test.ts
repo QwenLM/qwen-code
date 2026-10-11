@@ -839,20 +839,25 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
       .normalizeDerivedBranchTitle,
   ),
-  Storage: {
-    getGlobalQwenDir: vi.fn(() => '/tmp/qwen-global-test'),
-    getGlobalTempDir: vi.fn(() => '/tmp/qwen-global-temp'),
-    getUserExtensionsDir: vi.fn(() => '/tmp/qwen-extensions'),
-    getUserWorkflowsDir: vi.fn(() => '/home/test/.qwen/workflows'),
-    getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
-    runWithRuntimeBaseDir: vi.fn(
-      (
-        _runtimeBaseDir: string,
-        _sessionId: string | undefined,
-        operation: () => unknown,
-      ) => operation(),
-    ),
-  },
+  Storage: Object.assign(
+    class extends (
+      await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+    ).Storage {},
+    {
+      getGlobalQwenDir: vi.fn(() => '/tmp/qwen-global-test'),
+      getGlobalTempDir: vi.fn(() => '/tmp/qwen-global-temp'),
+      getUserExtensionsDir: vi.fn(() => '/tmp/qwen-extensions'),
+      getUserWorkflowsDir: vi.fn(() => '/home/test/.qwen/workflows'),
+      getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
+      runWithRuntimeBaseDir: vi.fn(
+        (
+          _runtimeBaseDir: string,
+          _sessionId: string | undefined,
+          operation: () => unknown,
+        ) => operation(),
+      ),
+    },
+  ),
   parseRule: vi.fn((raw: string) => {
     const trimmed = raw.trim();
     const openParen = trimmed.indexOf('(');
@@ -1033,6 +1038,7 @@ vi.mock('./service/filesystem.js', () => ({
 vi.mock('../config/settings.js', () => ({
   SettingScope: { User: 'User', Workspace: 'Workspace' },
   loadSettings: vi.fn(),
+  readSettingsSnapshot: vi.fn(),
   reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
 }));
 // Passthrough: the real cache would serve the first mockReturnValue to every
@@ -1247,6 +1253,7 @@ import type {
 import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
 import {
   loadSettings,
+  readSettingsSnapshot,
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
@@ -20886,33 +20893,54 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   }
 
   it.each([
-    ['qwen/settings/setMemory', 'user', false, false],
-    ['qwen/settings/setCoreValue', 'user', false, false],
-    ['qwen/settings/setCoreValue', 'user', true, false],
-    ['qwen/settings/setCoreValue', 'workspace', false, false],
-    ['qwen/settings/setMemory', 'user', false, true],
+    ['qwen/settings/setMemory', 'user', false, false, false],
+    ['qwen/settings/setCoreValue', 'user', false, false, false],
+    ['qwen/settings/setCoreValue', 'user', true, false, false],
+    ['qwen/settings/setCoreValue', 'workspace', false, false, false],
+    ['qwen/settings/setMemory', 'user', false, true, false],
+    ['qwen/settings/setMemory', 'user', false, false, true],
+    ['qwen/settings/setCoreValue', 'user', false, false, true],
   ] as const)(
-    'applies %s %s toggles with overrides=%s and foreign failure=%s',
-    async (route, scope, overridden, foreignFailure) => {
+    'applies %s %s toggles with overrides=%s and foreign failure=%s, invalid JSON=%s',
+    async (route, scope, overridden, foreignFailure, invalidJson) => {
       const { Config: LiveConfig } = await vi.importActual<
         typeof import('@qwen-code/qwen-code-core')
       >('@qwen-code/qwen-code-core');
-      const { LoadedSettings: LiveSettings } = await vi.importActual<
-        typeof import('../config/settings.js')
-      >('../config/settings.js');
+      const {
+        LoadedSettings: LiveSettings,
+        loadSettings: readWritingSettings,
+        readSettingsSnapshot: readSnapshot,
+      } = await vi.importActual<typeof import('../config/settings.js')>(
+        '../config/settings.js',
+      );
       const temp = await realFsPromises.mkdtemp(
         path.join(os.tmpdir(), 'acp-live-memory-'),
       );
       const roots = [path.join(temp, 'a'), path.join(temp, 'b')];
-      const userPath = path.join(temp, 'user.json');
+      const home = path.join(temp, 'home');
+      await realFsPromises.mkdir(home);
+      const userPath = path.join(home, 'settings.json');
+      vi.stubEnv('QWEN_HOME', home);
+      vi.stubEnv(
+        'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+        path.join(temp, 'system.json'),
+      );
+      vi.stubEnv(
+        'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+        path.join(temp, 'defaults.json'),
+      );
+      const workspaceFile = (root: string) =>
+        path.join(root, '.qwen', 'settings.json');
       await realFsPromises.writeFile(
         userPath,
         JSON.stringify({ memory: { enableManagedAutoMemory: true } }),
       );
       for (const root of roots) {
-        await realFsPromises.mkdir(root);
+        await realFsPromises.mkdir(path.join(root, '.qwen'), {
+          recursive: true,
+        });
         await realFsPromises.writeFile(
-          path.join(root, 'settings.json'),
+          workspaceFile(root),
           JSON.stringify(
             overridden && root === roots[0]
               ? { memory: { enableManagedAutoMemory: true } }
@@ -20940,12 +20968,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           empty,
           empty,
           file(userPath),
-          file(path.join(root, 'settings.json')),
+          file(workspaceFile(root)),
           true,
           new Set(),
         );
       };
-      const configs = [roots[0]!, roots[0]!, roots[1]!].map(
+      const alias = path.join(temp, 'b-alias');
+      await realFsPromises.symlink(
+        roots[1]!,
+        alias,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+      const configs = [roots[0]!, roots[0]!, roots[1]!, alias].map(
         (root, i) =>
           new LiveConfig({
             sessionId: `live-${i}`,
@@ -20955,17 +20989,35 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             debugMode: false,
             telemetry: { enabled: false },
             enableManagedAutoMemory: true,
+            trustedFolder: true,
           }),
       );
+      vi.mocked(mockConfig.getTargetDir).mockReturnValue(roots[0]!);
       const { agent, agentPromise } = await bootCoreSettingsAgent(
         load(roots[0]!),
       );
-      vi.mocked(loadSettings).mockImplementation((cwd) => {
-        if (foreignFailure && cwd === roots[1]) {
-          throw new Error('Unreadable foreign workspace settings');
+      vi.mocked(loadSettings).mockImplementation((cwd, options) => {
+        if (cwd === roots[1] || cwd === alias) {
+          return readWritingSettings(cwd, options);
         }
-        return load(cwd === roots[1] ? roots[1]! : roots[0]!);
+        return load(roots[0]!);
       });
+      vi.mocked(readSettingsSnapshot).mockClear();
+      vi.mocked(readSettingsSnapshot).mockImplementation((cwd, options) => {
+        if (foreignFailure)
+          throw new Error('Unreadable foreign workspace settings');
+        return readSnapshot(cwd, options);
+      });
+      if (invalidJson) {
+        await realFsPromises.writeFile(
+          workspaceFile(roots[1]!),
+          '{ "approvalMode":',
+        );
+      }
+      const foreignBytes = await realFsPromises.readFile(
+        workspaceFile(roots[1]!),
+        'utf8',
+      );
       const sessions = (agent as unknown as { sessions: Map<string, unknown> })
         .sessions;
       configs.forEach((config, i) =>
@@ -20983,21 +21035,50 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           configs.map((config) => config.getManagedAutoMemoryEnabled()),
         ).toEqual(
           scope === 'workspace' || overridden
-            ? [true, true, false]
-            : [false, false, foreignFailure],
+            ? [true, true, false, false]
+            : [
+                false,
+                false,
+                foreignFailure || invalidJson,
+                foreignFailure || invalidJson,
+              ],
         );
         expect(load(roots[0]!).merged.memory?.enableManagedAutoMemory).toBe(
           scope === 'workspace' || overridden,
         );
-        expect(load(roots[1]!).merged.memory?.enableManagedAutoMemory).toBe(
-          false,
+        if (scope === 'user') {
+          expect(
+            await realFsPromises.readFile(workspaceFile(roots[1]!), 'utf8'),
+          ).toBe(foreignBytes);
+        } else {
+          expect(load(roots[1]!).merged.memory?.enableManagedAutoMemory).toBe(
+            false,
+          );
+        }
+        expect(
+          await realFsPromises.readdir(path.join(roots[1]!, '.qwen')),
+        ).toEqual(['settings.json']);
+        expect(readSettingsSnapshot).toHaveBeenCalledTimes(
+          scope === 'user' ? 1 : 0,
         );
+        expect(
+          vi
+            .mocked(loadSettings)
+            .mock.calls.some(([cwd]) => cwd === roots[1] || cwd === alias),
+        ).toBe(scope === 'workspace');
+        if (scope === 'user') {
+          expect(readSettingsSnapshot).toHaveBeenCalledWith(roots[1], {
+            environment: process.env,
+            workspaceTrusted: true,
+          });
+        }
       } finally {
         sessions.clear();
         mockConnectionState.resolve();
         await agentPromise;
         await Promise.all(configs.map((config) => config.shutdown()));
         await realFsPromises.rm(temp, { recursive: true, force: true });
+        vi.unstubAllEnvs();
       }
     },
   );

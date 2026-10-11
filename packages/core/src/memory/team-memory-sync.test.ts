@@ -17,6 +17,12 @@ import {
 } from './memory-file-change.js';
 import { clearAutoMemoryRootCache, getTeamAutoMemoryRoot } from './paths.js';
 
+// Exercise the Windows null-device spelling while Git still runs natively.
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
+  devNull: '\\\\.\\nul',
+}));
+
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' });
 }

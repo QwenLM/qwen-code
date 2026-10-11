@@ -252,6 +252,7 @@ import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
 import {
   loadSettings,
+  readSettingsSnapshot,
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
@@ -7265,24 +7266,37 @@ class QwenAgent implements Agent {
       this.config,
       ...this.getActiveSessions().map((session) => session.getConfig()),
     ]);
+    const snapshots = new Map<string, LoadedSettings['merged'] | null>();
     for (const config of configs) {
       const root =
         config === this.config
           ? config.getTargetDir()
           : this.sessionWorkspaceRoot(config);
-      const sameWorkspace = this.canonicalWorkspacePath(root) === workspace;
+      const canonicalRoot = this.canonicalWorkspacePath(root);
+      const sameWorkspace = canonicalRoot === workspace;
       if (scope !== SettingScope.User && !sameWorkspace) continue;
       // User settings affect every workspace, each with its own overrides.
       let merged = settings.merged;
       if (!sameWorkspace) {
-        try {
-          merged = this.loadRequestSettings(root).merged;
-        } catch {
-          debugLogger.warn(
-            'Memory settings reload failed; keeping this workspace runtime setting',
-          );
-          continue;
+        if (!snapshots.has(canonicalRoot)) {
+          try {
+            snapshots.set(
+              canonicalRoot,
+              readSettingsSnapshot(root, {
+                environment: process.env,
+                workspaceTrusted: config.isTrustedFolder(),
+              }).merged,
+            );
+          } catch {
+            snapshots.set(canonicalRoot, null);
+            debugLogger.warn(
+              'Memory settings reload failed; keeping this workspace runtime setting',
+            );
+          }
         }
+        const snapshot = snapshots.get(canonicalRoot);
+        if (!snapshot) continue;
+        merged = snapshot;
       }
       config.setManagedAutoMemoryEnabled(
         !config.getBareMode() &&

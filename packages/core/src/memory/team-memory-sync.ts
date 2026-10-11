@@ -6,7 +6,6 @@
 
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
-import { devNull } from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -214,7 +213,13 @@ export async function syncTeamMemory(
         )
           return false;
         before = (
-          await tryGit(gitRoot, ['hash-object', '-w', '-t', 'tree', devNull])
+          await tryGit(gitRoot, [
+            'hash-object',
+            '-w',
+            '-t',
+            'tree',
+            '/dev/null',
+          ])
         )?.trim();
         if (!before) return false;
       }
