@@ -5048,6 +5048,15 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(scopeSelection).toContain(
       'takes one of the harness slots in item 2 rather than time from the central A/B',
     );
+    // "item 2" is an ordinal, so pin that it still names the harness line.
+    // `^` needs real newlines, hence the raw slice, as in the item-4 pin.
+    const rawScopeSelection = verifySkill.slice(
+      verifySkill.indexOf('## Scope selection'),
+      verifySkill.indexOf('## Method'),
+    );
+    expect(rawScopeSelection).toMatch(
+      /^2\. \*\*One or two wire-oracle harnesses\*\*/m,
+    );
     expect(scopeSelection).toContain(
       'The trigger is therefore the diff, not the claim.',
     );
