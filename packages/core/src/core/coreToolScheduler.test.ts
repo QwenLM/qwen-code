@@ -261,6 +261,31 @@ vi.mock('../tools/modifiable-tool.js', async (importOriginal) => {
   };
 });
 
+// The vision bridge runs after a producer already settled, so it is the
+// reachable post-settlement step that can still throw.
+const bridgeRejection = vi.hoisted(() => ({
+  value: undefined as Error | undefined,
+}));
+
+vi.mock(
+  '../services/visionBridge/tool-result-vision-bridge.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../services/visionBridge/tool-result-vision-bridge.js')
+      >();
+    return {
+      ...actual,
+      bridgeToolResultImages: (
+        params: Parameters<typeof actual.bridgeToolResultImages>[0],
+      ) => {
+        if (bridgeRejection.value) return Promise.reject(bridgeRejection.value);
+        return actual.bridgeToolResultImages(params);
+      },
+    };
+  },
+);
+
 vi.mock('../telemetry/sdk.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../telemetry/sdk.js')>();
   return {
@@ -6319,6 +6344,31 @@ describe('CoreToolScheduler', () => {
     expect(latestSpan('tool.alpha', 'call-alpha')?.ended).toBe(true);
   });
 
+  it('drops the producer raw size when a post-settlement step throws', async () => {
+    // A throw after `execute()` settled (here the vision bridge) replaces the
+    // producer's outcome with an error body, so that body must not inherit
+    // the producer's raw size or truncation status.
+    bridgeRejection.value = new Error('bridge failed');
+    try {
+      const { onAllToolCallsComplete } = await runReadBatch(
+        { alpha: textResult('p'.repeat(2000)) },
+        [valueRequest('alpha', 'a', 'prompt-post-settlement-throw')],
+      );
+
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'error');
+      expect(completed.response.error?.message).toContain('bridge failed');
+      const provenance = getToolOutputProvenance(
+        completed.response.responseParts[0],
+      );
+      expect(provenance).toBeDefined();
+      expect(provenance?.rawSize).toBeUndefined();
+      expect(provenance?.truncated).toBeUndefined();
+    } finally {
+      bridgeRejection.value = undefined;
+    }
+  });
+
   it('applies PostToolBatch stop decisions and preserves additional context', async () => {
     const alpha = deferred<ToolResult>();
     const executeB = vi.fn().mockResolvedValue(textResult('beta output'));
@@ -6379,6 +6429,7 @@ describe('CoreToolScheduler', () => {
     const provenance = getToolOutputProvenance(
       lastCompletedCall.response.responseParts[0],
     );
+    expect(provenance).toBeDefined();
     expect(provenance?.rawSize).toBeUndefined();
     expect(provenance?.truncated).toBeUndefined();
     expect(provenance?.budget).toBeUndefined();

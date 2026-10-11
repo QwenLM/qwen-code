@@ -7446,7 +7446,10 @@ export class CoreToolScheduler {
           executionStatus,
           failureHookArtifacts,
         );
-        observeProducerOutput(errorResponse);
+        // A throw raised after the producer already settled replaces its
+        // outcome: the error body is not a derivation of the tool output, so
+        // it must not inherit the producer's raw size or budget attribution.
+        observeProducerOutput(errorResponse, true);
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
           span,
