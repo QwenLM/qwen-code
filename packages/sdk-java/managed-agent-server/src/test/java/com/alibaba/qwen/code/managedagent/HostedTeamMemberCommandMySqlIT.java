@@ -239,15 +239,13 @@ class HostedTeamMemberCommandMySqlIT {
                 spring.getBean(PlatformTransactionManager.class));
         ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
         transaction.execute(status -> {
-            var created = store.insertWorkspaceSessionCommand(tenant, "actor",
-                    "create-" + marker, DIGEST, "qwen-code", null, null,
-                    List.of(), null,
+            // The trusted internal TeamLead lane: no public Shell gate,
+            // the internal team-lead profile ships with its own line
+            // (#13674's public Shell gate admits only externally created
+            // Shell Session lanes).
+            var created = store.insertInternalTeamLeadSessionCommand(tenant,
+                    "actor", "create-" + marker, DIGEST, null,
                     new WorkspaceSelection("workspace-0", "child"));
-            jdbc.update(
-                    "UPDATE managed_agent_session SET tool_profile ="
-                            + " 'hosted-workspace-shell/1' WHERE tenant_id = ?"
-                            + " AND session_id = ?",
-                    tenant, created.sessionId());
             leadSession = created.sessionId();
             return created.sessionId();
         });
