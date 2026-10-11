@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "private": true,
-  "version": "0.25.1",
+  "version": "0.25.1-nightly.20261011.01d3e6d81a",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -38,7 +38,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.25.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.25.1-nightly.20261011.01d3e6d81a"
   },
   "dependencies": {
     "@a2a-js/sdk": "^1.1.0",
