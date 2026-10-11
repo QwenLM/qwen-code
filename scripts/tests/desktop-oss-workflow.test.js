@@ -410,6 +410,18 @@ describe('Desktop OSS mirror workflow', () => {
     expect(updateFeed).toContain(
       'Desktop $RELEASE_VERSION will not replace newer stable feed $current',
     );
+    // The README links to the feed release, so its page text has to follow
+    // the feed; an older publish must not rewrite it.
+    expect(updateFeed).toContain('releases/tag/$RELEASE_TAG');
+    const editNotes = updateFeed.indexOf(
+      'gh release edit "$FEED_TAG" --title "$title" --notes "$notes"',
+    );
+    expect(editNotes).toBeGreaterThan(
+      updateFeed.indexOf('will not replace newer stable feed'),
+    );
+    expect(updateFeed).toContain(
+      '--title "$title" --notes "$notes" --latest=false',
+    );
 
     const sync = getWorkflowJob(syncWorkflow, 'sync');
     const check = getWorkflowStep(
