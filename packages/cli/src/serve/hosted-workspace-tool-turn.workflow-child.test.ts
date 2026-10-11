@@ -17,7 +17,10 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
-import { decodeWorkflowLaunchEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import {
+  MANAGED_CHILD_LIMITS,
+  decodeWorkflowLaunchEnvelope,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   HostedWorkspaceToolTurn,
@@ -25,6 +28,7 @@ import {
   workflowDefinitionPin,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 
 // #13803: the kind gate admits `workflow` for real, so the suite runs
 // without an enablement mock except where a test proves the unlisted
@@ -109,7 +113,10 @@ function call(
   } as ToolCallRequestInfo;
 }
 
-function createTurn(depth = 0): HostedWorkspaceToolTurn {
+function createTurn(
+  depth = 0,
+  hooksMountHeld = false,
+): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -148,6 +155,27 @@ function createTurn(depth = 0): HostedWorkspaceToolTurn {
         depth,
         queueConsumption: (childRunId) => consumption.push(childRunId),
       },
+      ...(hooksMountHeld
+        ? {
+            hooks: {
+              broker: new (HostedWorkspaceBroker as unknown as new (
+                ...args: unknown[]
+              ) => HostedWorkspaceBroker)(
+                { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+                sessionKey,
+                'hook-owner',
+              ),
+              mountHeld: true,
+              ensureReady: () => Promise.resolve(),
+              acquire: () => Promise.resolve(),
+              refresh: () => Promise.resolve(),
+              tools: () => [],
+              toolInput: () => undefined,
+              fire: () => Promise.resolve([]),
+              close: () => Promise.resolve(),
+            } as unknown as import('./hosted-hook-session.js').HostedHookSession,
+          }
+        : {}),
     },
   );
 }
@@ -319,6 +347,260 @@ it('refuses a script whose masked source calls workflow() as a nested launch', a
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     1,
   );
+});
+
+it('refuses the foreground workflow launch and rejects the sibling batch while a Workspace mount is at stake', async () => {
+  // Foreground + mount held: the launch cannot own the mount the child
+  // needs while this Turn or a Session owner already holds it.
+  const responses = await executeWorkflow(
+    createTurn(0, true),
+    call({ script: SCRIPT, run_in_background: false }),
+  );
+  expect(JSON.stringify(responses)).toContain(
+    'unavailable while this Turn holds the Workspace mount',
+  );
+  // Background + Hooks mount held: the Hook catalog's own mount blocks a
+  // background child run as long as the Session stays alive.
+  const background = await executeWorkflow(
+    createTurn(0, true),
+    call({ script: SCRIPT, run_in_background: true }),
+  );
+  expect(JSON.stringify(background)).toContain(
+    'Hook catalog or MCP owner holds the Workspace mount',
+  );
+  // Foreground share a batch with a non-child tool call: no mount-arm —
+  // the sibling still wedges the foreground child's single-mount world.
+  const turn = createTurn();
+  const answer = await turn.execute(
+    [
+      {
+        name: 'workflow',
+        callId: 'wf-fg',
+        args: { script: SCRIPT, run_in_background: false },
+        isClientInitiated: false,
+        prompt_id: 'prompt',
+      } as ToolCallRequestInfo,
+      {
+        name: 'run_shell_command',
+        callId: 'sh-1',
+        args: { command: 'echo x' },
+        isClientInitiated: false,
+        prompt_id: 'prompt',
+      } as ToolCallRequestInfo,
+    ],
+    [
+      {
+        functionCall: {
+          id: 'wf-fg',
+          name: 'workflow',
+          args: { script: SCRIPT, run_in_background: false },
+        },
+      },
+      {
+        functionCall: {
+          id: 'sh-1',
+          name: 'run_shell_command',
+          args: { command: 'echo x' },
+        },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  expect(JSON.stringify(answer)).toContain(
+    'cannot share a batch with a tool other than agent or workflow',
+  );
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+it('admits a batch of a foreground child agent beside a background workflow', async () => {
+  const turn = createTurn();
+  const childRunId = 'prompt:agent-1';
+  // Drive the foreground agent's full lifecycle so the batch completes:
+  // the turn's own wait is the standard settled-then-accepted arm — without
+  // it the foreground agent parks in awaitChildToolResult and the batch
+  // never returns.
+  const driving = (async () => {
+    for (;;) {
+      if (children.record(childRunId) !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await children.dispatchStarted(childRunId, {
+      dispatchId: 'dispatch-1',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach(childRunId, '550e8400-e29b-41d4-a716-446655440001');
+    await children.settleCompleted(childRunId, {
+      result: Buffer.from('agent answer', 'utf8'),
+      receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+    });
+    await children.accept(childRunId);
+  })();
+  const agentCall: ToolCallRequestInfo = {
+    name: 'agent',
+    callId: 'agent-1',
+    args: { description: 'audit', prompt: 'review', run_in_background: false },
+    isClientInitiated: false,
+    prompt_id: 'prompt',
+  } as ToolCallRequestInfo;
+  const responses = (
+    await Promise.all([
+      turn.execute(
+        [call({ script: SCRIPT }, 'wf-1'), agentCall],
+        [
+          {
+            functionCall: {
+              id: 'wf-1',
+              name: 'workflow',
+              args: { script: SCRIPT },
+            },
+          },
+          {
+            functionCall: {
+              id: 'agent-1',
+              name: 'agent',
+              args: {
+                description: 'audit',
+                prompt: 'review',
+                run_in_background: false,
+              },
+            },
+          },
+        ],
+        'model',
+        new AbortController().signal,
+      ),
+      driving,
+    ])
+  )[0];
+  // The agent arm's own exemption names `workflow` as an admissible
+  // sibling — without it the foreground agent would refuse with the batch
+  // refusal naming only `agent` as admissible.
+  expect(JSON.stringify(responses)).not.toContain('cannot share a batch');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    2,
+  );
+});
+
+it('answers an aborted half-batch: the first launch commits, the aborted second is refused by the admission cancel guard and never minted', async () => {
+  const turn = createTurn();
+  const controller = new AbortController();
+  await turn.initialize?.();
+  // The abort must arrive between admissions — early enough for the second
+  // workflow arm's own `if (signal.aborted)` guard to fire, late enough to
+  // keep the first launch's commit. Waiting on the first record's
+  // appearance draws that line deterministically.
+  const driving = (async () => {
+    for (;;) {
+      if (children.record('prompt:wf-1') !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    controller.abort();
+  })();
+  const responses = (
+    await Promise.all([
+      turn.execute(
+        [
+          call({ script: SCRIPT, run_in_background: true }, 'wf-1'),
+          call({ script: SCRIPT, run_in_background: true }, 'wf-2'),
+        ],
+        [
+          {
+            functionCall: {
+              id: 'wf-1',
+              name: 'workflow',
+              args: { script: SCRIPT, run_in_background: true },
+            },
+          },
+          {
+            functionCall: {
+              id: 'wf-2',
+              name: 'workflow',
+              args: { script: SCRIPT, run_in_background: true },
+            },
+          },
+        ],
+        'model',
+        controller.signal,
+      ),
+      driving,
+    ])
+  )[0];
+  // The aborted admission answers the second call with the cancel text —
+  // and mints no second record; the first had already landed.
+  expect(JSON.stringify(responses)).toContain('Workflow child started');
+  expect(JSON.stringify(responses)).toContain(
+    'The turn was cancelled before this workflow was admitted.',
+  );
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    1,
+  );
+});
+
+it('replays a workflow launch without minting a second child or double-spending the scope count', async () => {
+  const turn = createTurn();
+  const first = await executeWorkflow(turn, call({ script: SCRIPT }, 'wf-1'));
+  expect(JSON.stringify(first)).toContain('started');
+  const replayed = await executeWorkflow(
+    turn,
+    call({ script: SCRIPT }, 'wf-1'),
+  );
+  expect(JSON.stringify(replayed)).toContain('started');
+  // The replay guard at the launch admission moves the quota checks below
+  // `children.record(childRunId) === undefined`, so a re-driven batch names
+  // the same record without minting a second one.
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    1,
+  );
+});
+
+// H4c: the lifetime launch budget is kind-blind: the committed history of
+// child_agent runs counts against the workflow budget too.
+it('refuses a workflow launch past the spent launch budget of the scope', async () => {
+  for (
+    let index = 0;
+    index < MANAGED_CHILD_LIMITS.maxLaunchesPerScope - 1;
+    index++
+  ) {
+    const childRunId = `prompt:seed-${index}`;
+    await children.admit({
+      childRunId,
+      ownerScopeId: sessionKey.sessionId,
+      rootSessionId: sessionKey.sessionId,
+      completion: 'sent',
+      description: `seed ${index}`,
+      prompt: 'seed',
+      definition: {
+        definitionId: 'hosted-agent/hosted-workspace-shell/1',
+        definitionRevision: 1,
+        definitionDigest: session.authority.sessionHeader.definitionRef.digest,
+      },
+      workspaceMode: 'shared',
+      workingDirectory: '.',
+      executionCallId: childRunId,
+    });
+    await children.settleCancelled(childRunId, { started: false });
+  }
+  const last = await executeWorkflow(
+    createTurn(),
+    call({ script: SCRIPT }, 'call-last'),
+  );
+  expect(JSON.stringify(last)).toContain('started');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    MANAGED_CHILD_LIMITS.maxLaunchesPerScope,
+  );
+  for (const turn of [createTurn(), createTurn()]) {
+    const refused = await executeWorkflow(
+      turn,
+      call({ script: SCRIPT }, 'call-over'),
+    );
+    expect(JSON.stringify(refused)).toContain('budget_exhausted');
+    expect(
+      session.authority.extensionRecordsInDomain('child_run'),
+    ).toHaveLength(MANAGED_CHILD_LIMITS.maxLaunchesPerScope);
+  }
 });
 
 it('refuses malformed background flags, empty and unstartable scripts', async () => {

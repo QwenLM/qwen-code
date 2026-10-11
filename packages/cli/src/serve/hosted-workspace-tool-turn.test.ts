@@ -51,6 +51,7 @@ import {
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
   HOSTED_AGENT_TOOL,
+  HOSTED_WORKFLOW_TOOL,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -3323,6 +3324,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
     'team_create',
     'task_create',
     'task_update',
+    'workflow',
   ]);
   const declared = [
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
@@ -3330,6 +3332,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_PARENT_TOOL.name,
     ...HOSTED_TEAM_TOOLS.map((tool) => tool.name),
+    HOSTED_WORKFLOW_TOOL.name,
   ];
   for (const name of HOSTED_INPUT_PREVIEW_TOOLS)
     expect(declared).toContain(name);

@@ -187,6 +187,9 @@ describe('childResultNotificationText', () => {
     expect(notification).toContain('<result>审阅通过,生成文件两份。</result>');
     expect(notification).not.toContain('truncated');
     expect(notification).not.toContain('prompt:callId');
+    // R1-14: the kind element names the record's own kind — a child agent
+    // completion never reads as a workflow one to the waiting parent turn.
+    expect(notification).toContain('<kind>child_agent</kind>');
     expect(Buffer.byteLength(notification, 'utf8')).toBeLessThan(
       CHILD_NOTIFICATION_INLINE_LIMIT,
     );

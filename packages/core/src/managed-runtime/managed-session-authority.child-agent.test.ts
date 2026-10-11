@@ -23,6 +23,7 @@ import { type ManagedSessionDurableRef } from './managed-session-records.js';
 // kind gate for exactly that planting.
 const enablement = vi.hoisted(() => ({
   shellKind: false,
+  workflowNarrowed: false,
 }));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -31,6 +32,13 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
   return {
     ...actual,
     assertManagedSessionChildRunKindEnabled: (kind: string) => {
+      if (kind === 'workflow' && enablement.workflowNarrowed) {
+        // R1-14: refuse just this kind for the narrowing window — the whole
+        // point of the blocker's witness is that a persisted workflow
+        // record outlives its own later submission refusal.
+        actual.assertManagedSessionChildRunKindEnabled('unsettled-kind');
+        return;
+      }
       if (!(kind === 'shell' && enablement.shellKind)) {
         actual.assertManagedSessionChildRunKindEnabled(kind);
       }
@@ -42,6 +50,7 @@ const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
   enablement.shellKind = false;
+  enablement.workflowNarrowed = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -1205,6 +1214,56 @@ describe('managed session authority workflow records (H4c, enabled by the workfl
       },
       { create: false },
     );
+  });
+
+  // The H4c kind gate is submission-only by construction: reopening and
+  // rebuilding a persisted journal never re-runs it — if the gate ever
+  // widened, an already-committed workflow record would read as an
+  // admission failure on replay.
+  it('keeps a committed workflow child readable after the workflow kind gate narrows', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = workflowLife(refs);
+    await withAuthority(harness, async (authority) => {
+      await authority.commitExtensionRecord(
+        command('run-1:1'),
+        { domain: 'child_run', record: chain[0] },
+        TRUSTED,
+      );
+      expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
+      // The gate narrows while the Session stays open: a new workflow
+      // submission is refused on sight, and the persisted record still
+      // projects its task. Deleting the narrowing step should keep both
+      // halves of this test green; flipping the gate on replay would not.
+      enablement.workflowNarrowed = true;
+      try {
+        await expect(
+          authority.commitExtensionRecord(
+            command('run-2:1'),
+            { domain: 'child_run', record: chain[0] },
+            TRUSTED,
+          ),
+        ).rejects.toThrow('not enabled for submission');
+        expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
+      } finally {
+        enablement.workflowNarrowed = false;
+      }
+    });
+    // The gate holds onto nobody's durable record: a fresh authority
+    // rebuilding this journal from committed bytes walks through replay
+    // untouched, no matter how it updates its gate.
+    enablement.workflowNarrowed = true;
+    try {
+      await withAuthority(
+        harness,
+        async (authority) => {
+          expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
+        },
+        { create: false },
+      );
+    } finally {
+      enablement.workflowNarrowed = false;
+    }
   });
 
   it('binds a workflow child to the child Session commit rules', async () => {

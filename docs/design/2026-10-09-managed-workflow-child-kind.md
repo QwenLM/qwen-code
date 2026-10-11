@@ -2,7 +2,7 @@
 
 [English](2026-10-09-managed-workflow-child-kind.md) | [简体中文](2026-10-09-managed-workflow-child-kind.zh-CN.md)
 
-Status: implemented in this change. Landed: the `workflow` body kind of `managed-child_run`, registered and validated in both languages but not enabled for submission, and the cumulative child launch budget refused with `budget_exhausted`. The workflow runtime is delivered by its own slice ([design](2026-10-10-managed-workflow-child-runtime.md)); still design only the Workspace isolation policies (Follow-up work). This is slice **H4c** of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380), tracked by [#13743](https://github.com/QwenLM/qwen-code/issues/13743). It follows H4a ([record contract](2026-10-06-managed-child-agent-runtime.md), #13505) and H4b ([child Session runtime](2026-10-07-managed-child-session-runtime.md), #13550). The earlier [H4 problem framing](2026-10-04-managed-child-agents.md) remains background; where it disagrees with H4a, H4b or this document, these govern.
+Status: implemented in this change. Landed: the `workflow` body kind of `managed-child_run` and the cumulative child launch budget refused with `budget_exhausted`, with submission enabled by the [workflow runtime design](2026-10-10-managed-workflow-child-runtime.md) (delivered in the same tree: the gate lists both kinds). Still design only the Workspace isolation policies (Follow-up work). This is slice **H4c** of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380), tracked by [#13743](https://github.com/QwenLM/qwen-code/issues/13743). It follows H4a ([record contract](2026-10-06-managed-child-agent-runtime.md), #13505) and H4b ([child Session runtime](2026-10-07-managed-child-session-runtime.md), #13550). The earlier [H4 problem framing](2026-10-04-managed-child-agents.md) remains background; where it disagrees with H4a, H4b or this document, these govern.
 
 ## Problem and scope
 
@@ -114,8 +114,8 @@ The task projection maps a `workflow` run to task kind `workflow`. `child_accept
 
 ## Open questions
 
-1. **The workflow launch envelope**: whether it names a saved workflow, an extension workflow or inline source, and how arguments are bounded. This is for the workflow runtime slice.
-2. **Where a workflow's own agents run**: as nested child Sessions, which needs depth 2 and a real tree depth (`childLaunchAdmission` passes depth 1 today), or inside the workflow child itself. This is for the workflow runtime slice.
+1. _(Settled by the runtime slice)_ **The workflow launch envelope**: inline script source, `{ definition, script, args }` with closed keys and a 32 KiB `maxEnvelopeBytes` bound — [the runtime design's](2026-10-10-managed-workflow-child-runtime.md) decisions 1 and 3.
+2. _(Settled by the runtime slice)_ **Where a workflow's own agents run**: inside the workflow child as in-process subagents; nested child Sessions and the depth-2 runtime are the named follow-up — the runtime design's decision 5.
 3. **The budget value**: whether 64 needs tuning, and a per-root budget once nesting lands.
 
 ## Follow-up work

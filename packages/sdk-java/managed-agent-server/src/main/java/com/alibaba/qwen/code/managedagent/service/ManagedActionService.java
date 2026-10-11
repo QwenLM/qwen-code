@@ -37,7 +37,7 @@ public class ManagedActionService {
     private static final Set<String> PREVIEW_TOOLS =
             Set.of("read_file", "write_file", "edit", "run_shell_command",
                     "agent", "send_message", "team_create", "task_create",
-                    "task_update");
+                    "task_update", "workflow");
     private final ManagedAgentService sessions;
     private final ManagedActionStore actions;
     private final ManagedExtensionRecordStore resources;

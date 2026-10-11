@@ -2,7 +2,7 @@
 
 [English](2026-10-09-managed-workflow-child-kind.md) | [简体中文](2026-10-09-managed-workflow-child-kind.zh-CN.md)
 
-状态:已在本变更中实现。已落地:`managed-child_run` 的 `workflow` 记录体 kind,在两种语言中均已登记并校验,但不开放提交;以及累计 child launch 预算,超出时以 `budget_exhausted` 拒绝。workflow 运行时已由后续切片交付([设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md));仍为设计的只剩 Workspace 隔离策略(见"后续工作")。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4c** 切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13743](https://github.com/QwenLM/qwen-code/issues/13743) 跟踪。它承接 H4a([记录契约](2026-10-06-managed-child-agent-runtime.md),#13505)与 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.md),#13550)。更早的 [H4 问题框架](2026-10-04-managed-child-agents.md) 仍是背景;凡它与 H4a、H4b 或本文档冲突之处,以后者为准。
+状态:已在本变更中实现。已落地:`managed-child_run` 的 `workflow` 记录体 kind 与累计 child launch 预算(超出时以 `budget_exhausted` 拒绝),提交由 [workflow 运行时设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md) 启用(同一棵树交付:门禁列出两种 kind)。仍为设计的只剩 Workspace 隔离策略(见"后续工作")。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4c** 切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13743](https://github.com/QwenLM/qwen-code/issues/13743) 跟踪。它承接 H4a([记录契约](2026-10-06-managed-child-agent-runtime.md),#13505)与 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.md),#13550)。更早的 [H4 问题框架](2026-10-04-managed-child-agents.md) 仍是背景;凡它与 H4a、H4b 或本文档冲突之处,以后者为准。
 
 ## 问题与范围
 
@@ -114,8 +114,8 @@ Schema version 1。链以 `childRunId` 为键,与 `child_agent` 相同。[`child
 
 ## 未决问题
 
-1. **workflow launch envelope**:它指名的是已保存 workflow、扩展 workflow 还是内联源码,以及参数如何约束。由 workflow 运行时切片决定。
-2. **workflow 自己的 agent 在哪里运行**:作为嵌套的 child Session(需要深度 2 与真实的树深度;`childLaunchAdmission` 目前传入的是深度 1),还是在 workflow child 内部运行。由 workflow 运行时切片决定。
+1. (已由运行时切片了结) **workflow launch envelope**:内联源码,`{ definition, script, args }` 封闭键、32 KiB `maxEnvelopeBytes` 界——[运行时设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md)的决策 1 与 3。
+2. (已由运行时切片了结) **workflow 自己的 agent 在哪里运行**:在 workflow child 内部作为进程内 subagent 运行;嵌套 child Session 与深度 2 运行时是已指名的后续——运行时设计的决策 5。
 3. **预算取值**:64 是否需要调整,以及嵌套落地后的按根预算。
 
 ## 后续工作

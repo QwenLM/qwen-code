@@ -586,6 +586,59 @@ describe('managed workflow child operations (#13803)', () => {
           args: cyclic,
         }),
       ).toThrow(ManagedSessionRecordError);
+      // R1-14: exactly-at-limit is lawful — the check uses `>`, and its
+      // exact-boundary window needs no rescaling. The same byte over even
+      // one more must refuse.
+      const baseline = Buffer.byteLength(
+        JSON.stringify({
+          definition: WORKFLOW_DEFINITION,
+          script: '',
+          args: null,
+        }),
+        'utf8',
+      );
+      const slack = MANAGED_CHILD_LIMITS.maxEnvelopeBytes - baseline;
+      expect(slack).toBeGreaterThan(0);
+      expect(() =>
+        encodeWorkflowLaunchEnvelope({
+          definition: WORKFLOW_DEFINITION,
+          script: 's'.repeat(slack),
+          args: null,
+        }),
+      ).not.toThrow();
+      expect(() =>
+        encodeWorkflowLaunchEnvelope({
+          definition: WORKFLOW_DEFINITION,
+          script: 's'.repeat(slack + 1),
+          args: null,
+        }),
+      ).toThrow('byte_limit');
+      // R1-6: a function or a symbol in args must throw here — without the
+      // replacer `JSON.stringify` silently drops those members and the
+      // encoder would emit bytes its own decoder refuses, or (worse)
+      // truncated launch evidence. A plain object stays a weapon's
+      // negative control.
+      expect(() =>
+        encodeWorkflowLaunchEnvelope({
+          definition: WORKFLOW_DEFINITION,
+          script: SCRIPT,
+          args: { cb: () => undefined, x: 1 },
+        }),
+      ).toThrow(ManagedSessionRecordError);
+      expect(() =>
+        encodeWorkflowLaunchEnvelope({
+          definition: WORKFLOW_DEFINITION,
+          script: SCRIPT,
+          args: () => undefined,
+        }),
+      ).toThrow(ManagedSessionRecordError);
+      expect(() =>
+        encodeWorkflowLaunchEnvelope({
+          definition: WORKFLOW_DEFINITION,
+          script: SCRIPT,
+          args: { s: Symbol('k'), x: 1 },
+        }),
+      ).toThrow(ManagedSessionRecordError);
     });
 
     it('refuses malformed envelope bytes', () => {

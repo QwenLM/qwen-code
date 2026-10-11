@@ -105,14 +105,11 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
-  compileWorkflowScript,
-  describeWorkflowCompileError,
+  ARGS_MAX_DEPTH,
   extractAndStripMeta,
+  workflowPreLaunchRefusal,
 } from '@qwen-code/qwen-code-core/agents/runtime/workflow-sandbox.js';
-import {
-  describeWorkflowDeterminismViolations,
-  scanWorkflowScriptShape,
-} from '@qwen-code/qwen-code-core/agents/runtime/workflow-script-shape.js';
+import { scanWorkflowScriptShape } from '@qwen-code/qwen-code-core/agents/runtime/workflow-script-shape.js';
 import { WORKFLOW_NAME_PATTERN } from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -306,6 +303,38 @@ function teamAdmissionsEnabled(): boolean {
 }
 
 /**
+ * Walk one `args` value once: the classes the launch's later stages
+ * answer late — a number below the normal-double floor the digest
+ * substrate refuses (`JSON number outside the canonical range`), and
+ * nesting past the sandbox's own ARGS_MAX_DEPTH. The model fixes the
+ * value and retries; nothing commits and no slot or quota is spent.
+ */
+function workflowArgsRefusal(value: unknown): string | undefined {
+  const stack: Array<{ node: unknown; depth: number }> = [
+    { node: value, depth: 0 },
+  ];
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop()!;
+    if (depth > ARGS_MAX_DEPTH) {
+      return `Hosted workflow args nest deeper than the sandbox bound of ${ARGS_MAX_DEPTH} (depth_limit).`;
+    }
+    if (typeof node === 'number') {
+      if (node !== 0 && Math.abs(node) < 2.2250738585072014e-308) {
+        return 'Hosted workflow args carry a number outside the canonical JSON range.';
+      }
+      continue;
+    }
+    if (node === null || typeof node !== 'object') {
+      continue;
+    }
+    for (const item of Object.values(node)) {
+      stack.push({ node: item, depth: depth + 1 });
+    }
+  }
+  return undefined;
+}
+
+/**
  * The launch-time definition pin of an inline workflow (#13803 decision
  * 2): id+revision classify, the digest binds the exact bytes the child
  * executes. Inline sources need no revision counter, so revision 1 is the
@@ -465,6 +494,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'team_create',
   'task_create',
   'task_update',
+  'workflow',
 ];
 
 /**
@@ -1974,22 +2004,35 @@ export class HostedWorkspaceToolTurn {
             !args['script'].trim()
           ) {
             validationError = 'Hosted workflow requires a nonempty script.';
+          } else if (
+            Buffer.byteLength(args['script'], 'utf8') >
+            MANAGED_CHILD_LIMITS.maxEnvelopeBytes
+          ) {
+            // The byte bound consulted before any V8 work: the compile
+            // and the shape scan below would throw their results away.
+            validationError = `Hosted workflow script exceeds ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes (byte_limit).`;
           } else {
             // An unstartable script is a model-correctable argument
             // error, so it refuses here with the runner's own texts
             // rather than wedging the child's first Turn on its compile:
             // a failed child Session is the answer for a run that fails,
-            // never for one that could never start.
-            try {
-              compileWorkflowScript(args['script']);
-            } catch (cause) {
-              validationError = `Hosted workflow script is invalid: ${describeWorkflowCompileError(cause, args['script'].split(/\r\n|[\n\r\u2028\u2029]/).length)}`;
+            // never for one that could never start. The args value walks
+            // first: the digest substrate refuses a subnormal number and
+            // the sandbox refuses nesting past its own depth bound — the
+            // model fixes the value and retries at no quota or slot spent.
+            const argsRefusal = workflowArgsRefusal(args['args']);
+            if (argsRefusal !== undefined) {
+              validationError = argsRefusal;
+            }
+            if (validationError === undefined) {
+              const refusal = workflowPreLaunchRefusal(args['script']);
+              if (refusal !== undefined) {
+                validationError = `Hosted workflow script is invalid: ${refusal.detail}`;
+              }
             }
             if (validationError === undefined) {
               const shape = scanWorkflowScriptShape(args['script']);
-              if (shape.determinismViolations.length > 0) {
-                validationError = `Hosted workflow script is invalid: ${describeWorkflowDeterminismViolations(shape.determinismViolations)}`;
-              } else if (shape.nestedWorkflowCalls.length > 0) {
+              if (shape.nestedWorkflowCalls.length > 0) {
                 // A nested launch resolves script bytes the pin never
                 // examined (a saved workflow from any tier). Refuse with
                 // the same model-correctable text the reference arguments

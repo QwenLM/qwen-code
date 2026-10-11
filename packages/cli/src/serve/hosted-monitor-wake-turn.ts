@@ -7,6 +7,7 @@
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
 import { randomUUID } from 'node:crypto';
+import { isChildNotificationSource } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
 import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
@@ -237,7 +238,7 @@ export function withChildAgentConsumption(
       outcome === 'settled' &&
       !session.blocked &&
       // #13803: either child Session kind's acceptance notification.
-      (turn.source === 'child_agent' || turn.source === 'workflow') &&
+      isChildNotificationSource(turn.source) &&
       turn.turnId.endsWith(':accept:notify') &&
       session.childAgents
     ) {

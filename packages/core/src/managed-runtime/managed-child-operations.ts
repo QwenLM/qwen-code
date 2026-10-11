@@ -176,12 +176,29 @@ export function encodeWorkflowLaunchEnvelope(
 ): Buffer {
   let serialized: string;
   try {
-    serialized = JSON.stringify({
-      definition: envelope.definition,
-      script: envelope.script,
-      args: envelope.args ?? null,
-    });
-  } catch {
+    serialized = JSON.stringify(
+      {
+        definition: envelope.definition,
+        script: envelope.script,
+        args: envelope.args ?? null,
+      },
+      // JSON.stringify silently DROPS function- and symbol-valued members
+      // instead of throwing; without this replacer the encoder could emit
+      // bytes its own decoder refuses, or (worse) launch evidence that
+      // carries fewer arguments than the caller passed.
+      (_key, value: unknown) => {
+        if (typeof value === 'function' || typeof value === 'symbol') {
+          throw new ManagedSessionRecordError(
+            'Workflow launch arguments must be JSON values (byte_limit).',
+          );
+        }
+        return value;
+      },
+    );
+  } catch (cause) {
+    if (cause instanceof ManagedSessionRecordError) {
+      throw cause;
+    }
     throw new ManagedSessionRecordError(
       'Workflow launch arguments must be JSON-serializable (byte_limit).',
     );

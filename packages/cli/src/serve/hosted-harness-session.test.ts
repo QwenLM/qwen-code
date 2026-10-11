@@ -19072,8 +19072,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
       parentChildRunId: 'run-1',
       depth: 1,
     };
-    async function workflowApp(childShaped = true) {
-      const server = await app();
+    async function workflowApp(childShaped = true, withBroker = false) {
+      const server = await app(withBroker);
       const created = await headers(supertest(server).post('/session')).send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
@@ -19146,6 +19146,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
         )
       ).join('\n');
       expect(blobs).toContain('<workflow workflow/audit@1 sha256:');
+      // R1-14: the turn commits the run's own settled outcome as its own
+      // `managed-turn-result` resource, never as transcript text — a branch
+      // that threw at commit time would ship an empty resource and pass the
+      // watermark checks above. Reading the resource bodies makes that
+      // removal visible.
+      expect(blobs).toContain('Hello from workflow');
       // A same-body replay answers the same admission watermark.
       const replayed = await send(prompt, PROMPT_ID);
       expect(replayed.status).toBe(202);
@@ -19174,6 +19180,32 @@ describe('Hosted Harness Runtime turn takeover', () => {
       }
       expect(state.workflow).not.toHaveBeenCalled();
       expect(state.model).not.toHaveBeenCalled();
+      await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
+    });
+
+    // R1-14: the workflow launch's Turn never constructs the broker-backed
+    // tool turn — its work is the runner's own dispatch; a missing guard
+    // would let the harness fabricate a broker-backed tool turn for the
+    // workflow prompt, invoking the same broker warm the text path calls.
+    it('runs a workflow launch without ever warming the Session broker', async () => {
+      const warm = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'warm')
+        .mockResolvedValue(undefined);
+      const { server, authorize, send } = await workflowApp(true, true);
+      const admitted = await send(workflowPrompt(), PROMPT_ID);
+      expect(admitted.status).toBe(202);
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      expect(state.workflow).toHaveBeenCalledTimes(1);
+      expect(state.model).not.toHaveBeenCalled();
+      expect(warm).not.toHaveBeenCalled();
       await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
     });
 

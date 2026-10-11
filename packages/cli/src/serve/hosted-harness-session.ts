@@ -68,11 +68,13 @@ import type {
   ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
+  CHILD_NOTIFICATION_SOURCES,
   ManagedSessionModeGateError,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  isChildNotificationSource,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
@@ -664,8 +666,7 @@ function isWakeInputSource(source: string): boolean {
   return (
     source === 'monitor' ||
     source === AUTOMATION_INPUT_SOURCE ||
-    source === 'child_agent' ||
-    source === 'workflow' ||
+    isChildNotificationSource(source) ||
     source === SESSION_MESSAGE_INPUT_SOURCE
   );
 }
@@ -972,7 +973,7 @@ function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
   const turnId = event.payload['turnId'];
   const source = event.payload['source'];
   return (
-    (source === 'child_agent' || source === 'workflow') &&
+    isChildNotificationSource(source) &&
     typeof turnId === 'string' &&
     turnId.endsWith(':accept:notify')
   );
@@ -7089,7 +7090,7 @@ export function registerHostedHarnessSessionRoutes(
           sources: [
             ...(session.monitors ? ['monitor'] : []),
             // #13803: child notifications of either child Session kind.
-            ...(session.childAgents ? ['child_agent', 'workflow'] : []),
+            ...(session.childAgents ? [...CHILD_NOTIFICATION_SOURCES] : []),
             ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
             ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
             ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),

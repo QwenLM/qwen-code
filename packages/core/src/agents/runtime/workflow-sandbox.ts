@@ -349,6 +349,46 @@ export function describeWorkflowCompileError(
 }
 
 /**
+ * The one pre-launch gate both the runner and the hosted daemon's
+ * admission arm share instead of keeping lookalike checks: the compile
+ * error in the runner's dialect (a `WorkflowUnsupportedSyntaxError`'s own
+ * message verbatim, any other compile failure line-indexed) or the
+ * determinism description when the script reads a clock or a random
+ * source. `suppressSyntaxHint` marks the refusals that are not syntax
+ * problems, where the runner's default TypeScript-syntax hint would
+ * mislead.
+ */
+export function workflowPreLaunchRefusal(source: string):
+  | {
+      readonly detail: string;
+      readonly suppressSyntaxHint: boolean;
+    }
+  | undefined {
+  try {
+    compileWorkflowScript(source);
+  } catch (cause) {
+    if (cause instanceof WorkflowUnsupportedSyntaxError) {
+      return { detail: cause.message, suppressSyntaxHint: true };
+    }
+    return {
+      detail: describeWorkflowCompileError(
+        cause,
+        source.split(/\r\n|[\n\r\u2028\u2029]/).length,
+      ),
+      suppressSyntaxHint: false,
+    };
+  }
+  const violations = scanWorkflowScriptShape(source).determinismViolations;
+  if (violations.length === 0) {
+    return undefined;
+  }
+  return {
+    detail: describeWorkflowDeterminismViolations(violations),
+    suppressSyntaxHint: true,
+  };
+}
+
+/**
  * Keep a long source line readable without breaking caret alignment: slide a
  * window over the line and shift the caret by the same amount.
  */
@@ -497,6 +537,11 @@ import {
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import { parseWorkflowMetaLiteral } from './workflow-meta-literal.js';
 import { assertNoDynamicImport } from './workflow-script-validation.js';
+import { WorkflowUnsupportedSyntaxError } from './workflow-script-validation.js';
+import {
+  describeWorkflowDeterminismViolations,
+  scanWorkflowScriptShape,
+} from './workflow-script-shape.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
@@ -510,8 +555,9 @@ export const debugLogger = createDebugLogger('WORKFLOW');
 const MAX_LOG_LINES = 10_000;
 const MAX_PHASE_ENTRIES = 10_000;
 // Max nesting depth for args; defends against stack-overflow on deeply
-// nested model-authored input.
-const ARGS_MAX_DEPTH = 64;
+// nested model-authored input. Exported so the hosted admission arm
+// refuses the same values instead of duplicating the bound.
+export const ARGS_MAX_DEPTH = 64;
 
 /**
  * WorkflowAgentOpts — structured options for the `agent()` global.

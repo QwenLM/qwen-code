@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import type { Part } from '@google/genai';
+import { parseDefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { WorkflowRunner } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import type { WorkflowRunOutcome } from '@qwen-code/qwen-code-core/agents/runtime/workflow-orchestrator.js';
@@ -34,8 +35,6 @@ export interface HostedWorkflowLaunch {
   readonly script: string;
   readonly args: unknown;
 }
-
-const DIGEST_HEX = /^[0-9a-f]{64}$/;
 
 /**
  * Parses one prompt block as a workflow launch, or returns undefined. The
@@ -69,36 +68,20 @@ export function parseHostedWorkflowLaunchBlock(
     return undefined;
   }
   const definition = block['definition'];
-  if (
-    typeof definition !== 'object' ||
-    definition === null ||
-    Object.keys(definition as object)
-      .sort()
-      .join(',') !== 'definitionDigest,definitionId,definitionRevision'
-  ) {
+  // The pin's shape and id bounds are the record layer's own: delegate
+  // so both lanes refuse the same bytes (the hand-rolled check used to
+  // admit a 513-byte or control-character definitionId the envelope
+  // decoder beside it refused).
+  try {
+    const parsed = parseDefinitionPin(definition, 'workflow launch definition');
+    return {
+      definition: parsed,
+      script: block['script'],
+      args: block['args'],
+    };
+  } catch {
     return undefined;
   }
-  const pin = definition as Record<string, unknown>;
-  if (
-    typeof pin['definitionId'] !== 'string' ||
-    pin['definitionId'].length === 0 ||
-    typeof pin['definitionRevision'] !== 'number' ||
-    !Number.isSafeInteger(pin['definitionRevision']) ||
-    pin['definitionRevision'] < 1 ||
-    typeof pin['definitionDigest'] !== 'string' ||
-    !DIGEST_HEX.test(pin['definitionDigest'])
-  ) {
-    return undefined;
-  }
-  return {
-    definition: {
-      definitionId: pin['definitionId'],
-      definitionRevision: pin['definitionRevision'],
-      definitionDigest: pin['definitionDigest'],
-    },
-    script: block['script'],
-    args: block['args'],
-  };
 }
 
 /** The one-line journal summary of a launched workflow child. */
@@ -146,25 +129,24 @@ function safeJson(value: unknown): string {
 const WORKFLOW_TURN_RESULT_LIMIT = 32 * 1024;
 
 function bounded(text: string): string {
-  const points = [...text];
   if (Buffer.byteLength(text, 'utf8') <= WORKFLOW_TURN_RESULT_LIMIT) {
     return text;
   }
-  const marker = '\n… (truncated: the full outcome is in the run journal)';
-  let low = 0;
-  let high = points.length;
-  while (low < high) {
-    const middle = (low + high + 1) >> 1;
-    if (
-      Buffer.byteLength(points.slice(0, middle).join('') + marker, 'utf8') <=
-      WORKFLOW_TURN_RESULT_LIMIT
-    ) {
-      low = middle;
-    } else {
-      high = middle - 1;
-    }
+  // R1-5: never spread the whole outcome into a code-point array — the
+  // byte check usually makes it unnecessary, and the walk-back below costs
+  // one buffer instead of an array plus a slice-and-join per search step.
+  // R1-9: the outcome lives in the run snapshot, never in the run journal.
+  const marker =
+    '\n… (truncated: the full outcome is in the run snapshot at <projectDir>/workflows/<runId>.json)';
+  const budget = WORKFLOW_TURN_RESULT_LIMIT - Buffer.byteLength(marker, 'utf8');
+  const bytes = Buffer.from(text, 'utf8');
+  let end = Math.min(budget, bytes.length);
+  // Walk back to a code-point boundary: a UTF-8 continuation byte carries
+  // the 0x80 low bits, so ending on one would split a sequence.
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) {
+    end--;
   }
-  return points.slice(0, low).join('') + marker;
+  return bytes.subarray(0, end).toString('utf8') + marker;
 }
 
 function renderOutcome(outcome: WorkflowRunOutcome): string {

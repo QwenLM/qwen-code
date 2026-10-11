@@ -1382,7 +1382,7 @@ describe('settlePendingMonitorInputs', () => {
   // #13803 (K2): a workflow child's acceptance notification reads as a
   // monitor-family source through the default sources list — the close drain
   // never has to name it.
-  it('settles a workflow child notification through the default sources', async () => {
+  it('pins the fallback: a workflow child notification also settles through the default sources list (production never takes it, the close drain names its own capability list)', async () => {
     const { session, lease } = await openRootedSession();
     try {
       const authority = session.authority;

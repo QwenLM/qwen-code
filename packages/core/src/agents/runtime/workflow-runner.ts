@@ -55,10 +55,6 @@ import {
 } from './workflow-orchestrator.js';
 import { WorkflowBudgetImpl } from './workflow-budget.js';
 import {
-  describeWorkflowDeterminismViolations,
-  scanWorkflowScriptShape,
-} from './workflow-script-shape.js';
-import {
   evaluateWorkflowSize,
   resolveWorkflowSizeCaps,
   resolveWorkflowSizeGuidelineSetting,
@@ -73,10 +69,9 @@ import {
 } from './workflow-saved.js';
 import {
   compileWorkflowScript,
-  describeWorkflowCompileError,
   type WorkflowMeta,
+  workflowPreLaunchRefusal,
 } from './workflow-sandbox.js';
-import { WorkflowUnsupportedSyntaxError } from './workflow-script-validation.js';
 import {
   resolveReviewWorkflowLimits,
   type ReviewWorkflowLimits,
@@ -392,30 +387,14 @@ export class WorkflowRunner {
         loaded?.savedWorkflowName ??
         registry?.get(runId)?.workflowName;
 
-      try {
-        scriptMeta = compileWorkflowScript(script).meta;
-      } catch (error) {
-        if (error instanceof WorkflowUnsupportedSyntaxError) {
-          throw new WorkflowScriptNotLaunchedError(error.message, '');
-        }
+      const refusal = workflowPreLaunchRefusal(script);
+      if (refusal !== undefined) {
         throw new WorkflowScriptNotLaunchedError(
-          describeWorkflowCompileError(
-            error,
-            script.split(/\r\n|[\n\r\u2028\u2029]/).length,
-          ),
+          refusal.detail,
+          refusal.suppressSyntaxHint ? '' : undefined,
         );
       }
-      // A script that reads a clock or a random source cannot be replayed on
-      // resume. Refused here, before any agent spends a token, rather than on
-      // whichever call reaches the sandbox guard first.
-      const determinismViolations =
-        scanWorkflowScriptShape(script).determinismViolations;
-      if (determinismViolations.length > 0) {
-        throw new WorkflowScriptNotLaunchedError(
-          describeWorkflowDeterminismViolations(determinismViolations),
-          '',
-        );
-      }
+      scriptMeta = compileWorkflowScript(script).meta;
 
       if (options.resumeFromRunId) {
         // A resume replays a journal. With none to replay it would dispatch

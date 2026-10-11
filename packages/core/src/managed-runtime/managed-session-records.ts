@@ -194,10 +194,22 @@ export const MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS = Object.freeze([
 ] as const);
 
 /**
- * The `child_run` gate. This stands beside {@link
- * assertManagedSessionDomainEnabled} for that one domain: enablement is
- * decided per capability, and the body kind is the capability.
+ * The input sources a child run's completion notification carries — the
+ * kinds of the gate above. Consumers spread this constant instead of
+ * re-listing `'child_agent', 'workflow'` by hand.
  */
+export const CHILD_NOTIFICATION_SOURCES =
+  MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS;
+
+/** True when an input's source names one of the child run kinds. */
+export function isChildNotificationSource(source: unknown): boolean {
+  return (
+    typeof source === 'string' &&
+    (MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]).includes(
+      source,
+    )
+  );
+}
 export function assertManagedSessionChildRunKindEnabled(kind: string): void {
   if (
     !(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]).includes(
