@@ -353,6 +353,21 @@ describe('FileCommandLoader', () => {
     expect(commands[0].name).toBe('good');
   });
 
+  it('loads a TOML command saved with a UTF-8 BOM', async () => {
+    const userCommandsDir = Storage.getUserCommandsDir();
+    mock({
+      [userCommandsDir]: {
+        'bom.toml': '\uFEFFprompt = "Prompt after a BOM"',
+      },
+    });
+
+    const loader = new FileCommandLoader(null);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].name).toBe('bom');
+  });
+
   it('ignores files that are semantically invalid (missing prompt)', async () => {
     const userCommandsDir = Storage.getUserCommandsDir();
     mock({
