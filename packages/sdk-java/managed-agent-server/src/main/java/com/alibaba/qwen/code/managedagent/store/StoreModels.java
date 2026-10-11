@@ -18,7 +18,21 @@ public final class StoreModels {
             long harnessLastEventId, long lastSequence,
             long replayFloorSequence, long createdAt, long updatedAt,
             Long deletedAt, long version, ContextBinding workspace,
-            String approvalMode, String toolProfile) {
+            String approvalMode, String toolProfile,
+            String agentDefinitionDigest) {
+        public SessionRecord(String tenantId, String sessionId,
+                String agentId, String agentRevision, String title,
+                String status, String harnessBootId, String harnessEventEpoch,
+                long harnessLastEventId, long lastSequence,
+                long replayFloorSequence, long createdAt, long updatedAt,
+                Long deletedAt, long version, ContextBinding workspace,
+                String approvalMode, String toolProfile) {
+            this(tenantId, sessionId, agentId, agentRevision, title, status,
+                    harnessBootId, harnessEventEpoch, harnessLastEventId,
+                    lastSequence, replayFloorSequence, createdAt, updatedAt,
+                    deletedAt, version, workspace, approvalMode, toolProfile,
+                    null);
+        }
         public SessionRecord(String tenantId, String sessionId,
                 String agentId, String title, String status,
                 String harnessBootId, String harnessEventEpoch,
@@ -27,7 +41,7 @@ public final class StoreModels {
             this(tenantId, sessionId, agentId, null, title, status,
                     harnessBootId, harnessEventEpoch, harnessLastEventId,
                     lastSequence, 0, createdAt, updatedAt, deletedAt, version,
-                    null, "yolo", null);
+                    null, "yolo", null, null);
         }
     }
 
