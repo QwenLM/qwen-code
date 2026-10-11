@@ -349,8 +349,15 @@ const proxy = createServer((req, res) => {
       // A controller restart or a client abort makes one relay die; the
       // adapter sees a transport failure, which is its own retry signal.
       // The cause must reach the log — an injected drop and a misrouted
-      // relay read identically at the client without it.
-      console.log(`FG7_RELAY_FAILED ${String(cause)}`);
+      // relay read identically at the client without it. The useful half
+      // lives on cause.cause ("fetch failed" alone says nothing).
+      console.log(
+        `FG7_RELAY_FAILED ${String(cause)}${
+          cause instanceof Error && cause.cause
+            ? ` cause: ${String(cause.cause)}`
+            : ''
+        }`,
+      );
       res.destroy();
     }
   })();
@@ -501,6 +508,29 @@ async function pollUntilAdmitted(adapter: ManagedEmailAdapter): Promise<void> {
   throw new Error('the scripted inbound was never admitted');
 }
 
+/** The exact once-window closed: one physical send and one receipt per delivery, per delivery. */
+function assertSettledExactly(quota: number): void {
+  assert.equal(
+    results.sends.length,
+    quota,
+    `exactly ${quota} physical send(s)`,
+  );
+  assert.equal(
+    results.receipts.length,
+    quota,
+    `exactly ${quota} receipt(s) reported`,
+  );
+  assert.equal(
+    new Set(results.receipts.map((receipt) => receipt.deliveryId)).size,
+    quota,
+    `exactly ${quota} distinct deliveries reported`,
+  );
+}
+
+function assertNothingSent(): void {
+  assert.equal(results.sends.length, 0, 'no send may ever happen');
+}
+
 /** Full ticks until every expected send is sent and reported once. */
 async function tickUntilSettled(adapter: ManagedEmailAdapter): Promise<void> {
   const expectDelivery = config.expectDelivery ?? true;
@@ -550,21 +580,7 @@ async function tickUntilSettled(adapter: ManagedEmailAdapter): Promise<void> {
           await tickOrNote(() => adapter.tick());
           await sleep(150);
         }
-        assert.equal(
-          results.sends.length,
-          quota,
-          `exactly ${quota} physical send(s)`,
-        );
-        assert.equal(
-          results.receipts.length,
-          quota,
-          `exactly ${quota} receipt(s) reported`,
-        );
-        assert.equal(
-          new Set(results.receipts.map((receipt) => receipt.deliveryId)).size,
-          quota,
-          `exactly ${quota} distinct deliveries reported`,
-        );
+        assertSettledExactly(quota);
         return;
       }
     } else if (
@@ -573,29 +589,15 @@ async function tickUntilSettled(adapter: ManagedEmailAdapter): Promise<void> {
       tick >= 5
     ) {
       // Five claim rounds and the outbox stayed silent: nothing was owed.
-      assert.equal(results.sends.length, 0, 'no send may ever happen');
+      assertNothingSent();
       return;
     }
     await sleep(200);
   }
   if (expectDelivery) {
-    assert.equal(
-      results.sends.length,
-      quota,
-      `exactly ${quota} physical send(s)`,
-    );
-    assert.equal(
-      results.receipts.length,
-      quota,
-      `exactly ${quota} receipt(s) reported`,
-    );
-    assert.equal(
-      new Set(results.receipts.map((receipt) => receipt.deliveryId)).size,
-      quota,
-      `exactly ${quota} distinct deliveries reported`,
-    );
+    assertSettledExactly(quota);
   } else {
-    assert.equal(results.sends.length, 0, 'no send may ever happen');
+    assertNothingSent();
   }
 }
 
@@ -753,6 +755,13 @@ try {
     default:
       throw new Error(`unknown phase ${config.phase as string}`);
   }
+} catch (cause) {
+  // A failed phase is the run that needs its evidence most: persist the
+  // accumulated state before re-throwing so the IT's artifact carries it.
+  await writeFile(config.resultFile, JSON.stringify(results, null, 2)).catch(
+    () => undefined,
+  );
+  throw cause;
 } finally {
   proxy.closeAllConnections();
   await new Promise<void>((resolve) => proxy.close(() => resolve()));

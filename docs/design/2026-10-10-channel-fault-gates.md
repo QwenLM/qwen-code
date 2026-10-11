@@ -48,7 +48,8 @@ decision 2).
 - Relevant production guards under gate: the V47 route-row redelivery
   answer and the funnel's `inputId` replay (`ManagedChannelService:206-232`,
   `hosted-channel-session.ts` submit replay); claim idempotency
-  (`claimOne` + funnel `claim` on `sending`); receipt idempotency by
+  (`claimOne` + funnel `claim` on `sending`) and claim-row uniqueness (the
+  adapters' retries never mint a second claim row); receipt idempotency by
   `providerMessageId` (funnel `receipt`); record-first-then-ledger ordering
   with reconciler convergence (`reconcileClaim`'s pre-settle converge);
   adapter outbound persistence before send and outcome persistence before
@@ -56,9 +57,12 @@ decision 2).
   ambiguous-SMTP → `unknown` classification (5xx → `rejected`, everything
   else `unknown`); the 10-minute claim lease sweep; the funnel's `cancel`
   (planned → `cancelled`; sending → `cancelRequested` flag only); the
-  dense-ordinal refusal (`ManagedChannelRecords.java:124`,
-  `HostedChannelSession.receipt`); the `unknown → delivered` honest
-  recovery step (`ManagedExtensionRecords.TRANSITIONS`).
+  missing-segment refusal (`HostedChannelSession.receipt` refusing an
+  ordinal the plan has no segment for, surfacing as 409
+  `channel_operation_conflict` — the store's dense-ordinal rule
+  (`ManagedChannelRecords.java:124`) fires only under H5d's multi-segment
+  plans and belongs to that slice's gate); the `unknown → delivered`
+  honest recovery step (`ManagedExtensionRecords.TRANSITIONS`).
 
 ## Scope decisions
 
@@ -66,7 +70,10 @@ decision 2).
    no events at all (`ManagedChannelService` appends to no stream);
    deliveries are exposed read-only over a cursor-paginated REST ledger
    (`GET /v1/agent-channels/{id}/deliveries`, Base64 `createdAt:id`
-   cursor). "Disconnect the event stream, resume with `Last-Event-ID`,
+   cursor) plus a per-delivery read
+   (`GET /v1/agent-channels/{id}/deliveries/{deliveryId}`) — the ledger
+   row is minted at claim, so a `planned` delivery is not readable at
+   all. "Disconnect the event stream, resume with `Last-Event-ID`,
    assert no duplicates and no gaps" cannot be written today (the triage
    comment's option B). FG7e therefore gates **read-ledger continuity**:
    cursor-stable, duplicate-free, gap-free pagination across a client abort
@@ -115,8 +122,13 @@ sessionId, {kind:"cancel_delivery", ...})` directly — the same generic
 for the delivery's segments; Java-side ground truth is JDBC over
 `qwen_managed_channel_{binding,claim,route,delivery}`, the Session Store
 journal, and the captured Spring log; every case asserts its fault actually
-fired (proxy drop counter, `FG7B_<case>` SQLException marker, or the crash
-class's kill markers).
+fired, by one of the mechanisms the cases actually assert: the proxy drop
+counter and the `FG7B_<case>` SQLException marker (FG7a/b), the crash
+class's kill markers, a parked send's `FG7_CLAIM_PARKED`/`FG7_HELD` marker,
+the cancel answer's `cancelRequested` flag, the aborted page's unread-body
+proof (FG7c/d/e), or the injected fault's own refused outcome — an
+accept-timeout `unknown` receipt, a 409 `channel_operation_conflict`
+probe (FG7f).
 
 ### FG7a — lost adapter ⇄ control-plane replies
 
@@ -144,8 +156,11 @@ keyed by the claim row, `claim-reply`'s expectation upgrades from
 ### FG7b — store failures
 
 Test-only SQL triggers, tenant- and table-scoped, installed and dropped per
-class like FG6b. Reply-loss here means the adapter restarts behind a commit
-whose answer it never saw.
+class like FG6b: each case installs its `FG7B_<case>` trigger, fires it once
+against the matching UPDATE, and the class teardown drops what is left —
+cross-case isolation comes from that per-class install/teardown lifecycle,
+not from the trigger spending itself. Reply-loss here means the adapter
+restarts behind a commit whose answer it never saw.
 
 | Case                   | Injection                                                                                        | Expect                                                                                                                                                                                                                   |
 | ---------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -162,12 +177,12 @@ wall-clocked: the production sweep stays inert
 SQL, and one reconcile pass is driven explicitly (the bean in-JVM; the
 `/control/expire` + `/control/reconcile` endpoints of the fixture JVM).
 
-| Case                   | Injection                                                                                                | Expect                                                                                                                                                                                                                                                                                      |
-| ---------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spring-kill-dispatch` | Relay the carrying claim answer, destroy it, then SIGKILL Spring; bounce it behind the adapter's retries | Nothing sends; one claim row; the strand settles `unknown` by lease; cold start never auto-resends                                                                                                                                                                                          |
-| `spring-kill-receipt`  | Relay the receipt answer, then SIGKILL Spring                                                            | Restart; the receipt re-drive settles idempotently: one send, one `delivered`                                                                                                                                                                                                               |
-| `adapter-kill`         | SIGKILL the adapter after the fake SMTP accepts, before the receipt persists                             | Lease sweep settles `unknown` (the provider may hold the message); the cold adapter settles its orphaned outbound `unknown`; nothing auto-re-sends; an explicit `:resend` opens `<id>:r1` carrying only the unsent segment, warns `possibleDuplicate`, and delivers with its own Message-ID |
-| `adapter-stop`         | SIGSTOP the adapter after accept; let the lease settle `unknown`; SIGCONT                                | The re-driven persisted receipt lands the legal `unknown → delivered` step with the original receipt; one send throughout                                                                                                                                                                   |
+| Case                   | Injection                                                                                                | Expect                                                                                                                                                                                                                                                                                                       |
+| ---------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `spring-kill-dispatch` | Relay the carrying claim answer, destroy it, then SIGKILL Spring; bounce it behind the adapter's retries | Nothing sends; one claim row; the strand settles `unknown` by lease; cold start never auto-resends                                                                                                                                                                                                           |
+| `spring-kill-receipt`  | Relay the receipt answer, then SIGKILL Spring                                                            | Restart; the receipt re-drive settles idempotently: one send, one `delivered`                                                                                                                                                                                                                                |
+| `adapter-kill`         | SIGKILL the adapter after the fake SMTP accepts, before the receipt persists                             | Lease sweep settles `unknown` (the provider may hold the message); the cold adapter settles its orphaned outbound `unknown`; nothing auto-re-sends. (The explicit `:resend` chain — `<id>:r1`, unsent segment, `possibleDuplicate`, own Message-ID — is pinned by FG7f's `receipt-never-arrived`, not here.) |
+| `adapter-stop`         | SIGSTOP the adapter after accept; let the lease settle `unknown`; SIGCONT                                | The re-driven persisted receipt lands the legal `unknown → delivered` step with the original receipt; one send throughout                                                                                                                                                                                    |
 
 ### FG7d — cancellation (production-relay-driven `cancel_delivery`)
 
@@ -180,10 +195,10 @@ SQL, and one reconcile pass is driven explicitly (the bean in-JVM; the
 
 ### FG7e — read-ledger continuity (re-scoped, decision 1)
 
-| Case                      | Injection                                                                                                                                           | Expect                                                                                                                                                  |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `delivery-page-resume`    | Create two deliveries (two turns over one claim), read with `limit=1`, abort one page fetch mid-body, resume by cursor while the states keep moving | The union is duplicate-free and gap-free in stable newest-first order; a from-scratch re-read returns the same identities with honestly advanced states |
-| `delivery-state-progress` | Interleave the reads of one delivery across `planned → sending → delivered`                                                                         | Every page state is a state the ledger actually held; no read ever reports `delivered` before the receipt commit                                        |
+| Case                      | Injection                                                                                                                                                                                                                                 | Expect                                                                                                                                                                                                                               |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `delivery-page-resume`    | Create two deliveries (two turns over one claim), park both at `sending` with the fake SMTP held; read with `limit=1`, abort one page fetch mid-body, resume by cursor — the states are frozen for the whole aborted read and cursor walk | The union across the abort is duplicate-free and gap-free in stable newest-first order; a separate post-release re-read returns the same identities with their states honestly advanced                                              |
+| `delivery-state-progress` | Interleave the per-delivery reads of one delivery across `planned → sending → delivered`                                                                                                                                                  | The ledger row is minted at claim, so the `planned` leg answers 404 — a `planned` delivery is not readable at all; every state a read returns is one the ledger actually held; no read reports `delivered` before the receipt commit |
 
 ### FG7f — partial and unknown delivery (decision 2)
 
@@ -244,14 +259,18 @@ production, the evidence recorded beside each call; no client timeout
 inbound-only `poll()` as separate steps — the `pull-terminate` phase
 parks at its kill marker instead — so the IT sequences around
 cancellations and kills, with `expectedSends` for multi-delivery pulls
-and `holdAfterDrop` for the zero-send fault windows. State lives in a
-per-case directory so a restart genuinely cold-loads it. Per-step stdout
-markers (`FG7_READY`, `FG7_DROPPED <verb>`, `FG7_CLAIMED`, `FG7_SEND_DONE`,
-`FG7_CLAIM_PARKED`, `FG7_HELD`, `FG7_AWAIT_KILL`, `FG7_PROBE_REFUSED`,
-`FG7_RESEND`, `FG7_<phase>_OK`) sequence the IT; `results-<phase>.json`
-carries the per-case evidence (send count and Message-IDs, admission
-identity, relay attempts with drop flags, receipt outcomes, probe
-status). For `adapter-kill`/`adapter-stop` the IT kills the driver
+and `holdAfterDrop` for the zero-send fault windows, with `holdUntilFile`
+when the zero-send window must outlive a control-plane bounce. State lives
+in a per-case directory so a restart genuinely cold-loads it. The markers
+the ITs wait on or assert — `FG7_DROPPED <verb>` (claim/receipt),
+`FG7_CLAIM_PARKED`, `FG7_HELD`, `FG7_AWAIT_KILL`, and the
+`FG7_<phase>_OK` completion marker — sequence the IT; the rest are
+diagnostic log lines only (`FG7_READY`, `FG7_CLAIMED`, `FG7_SEND_DONE`,
+`FG7_PROBE_REFUSED`, `FG7_RESEND`, and the relay-failure line
+`FG7_RELAY_FAILED <cause>`). `results-<phase>-<n>.json` (per-launch tag
+`<phase>-<n>`, as the GateSupport paragraph above states) carries the
+per-case evidence (send count and Message-IDs, admission identity, relay
+attempts with drop flags and statuses, receipt outcomes, probe status). For `adapter-kill`/`adapter-stop` the IT kills the driver
 itself at the marker and relaunches with the same state dir.
 
 **Harness and model.** The IT boots `dist/cli.js serve --profile
@@ -346,8 +365,11 @@ for (decision 2).
 ## Validation and acceptance
 
 - `npm run build && npm run typecheck`, ESLint clean on the driver,
-  Checkstyle and SpotBugs on all four new Java files, and the module's
-  surefire suite green (1606 tests at the first-verification baseline).
+  compilation of all four new Java files, Checkstyle and SpotBugs on the
+  module's configured source roots (main sources only — the four new
+  Java files are test sources, outside both plugins' configured scope;
+  the previous wording overstated what ran), and the module's surefire
+  suite green (1606 tests at the first-verification baseline).
 - Both new classes green on MariaDB 10.11 locally (the CI lane is MySQL
   8.4): 19 cases firing their declared faults — every drop counter,
   `FG7B_*` trigger marker and kill marker observed — per-case selectors

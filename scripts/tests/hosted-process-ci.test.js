@@ -133,7 +133,9 @@ describe('Hosted real-process gates', () => {
         'packages/sdk-java/**',
         'packages/cli/src/serve/**',
         'packages/cli/src/commands/channel/**',
+        'packages/cli/src/commands/channel.ts',
         'packages/channels/email/**',
+        'packages/channels/base/**',
         'packages/core/src/managed-runtime/**',
         'packages/cli/src/config/**',
         'packages/core/src/config/**',
@@ -246,6 +248,12 @@ describe('Hosted real-process gates', () => {
     );
     expect(upload.if).toBe('always()');
     expect(upload.with.path).toContain('failsafe-reports');
+    // The FG7 lane moved its per-case evidence out of @TempDir into this
+    // module-relative directory precisely so an artifact can carry it; the
+    // writer and the upload path must not drift.
+    expect(upload.with.path).toContain(
+      'packages/sdk-java/managed-agent-server/target/fg7-cases/',
+    );
   });
 
   it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {

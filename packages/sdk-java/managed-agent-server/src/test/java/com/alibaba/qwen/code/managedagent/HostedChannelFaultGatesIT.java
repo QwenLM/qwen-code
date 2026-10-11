@@ -186,20 +186,27 @@ class HostedChannelFaultGatesIT {
         }
     }
 
-    private static String caseLogs(Path caseDir) throws IOException {
+    private static String caseLogs(Path caseDir) {
         // A case that dies before its directory exists must never mask the
-        // original failure.
+        // original failure — and neither may an I/O error reading its logs.
         if (!Files.isDirectory(caseDir)) {
             return "<no case directory>";
         }
         StringBuilder dump = new StringBuilder();
-        for (Path log : Files.list(caseDir)
-                .filter(entry -> entry.getFileName().toString()
-                        .startsWith("driver-")
-                        && entry.getFileName().toString().endsWith(".log"))
-                .toList()) {
-            dump.append("== ").append(log.getFileName()).append('\n')
-                    .append(Files.readString(log)).append('\n');
+        try {
+            for (Path log : Files.list(caseDir)
+                    .filter(entry -> entry.getFileName().toString()
+                            .startsWith("driver-")
+                            && entry.getFileName().toString()
+                                    .endsWith(".log"))
+                    .toList()) {
+                dump.append("== ").append(log.getFileName()).append('\n')
+                        .append(HostedChannelGateSupport.safeRead(log))
+                        .append('\n');
+            }
+        } catch (IOException failure) {
+            dump.append("<case logs unreadable: ").append(failure)
+                    .append('>');
         }
         return dump.toString();
     }
@@ -510,10 +517,14 @@ class HostedChannelFaultGatesIT {
             Supplier<Object> probe) throws Exception {
         Object outcome;
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
+        Throwable lastFailure = null;
         while (System.nanoTime() < deadline) {
             try {
                 outcome = probe.get();
-            } catch (RuntimeException ignored) {
+            } catch (RuntimeException failure) {
+                // A persistently failing probe must reach the timeout
+                // report, not burn the deadline as a bare timeout.
+                lastFailure = failure;
                 outcome = null;
             }
             if (Boolean.TRUE.equals(outcome)) {
@@ -527,8 +538,10 @@ class HostedChannelFaultGatesIT {
             }
             Thread.sleep(200);
         }
+        String suffix = lastFailure == null ? ""
+                : "\nlast probe failure: " + lastFailure;
         throw new AssertionError(description + " timed out; harness log:\n"
-                + harnessLogSnapshot());
+                + harnessLogSnapshot() + suffix, lastFailure);
     }
 
     private String harnessLogSnapshot() {
@@ -571,17 +584,18 @@ class HostedChannelFaultGatesIT {
     }
 
     /** Park one pull mid-send; resume it by creating {@code release}. */
-    private Process startParkedPull(Path caseDir, Map<String, Object> base,
-            Path release) throws Exception {
+    private HostedChannelGateSupport.DriverLaunch startParkedPull(
+            Path caseDir, Map<String, Object> base, Path release)
+            throws Exception {
         return startParkedPull(caseDir, base, release, 1);
     }
 
-    private Process startParkedPull(Path caseDir, Map<String, Object> base,
-            Path release, int expectedSends) throws Exception {
+    private HostedChannelGateSupport.DriverLaunch startParkedPull(
+            Path caseDir, Map<String, Object> base, Path release,
+            int expectedSends) throws Exception {
         return support.startDriver(caseDir, "pull-parked", base,
                 Map.of("smtpMode", "park", "smtpReleaseFile",
-                        release.toString(), "expectedSends", expectedSends))
-                .process();
+                        release.toString(), "expectedSends", expectedSends));
     }
 
     private void awaitSending(String tenant, String sessionId,
@@ -783,9 +797,8 @@ class HostedChannelFaultGatesIT {
                 assertThat(support.deliveryProjection(tenant, sessionId,
                         deliveryId).get("delivery_state"))
                         .isEqualTo("cancelled");
-                support.drive(caseDir, "pull", base, Map.of("expectDelivery",
-                        false));
-                JsonNode pull = support.resultsOf(caseDir, "pull-1");
+                JsonNode pull = support.drive(caseDir, "pull", base,
+                        Map.of("expectDelivery", false));
                 assertThat(HostedChannelGateSupport.relayCountOk(pull,
                         "claim"))
                         .as("the outbox pull reached the control plane")
@@ -803,7 +816,10 @@ class HostedChannelFaultGatesIT {
                         .asText() + ":reply";
                 awaitPlanned(tenant, sessionId, deliveryId);
                 Path release = caseDir.resolve("smtp-release");
-                Process driver = startParkedPull(caseDir, base, release);
+                HostedChannelGateSupport.DriverLaunch launch = startParkedPull(
+                        caseDir, base, release);
+                Process driver = launch.process();
+                String tag = launch.tag();
                 try {
                     awaitSending(tenant, sessionId, deliveryId, channelId);
                     Map<String, Object> answer = cancelDelivery(tenant,
@@ -816,10 +832,10 @@ class HostedChannelFaultGatesIT {
                     assertThat(driver.waitFor(120, TimeUnit.SECONDS))
                             .as("parked driver completion:\n%s",
                                     HostedChannelGateSupport.safeRead(caseDir
-                                            .resolve("driver-pull-parked-1.log")))
+                                            .resolve("driver-" + tag
+                                                    + ".log")))
                             .isTrue();
-                    JsonNode results = support.resultsOf(caseDir,
-                            "pull-parked-1");
+                    JsonNode results = support.resultsOf(caseDir, tag);
                     assertThat(results.path("sends")).hasSize(1);
                     HostedChannelGateSupport.assertSendsTo(results);
                     JsonNode record = support.deliveryRecord(tenant, sessionId,
@@ -843,18 +859,18 @@ class HostedChannelFaultGatesIT {
                         .asText() + ":reply";
                 awaitPlanned(tenant, sessionId, deliveryId);
                 Path release = caseDir.resolve("smtp-release");
-                Process driver = support.startDriver(caseDir,
-                        "pull-terminate", base, Map.of("smtpMode", "park",
-                                "smtpReleaseFile", release.toString()))
-                        .process();
+                HostedChannelGateSupport.DriverLaunch launch = support
+                        .startDriver(caseDir, "pull-terminate", base, Map.of(
+                                "smtpMode", "park", "smtpReleaseFile",
+                                release.toString()));
+                Process driver = launch.process();
+                String tag = launch.tag();
                 try {
                     awaitSending(tenant, sessionId, deliveryId, channelId);
                     cancelDelivery(tenant, sessionId, deliveryId);
                     Files.writeString(release, "go");
-                    await("the send's evidence landed", 90,
-                            () -> Files.exists(caseDir.resolve(
-                                    "results-pull-terminate-1.json"))
-                                    ? true : null);
+                    support.awaitLog(caseDir, "driver-" + tag + ".log",
+                            "FG7_AWAIT_KILL", driver);
                     driver.destroyForcibly();
                     support.expireClaims(tenant, channelId);
                     spring.getBean(ManagedChannelService.class).reconcile();
@@ -874,8 +890,7 @@ class HostedChannelFaultGatesIT {
                     assertThat(support.deliveryProjection(tenant, sessionId,
                             deliveryId).get("delivery_state"))
                             .isEqualTo("unknown");
-                    JsonNode terminated = support.resultsOf(caseDir,
-                            "pull-terminate-1");
+                    JsonNode terminated = support.resultsOf(caseDir, tag);
                     assertThat(terminated.path("sends")).hasSize(1);
                     HostedChannelGateSupport.assertSendsTo(terminated);
                 } finally {
@@ -901,13 +916,16 @@ class HostedChannelFaultGatesIT {
                 awaitPlanned(tenant, firstSession, firstDelivery);
                 awaitPlanned(tenant, secondSession, secondDelivery);
                 Path release = caseDir.resolve("smtp-release");
-                Process driver = startParkedPull(caseDir, base, release, 2);
+                HostedChannelGateSupport.DriverLaunch launch = startParkedPull(
+                        caseDir, base, release, 2);
+                Process driver = launch.process();
+                String tag = launch.tag();
                 try {
                     // The claim answer carries BOTH deliveries and parks the
                     // first send: parked is the only stable read gate — the
                     // cold attach of a second Session takes as long as it
                     // takes, and any row-count predicate races ahead of it.
-                    support.awaitLog(caseDir, "driver-pull-parked-1.log",
+                    support.awaitLog(caseDir, "driver-" + tag + ".log",
                             "FG7_CLAIM_PARKED", driver);
                     abortPageRead(tenant, channelId);
                     List<String> sending = pageIdentify(tenant, channelId, 1);
@@ -919,7 +937,7 @@ class HostedChannelFaultGatesIT {
                             .as("parked driver completion").isTrue();
                     assertThat(driver.exitValue())
                             .as(HostedChannelGateSupport.safeRead(caseDir
-                                    .resolve("driver-pull-parked-1.log")))
+                                    .resolve("driver-" + tag + ".log")))
                             .isZero();
                     await("both delivered", 60, () -> {
                         for (String delivery : List.of(firstDelivery,
@@ -960,9 +978,12 @@ class HostedChannelFaultGatesIT {
                 awaitPlanned(tenant, sessionId, deliveryId);
                 readDelivery(tenant, channelId, deliveryId, 404);
                 Path release = caseDir.resolve("smtp-release");
-                Process driver = startParkedPull(caseDir, base, release);
+                HostedChannelGateSupport.DriverLaunch launch = startParkedPull(
+                        caseDir, base, release);
+                Process driver = launch.process();
+                String tag = launch.tag();
                 try {
-                    support.awaitLog(caseDir, "driver-pull-parked-1.log",
+                    support.awaitLog(caseDir, "driver-" + tag + ".log",
                             "FG7_CLAIM_PARKED", driver);
                     assertThat(readDelivery(tenant, channelId, deliveryId, 200)
                             .path("state").asText())
@@ -972,7 +993,7 @@ class HostedChannelFaultGatesIT {
                     assertThat(driver.waitFor(120, TimeUnit.SECONDS)).isTrue();
                     assertThat(driver.exitValue())
                             .as(HostedChannelGateSupport.safeRead(caseDir
-                                    .resolve("driver-pull-parked-1.log")))
+                                    .resolve("driver-" + tag + ".log")))
                             .isZero();
                     await("ledger delivered", 60, () -> {
                         Map<String, Object> row = support.ledger(tenant,
@@ -1023,13 +1044,14 @@ class HostedChannelFaultGatesIT {
                 String deliveryId = admitted.path("admissionInputIds").get(0)
                         .asText() + ":reply";
                 awaitPlanned(tenant, sessionId, deliveryId);
-                Process driver = support.startDriver(caseDir,
-                        "pull-terminate", base, Map.of()).process();
+                HostedChannelGateSupport.DriverLaunch launch = support
+                        .startDriver(caseDir, "pull-terminate", base,
+                                Map.of());
+                Process driver = launch.process();
+                String tag = launch.tag();
                 try {
-                    await("the send's evidence landed", 90,
-                            () -> Files.exists(caseDir.resolve(
-                                    "results-pull-terminate-1.json"))
-                                    ? true : null);
+                    support.awaitLog(caseDir, "driver-" + tag + ".log",
+                            "FG7_AWAIT_KILL", driver);
                     driver.destroyForcibly();
                 } finally {
                     if (driver.isAlive()) {
@@ -1044,8 +1066,7 @@ class HostedChannelFaultGatesIT {
                                 tenant, sessionId, deliveryId)
                                         .get("delivery_state"))
                                 ? true : null);
-                JsonNode terminated = support.resultsOf(caseDir,
-                        "pull-terminate-1");
+                JsonNode terminated = support.resultsOf(caseDir, tag);
                 assertThat(terminated.path("sends")).hasSize(1);
                 HostedChannelGateSupport.assertSendsTo(terminated);
                 Map<String, Object> originalRow = support.ledger(tenant,
@@ -1089,9 +1110,12 @@ class HostedChannelFaultGatesIT {
                         .asText() + ":reply";
                 awaitPlanned(tenant, sessionId, deliveryId);
                 Path release = caseDir.resolve("smtp-release");
-                Process driver = startParkedPull(caseDir, base, release);
+                HostedChannelGateSupport.DriverLaunch launch = startParkedPull(
+                        caseDir, base, release);
+                Process driver = launch.process();
+                String tag = launch.tag();
                 try {
-                    support.awaitLog(caseDir, "driver-pull-parked-1.log",
+                    support.awaitLog(caseDir, "driver-" + tag + ".log",
                             "FG7_CLAIM_PARKED", driver);
                     JsonNode probe = support.drive(caseDir, "probe", base,
                             Map.of("probeDeliveryId", deliveryId));
@@ -1099,7 +1123,7 @@ class HostedChannelFaultGatesIT {
                             .as("an out-of-plan ordinal is refused")
                             .isEqualTo(409);
                     assertThat(probe.path("probeErrorCode").asText())
-                            .as("the refusal is the dense-ordinal one")
+                            .as("the refusal is the missing-segment one")
                             .isEqualTo("channel_operation_conflict");
                     assertThat(support.ledger(tenant, channelId, deliveryId)
                             .get("state"))
@@ -1108,8 +1132,7 @@ class HostedChannelFaultGatesIT {
                     Files.writeString(release, "go");
                     assertThat(driver.waitFor(120, TimeUnit.SECONDS))
                             .as("parked driver completion").isTrue();
-                    JsonNode settled = support.resultsOf(caseDir,
-                            "pull-parked-1");
+                    JsonNode settled = support.resultsOf(caseDir, tag);
                     assertThat(settled.path("sends"))
                             .as("recovery re-reads identity; nothing re-sends")
                             .hasSize(1);

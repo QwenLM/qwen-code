@@ -12,11 +12,11 @@ Issue #13802 是 #12380 中 F 阶段的下一片：为 **channel 域**补 FG6 �
 
 - 完整的多进程 channel 链路今天只存在于生产接线中：adapter（`ManagedEmailAdapter`）→ 内部 adapter 面（`ManagedChannelAdapterController`，今天零 HTTP 覆盖）→ `ManagedChannelService` → `QwenHostedHarnessConnector.runChannelOperation` → 打包 Harness（`POST /session/:id/channels/operations` → `HostedChannelSession`）→ journal → Session Store。既有测试在两侧都停在上一跳：Java 侧用进程内的 `RecordingHarness`（`ManagedChannelServiceTest`，H2）；TS 侧用本地 JSONL store（`hosted-channel-session.test.ts`）或假控制面（`managed-email-adapter.test.ts`）。
 - FG7 复用的 Hosted 车道机关：`HostedWorkspaceToolTurnIT` 用一个类承载 FG6a/b/d/e/f —— FG6a/b/d/f 按字母给出用例选择子（`-Dqwen.fg6X.case`），FG6e 是单用例、无选择子；`HostedProcessCrashIT` + `HostedProcessCrashFixtureMain` 把 Spring 跑在可杀死的子 JVM 里做 FG6c；`integration-tests/helpers/hosted-harness-process.ts` 启动打包的 `dist/cli.js serve`；`integration-tests/fake-openai-server.ts` 提供确定性模型；每个故障类各有一个参数化 TS 驱动，内嵌反向代理；SQL 触发器注入存储故障（`FG6B_*` 标记在 Spring 日志里断言）。`check-failsafe-reports.js hosted` 强制每个 `Hosted*IT` 在 `hosted-harness-mysql` CI 作业中运行且只能在它中运行。
-- 被门禁覆盖的相关生产防护：V47 route 行的重放应答与漏斗的 `inputId` 重放（`ManagedChannelService:206-232`，`hosted-channel-session.ts` 的 submit 重放）；claim 幂等（`claimOne` + 漏斗 `claim` on `sending`）与 claim 行唯一性；按 `providerMessageId` 的回执幂等（漏斗 `receipt`）；先记录后台账的顺序与协调器收敛（`reconcileClaim` 的结算前收敛）；adapter 发送前持久化 outbound、上报前持久化结果（`managed-email-adapter.ts` 的 `send`、`reportOrphanedOutbound`）；含糊 SMTP → `unknown` 的分类（5xx → `rejected`，其余 `unknown`）；10 分钟的 claim 租约清扫；漏斗的 `cancel`（planned → `cancelled`；sending → 仅 `cancelRequested` 标记）；稠密 ordinal 拒绝（`ManagedChannelRecords.java:124`、`HostedChannelSession.receipt`）；`unknown → delivered` 的诚实恢复步（`ManagedExtensionRecords.TRANSITIONS`）。
+- 被门禁覆盖的相关生产防护：V47 route 行的重放应答与漏斗的 `inputId` 重放（`ManagedChannelService:206-232`，`hosted-channel-session.ts` 的 submit 重放）；claim 幂等（`claimOne` + 漏斗 `claim` on `sending`）与 claim 行唯一性（adapter 的重试绝不铸出第二行 claim）；按 `providerMessageId` 的回执幂等（漏斗 `receipt`）；先记录后台账的顺序与协调器收敛（`reconcileClaim` 的结算前收敛）；adapter 发送前持久化 outbound、上报前持久化结果（`managed-email-adapter.ts` 的 `send`、`reportOrphanedOutbound`）；含糊 SMTP → `unknown` 的分类（5xx → `rejected`，其余 `unknown`）；10 分钟的 claim 租约清扫；漏斗的 `cancel`（planned → `cancelled`；sending → 仅 `cancelRequested` 标记）；缺段拒绝（`HostedChannelSession.receipt` 对计划不存在的 ordinal 拒绝，外化为 409 `channel_operation_conflict`——存储层稠密序号规则（`ManagedChannelRecords.java:124`）只有在 H5d 的多段计划下才点火，属于那一片的门禁）；`unknown → delivered` 的诚实恢复步（`ManagedExtensionRecords.TRANSITIONS`）。
 
 ## 范围决定
 
-1. **FG7e 改范围：没有可门禁的 SSE 面。** channel 不发布任何事件（`ManagedChannelService` 不向任何流追加）；投递只通过游标分页的 REST 台账只读暴露（`GET /v1/agent-channels/{id}/deliveries`，Base64 `createdAt:id` 游标）。「断开事件流、用 `Last-Event-ID` 续传、断言不重复不缺失」今天写不出来（triage 评论的选项 B）。因此 FG7e 改为门禁**读台账连续性**：跨客户端中断与跨投递状态推进的游标稳定、不重复、不缺失的分页 —— 这正是 SSE 续传本应作出的断言，只是对准真实存在的面。它刻意不挂 SSE 的名字。
+1. **FG7e 改范围：没有可门禁的 SSE 面。** channel 不发布任何事件（`ManagedChannelService` 不向任何流追加）；投递只通过游标分页的 REST 台账只读暴露（`GET /v1/agent-channels/{id}/deliveries`，Base64 `createdAt:id` 游标），外加一条按投递的单条读取（`GET /v1/agent-channels/{id}/deliveries/{deliveryId}`）——台账行在领取后才铸出，因此一条 `planned` 投递根本不可读。「断开事件流、用 `Last-Event-ID` 续传、断言不重复不缺失」今天写不出来（triage 评论的选项 B）。因此 FG7e 改为门禁**读台账连续性**：跨客户端中断与跨投递状态推进的游标稳定、不重复、不缺失的分页 —— 这正是 SSE 续传本应作出的断言，只是对准真实存在的面。它刻意不挂 SSE 的名字。
 
 2. **FG7f 门禁 `unknown` 族；`partial` 在 v1 没有生产者。** email 计划是单分段（`planChannelSegments` 恒返回一段，`managed-channel-operations.ts:556`），而 `partial` 要求 `settled > 0 && settled < segments.length` —— 单分段下不可达。`partial` 的后继规则见证存在于契约层（`managed-channel-record.ts:458`）；多进程 `partial` 门禁需要 H5d 的多段计划，属于那一片。本门禁在全链路上证明的是 v1 可达的那段诚实投递线：提供方回答含糊 → `unknown`；回执始终不到 → 租约结算 `unknown`（绝不自动重发）；计划外 ordinal → 被拒且投递不前进；恢复重读原身份（绝不重发）；显式 resend 链只带未发送分段并携带重复警告。
 
@@ -26,7 +26,7 @@ Issue #13802 是 #12380 中 F 阶段的下一片：为 **channel 域**补 FG6 �
 
 ## 门禁台账
 
-`one send` 恒指假 SMTP 对该投递的分段恰好观察到一次物理发送；Java 侧的基准事实是 `qwen_managed_channel_{binding,claim,route,delivery}`、Session Store journal 与被捕获的 Spring 日志上的 JDBC；每个用例都断言其故障确实点火（代理丢弃计数、`FG7B_<case>` SQLException 标记、崩溃类的杀死标记）。
+`one send` 恒指假 SMTP 对该投递的分段恰好观察到一次物理发送；Java 侧的基准事实是 `qwen_managed_channel_{binding,claim,route,delivery}`、Session Store journal 与被捕获的 Spring 日志上的 JDBC；每个用例都断言其故障确实点火，使用的正是用例真正断言的那些机制：代理丢弃计数与 `FG7B_<case>` SQLException 标记（FG7a/b）、崩溃类的杀死标记、泊停发送的 `FG7_CLAIM_PARKED`/`FG7_HELD` 标记、cancel 应答的 `cancelRequested` 标记、被中断那一页正文未读的证明（FG7c/d/e），以及被注入故障自身的拒绝结果——accept-timeout 导致的 `unknown` 回执与 409 `channel_operation_conflict` 探针（FG7f）。
 
 ### FG7a —— adapter ⇄ 控制面 应答丢失
 
@@ -42,7 +42,7 @@ Issue #13802 是 #12380 中 F 阶段的下一片：为 **channel 域**补 FG6 �
 
 ### FG7b —— 存储故障
 
-纯测试 SQL 触发器，按租户与表限定作用域，每个类装拆一次，与 FG6b 相同。这里的应答丢失指 adapter 在一个它从没能看到应答的已提交事实之后重启。
+纯测试 SQL 触发器，按租户与表限定作用域，每个类装拆一次，与 FG6b 相同：每个用例装好自己的 `FG7B_<case>` 触发器、对着匹配的 UPDATE 点火一次，类的 teardown 再卸下残余——跨用例隔离来自这个按类的装拆-回收生命周期，而不是触发器自我消耗。这里的应答丢失指 adapter 在一个它从没能看到应答的已提交事实之后重启。
 
 | 用例                   | 注入                                                                       | 期望                                                                                                                        |
 | ---------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
@@ -54,12 +54,12 @@ Issue #13802 是 #12380 中 F 阶段的下一片：为 **channel 域**补 FG6 �
 
 Spring 跑在由 IT 杀死的子 JVM 里；adapter 驱动是可杀/可停进程。租约机关是确定性的而不是墙钟：生产清扫保持惰性（`claim-lease=30m`、`scan-delay=30s`），claim 行由 SQL 回拨时间，一次 reconcile 显式驱动（进程内走 bean；子 JVM 走 `/control/expire` + `/control/reconcile` 端点）。
 
-| 用例                   | 注入                                                                                | 期望                                                                                                                                                                                                             |
-| ---------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spring-kill-dispatch` | 接力携带的 claim 应答并毁掉，随即 SIGKILL Spring；在 adapter 的重试窗口背后弹性重启 | 零发送；一行 claim；搁浅由租约结算 `unknown`；冷启动绝不自动重发                                                                                                                                                 |
-| `spring-kill-receipt`  | 接力 receipt 应答后 SIGKILL Spring                                                  | 重启；回执重驱动幂等结算：一次发送、一次 `delivered`                                                                                                                                                             |
-| `adapter-kill`         | 假 SMTP 接受之后、回执持久化之前 SIGKILL adapter                                    | 租约清扫结算 `unknown`（提供方可能持信）；冷启动 adapter 把孤儿 outbound 结算为 `unknown`；没有任何自动重发；显式 `:resend` 打开 `<id>:r1`，只带未发送分段，警告 `possibleDuplicate`，并用自己的 Message-ID 送达 |
-| `adapter-stop`         | 接受后 SIGSTOP adapter；等租约把投递结算为 `unknown`；SIGCONT                       | 重驱动的持久化回执落地合法的 `unknown → delivered` 步并持原回执；全程一次发送                                                                                                                                    |
+| 用例                   | 注入                                                                                | 期望                                                                                                                                                                                                                                                   |
+| ---------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `spring-kill-dispatch` | 接力携带的 claim 应答并毁掉，随即 SIGKILL Spring；在 adapter 的重试窗口背后弹性重启 | 零发送；一行 claim；搁浅由租约结算 `unknown`；冷启动绝不自动重发                                                                                                                                                                                       |
+| `spring-kill-receipt`  | 接力 receipt 应答后 SIGKILL Spring                                                  | 重启；回执重驱动幂等结算：一次发送、一次 `delivered`                                                                                                                                                                                                   |
+| `adapter-kill`         | 假 SMTP 接受之后、回执持久化之前 SIGKILL adapter                                    | 租约清扫结算 `unknown`（提供方可能持信）；冷启动 adapter 把孤儿 outbound 结算为 `unknown`；没有任何自动重发。（显式 `:resend` 链——`<id>:r1`、仅未发送分段、`possibleDuplicate`、自有 Message-ID——由 FG7f 的 `receipt-never-arrived` 钉住，不在此处。） |
+| `adapter-stop`         | 接受后 SIGSTOP adapter；等租约把投递结算为 `unknown`；SIGCONT                       | 重驱动的持久化回执落地合法的 `unknown → delivered` 步并持原回执；全程一次发送                                                                                                                                                                          |
 
 ### FG7d —— 取消（经生产中继驱动 `cancel_delivery`）
 
@@ -72,10 +72,10 @@ Spring 跑在由 IT 杀死的子 JVM 里；adapter 驱动是可杀/可停进程�
 
 ### FG7e —— 读台账连续性（改范围后，决定 1）
 
-| 用例                      | 注入                                                                                           | 期望                                                                     |
-| ------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `delivery-page-resume`    | 建两份投递（单 claim 两轮），以 `limit=1` 读取，一页正文读到一半中止，状态持续推进中按游标续读 | 并集不重复、不缺失，稳定新在前；从头重读返回同一身份集合，状态诚实推进   |
-| `delivery-state-progress` | 一份投递跨越 `planned → sending → delivered` 交错读取                                          | 每页状态都是台账真实持过的状态；任何读取绝不在回执提交前报告 `delivered` |
+| 用例                      | 注入                                                                                                                                                                 | 期望                                                                                                                                                                   |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `delivery-page-resume`    | 建两份投递（单 claim 两轮），以假 SMTP 泊停把两份都冻结在 `sending`；以 `limit=1` 读取，一页正文读到一半中止，按游标续读——整个被中断的读取与游标行走期间状态保持不动 | 跨该中断的并集不重复、不缺失，稳定新在前；其后独立的放行后重读返回同一身份集合，状态如实推进                                                                           |
+| `delivery-state-progress` | 一份投递跨越 `planned → sending → delivered` 交错读取                                                                                                                | 台账行在领取后才铸出，因此 `planned` 那一腿应答 404——一条 `planned` 投递根本不可读；每次读取返回的状态都是台账真实持过的状态；任何读取绝不在回执提交前报告 `delivered` |
 
 ### FG7f —— 部分与未知投递（决定 2）
 
@@ -89,7 +89,7 @@ Spring 跑在由 IT 杀死的子 JVM 里；adapter 驱动是可杀/可停进程�
 
 **Java。** `HostedChannelFaultGatesIT` 按字母各起一个进程内 `ManagedAgentServerApplication`（workspace 挂载、registry/access 行由 JDBC 播种、MySQL 属性强制 —— 缺席即失败），外加 `qwen.managed-agent.channels.enabled=true` 与一个探测空闲端口上的 `qwen.managed-agent.internal-server.port`（`BrokerSecurity`/`Issue13180InternalPortTest` 模式 —— 全部测试中首次启动 adapter 面），session-store 的 base-url 固定指向该内部端口（`BrokerSecurity` 强制）。`session-store.workspace-id`、`harness.workspace-files-enabled`，以及 `durable-local-process=false`/`trusted-local-reboot-recovery=false` 这一对，让 workspace 链在 macOS 上保持诚实。取消直接经 `spring.getBean(HarnessConnector.class).runChannelOperation(...)` 携带 `kind: cancel_delivery` 驱动 —— 生产中继，无探针 bean。触发器沿用 FG6b 的 DDL 形状，`SIGNAL SQLSTATE` 文本为 `FG7B_<case>`，限定到用例租户，并在被捕获的 Spring 输出中断言。`HostedChannelProcessCrashIT` + `HostedChannelCrashFixtureMain` 照 `HostedProcessCrashIT` 的镜子：子 JVM、`FG7C_*` 环境变量、携带 `internalUrl`/`controlUrl` 的原子 `ready.json`、下一代启动前先杀掉上一代，以及租约用的 `/control/expire` + `/control/reconcile` 端点。共享的 `HostedChannelGateSupport` 持有驱动的启动-结果协议（按启动计数的 `driver-<phase>-<n>.json/.log`、`results-<phase>-<n>.json`）、`FG7_<PHASE>_OK` 标记派生、每用例 `HOME`/`QWEN_HOME` 隔离、察觉写入者存活性的 `awaitLog`，以及门禁读取的全部 JDBC 基准事实查询。
 
-**驱动。** `integration-tests/helpers/hosted-channel-fault-driver.ts`，与所有 FG6 驱动一样按步启动为 `node --import tsx … <driver.json>`。它持有：内嵌故障代理（按具名动词一次性丢失，头部接力走 `hosted-relay-headers.ts`，点火按内容感知 —— claim 丢失只在携带 ≥1 个投递的应答上点火）；真实的 `ManagedEmailAdapter`（取自 `@qwen-code/channel-email` 的构建产物）配测试 deps —— 剧本化 FakeImap（剧本邮件携带确定性的 `(channel, uid)` Message-ID，使重驱动的事件绝不按内容另铸路由；打开时游标为空，使邮件被准入而非当作历史跳过）、可剧本化的 FakeSmtp，其 `sendMail` 记录每次发送并可在放行文件前泊停（`smtpMode: park`）、接受后挂起（`holdAfterSendFile`）、或无 5xx 码超时（`accept-timeout`），noop 锁，真实的 `mailparser`，以及包着生产 `HttpManagedChannelControlPlane` 的记录型控制面客户端（线上线形与生产完全一致，证据在旁记录；无客户端超时 —— 冷 Session 上的 claim 合法地需要它所需的时间）。`pollLoop: false`：阶段以独立步骤驱动 `tick()` 或纯入站的 `poll()`（`pull-terminate` 阶段则泊停于其杀死标记处），使 IT 能在取消与杀死前后编排顺序；多投递拉取用 `expectedSends`；零发送故障窗用 `holdAfterDrop`。状态放在每个用例自己的目录里，使重启是真的冷加载。每步 stdout 标记（`FG7_READY`、`FG7_DROPPED <verb>`、`FG7_CLAIMED`、`FG7_SEND_DONE`、`FG7_CLAIM_PARKED`、`FG7_HELD`、`FG7_AWAIT_KILL`、`FG7_PROBE_REFUSED`、`FG7_RESEND`、`FG7_<phase>_OK`）为 IT 排序；`results-<phase>.json` 携带用例证据（发送计数与 Message-ID、准入身份、带丢弃标记的接力次数、回执结果、探针状态）。`adapter-kill`/`adapter-stop` 中 IT 在标记处直接杀死驱动进程本身，并用同一状态目录重新拉起。
+**驱动。** `integration-tests/helpers/hosted-channel-fault-driver.ts`，与所有 FG6 驱动一样按步启动为 `node --import tsx … <driver.json>`。它持有：内嵌故障代理（按具名动词一次性丢失，头部接力走 `hosted-relay-headers.ts`，点火按内容感知 —— claim 丢失只在携带 ≥1 个投递的应答上点火）；真实的 `ManagedEmailAdapter`（取自 `@qwen-code/channel-email` 的构建产物）配测试 deps —— 剧本化 FakeImap（剧本邮件携带确定性的 `(channel, uid)` Message-ID，使重驱动的事件绝不按内容另铸路由；打开时游标为空，使邮件被准入而非当作历史跳过）、可剧本化的 FakeSmtp，其 `sendMail` 记录每次发送并可在放行文件前泊停（`smtpMode: park`）、接受后挂起（`holdAfterSendFile`）、或无 5xx 码超时（`accept-timeout`），noop 锁，真实的 `mailparser`，以及包着生产 `HttpManagedChannelControlPlane` 的记录型控制面客户端（线上线形与生产完全一致，证据在旁记录；无客户端超时 —— 冷 Session 上的 claim 合法地需要它所需的时间）。`pollLoop: false`：阶段以独立步骤驱动 `tick()` 或纯入站的 `poll()`（`pull-terminate` 阶段则泊停于其杀死标记处），使 IT 能在取消与杀死前后编排顺序；多投递拉取用 `expectedSends`；零发送故障窗用 `holdAfterDrop`；必须跨控制面 bounce 存活的零发送窗用 `holdUntilFile`。状态放在每个用例自己的目录里，使重启是真的冷加载。两类 IT 等待或断言的标记——`FG7_DROPPED <verb>`（claim/receipt）、`FG7_CLAIM_PARKED`、`FG7_HELD`、`FG7_AWAIT_KILL` 与完成标记 `FG7_<phase>_OK`——为 IT 排序；其余标记仅作诊断日志（`FG7_READY`、`FG7_CLAIMED`、`FG7_SEND_DONE`、`FG7_PROBE_REFUSED`、`FG7_RESEND`，以及 relay 失败行 `FG7_RELAY_FAILED <cause>`）。`results-<phase>-<n>.json`（按启动计数的标签名，即上文 GateSupport 段所述）携带用例证据（发送计数与 Message-ID、准入身份、带丢弃标记与状态码的接力次数、回执结果、探针状态）。`adapter-kill`/`adapter-stop` 中 IT 在标记处直接杀死驱动进程本身，并用同一状态目录重新拉起。
 
 **Harness 与模型。** IT 在固定端口以 `dist/cli.js serve --profile hosted-harness` 启动，携带内嵌 broker 的 URL（同 FG6），并由一个 OpenAI 兼容的罐装模型对每轮的 channel 唤醒轮给出一小段固定回复，于是一个轮次产出一份 `<inputId>:reply` 投递、一个小分段。Harness 的 Workspace Session 需要 `hosted-workspace-files/1`，因此 harness 以 `--managed-runtime-broker-url` 启动，broker 以方法级固定端口内嵌运行（固定 harness 端口解开 base-url/broker-url 的启动循环）。IT 一律经 JDBC 等待 journal 事实，而不是 sleep；排序谓词点名驱动标记（读前先泊停），绝不只数行数。
 
@@ -116,7 +116,7 @@ Spring 跑在由 IT 杀死的子 JVM 里；adapter 驱动是可杀/可停进程�
 
 ## 验证与验收
 
-- `npm run build && npm run typecheck`、驱动经 ESLint 干净、全部四个新 Java 文件过 Checkstyle 与 SpotBugs、本模块 surefire 套件全绿（初验基线 1606 个测试）。
+- `npm run build && npm run typecheck`、驱动经 ESLint 干净、全部四个新 Java 文件完成编译、Checkstyle 与 SpotBugs 在模块配置范围内的源上通过（仅 main 源——四个新 Java 文件属于测试源，不在两个插件的配置范围内；旧表述夸大了实际覆盖）、本模块 surefire 套件全绿（初验基线 1606 个测试）。
 - 两个新类在本机 MariaDB 10.11 上全绿（CI 车道为 MySQL 8.4）：19 个用例全部点燃其声明的故障 —— 每个丢弃计数、`FG7B_*` 触发标记与杀死标记均被观察到 —— 按用例选择子可用、无任何注入时 channel 正常流绿。
 - 上述每个变异单独变红；源码还原；整套门禁复绿。
 - `hosted-process-ci.test.js` 在新预算下全绿，`check-failsafe-reports.js hosted` 在全车道运行后满足。

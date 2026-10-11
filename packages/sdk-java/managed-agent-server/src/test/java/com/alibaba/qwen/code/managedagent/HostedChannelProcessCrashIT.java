@@ -140,23 +140,30 @@ class HostedChannelProcessCrashIT {
         }
     }
 
-    private static String caseLogs(Path caseDir) throws IOException {
+    private static String caseLogs(Path caseDir) {
         // A case that dies before its directory exists (e.g. killFixture's
-        // assertion) must never mask the original failure.
+        // assertion) must never mask the original failure — and neither may
+        // an I/O error reading its logs.
         if (!Files.isDirectory(caseDir)) {
             return "<no case directory>";
         }
         StringBuilder dump = new StringBuilder();
-        for (Path log : Files.list(caseDir)
-                .filter(entry -> {
-                    String name = entry.getFileName().toString();
-                    return (name.startsWith("driver-")
-                            || name.startsWith("fixture-"))
-                            && name.endsWith(".log");
-                })
-                .toList()) {
-            dump.append("== ").append(log.getFileName()).append('\n')
-                    .append(Files.readString(log)).append('\n');
+        try {
+            for (Path log : Files.list(caseDir)
+                    .filter(entry -> {
+                        String name = entry.getFileName().toString();
+                        return (name.startsWith("driver-")
+                                || name.startsWith("fixture-"))
+                                && name.endsWith(".log");
+                    })
+                    .toList()) {
+                dump.append("== ").append(log.getFileName()).append('\n')
+                        .append(HostedChannelGateSupport.safeRead(log))
+                        .append('\n');
+            }
+        } catch (IOException failure) {
+            dump.append("<case logs unreadable: ").append(failure)
+                    .append('>');
         }
         return dump.toString();
     }
@@ -238,13 +245,16 @@ class HostedChannelProcessCrashIT {
                 // holdUntilFile keeps the deceived adapter ticking across
                 // the bounce so its warm retries can only succeed on the
                 // restarted generation; the file is the release after boot.
-                Process driver = support.startDriver(caseDir, "full-turn",
-                        base, Map.of("dropVerb", "claim", "expectDelivery",
-                                false, "holdAfterDrop", true, "holdUntilFile",
+                HostedChannelGateSupport.DriverLaunch launch = support
+                        .startDriver(caseDir, "full-turn", base, Map.of(
+                                "dropVerb", "claim", "expectDelivery", false,
+                                "holdAfterDrop", true, "holdUntilFile",
                                 caseDir.resolve("bounce-released").toString(),
-                                "maxTicks", 300)).process();
+                                "maxTicks", 300));
+                Process driver = launch.process();
+                String tag = launch.tag();
                 try {
-                    support.awaitLog(caseDir, "driver-full-turn-1.log",
+                    support.awaitLog(caseDir, "driver-" + tag + ".log",
                             "FG7_DROPPED claim", driver);
                     killFixture();
                     startFixture(caseDir, tenant, internalPort);
@@ -254,18 +264,21 @@ class HostedChannelProcessCrashIT {
                     assertThat(driver.waitFor(300, TimeUnit.SECONDS))
                             .as("driver exits behind the bounce:\n%s",
                                     HostedChannelGateSupport.safeRead(caseDir
-                                            .resolve("driver-full-turn-1.log")))
+                                            .resolve("driver-" + tag
+                                                    + ".log")))
                             .isTrue();
                     assertThat(driver.exitValue())
                             .as(HostedChannelGateSupport.safeRead(caseDir
-                                    .resolve("driver-full-turn-1.log")))
+                                    .resolve("driver-" + tag + ".log")))
                             .isZero();
-                    JsonNode results = support.resultsOf(caseDir,
-                            "full-turn-1");
+                    JsonNode results = support.resultsOf(caseDir, tag);
                     boolean postBounce = false;
                     for (JsonNode relay : results.path("relays")) {
+                        // A relay records its answer's status; liveness past
+                        // the bounce means a healthy answer, not any answer.
                         if ("claim".equals(relay.path("verb").asText())
                                 && !relay.path("dropped").asBoolean()
+                                && relay.path("status").asInt() < 400
                                 && relay.path("ts").asLong() >= bounceDone) {
                             postBounce = true;
                             break;
@@ -286,6 +299,11 @@ class HostedChannelProcessCrashIT {
                             channelId);
                     String deliveryId = results.path("admissionInputIds")
                             .get(0).asText() + ":reply";
+                    assertThat(support.ledgerRows(tenant, channelId))
+                            .as("no duplicate delivery rows").isEqualTo(1);
+                    assertThat(support.inputAcceptedCount(tenant, sessionId))
+                            .as("one platform event commits exactly one input")
+                            .isEqualTo(1);
                     control("expire",
                             "tenant=" + tenant + "&channel=" + channelId);
                     control("reconcile", "");
@@ -298,6 +316,9 @@ class HostedChannelProcessCrashIT {
                             .get("state")).isEqualTo("unknown");
                     JsonNode cold = support.drive(caseDir, "resume-cold",
                             base);
+                    assertThat(HostedChannelGateSupport.relayCountOk(cold,
+                            "claim")).as("the cold adapter reached the outbox")
+                            .isGreaterThanOrEqualTo(1);
                     HostedChannelGateSupport.assertSendsEmpty(cold,
                             "cold start never auto-resends");
                     assertThat(support.claimRows(tenant, channelId))
@@ -316,29 +337,32 @@ class HostedChannelProcessCrashIT {
                 }
             }
             case "spring-kill-receipt" -> {
-                Process driver = support.startDriver(caseDir, "full-turn",
-                        base, Map.of("dropVerb", "receipt", "maxTicks", 300))
-                        .process();
+                HostedChannelGateSupport.DriverLaunch launch = support
+                        .startDriver(caseDir, "full-turn", base, Map.of(
+                                "dropVerb", "receipt", "maxTicks", 300));
+                Process driver = launch.process();
+                String tag = launch.tag();
                 try {
-                    support.awaitLog(caseDir, "driver-full-turn-1.log",
+                    support.awaitLog(caseDir, "driver-" + tag + ".log",
                             "FG7_DROPPED receipt", driver);
                     killFixture();
                     startFixture(caseDir, tenant, internalPort);
                     assertThat(driver.waitFor(300, TimeUnit.SECONDS))
                             .as("driver converges behind the bounce:\n%s",
                                     HostedChannelGateSupport.safeRead(caseDir
-                                            .resolve("driver-full-turn-1.log")))
+                                            .resolve("driver-" + tag
+                                                    + ".log")))
                             .isTrue();
                     assertThat(driver.exitValue())
                             .as(HostedChannelGateSupport.safeRead(caseDir
-                                    .resolve("driver-full-turn-1.log")))
+                                    .resolve("driver-" + tag + ".log")))
                             .isZero();
                 } finally {
                     if (driver.isAlive()) {
                         driver.destroyForcibly();
                     }
                 }
-                JsonNode results = support.resultsOf(caseDir, "full-turn-1");
+                JsonNode results = support.resultsOf(caseDir, tag);
                 assertThat(results.path("sends"))
                         .as("at most one physical send across the bounce")
                         .hasSize(1);
@@ -362,10 +386,13 @@ class HostedChannelProcessCrashIT {
                 String deliveryId = admitted.path("admissionInputIds").get(0)
                         .asText() + ":reply";
                 awaitPlanned(tenant, sessionId, deliveryId);
-                Process driver = support.startDriver(caseDir,
-                        "pull-terminate", base, Map.of()).process();
+                HostedChannelGateSupport.DriverLaunch launch = support
+                        .startDriver(caseDir, "pull-terminate", base,
+                                Map.of());
+                Process driver = launch.process();
+                String tag = launch.tag();
                 try {
-                    support.awaitLog(caseDir, "driver-pull-terminate-1.log",
+                    support.awaitLog(caseDir, "driver-" + tag + ".log",
                             "FG7_AWAIT_KILL", driver);
                     driver.destroyForcibly();
                 } finally {
@@ -380,11 +407,13 @@ class HostedChannelProcessCrashIT {
                         deliveryId).get("delivery_state"))
                         .as("the lease settles the unknown outcome")
                         .isEqualTo("unknown");
-                JsonNode terminated = support.resultsOf(caseDir,
-                        "pull-terminate-1");
+                JsonNode terminated = support.resultsOf(caseDir, tag);
                 assertThat(terminated.path("sends")).hasSize(1);
                 HostedChannelGateSupport.assertSendsTo(terminated);
                 JsonNode cold = support.drive(caseDir, "resume-cold", base);
+                assertThat(HostedChannelGateSupport.relayCountOk(cold,
+                        "claim")).as("the cold adapter reached the outbox")
+                        .isGreaterThanOrEqualTo(1);
                 HostedChannelGateSupport.assertSendsEmpty(cold,
                         "a cold adapter never auto-resends");
                 assertThat(support.deliveryProjection(tenant, sessionId,
@@ -397,11 +426,14 @@ class HostedChannelProcessCrashIT {
                         .asText() + ":reply";
                 awaitPlanned(tenant, sessionId, deliveryId);
                 Path hold = caseDir.resolve("receipt-hold-release");
-                Process driver = support.startDriver(caseDir, "pull", base,
-                        Map.of("holdAfterSendFile", hold.toString())).process();
+                HostedChannelGateSupport.DriverLaunch launch = support
+                        .startDriver(caseDir, "pull", base, Map.of(
+                                "holdAfterSendFile", hold.toString()));
+                Process driver = launch.process();
+                String tag = launch.tag();
                 try {
-                    support.awaitLog(caseDir, "driver-pull-1.log", "FG7_HELD",
-                            driver);
+                    support.awaitLog(caseDir, "driver-" + tag + ".log",
+                            "FG7_HELD", driver);
                     signal(driver, "STOP");
                     control("expire",
                             "tenant=" + tenant + "&channel=" + channelId);
@@ -417,14 +449,15 @@ class HostedChannelProcessCrashIT {
                             .isTrue();
                     assertThat(driver.exitValue())
                             .as(HostedChannelGateSupport.safeRead(
-                                    caseDir.resolve("driver-pull-1.log")))
+                                    caseDir.resolve("driver-" + tag
+                                            + ".log")))
                             .isZero();
                 } finally {
                     if (driver.isAlive()) {
                         driver.destroyForcibly();
                     }
                 }
-                JsonNode results = support.resultsOf(caseDir, "pull-1");
+                JsonNode results = support.resultsOf(caseDir, tag);
                 assertThat(results.path("sends")).hasSize(1);
                 HostedChannelGateSupport.assertSendsTo(results);
                 JsonNode record = support.deliveryRecord(tenant, sessionId,
@@ -651,10 +684,14 @@ class HostedChannelProcessCrashIT {
             Supplier<Object> probe) throws Exception {
         Object outcome;
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
+        Throwable lastFailure = null;
         while (System.nanoTime() < deadline) {
             try {
                 outcome = probe.get();
-            } catch (RuntimeException ignored) {
+            } catch (RuntimeException failure) {
+                // A persistently failing probe must reach the timeout
+                // report, not burn the deadline as a bare timeout.
+                lastFailure = failure;
                 outcome = null;
             }
             if (Boolean.TRUE.equals(outcome)) {
@@ -668,8 +705,10 @@ class HostedChannelProcessCrashIT {
             }
             Thread.sleep(200);
         }
+        String suffix = lastFailure == null ? ""
+                : "\nlast probe failure: " + lastFailure;
         throw new AssertionError(description + " timed out; harness log:\n"
-                + harnessLogSnapshot());
+                + harnessLogSnapshot() + suffix, lastFailure);
     }
 
     private String harnessLogSnapshot() {
