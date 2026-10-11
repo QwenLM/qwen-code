@@ -2407,8 +2407,11 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('setManagedAutoMemoryEnabled', () => {
-    it('updates the live extraction and availability gates', () => {
+    it('updates the live extraction and availability gates', async () => {
       const config = makeConfig({ enableManagedAutoMemory: true });
+      const refresh = vi
+        .spyOn(config, 'refreshHierarchicalMemory')
+        .mockResolvedValue(undefined);
       expect(config.getManagedAutoMemoryEnabled()).toBe(true);
       config.setManagedAutoMemoryEnabled(false);
       expect(config.getManagedAutoMemoryEnabled()).toBe(false);
@@ -2416,7 +2419,72 @@ describe('Server Config (config.ts)', () => {
       config.setManagedAutoMemoryEnabled(true);
       expect(config.getManagedAutoMemoryEnabled()).toBe(true);
       expect(config.isManagedMemoryAvailable()).toBe(true);
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
     });
+
+    it('retains SSH isolation after enabling the preference', () => {
+      const environment = new SshExecutionEnvironment(
+        { host: 'host', directory: '/srv/project' },
+        '/local/anchor',
+      );
+      const config = makeConfig({
+        enableManagedAutoMemory: false,
+        executionEnvironment: environment,
+      });
+      const refresh = vi.spyOn(config, 'refreshHierarchicalMemory');
+      for (const candidate of [config, deriveConfig(config)]) {
+        candidate.setManagedAutoMemoryEnabled(true);
+        expect(candidate.getManagedAutoMemoryEnabled()).toBe(false);
+        expect(candidate.isManagedMemoryAvailable()).toBe(false);
+      }
+      expect(refresh).not.toHaveBeenCalled();
+      const local = deriveConfig(makeConfig(), {
+        getExecutionEnvironment: () => environment,
+      });
+      expect(local.getManagedAutoMemoryEnabled()).toBe(true);
+      expect(local.isManagedMemoryAvailable()).toBe(true);
+    });
+
+    it.each([true, false])(
+      'refreshes the policy, catalog and live chat after toggling from %s',
+      async (initiallyEnabled) => {
+        const config = makeConfig({
+          enableManagedAutoMemory: initiallyEnabled,
+        });
+        loadProjectRules();
+        const entry = '- [Project Memory](project.md)';
+        vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(
+          mockAutoMemoryIndexRead(entry),
+        );
+        await config.refreshHierarchicalMemory();
+        let instruction = config.getAutoMemoryPrompt();
+        const refreshSystemInstruction = vi.fn(async () => {
+          instruction = config.getAutoMemoryPrompt();
+        });
+        vi.spyOn(config, 'getLlmClient').mockReturnValue({
+          refreshSystemInstruction,
+        } as unknown as ReturnType<Config['getLlmClient']>);
+
+        config.setManagedAutoMemoryEnabled(!initiallyEnabled);
+        if (initiallyEnabled) {
+          expect(config.getAutoMemoryPrompt()).toBe('');
+          expect(config.getAutoMemoryContext()).toBe('');
+        }
+        await vi.waitFor(() => {
+          expect(refreshSystemInstruction).toHaveBeenCalledOnce();
+          if (initiallyEnabled) {
+            expect(instruction).toBe('');
+            expect(config.getAutoMemoryContext()).toBe('');
+          } else {
+            expect(instruction).toContain('# auto memory');
+            expect(config.getAutoMemoryContext()).toContain(entry);
+          }
+        });
+        config.setManagedAutoMemoryEnabled(!initiallyEnabled);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(refreshSystemInstruction).toHaveBeenCalledOnce();
+      },
+    );
 
     it('retains the bare-mode gate after enabling the preference', () => {
       const config = makeConfig({ bareMode: true });

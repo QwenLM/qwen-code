@@ -407,6 +407,7 @@ import {
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
+import { refreshMemoryInstruction } from '../memory/refresh.js';
 import {
   getProjectMetadataMigrationRoots,
   scanMemoryMetadataCorpusStatus,
@@ -9108,7 +9109,7 @@ export class Config {
 
   /** Managed-memory policy for the system prompt, without legacy indexes. */
   getAutoMemoryPrompt(): string {
-    return this.autoMemoryPrompt;
+    return this.isManagedMemoryAvailable() ? this.autoMemoryPrompt : '';
   }
 
   /** Latest legacy catalog, sent only at the request tail, never stored history. */
@@ -11026,14 +11027,20 @@ export class Config {
   }
 
   getManagedAutoMemoryEnabled(): boolean {
-    if (this.shellExecutionSandbox) return false;
+    if (this.shellExecutionSandbox || this.executionEnvironment) return false;
     return (
       this.enableManagedAutoMemory && !this.getBareMode() && !this.isSafeMode()
     );
   }
 
   setManagedAutoMemoryEnabled(enabled: boolean): void {
+    const wasAvailable = this.isManagedMemoryAvailable();
     this.enableManagedAutoMemory = enabled;
+    if (this.isManagedMemoryAvailable() !== wasAvailable) {
+      void refreshMemoryInstruction(this, {
+        logContext: 'managed memory toggle',
+      });
+    }
   }
 
   /**
@@ -11104,7 +11111,7 @@ export class Config {
   }
 
   isManagedMemoryAvailable(): boolean {
-    if (this.shellExecutionSandbox) return false;
+    if (this.shellExecutionSandbox || this.executionEnvironment) return false;
     return this.enableManagedAutoMemory && !this.getBareMode();
   }
 
