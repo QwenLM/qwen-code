@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.Headers;
@@ -192,34 +193,52 @@ class ProviderRuntimeTransportTest {
     }
 
     @Test
-    void emitsTheSharedPublicControlFixturesWithoutChangingTheirIdentity() throws Exception {
-        JsonNode corpus = new ObjectMapper().readTree(ManagedRuntimeAttestationConformanceTest
+    void replaysTheSharedPublicControlFixturesBeforeSending() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode corpus = mapper.readTree(ManagedRuntimeAttestationConformanceTest
                 .contractDirectory().resolve("managed-runtime-provider-v1.fixtures.json").toFile());
         assertEquals(ProviderRuntimeProtocol.NAME, corpus.required("protocol").asText());
         JsonNode cases = corpus.required("cases");
         Set<String> publicKinds = Set.of("manifest", "history", "begin-turn", "prepare",
-                "confirmation", "preflight", "confirm", "bind-history", "checkpoint");
+                "confirmation", "preflight", "confirm", "bind-history", "checkpoint", "raw-file-history");
         List<String> exercised = new ArrayList<>();
+        int rejected = 0;
         for (JsonNode fixture : cases) {
             String kind = fixture.required("request").required("operation").required("kind").asText();
-            if (!fixture.required("valid").asBoolean() || !publicKinds.contains(kind)) {
+            if (!publicKinds.contains(kind)) {
                 continue;
             }
-            Map<String, Object> expected = JsonCodec.parseObject(fixture.required("request")
-                    .toString().getBytes(StandardCharsets.UTF_8), "fixture");
-            result = Set.of("begin-turn", "confirm").contains(kind) ? null : Map.of();
+            String name = fixture.required("name").asText();
+            Map<String, Object> expected = mapper.convertValue(fixture.required("request"),
+                    new TypeReference<Map<String, Object>>() {});
+            Map<String, Object> operation = ProviderRuntimeProtocol.object(expected.get("operation"));
+            JsonNode envelope = fixture.required("request").required("session");
+            RuntimeSession fixtureSession = new RuntimeSession(envelope.required("harnessSessionId").asText(),
+                    envelope.required("runtimeSessionId").asText(), envelope.required("turnKind").asText(),
+                    session.getScope());
             requests.clear();
-            Object answer = transport.control(lease, session,
-                    ProviderRuntimeProtocol.object(expected.get("operation"))).toCompletableFuture().join();
-            assertEquals(result, answer, kind);
-            assertEquals(expected, requests.getLast(), kind);
-            assertEquals("history".equals(kind) ? 1 : 2, requests.size(), kind);
-            if (!"history".equals(kind)) {
+            if (!fixture.required("valid").asBoolean()) {
+                RuntimeBrokerException error = assertThrows(RuntimeBrokerException.class,
+                        () -> transport.control(lease, fixtureSession, operation), name);
+                assertEquals(400, error.getStatusCode(), name);
+                assertEquals("runtime_control_operation_invalid", error.getCode(), name);
+                assertTrue(requests.isEmpty(), name);
+                rejected++;
+                continue;
+            }
+            result = Set.of("begin-turn", "confirm").contains(kind) ? null : Map.of();
+            Object answer = transport.control(lease, fixtureSession, operation).toCompletableFuture().join();
+            assertEquals(result, answer, name);
+            assertEquals(expected, requests.getLast(), name);
+            boolean acquires = !Set.of("history", "raw-file-history", "workspace-context").contains(kind);
+            assertEquals(acquires ? 2 : 1, requests.size(), name);
+            if (acquires) {
                 assertEquals(Map.of("kind", "acquire"), requests.getFirst().get("operation"));
             }
             exercised.add(kind);
         }
         assertEquals(publicKinds, Set.copyOf(exercised));
+        assertTrue(rejected > 0);
     }
 
     @Test
@@ -228,7 +247,7 @@ class ProviderRuntimeTransportTest {
                 .contractDirectory().resolve("managed-runtime-provider-v1.fixtures.json").toFile())
                 .required("cases");
         Set<String> publicKinds = Set.of("manifest", "history", "begin-turn", "prepare",
-                "confirmation", "preflight", "confirm", "bind-history", "checkpoint");
+                "confirmation", "preflight", "confirm", "bind-history", "checkpoint", "raw-file-history");
         Set<String> refused = new java.util.HashSet<>();
         for (JsonNode fixture : cases) {
             if (!fixture.required("valid").asBoolean()) {
@@ -450,12 +469,36 @@ class ProviderRuntimeTransportTest {
     }
 
     @Test
-    void acceptsUppercaseSessionUuidInProviderControlIdentity() {
+    void rejectsNoncanonicalSessionUuidsInProviderIdentitiesAndReferences() {
         String uppercase = SESSION.toUpperCase(Locale.ROOT);
-        Map<String, Object> reference = new LinkedHashMap<>(reference());
-        reference.put("sessionId", uppercase);
+        for (Map.Entry<String, String> ids : List.of(Map.entry(uppercase, SESSION),
+                Map.entry(SESSION, uppercase), Map.entry(uppercase, uppercase))) {
+            Map<String, Object> reference = new LinkedHashMap<>(reference());
+            reference.put("sessionId", ids.getKey());
+            Map<String, Object> identity = new LinkedHashMap<>(reference);
+            identity.remove("invocationId");
+            identity.remove("argsDigest");
+            RuntimeSession noncanonical = new RuntimeSession(HARNESS, ids.getValue(), "bootstrap", session.getScope());
+            for (Map<String, Object> operation : List.of(
+                    Map.of("kind", "begin-turn", "identity", identity),
+                    Map.of("kind", "preflight", "reference", reference))) {
+                RuntimeBrokerException error = assertThrows(RuntimeBrokerException.class,
+                        () -> transport.control(lease, noncanonical, operation));
+                assertEquals(400, error.getStatusCode());
+                assertEquals("runtime_control_operation_invalid", error.getCode());
+            }
+            assertThrows(RuntimeBrokerException.class,
+                    () -> ProviderRuntimeProtocol.reference(reference, ids.getValue()));
+        }
+        assertTrue(requests.isEmpty());
+        Map<String, Object> identity = new LinkedHashMap<>(reference());
+        identity.remove("invocationId");
+        identity.remove("argsDigest");
         assertDoesNotThrow(() -> ProviderRuntimeProtocol.control(
-                Map.of("kind", "preflight", "reference", reference), HARNESS, uppercase));
+                Map.of("kind", "begin-turn", "identity", identity), HARNESS, SESSION));
+        assertDoesNotThrow(() -> ProviderRuntimeProtocol.control(
+                Map.of("kind", "preflight", "reference", reference()), HARNESS, SESSION));
+        assertDoesNotThrow(() -> ProviderRuntimeProtocol.reference(reference(), SESSION));
     }
 
     @Test
@@ -490,6 +533,33 @@ class ProviderRuntimeTransportTest {
         assertTrue(requests.isEmpty());
     }
 
+    @Test
+    void validatesSnapshotPromptCollectionsBeforeSendingEitherHistoryBinding() {
+        List<Function<Object, Map<String, Object>>> bindings = List.of(
+                snapshots -> Map.of("kind", "bind-history", "binding", Map.of("ownerSessionId", HARNESS,
+                        "ownerRuntimeSessionId", SESSION, "executionCwd", "/workspace", "snapshots", snapshots)),
+                snapshots -> Map.of("kind", "raw-file-history", "action", "bind", "state",
+                        Map.of("ownerSessionId", HARNESS, "snapshots", snapshots, "files", Map.of())));
+        List<Map<String, Object>> snapshots = new ArrayList<>();
+        for (int index = 0; index < 101; index++) {
+            snapshots.add(Map.of("promptId", "prompt-" + index,
+                    "timestamp", "2026-01-01T00:00:00.000Z", "trackedFileBackups", Map.of()));
+        }
+        for (Function<Object, Map<String, Object>> binding : bindings) {
+            assertDoesNotThrow(() -> ProviderRuntimeProtocol.control(binding.apply(List.of()), HARNESS, SESSION));
+            assertDoesNotThrow(() -> ProviderRuntimeProtocol.control(
+                    binding.apply(snapshots.subList(0, 100)), HARNESS, SESSION));
+            for (Object invalid : List.of("not a list", Map.of(), List.of("not a snapshot"),
+                    List.of(List.of()), List.of(snapshots.getFirst(), snapshots.getFirst()), snapshots)) {
+                RuntimeBrokerException error = assertThrows(RuntimeBrokerException.class,
+                        () -> transport.control(lease, session, binding.apply(invalid)));
+                assertEquals(400, error.getStatusCode());
+                assertEquals("runtime_control_operation_invalid", error.getCode());
+            }
+        }
+        assertTrue(requests.isEmpty());
+    }
+
     private static void assertAttestationInvalid(Supplier<CompletionStage<?>> call, Object label) {
         CompletionException failure = assertThrows(CompletionException.class,
                 () -> call.get().toCompletableFuture().join(), String.valueOf(label));
@@ -502,7 +572,8 @@ class ProviderRuntimeTransportTest {
 
     @Test
     void rejectsTheSharedMalformedReferencesBeforeTheyCanBeReserved() throws Exception {
-        JsonNode cases = new ObjectMapper().readTree(ManagedRuntimeAttestationConformanceTest
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode cases = mapper.readTree(ManagedRuntimeAttestationConformanceTest
                 .contractDirectory().resolve("managed-runtime-provider-v1.fixtures.json").toFile())
                 .required("cases");
         int rejected = 0;
@@ -511,13 +582,15 @@ class ProviderRuntimeTransportTest {
             if (fixture.required("valid").asBoolean() || reference.isMissingNode()) {
                 continue;
             }
-            Map<String, Object> malformed = JsonCodec.parseObject(
-                    reference.toString().getBytes(StandardCharsets.UTF_8), "reference");
+            Map<String, Object> malformed = mapper.convertValue(reference,
+                    new TypeReference<Map<String, Object>>() {});
+            String runtimeSessionId = fixture.required("request").required("session")
+                    .required("runtimeSessionId").asText();
             assertThrows(RuntimeBrokerException.class,
-                    () -> ProviderRuntimeProtocol.reference(malformed, SESSION), fixture.required("name").asText());
+                    () -> ProviderRuntimeProtocol.reference(malformed, runtimeSessionId), fixture.required("name").asText());
             rejected++;
         }
-        assertEquals(3, rejected);
+        assertTrue(rejected > 0);
     }
 
     @Test

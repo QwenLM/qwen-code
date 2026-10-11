@@ -35,7 +35,10 @@ const fixtures = JSON.parse(
   cases: Array<{
     name: string;
     valid: boolean;
-    request: { operation?: { kind?: unknown; outcome?: unknown } };
+    request: {
+      session: ManagedRuntimeProviderSession;
+      operation?: { kind?: unknown; outcome?: unknown };
+    };
   }>;
 };
 const session: ManagedRuntimeProviderSession = {
@@ -62,6 +65,19 @@ describe('managed-runtime-provider/1', () => {
       expect(parseManagedRuntimeProviderRequest(request)).toEqual(request);
     else expect(() => parseManagedRuntimeProviderRequest(request)).toThrow();
   });
+
+  it.each(fixtures.cases.filter(({ name }) => name.startsWith('validation-')))(
+    'standalone operation: $name',
+    ({ valid, request }) => {
+      const parse = () =>
+        parseManagedRuntimeProviderOperation(
+          request.operation,
+          request.session,
+        );
+      if (valid) expect(parse()).toEqual(request.operation);
+      else expect(parse).toThrow();
+    },
+  );
 
   it('pins the shared corpus to this protocol and one case shape', () => {
     // Both languages read the corpus by these literal keys.
