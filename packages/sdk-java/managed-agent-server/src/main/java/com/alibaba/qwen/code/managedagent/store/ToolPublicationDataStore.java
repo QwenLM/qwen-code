@@ -1496,13 +1496,10 @@ public final class ToolPublicationDataStore {
     }
 
     private void lockTenant(JsonNode key) {
-        String tenant = text(key, "tenantId");
-        String tenantKey = hash(tenant);
-        jdbc.update("INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
-                + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
-        String storedTenant = jdbc.queryForObject("SELECT tenant_id FROM qwen_tool_publication_tenant"
-                + " WHERE tenant_key = ? FOR UPDATE", String.class, tenantKey);
-        require(tenant.equals(storedTenant), "Publication tenant conflicts");
+        // The entry point's first tenant-guard acquisition on this lane, so
+        // it runs bounded with the shared named-failure mapping (#13800).
+        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
+                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private List<Stored> stored(String scope, String publicationId, String slot) {

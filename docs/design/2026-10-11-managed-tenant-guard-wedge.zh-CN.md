@@ -269,6 +269,42 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
 4. `recovery_blocked` 标记的表述仍准确：被卡会话继续准确报告自身阻
    塞状态（见证步骤 3 的断言）。
 
+## 评审修正（R1，2026-10-12）
+
+首轮评审证明解耦本身引入了三处缺陷；三处均在本改动内修复并以见证钉
+住。
+
+### F1. 重放快照只允许在取得 head 锁之后钉住
+
+从 `findHeadForUpdate` 移除 per-Session 的 `lockSession` 后，`requireLive`
+这条普通读成了事务首个一致性读。REPEATABLE READ 下它在 head 行锁等待
+之前钉快照：被该锁放行的重复提交在 `findTransactionByCommand` 里仍读旧
+快照，看不到赢家已提交的事务，落入 `validateHead`，把幂等重试变成
+`managed_session_head_conflict` 409。`findHeadForUpdate` 现在先执行 head 行
+`SELECT ... FOR UPDATE`，依赖快照的读取均在持锁之后。见证：
+`ManagedSessionGuardConvoyIT#duplicateCommitReplaysAfterWaitingForTheHeadLock`。
+
+### F2. 有界必须落在各车道首次获取处，而不是下游
+
+publication 车道在到达 `lockPublicationWriter` 之前就已触租户守卫：
+`applyLocked` 内联执行自己的 tenant INSERT/SELECT，`prepareAdmission` 与
+`commitReceipt` 各自调用自身锁函数（receipt 还先无超时取 placement guard），
+且 `grants.lockOriginalSettledResult` 与 retention 读 lease 的开口
+（`lockSessionHead`）更早触 CAS 行。apply/准入/回执三条车道与 lease 开口的
+首次获取现均以同一逐语句上界运行并共享 `tenant_guard_contended` 映射。见
+证：`ManagedSessionGuardConvoyIT#heldTenantGuardsBoundPublicationLaneEntries`。
+
+### F3. writer 获取保持 placement 先于 drain 栅栏
+
+普通分支的 `checkLifecycleWriter` 早退后，`acquireWriter` 先读
+`requireOrdinaryAdmission`、再取 placement guard。drain 行不存在时，
+`SELECT ... FOR UPDATE` 在 REPEATABLE READ 下持有 next-key/gap 锁；生命周期
+侧恒以 placement 在先、再插入 drain 行，因此 writer 持 gap 锁等待
+placement 成环，InnoDB 以击毙 writer 化解（经有界路径浮出水面的是 1213 而
+非正确的 409）。`acquireWriter` 现在先取有界的 placement guard，再读 drain
+栅栏。见证：
+`ManagedSessionGuardConvoyIT#writerAcquisitionOrdersPlacementBeforeTheDrainFence`。
+
 ## 后续（不在本次改动）
 
 - 生命周期恢复事务的守卫窗口压界（`recoverEffects`/`saveEffects`/

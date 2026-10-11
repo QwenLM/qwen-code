@@ -58,7 +58,7 @@ public class ManagedSessionStore {
     // never wait on them past this per-statement bound: a held row degrades
     // to a named, retryable failure instead of out-waiting the caller's own
     // request budget (#13800).
-    private static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = 5;
+    static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = 5;
     private static final Pattern DIGEST = Pattern.compile("^[0-9a-f]{64}$");
     private static final Pattern WRITER_TOKEN = Pattern.compile(
             "^[A-Za-z0-9_-]{"
@@ -206,7 +206,7 @@ public class ManagedSessionStore {
                         + " within the hot-path bound; retry.");
     }
 
-    private static void lockBounded(Runnable lock) {
+    static void lockBounded(Runnable lock) {
         try {
             lock.run();
         } catch (CannotAcquireLockException | QueryTimeoutException error) {
@@ -317,11 +317,6 @@ public class ManagedSessionStore {
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         checkLifecycleWriter(tenantId, sessionId, authority);
-        if (authority != null) {
-            WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, false);
-        } else {
-            requireOrdinaryAdmission(tenantId, sessionId);
-        }
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
         // Acquisition stays serialized with an in-flight delete/retire: while
@@ -329,10 +324,19 @@ public class ManagedSessionStore {
         // point, so it stays. Both acquisitions run in the codebase-wide
         // placement-before-publication order, bounded — a held row degrades
         // to a named failure instead of a silent wedge or a 1213 (#13800).
+        // Placement must precede the drain admission check below: begin paths
+        // insert drain rows only after locking placement, so checking the
+        // drain first would take its gap lock and deadlock against a
+        // lifecycle that already holds placement (#13800).
         lockBounded(() -> WorkspaceMigrationAdmission.sessionAdmission(jdbc,
                 tenantId, sessionId, GUARD_ACQUIRE_TIMEOUT_SECONDS));
         lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
                 tenantId, GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        if (authority != null) {
+            WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, false);
+        } else {
+            requireOrdinaryAdmission(tenantId, sessionId);
+        }
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<String> closed = jdbc.query("SELECT status FROM managed_agent_session"
                 + " WHERE tenant_id = ? AND session_id = ? AND workspace_id IS NOT NULL FOR UPDATE",
@@ -1240,15 +1244,19 @@ public class ManagedSessionStore {
     }
 
     private HeadRow findHeadForUpdate(String tenantId, String sessionId) {
-        // The head row lock below is the per-Session serialization point;
-        // the tenant-wide CAS row stays with explicit publication paths so
-        // ordinary writes never queue on it (#13800).
-        ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
+        // The head row lock is the per-Session serialization point, and it
+        // must be this transaction's first database read: under REPEATABLE
+        // READ the first plain SELECT pins the snapshot, and a duplicate
+        // commit released by this lock must see the winner's committed
+        // transaction in findTransactionByCommand to replay rather than
+        // conflict (#13800). The tenant-wide CAS row stays with explicit
+        // publication paths so ordinary writes never queue on it.
         List<HeadRow> rows = jdbc.query(
                 "SELECT * FROM qwen_managed_session_journal_head"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " FOR UPDATE",
                 headMapper, tenantId, sessionId);
+        ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         return rows.isEmpty() ? null : rows.get(0);
     }
 

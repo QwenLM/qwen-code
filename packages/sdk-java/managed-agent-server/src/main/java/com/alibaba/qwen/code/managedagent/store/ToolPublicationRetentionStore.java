@@ -75,7 +75,12 @@ public final class ToolPublicationRetentionStore {
     }
 
     static Map<String, Object> lockSessionHead(JdbcTemplate jdbc, String tenant, String session) {
-        lockTenant(jdbc, tenant);
+        // Retention-read callers reach the tenant CAS row here before the
+        // head row, so the acquisition runs bounded with the shared
+        // named-failure mapping: a held row answers tenant_guard_contended
+        // instead of out-waiting the caller's own request budget (#13800).
+        ManagedSessionStore.lockBounded(() -> lockTenant(jdbc, tenant,
+                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         var heads = jdbc.queryForList("SELECT state FROM qwen_managed_session_journal_head"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenant, session);
         return heads.isEmpty() ? null : heads.getFirst();

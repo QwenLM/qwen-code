@@ -349,11 +349,11 @@ public final class ToolPublicationStore {
         }
         lockOriginal(hint);
         // Every mutation uses this order, including no-start capacity release.
-        jdbc.update("INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
-                + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
-        String savedTenant = jdbc.queryForObject("SELECT tenant_id FROM qwen_tool_publication_tenant"
-                + " WHERE tenant_key = ? FOR UPDATE", String.class, tenantKey);
-        require(tenant.equals(savedTenant), "Tenant key conflicts");
+        // The tenant guard is this entry's first acquisition, so it runs
+        // bounded with the shared named-failure mapping: a held row answers
+        // tenant_guard_contended instead of out-waiting the caller (#13800).
+        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
+                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         JsonNode owner = request.get("owner");
         var writer = sessions.lockPublicationWriter(tenant, workspace, session,
                 text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken);
@@ -892,11 +892,12 @@ public final class ToolPublicationStore {
     }
 
     private void lockTenant(String tenant) {
-        String tenantKey = hash(tenant);
-        jdbc.update("INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
-                + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
-        require(tenant.equals(jdbc.queryForObject("SELECT tenant_id FROM qwen_tool_publication_tenant"
-                + " WHERE tenant_key = ? FOR UPDATE", String.class, tenantKey)), "Publication tenant conflicts");
+        // Grant lanes funnel through this helper for their first tenant
+        // guard acquisition; it runs bounded with the shared named-failure
+        // mapping: a held row answers tenant_guard_contended instead of
+        // out-waiting the caller (#13800).
+        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
+                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private static JsonNode grant(String id, Row row) {

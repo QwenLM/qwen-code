@@ -351,7 +351,12 @@ public final class ToolPublicationAdmissionStore {
                     "Original manifest resource conflicts");
         }
         return transactions.execute(status -> {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, text(key, "tenantId"));
+            // The receipt lane's first tenant-wide acquisitions run bounded
+            // with the shared named-failure mapping: a held guard answers
+            // tenant_guard_contended instead of out-waiting the caller
+            // (#13800). Lock order stays placement before publication.
+            ManagedSessionStore.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc,
+                    text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
             data.lockOriginalSettledResult(key, publicationId, finished);
             lockTenant(key);
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
@@ -525,13 +530,10 @@ public final class ToolPublicationAdmissionStore {
     }
 
     private void lockTenant(JsonNode key) {
-        String tenant = text(key, "tenantId");
-        String tenantKey = ToolPublicationContract.sha256(tenant.getBytes(StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
-                + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
-        String saved = jdbc.queryForObject("SELECT tenant_id FROM qwen_tool_publication_tenant"
-                + " WHERE tenant_key = ? FOR UPDATE", String.class, tenantKey);
-        require(tenant.equals(saved), "Receipt tenant conflicts");
+        // This lane's first tenant-guard acquisition, bounded with the
+        // shared named-failure mapping (#13800).
+        ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
+                text(key, "tenantId"), ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }
 
     private static String scope(JsonNode key) {

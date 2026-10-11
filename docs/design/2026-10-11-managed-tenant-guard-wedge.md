@@ -314,6 +314,50 @@ session with an unlocked head row.
 4. `recovery_blocked` marker remains narrated accurately: the blocked
    Session keeps reporting its own blocked state (witness step 3 assertion).
 
+## Review corrections (R1, 2026-10-12)
+
+The first review round proved that the decoupling itself introduced three
+defects; each is fixed in this change and pinned by a witness.
+
+### F1. The replay snapshot is only allowed to be pinned after the head lock
+
+Removing the per-Session `lockSession` from `findHeadForUpdate` left a
+plain read (`requireLive`) as the transaction's first consistent read.
+Under REPEATABLE READ that read pins the snapshot _before_ the head row
+lock waits: a duplicate commit released by this lock still evaluated a
+stale snapshot in `findTransactionByCommand` and fell into
+`validateHead`, converting an idempotent retry into a
+`managed_session_head_conflict` 409. `findHeadForUpdate` now executes the
+head `SELECT ... FOR UPDATE` first; the snapshot-dependent reads follow
+under the held lock. Witness:
+`ManagedSessionGuardConvoyIT#duplicateCommitReplaysAfterWaitingForTheHeadLock`.
+
+### F2. Boundedness must sit at each lane's first acquisition, not downstream
+
+The publication lanes reach the tenant guard before
+`lockPublicationWriter`: `applyLocked` executed its own tenant
+INSERT/SELECT inline, `prepareAdmission` and `commitReceipt` each called
+their own lock helpers (and the receipt path first took the placement
+guard unbounded), and `grants.lockOriginalSettledResult` plus the
+retention read-lease opener touched the CAS row ahead of them. All first
+acquisitions on the apply/admission/receipt lanes and the lease opener
+(`lockSessionHead`) now run bounded with the shared
+`tenant_guard_contended` mapping. Witness:
+`ManagedSessionGuardConvoyIT#heldTenantGuardsBoundPublicationLaneEntries`.
+
+### F3. Writer acquisition keeps placement before the drain fence
+
+With the ordinary branch of `checkLifecycleWriter` early-returned,
+`acquireWriter` read the drain fence (`requireOrdinaryAdmission`) before
+acquiring the placement guard. The drain `SELECT ... FOR UPDATE` takes a
+next-key/gap lock when no row exists; the begin side takes placement
+first and only then inserts the drain row, so writer-vs-lifecycle formed
+a cycle that InnoDB dissolved by killing the writer (surfacing a 1213
+through the bounded path instead of the correct 409). `acquireWriter` now
+takes the bounded placement guard before reading the drain fence.
+Witness:
+`ManagedSessionGuardConvoyIT#writerAcquisitionOrdersPlacementBeforeTheDrainFence`.
+
 ## Follow-ups (not in this change)
 
 - Bound the lifecycle recovery transactions' guard window (snapshot-then-
