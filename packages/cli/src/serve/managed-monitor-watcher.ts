@@ -91,9 +91,7 @@ export class ManagedMonitorWatcher implements MonitorWatchExecutor {
         started: true,
       },
       process: watch,
-      terminate: async () => {
-        await watch.terminate(5_000);
-      },
+      terminate: async () => (await watch.terminate(5_000)) !== null,
     };
   }
 }

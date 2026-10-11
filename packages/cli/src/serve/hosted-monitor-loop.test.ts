@@ -82,6 +82,8 @@ class FakeExecutor {
     | ((failed: boolean, stopRequested?: boolean) => Promise<void> | void)
     | undefined;
   terminateCalls = 0;
+  /** A remote watch stops nothing here and reports no proof. */
+  provesStop = true;
   commands: Array<Readonly<Record<string, unknown>>> = [];
   failStart: Error | undefined;
 
@@ -98,7 +100,7 @@ class FakeExecutor {
       receipt: { watch: 'started' },
       terminate: () => {
         this.terminateCalls += 1;
-        return Promise.resolve();
+        return Promise.resolve(this.provesStop);
       },
     });
   }
@@ -342,6 +344,37 @@ describe('HostedMonitorLoop', () => {
       run: { state: 'settled', execution: 'settled' },
     });
     expect(rig.executor.terminateCalls).toBe(1);
+    await closeLoop(rig);
+  });
+
+  it('parks an auto-stop it cannot prove instead of settling the quota (#13856)', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    // The production watch runs in the worker: its handle stops nothing and
+    // reports no proof, so the quota may not claim a settled watch that
+    // still runs and still holds its Runtime.
+    rig.executor.provesStop = false;
+    await rig.loop.start(params({ maxEvents: 1 }));
+
+    rig.executor.onLine?.('one');
+    await rig.clock.advance(1_000);
+    await rig.loop.done;
+    expect(committed(rig.authority)).toMatchObject({
+      observationSequence: 1,
+      stopReason: null,
+      run: {
+        state: 'recovery_blocked',
+        reason: 'runtime_lost',
+        execution: 'outcome_unknown',
+      },
+    });
+    expect(rig.executor.terminateCalls).toBe(1);
+
+    // The loop stopped observing, so a later line neither flushes nor
+    // re-settles the parked record.
+    rig.executor.onLine?.('late');
+    await rig.clock.advance(5_000);
+    expect(committed(rig.authority).observationSequence).toBe(1);
     await closeLoop(rig);
   });
 

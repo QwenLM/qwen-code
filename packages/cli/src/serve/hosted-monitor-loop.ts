@@ -64,7 +64,13 @@ export interface MonitorWatchHandle {
   readonly receipt: Readonly<Record<string, unknown>>;
   /** The supervised physical unit, exposed to the worker's own registry. */
   readonly process?: ManagedChildRunProcess;
-  terminate(): Promise<void>;
+  /**
+   * Ends the watch and reports whether that stop is proven. A handle whose
+   * watch runs in the worker answers `false` — only the Runtime's
+   * maintenance route can stop it — so the loop parks the record instead
+   * of claiming a settlement the physical side never confirmed (#13856).
+   */
+  terminate(): Promise<boolean>;
 }
 
 export interface MonitorLoopClock {
@@ -350,7 +356,16 @@ export class HostedMonitorLoop {
     if (this.ended) return;
     this.ended = true;
     this.disarm();
-    if (terminate) await this.handle?.terminate();
+    if (terminate && this.handle !== undefined) {
+      // The quota or the idle window ended this loop's own observing; only
+      // a proven stop may settle the record at that reason. An unproven one
+      // parks on the same honest line `stop()` uses, so a watch that still
+      // runs never reports as a task that ended (#13856).
+      if (!(await this.handle.terminate())) {
+        await this.monitors.blockedRuntimeLost(this.monitorId);
+        return;
+      }
+    }
     await this.monitors.settleQuiet(this.monitorId, stopReason);
   }
 
