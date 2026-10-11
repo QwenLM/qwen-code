@@ -12642,6 +12642,44 @@ describe('LlmChat', async () => {
       expect(recordingChat.isLastPromptTokenCountEstimated()).toBe(true);
     });
 
+    it('records an escalated turn once when the provider fails after its buffered tool call', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const call = fnCall('read_file', { path: '/tmp/e.txt' }, 'call_buffered');
+      const streams = [
+        makeStream([makeChunk([{ text: 'partial answer' }], 'MAX_TOKENS')]),
+        streamThenThrow(
+          [
+            modelChunk([{ text: 'visible escalated text' }]),
+            modelChunk([call], 'STOP'),
+          ],
+          new Error('cut after a buffered terminal tool call'),
+        ),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-pro',
+        { message: 'essay' },
+        'escalated-buffered-call-then-error',
+      );
+      await expect(async () => {
+        for await (const _event of stream) {
+          // Consume until the provider error propagates.
+        }
+      }).rejects.toThrow('cut after a buffered terminal tool call');
+
+      const history = recordingChat.getHistory();
+      expect(history.filter((entry) => entry.role === 'model')).toHaveLength(1);
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]![0].message).toEqual(
+        history.at(-1)?.parts,
+      );
+    });
+
     it('restores the truncated turn when escalation fails without output', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
@@ -18105,6 +18143,37 @@ describe('LlmChat', async () => {
         );
         await sendDrain('write an answer', 'recovery-phases');
         expect(chat.getHistory().at(-1)?.parts).toEqual([commentary, final]);
+      },
+    );
+
+    it.each([
+      ['a distinct', 'msg_f', 'separate'],
+      ['the same', 'msg_c', 'merged'],
+    ])(
+      'keeps the next part when a fully replayed boundary part precedes %s Responses message',
+      async (_label, nextId, expected) => {
+        const commentary = {
+          text: 'The shared recovery text is long enough to deduplicate.',
+          responsesMessage: { id: 'msg_c', phase: 'commentary' },
+        };
+        const next = {
+          text: ' A separate final answer.',
+          responsesMessage: {
+            id: nextId,
+            phase: nextId === 'msg_c' ? 'commentary' : 'final_answer',
+          },
+        };
+        serveStreams(
+          truncated('discarded initial'),
+          streamOf(modelChunk([commentary], 'MAX_TOKENS')),
+          streamOf(modelChunk([commentary, next], 'STOP')),
+        );
+        await sendDrain('write an answer', 'recovery-replayed-boundary');
+        expect(chat.getHistory().at(-1)?.parts).toEqual(
+          expected === 'separate'
+            ? [commentary, next]
+            : [{ ...commentary, text: commentary.text + next.text }],
+        );
       },
     );
 

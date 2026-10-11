@@ -1470,7 +1470,8 @@ function appendRecoveryContinuationParts(
   const continuationBoundaryPart = nextParts[0];
   if (
     isPlainTextPart(previousBoundaryPart) &&
-    isPlainTextPart(continuationBoundaryPart)
+    isPlainTextPart(continuationBoundaryPart) &&
+    sameResponsesMessage(previousBoundaryPart, continuationBoundaryPart)
   ) {
     mergedParts[mergedParts.length - 1] = {
       ...previousBoundaryPart,
@@ -5445,6 +5446,23 @@ export class LlmChat {
                 escalatedCommittedModelContent !== undefined &&
                 self.history.includes(escalatedCommittedModelContent)
               ) {
+                // When settling records this turn, drop its partial so the
+                // generator's finally does not record it a second time.
+                const pendingIndex = self.pendingPartialAssistantTurnIndex;
+                if (
+                  pendingIndex !== null &&
+                  self.history[pendingIndex] ===
+                    escalatedCommittedModelContent &&
+                  !self.activeRecoveryUserContent &&
+                  self.deferredMaxTokensRecordTarget ===
+                    escalatedCommittedModelContent &&
+                  self.deferredMaxTokensRecords.some(
+                    ({ modelContent }) =>
+                      modelContent === escalatedCommittedModelContent,
+                  )
+                ) {
+                  self.clearPendingPartialState();
+                }
                 self.settleDeferredMaxTokensRecords();
                 return redisplayCommittedVisible ||
                   !yieldedVisibleEscalatedOutput
