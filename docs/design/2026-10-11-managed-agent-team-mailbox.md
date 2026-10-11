@@ -139,7 +139,7 @@ The facts below are from `main` at `66ddb151cb`, which includes #13846 (merged a
    - **Partial outcomes.** A refused recipient does not stop the others. A recipient is refused when its head ended or is stopping, when a message bound refuses it (`count_limit` or `budget_exhausted`), or when its continuation's launch admission refuses it (decision 3).
    - **Answers.** As in Legacy:
      - every member reached;
-     - `delivered to <n> of <m>`, with each refused member and its reason;
+     - `sent to <n> of <m>`, with each refused member and its reason;
      - or, when none was reached, a tool error.
    - **Replay.** A replayed broadcast finds each recipient's committed message or continuation and adds nothing twice.
    - **Scope.** The lead is never a recipient. A broadcast never leaves the team.
