@@ -83,8 +83,8 @@ const broker = vi.hoisted(() => ({
 // slice (#13856); a case that needs a gate shut closes it here, per test,
 // per the same harness the core suites use.
 const enablement = vi.hoisted(() => ({
-  childRun: false,
-  monitorRun: false,
+  childRun: true,
+  monitorRun: true,
 }));
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
@@ -270,8 +270,9 @@ beforeEach(async () => {
   turn = createTurn();
 });
 afterEach(async () => {
-  enablement.childRun = false;
-  enablement.monitorRun = false;
+  // Restores the production default a case closed on purpose.
+  enablement.childRun = true;
+  enablement.monitorRun = true;
   await turn?.close();
   vi.restoreAllMocks();
   // A Session whose writes stopped cannot record its own close.

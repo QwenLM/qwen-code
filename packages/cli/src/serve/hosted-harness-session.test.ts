@@ -121,8 +121,8 @@ const wakeDeps = vi.hoisted(() => ({
 }));
 
 const domainEnablement = vi.hoisted(() => ({
-  childRun: false,
-  monitorRun: false,
+  childRun: true,
+  monitorRun: true,
 }));
 
 vi.mock(
@@ -134,11 +134,11 @@ vi.mock(
       >();
     return {
       ...actual,
+      // #13856: monitor_run is enabled in production, so the real gate
+      // decides it; the hook stays for a case that needs it shut.
       assertManagedSessionDomainEnabled: (
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
-        // #13856: monitor_run is enabled in production; a case that needs
-        // it shut closes it here, never the other way around.
         if (domain === 'monitor_run' && !domainEnablement.monitorRun) {
           throw new actual.ManagedSessionRecordError(
             'domain monitor_run is registered but not enabled for submission.',
@@ -147,16 +147,23 @@ vi.mock(
         actual.assertManagedSessionDomainEnabled(domain);
       },
       // H4b: record commits gate per kind, beside the admission mock. The
-      // shell kind is enabled in production (#13856); a case closes it per
-      // test through the same flag, while the flag's legacy lift keeps
-      // admitting the pre-production workflow plantings it always covered.
+      // shell kind is enabled in production (#13856), so every kind the
+      // production list carries goes through the real gate; a case that
+      // needs the shell kind shut closes it per test. A kind production
+      // has not enabled (a workflow planting) stays a fixture, admitted so
+      // the case runs what it is about rather than the kind gate.
       assertManagedSessionChildRunKindEnabled: (kind: string) => {
-        if (domainEnablement.childRun) return;
-        if (kind === 'shell') {
+        if (kind === 'shell' && !domainEnablement.childRun) {
           throw new actual.ManagedSessionRecordError(
             'domain child_run kind shell is registered but not enabled for submission.',
           );
         }
+        if (
+          !(
+            actual.MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]
+          ).includes(kind)
+        )
+          return;
         actual.assertManagedSessionChildRunKindEnabled(kind);
       },
     };
@@ -5919,7 +5926,7 @@ describe('Hosted Harness no-tool session', () => {
           .status,
       ).toBe(204);
     } finally {
-      domainEnablement.childRun = false;
+      domainEnablement.childRun = true;
     }
   });
 
@@ -19208,7 +19215,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         supertest(replacement).delete(`/session/${SESSION_ID}`),
       );
     } finally {
-      domainEnablement.childRun = false;
+      domainEnablement.childRun = true;
     }
   }, 30_000);
 
@@ -19455,7 +19462,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           supertest(replacement).delete(`/session/${SESSION_ID}`),
         );
       } finally {
-        domainEnablement.childRun = false;
+        domainEnablement.childRun = true;
       }
     },
     30_000,
@@ -19765,7 +19772,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         );
         await headers(supertest(second).delete(`/session/${SESSION_ID}`));
       } finally {
-        domainEnablement.childRun = false;
+        domainEnablement.childRun = true;
       }
     },
     30_000,
@@ -19996,7 +20003,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(retried).toBe(0);
         expect(domainCommits('team_task')).toBe(1);
       } finally {
-        domainEnablement.childRun = false;
+        domainEnablement.childRun = true;
       }
     },
     30_000,
