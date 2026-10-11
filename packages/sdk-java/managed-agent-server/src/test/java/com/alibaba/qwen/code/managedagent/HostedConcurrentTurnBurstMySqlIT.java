@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.sql.DataSource;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.slf4j.LoggerFactory;
@@ -66,10 +67,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 // -Dmysql.password (defaults match a local throwaway server on 13306).
 //
 // The Hosted*IT classes share one failsafe fork and one MySQL schema, so
-// the context is closed after the class: cached for the rest of the fork,
-// its operation and Turn recovery would go on scanning every tenant and
-// claim later classes' work on a host with no Runtime Broker, which cannot
-// close their Workspace Sessions.
+// the context is closed after the class. Cached for the rest of the fork,
+// its recovery scans (operations, Turns, action responses) would go on
+// covering every tenant and claim later classes' work for this host, whose
+// fixture Harness and missing Runtime Broker can neither run that work nor
+// close its Workspace Sessions. For the same reason a round that stalls
+// has its work ended before the context closes.
 @SpringBootTest(properties = {
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.runtime-broker.enabled=false",
@@ -120,6 +123,21 @@ class HostedConcurrentTurnBurstMySqlIT {
                         + "&allowPublicKeyRetrieval=true&useSSL=false");
     }
 
+    private final List<String> tenants = new ArrayList<>();
+
+    @AfterEach
+    void endOwedWork() {
+        // A round that settled matches nothing.
+        for (String tenant : tenants) {
+            jdbc.update("UPDATE managed_agent_turn SET status = 'FAILED'"
+                    + " WHERE tenant_id = ? AND status NOT IN"
+                    + " ('COMPLETED', 'FAILED', 'CANCELLED')", tenant);
+            jdbc.update("UPDATE managed_agent_operation SET delivery_state"
+                    + " = 'CONFIRMED' WHERE tenant_id = ? AND delivery_state"
+                    + " IN ('PENDING', 'LEASED', 'BLOCKED')", tenant);
+        }
+    }
+
     @Test
     @Timeout(600)
     void turnBurstsSettleWithoutLockConvoy() throws Exception {
@@ -143,6 +161,7 @@ class HostedConcurrentTurnBurstMySqlIT {
     private List<String> runBurst(int burst, long staggerMs)
             throws Exception {
         String tenant = "burst-" + burst + "-" + UUID.randomUUID();
+        tenants.add(tenant);
         Logger coordinator = (Logger) LoggerFactory.getLogger(
                 HarnessCoordinator.class);
         ListAppender<ILoggingEvent> logs = new ListAppender<>();

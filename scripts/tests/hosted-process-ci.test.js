@@ -384,11 +384,13 @@ describe('Hosted real-process gates', () => {
     `com/alibaba/qwen/code/managedagent/${className}.java`;
   // Java code without its string literals and comments, so neither a
   // commented-out annotation nor a "/*" inside a string skews the counts.
+  // One pass, so whichever of a literal or a comment opens first wins.
   const javaCode = (source) =>
-    source
-      .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/\/\/.*$/gm, '');
+    source.replace(
+      /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\/\*[\s\S]*?\*\/|\/\/.*$/gm,
+      (token) =>
+        token.startsWith('"') ? '""' : token.startsWith("'") ? "''" : '',
+    );
   const hostedTestSource = (className) =>
     javaCode(read(hostedTestPath(className)));
   const ceilingsOf = (source) =>
@@ -431,10 +433,11 @@ describe('Hosted real-process gates', () => {
   });
 
   // The Hosted*IT classes share one fork, and Spring caches a test context
-  // for the rest of it. A Managed Agent context's operation and Turn
-  // recovery scan every tenant of its schema, so one left open on the
-  // shared MySQL schema claims the work of the classes that run after it.
-  it('closes every Hosted IT Spring test context after its class', () => {
+  // for the rest of it. A Managed Agent context's recovery scans cover
+  // every tenant of its schema, so one left open on the shared MySQL schema
+  // claims the work of the classes that run after it. A context inherited
+  // from a base class or a meta-annotation is not seen here; none exists.
+  it('closes the Spring test context each Hosted IT class declares', () => {
     const root = 'packages/sdk-java/managed-agent-server/src/test/java/';
     const contexts = readdirSync(new URL(`../../${root}`, import.meta.url), {
       recursive: true,
@@ -446,11 +449,21 @@ describe('Hosted real-process gates', () => {
         const code = javaCode(read(root + file.split(path.sep).join('/')));
         const declaration = code.search(new RegExp(`\\bclass\\s+${name}\\b`));
         expect(declaration, name).toBeGreaterThan(0);
-        // Only the annotations on the test class itself.
-        return { name, header: code.slice(0, declaration) };
+        // Only the annotations on the test class itself: the header starts
+        // where a type declared before it ends, a brace closed outside any
+        // parentheses (an annotation's array initializer sits inside them).
+        let start = 0;
+        for (let i = 0, braces = 0, parens = 0; i < declaration; i++) {
+          if (code[i] === '(') parens++;
+          else if (code[i] === ')') parens--;
+          else if (code[i] === '{') braces++;
+          else if (code[i] === '}' && --braces === 0 && parens === 0)
+            start = i + 1;
+        }
+        return { name, header: code.slice(start, declaration) };
       })
       .filter(({ header }) =>
-        /@(?:[\w.]+\.)?(?:SpringBootTest|SpringJUnitConfig|ContextConfiguration)\b/.test(
+        /@\s*(?:[\w.]+\.)?(?:SpringBootTest|SpringJUnitConfig|SpringJUnitWebConfig|ContextConfiguration)\b/.test(
           header,
         ),
       );
@@ -462,13 +475,17 @@ describe('Hosted real-process gates', () => {
     );
     for (const { name, header } of contexts) {
       const dirties = header.match(
-        /@(?:[\w.]+\.)?DirtiesContext\b(?:\s*\(([^)]*)\))?/,
+        /@\s*(?:[\w.]+\.)?DirtiesContext\b(?:\s*\(([^)]*)\))?/,
       );
       expect(dirties, name).not.toBeNull();
-      // Without arguments it defaults to AFTER_CLASS.
-      if (dirties[1] !== undefined) {
-        expect(dirties[1], name).toMatch(
-          /^\s*classMode\s*=\s*(?:[\w.]+\.)?AFTER_CLASS\s*$/,
+      // classMode defaults to AFTER_CLASS; AFTER_EACH_TEST_METHOD also
+      // closes the context before the next class starts.
+      const mode = (dirties[1] ?? '').match(
+        /\bclassMode\s*=\s*(?:[\w.]+\s*\.\s*)*(\w+)/,
+      );
+      if (mode !== null) {
+        expect(['AFTER_CLASS', 'AFTER_EACH_TEST_METHOD'], name).toContain(
+          mode[1],
         );
       }
     }
