@@ -246,8 +246,12 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             JsonCodec.requiredString(body, "requestId", "release request");
             String harnessSessionId = JsonCodec.requiredString(body,
                     "harnessSessionId", "release request");
+            // `drain` is the close arm: it stops the Session's live
+            // background holds before releasing. A routine release omits it
+            // and is refused `runtime_session_held` while a run is live.
+            boolean drain = Boolean.TRUE.equals(body.get("drain"));
             complete(exchange, service.release(harnessSessionId,
-                    runtimeSessionId), released -> envelope(harnessSessionId,
+                    runtimeSessionId, drain), released -> envelope(harnessSessionId,
                             runtimeSessionId, "released", released));
             return;
         }

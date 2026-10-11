@@ -1300,6 +1300,24 @@ it('releases its broker when a tool turn acquired it after catalog restoration',
   expect(release.mock.instances[0]).toBe(replacement.broker);
 });
 
+it('drains the Hook-owned Runtime at close over a live background run (#13856)', async () => {
+  await hooks.ensureReady();
+  await hooks.broker.acquire();
+  const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+  release.mockClear();
+  // A Hook-configured Shell turn shares this broker and its `finish()`
+  // skips the release, so a background run that outlives the turn holds
+  // this Runtime: the routine arm refuses it, and only the drain stops it.
+  release.mockImplementation(async (options?: { readonly drain?: boolean }) => {
+    if (options?.drain !== true)
+      throw new HostedWorkspaceBrokerRejection(409, 'runtime_session_held');
+  });
+  await hooks.close();
+  expect(release.mock.calls.length).toBeGreaterThan(0);
+  for (const call of release.mock.calls)
+    expect(call).toEqual([{ drain: true }]);
+});
+
 it.each(['catalog', 'settled', 'lost-ack'])(
   'releases an earlier owner before acquiring a replacement (%s)',
   async (phase) => {

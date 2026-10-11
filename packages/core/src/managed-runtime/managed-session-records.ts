@@ -142,6 +142,9 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     // H4e-b1: a lead's team and its task board.
     'team_state',
     'team_task',
+    // H3 (#13856): the Monitor runtime, enabled after its physical
+    // acceptance pass; the hold semantics land with the gate.
+    'monitor_run',
   ];
 
 /**
@@ -178,15 +181,16 @@ export function assertManagedSessionScheduleSessionModeEnabled(
 
 /**
  * The `child_run` body kinds a caller may actually submit today (H4b).
- * `child_run` carries two capabilities with independent enablement gates —
- * H3's background Shell and H4's child agent — so it never joins the plain
- * enabled list as a whole: the shell kind stays disabled here until the H3
- * enablement gates clear, while H4b admits `child_agent`. The Java store
- * validates both kinds and, since H4a, deploys before any writer, keeping
- * the server-first order H1/H2 used.
+ * `child_run` carries its capabilities with independent enablement gates —
+ * H3's background Shell, H4's child agent, and the workflow kind (#13803)
+ * — so it never joins the plain enabled list as a whole. H4b admitted
+ * `child_agent`; the shell kind joined once H3's hold semantics and
+ * physical acceptance landed (#13856). The Java store validates every
+ * kind ahead of any writer, keeping the server-first order H1/H2 used.
  */
 export const MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS = Object.freeze([
   'child_agent',
+  'shell',
 ] as const);
 
 /**

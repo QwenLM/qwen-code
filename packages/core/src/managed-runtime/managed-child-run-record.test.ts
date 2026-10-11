@@ -95,9 +95,9 @@ function templateOf(fixture: {
 
 describe('managed-child-run-record/1 shared contract', () => {
   it('projects per-kind tasks behind a per-kind enablement gate', () => {
-    // H4b admits the child_agent kind; the domain itself still stays off
-    // the plain enabled list, so H3's shell keeps its own disabled gate,
-    // and H4c registers the workflow kind without admitting it.
+    // H4b admitted the child_agent kind and H3's enablement (#13856)
+    // admitted shell; the domain itself still stays off the plain enabled
+    // list, and H4c registers the workflow kind without admitting it.
     const body = MANAGED_EXTENSION_RECORD_BODIES.child_run!;
     expect(
       body.taskKindOf(parseChildRun(fixtures.templates['child_run'])),
@@ -112,13 +112,16 @@ describe('managed-child-run-record/1 shared contract', () => {
     expect(MANAGED_TASK_KINDS).toContain('child_agent');
     expect(MANAGED_TASK_KINDS).toContain('workflow');
     expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain('child_run');
-    expect(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS).toEqual(['child_agent']);
+    expect(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS).toEqual([
+      'child_agent',
+      'shell',
+    ]);
     expect(() =>
       assertManagedSessionChildRunKindEnabled('child_agent'),
     ).not.toThrow();
-    expect(() => assertManagedSessionChildRunKindEnabled('shell')).toThrow(
-      'domain child_run kind shell is registered but not enabled for submission.',
-    );
+    expect(() =>
+      assertManagedSessionChildRunKindEnabled('shell'),
+    ).not.toThrow();
     expect(() => assertManagedSessionChildRunKindEnabled('workflow')).toThrow(
       'domain child_run kind workflow is registered but not enabled for submission.',
     );

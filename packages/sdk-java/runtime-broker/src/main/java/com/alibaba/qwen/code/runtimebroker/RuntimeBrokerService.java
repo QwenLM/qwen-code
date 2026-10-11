@@ -486,7 +486,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     || original.binding().getGeneration() != binding.getGeneration()) {
                 throw conflict("workspace_close_identity_unverified", "Release generation differs");
             }
-            return releaseSession(original).thenAccept(released -> {
+            // The close cascade's release is the drain arm: a live hold row
+            // gets its stop here, where the caller's fence can wait for the
+            // proof, never on a turn's routine release.
+            return releaseSession(original, true).thenAccept(released -> {
                 if (!Boolean.TRUE.equals(released)) {
                     throw unavailable("runtime_session_release_failed", "Original Session has not released");
                 }
@@ -827,8 +830,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     context.lease(), context.session(), grant)),
                                     "runtime_publication_install_failed", "Publication installation failed")
                                     .thenApply(ignored -> {
-                                        if (Boolean.TRUE.equals(((Map<?, ?>) payload.get("input")).get("is_background"))) {
-                                            admitBackgroundProcess(context, record);
+                                        // The detached family holds its Runtime
+                                        // through its own ledger row: the Shell
+                                        // process for `is_background`, the watch
+                                        // for `is_monitor`.
+                                        Map<?, ?> toolInput = (Map<?, ?>) payload.get("input");
+                                        ManagedHoldFamily family = Boolean.TRUE.equals(toolInput.get("is_monitor"))
+                                                ? ManagedHoldFamily.MONITOR
+                                                : Boolean.TRUE.equals(toolInput.get("is_background"))
+                                                        ? ManagedHoldFamily.SHELL
+                                                        : null;
+                                        if (family != null) {
+                                            admitBackgroundProcess(context, record, family);
                                         }
                                         beginDispatch(context, record, payload, grant);
                                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
@@ -1125,13 +1138,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             requireReadySessionRecord(context);
                             ToolExecutionRecord current = requireExecution(
                                     context, executionId);
-                            // A background process row never dispatches, so a
-                            // cancel would settle it immediately — while its
-                            // process provably runs. It settles only on the
-                            // owner's stop evidence; stop goes through the
+                            // A hold row never dispatches, so a cancel would
+                            // settle it immediately — while its process
+                            // provably runs. It settles only on the owner's
+                            // stop evidence; stop goes through the
                             // maintenance route.
-                            if ("background_v3_process".equals(
-                                    current.getReference().get("dispatchMode"))) {
+                            if (ManagedHoldFamily.of(current) != null) {
                                 throw conflict("runtime_execution_conflict",
                                         "A background process settles only on stop evidence");
                             }
@@ -1646,8 +1658,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
     }
 
+    /**
+     * A routine release holds nothing back and stops nothing: a Session
+     * with a provably live hold row is refused {@code runtime_session_held}
+     * and its run keeps its Runtime. The drain arm — the Session close and
+     * the control plane's close cascade — stops what is live first.
+     */
     public CompletionStage<Boolean> release(String harnessSessionId,
             String runtimeSessionId) {
+        return release(harnessSessionId, runtimeSessionId, false);
+    }
+
+    public CompletionStage<Boolean> release(String harnessSessionId,
+            String runtimeSessionId, boolean drain) {
         requireOpen();
         String harnessId = BrokerValues.requireId(harnessSessionId,
                 "harnessSessionId");
@@ -1655,19 +1678,20 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 "runtimeSessionId");
         CompletableFuture<SessionContext> local = sessions.get(runtimeId);
         if (local == null) {
-            return releasedSession(harnessId, runtimeId);
+            return releasedSession(harnessId, runtimeId, drain);
         }
         return local.thenCompose(context -> {
             if (!context.session().getHarnessSessionId().equals(harnessId)) {
                 throw conflict("runtime_session_conflict",
                         "Runtime Session belongs to another Harness Session");
             }
-            return releaseSession(context);
+            return releaseSession(context, drain);
         });
     }
 
     private CompletionStage<Boolean> releasedSession(
-            String harnessSessionId, String runtimeSessionId) {
+            String harnessSessionId, String runtimeSessionId,
+            boolean drain) {
         return persistedSession(harnessSessionId, runtimeSessionId)
                 .thenCompose(record -> {
                     if (record.getState()
@@ -1683,7 +1707,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         CompletableFuture<SessionContext> adopted = CompletableFuture.completedFuture(
                                 new SessionContext(record.getSession(), binding, requireLiveBinding(binding).lease()));
                         boolean inserted = sessions.putIfAbsent(runtimeSessionId, adopted) == null;
-                        return release(harnessSessionId, runtimeSessionId).whenComplete((released, error) -> {
+                        return release(harnessSessionId, runtimeSessionId, drain).whenComplete((released, error) -> {
                             if (inserted && (error != null || !Boolean.TRUE.equals(released))) {
                                 sessions.remove(runtimeSessionId, adopted);
                             }
@@ -1818,17 +1842,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return current == null ? record : current;
     }
 
-    // H3: the background process is its own ledger row, admitted at start,
-    // carrying no model result and staying non-terminal until physical
-    // proof — that is what `hasActiveBy*` counts while it lives.
+    // H3: the background process (or Monitor watch) is its own ledger row,
+    // admitted at start, carrying no model result and staying non-terminal
+    // until physical proof — that is what `hasActiveBy*` counts while it
+    // lives.
     private void admitBackgroundProcess(SessionContext context,
-            ToolExecutionRecord invocation) {
+            ToolExecutionRecord invocation, ManagedHoldFamily family) {
         context.lock();
         try {
             Map<String, Object> invocationReference = invocation.getReference();
             String callId = referenceString(invocationReference, "callId");
             Map<String, Object> reference = Map.of(
-                    "dispatchMode", "background_v3_process",
+                    "dispatchMode", family.dispatchMode(),
                     "processOf", invocation.getExecutionCallId(),
                     "sessionId", referenceString(invocationReference, "sessionId"),
                     "promptId", referenceString(invocationReference, "promptId"),
@@ -1881,8 +1906,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<ToolExecutionRecord> observeProcessRow(
             SessionContext context, ToolExecutionRecord invocation,
             ToolExecutionRecord process) {
-        return controlProcessRow(context, invocation, process, "shell-status",
-                true);
+        return controlProcessRow(context, invocation, process,
+                statusKind(process), true);
     }
 
     /**
@@ -1894,8 +1919,32 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<ToolExecutionRecord> observeScannedProcessRow(
             SessionContext context, ToolExecutionRecord invocation,
             ToolExecutionRecord process) {
-        return controlProcessRow(context, invocation, process, "shell-status",
-                false);
+        return controlProcessRow(context, invocation, process,
+                statusKind(process), false);
+    }
+
+    /**
+     * A hold row's family names its maintenance kinds: the background Shell
+     * rides {@code shell-status}/{@code shell-terminate}, the Monitor watch
+     * {@code monitor-status}/{@code monitor-stop}. The sweep and the scan
+     * only ever touch hold rows, so the family is always present.
+     */
+    private static String statusKind(ToolExecutionRecord process) {
+        ManagedHoldFamily family = ManagedHoldFamily.of(process);
+        if (family == null) {
+            throw invalid("runtime_control_operation_invalid",
+                    "A hold row's dispatch mode is required");
+        }
+        return family.statusKind();
+    }
+
+    private static String stopKind(ToolExecutionRecord process) {
+        ManagedHoldFamily family = ManagedHoldFamily.of(process);
+        if (family == null) {
+            throw invalid("runtime_control_operation_invalid",
+                    "A hold row's dispatch mode is required");
+        }
+        return family.stopKind();
     }
 
     /**
@@ -1952,15 +2001,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     /**
-     * Before a release computes its busy check, every background process
-     * row this Broker admitted for the Session asks its physical owner
-     * once: a proven exit settles the row here, and anything else simply
-     * keeps it — the busy answer then stands on what is actually still
-     * running. A failed lookup moves on, because busy remains the accurate
-     * answer for what could not be proven.
+     * Before a release computes its busy check, every hold row this Broker
+     * admitted for the Session asks its physical owner once: a proven exit
+     * settles the row here, and anything else simply keeps it — the busy or
+     * held answer behind it then stands on what is actually still running.
+     * A failed lookup moves on, because busy remains the accurate answer
+     * for what could not be proven. Only a drain issues each live row's
+     * stop; a routine release observes and holds.
      */
     private CompletionStage<Void> settleUnprovenBackgroundRows(
-            SessionContext context) {
+            SessionContext context, boolean drain) {
         CompletionStage<Void> chain = CompletableFuture.completedFuture(null);
         List<String> processIds;
         List<ToolExecutionRecord> durable = durableBackgroundProcessRows(
@@ -1993,16 +2043,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
             } catch (RuntimeException notOurs) {
                 continue;
             }
-            // Status first; a row the owner still counts running gets one
-            // stop it must prove — an unproven stop keeps the hold, and
-            // the busy answer behind it stays accurate.
+            // Status first. A drain gives a row the owner still counts
+            // running one stop it must prove — an unproven stop keeps the
+            // hold, and the busy answer behind it stays accurate. A routine
+            // release stops nothing: the run holds its Runtime for as long
+            // as it needs it, and the release answers held instead.
             chain = chain.thenCompose(ignored -> observeProcessRow(
                     context, invocation, row)
-                    .thenCompose(current -> current.isTerminal()
+                    .thenCompose(current -> !drain || current.isTerminal()
                             ? CompletableFuture.completedFuture(current)
                             : controlProcessRow(context, invocation, current,
-                                    "shell-terminate"))
-                    .thenCompose(current -> current.isTerminal()
+                                    stopKind(current)))
+                    .thenCompose(current -> !drain || current.isTerminal()
                             ? CompletableFuture.completedFuture(current)
                             : observeProcessRow(context, invocation, current))
                     .thenApply(current -> {
@@ -2122,7 +2174,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<Boolean> releaseSession(
-            SessionContext context) {
+            SessionContext context, boolean drain) {
         RuntimeSessionRecord persisted = sessionRepository.findById(context.session().getScope(),
                 context.session().getRuntimeSessionId());
         if (persisted != null && persisted.getState() == RuntimeSessionRecord.State.RELEASED) {
@@ -2152,8 +2204,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         } finally {
             context.unlock();
         }
-        CompletionStage<Boolean> run = settleUnprovenBackgroundRows(context)
-                .thenCompose(ignored -> releaseSessionAfterSweep(context));
+        CompletionStage<Boolean> run = settleUnprovenBackgroundRows(context, drain)
+                .thenCompose(ignored -> releaseSessionAfterSweep(context, drain));
         run.whenComplete((result, error) -> {
             if (error != null) {
                 context.releaseAttempt(null);
@@ -2171,7 +2223,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<Boolean> releaseSessionAfterSweep(
-            SessionContext context) {
+            SessionContext context, boolean drain) {
         boolean backgroundBusy;
         context.lock();
         try {
@@ -2195,9 +2247,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (!backgroundBusy) {
             return completeSessionRelease(context);
         }
-        // The sweep already issued each row's stop and settled every end
-        // it could prove; what it could not prove keeps its hold — busy
-        // is the accurate answer here, never a speculative teardown.
+        if (!drain) {
+            // Routine release: the sweep stopped nothing, so a live hold is
+            // the designed state, not a wedge — the run holds its Runtime
+            // until it is proven gone, and the answer names the hold so the
+            // Harness never mistakes it for the unproven busy below.
+            return failed(conflict("runtime_session_held",
+                    "Runtime Session is held by a live background run"));
+        }
+        // The drain sweep issued each row's stop and settled every end it
+        // could prove; what it could not prove keeps its hold — busy is the
+        // accurate answer here, never a speculative teardown.
         return failed(conflict("runtime_session_busy",
                 "Runtime Session has an active background process"));
     }

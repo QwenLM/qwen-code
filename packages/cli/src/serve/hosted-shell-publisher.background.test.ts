@@ -38,36 +38,9 @@ import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/manag
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 
-// child_run and monitor_run are enabled by the H3 enablement slice; the
-// test drives both background paths ahead of it with the same test-only
-// flip the authority suites use.
-const enablement = vi.hoisted(() => ({ childRun: true, monitorRun: true }));
-
-vi.mock(
-  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
-      >();
-    return {
-      ...actual,
-      assertManagedSessionDomainEnabled: (
-        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-      ) => {
-        if (domain === 'monitor_run' ? !enablement.monitorRun : true) {
-          actual.assertManagedSessionDomainEnabled(domain);
-        }
-      },
-      assertManagedSessionChildRunKindEnabled: (kind: string) => {
-        if (!enablement.childRun) {
-          actual.assertManagedSessionChildRunKindEnabled(kind);
-        }
-      },
-    };
-  },
-);
-
+// child_run's shell kind and monitor_run are enabled by the H3 enablement
+// slice (#13856): this suite drives both background paths through the real
+// gates, with no lift.
 let root: string | undefined;
 let session: ManagedSession | undefined;
 let orchestrator: HostedChildRunSession | undefined;
@@ -428,6 +401,68 @@ it('runs the background exit leg: revise, seal, settle as one evidence', async (
       .eventsInSequenceRange(1, session!.authority.committedSequence)
       .filter((event) => event.kind === 'tool.receipt'),
   ).toHaveLength(0);
+});
+
+it('projects a platform-driven stop as stop_requested, never as an exit', async () => {
+  // #13856 A8: the worker marks a stop it was asked to make, the finalize
+  // carries the marker, and the record answers cancelled/stop_requested —
+  // with no exit evidence, exactly as the contract demands of a stop.
+  const r = await rig();
+  const request = backgroundRequest(r.key, '1');
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-a',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    backgroundRequest(r.key, '1') as Parameters<
+      ManagedShellPublisherRegistry['prepare']
+    >[0],
+  );
+  prepared.sink.setStarted(1);
+  await prepared.sink.write('stdout', Buffer.from('half'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: null,
+    signal: 15,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  // The registry's terminate path marks the capture before it finalizes.
+  prepared.sink.setStopRequested();
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  const envelope = await prepared.sink.finalize('error', [], {
+    message: 'Background Shell terminated with SIGTERM.',
+  });
+
+  await r.registry.accept(prepared.identity, envelope);
+
+  const record = parseChildShellRun(
+    session!.authority.extensionRecord('child_run', 'execution-bg')!.record,
+  );
+  expect(record).toMatchObject({
+    stopReason: 'stop_requested',
+    stopRequested: true,
+    // A stop by anyone else carries no exit status (contract rule).
+    exitCode: null,
+    exitSignal: null,
+  });
+  expect(record.run.state).toBe('cancelled');
+  expect(record.run.execution).toBe('settled');
+  // The output still landed: the marker changes the stop's meaning, never
+  // the capture's bytes.
+  const finalManifest = parseToolResultManifestBytes(
+    await (
+      session!.resources as {
+        read: (ref: ManagedSessionDurableRef) => Promise<Buffer>;
+      }
+    ).read(record.outputRef!),
+  );
+  expect(finalManifest.captureStatus).toBe('complete');
 });
 
 it('melds a monitor watch through one terminal step only after its start receipt', async () => {

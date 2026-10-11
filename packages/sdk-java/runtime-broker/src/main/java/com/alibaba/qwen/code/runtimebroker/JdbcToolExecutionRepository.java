@@ -477,8 +477,7 @@ public final class JdbcToolExecutionRepository
                     return List.copyOf(matches);
                 }
                 for (ToolExecutionRecord record : batch) {
-                    if ("background_v3_process".equals(
-                            record.getReference().get("dispatchMode"))) {
+                    if (ManagedHoldFamily.of(record) != null) {
                         matches.add(record);
                         if (matches.size() == limit) {
                             return List.copyOf(matches);

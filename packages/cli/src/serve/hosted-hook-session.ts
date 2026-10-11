@@ -316,7 +316,7 @@ export class HostedHookSession {
     // released once.
     this.acquiring ??= (async () => {
       try {
-        await this.releaseEarlierOwners();
+        await this.releaseEarlierOwners(false);
         await this.broker.warm();
         await this.broker.acquire();
         if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
@@ -328,7 +328,12 @@ export class HostedHookSession {
     await this.acquiring;
   }
 
-  private async releaseEarlierOwners(): Promise<void> {
+  /**
+   * `drain` belongs to the close alone: an acquire hands an earlier owner
+   * back while the Session lives, so it must never stop a background run
+   * that still provably holds that owner's Runtime (#13856).
+   */
+  private async releaseEarlierOwners(drain: boolean): Promise<void> {
     if (!this.ownsBroker) return;
     const owners = new Map<string, boolean>();
     const { authority } = this.session;
@@ -369,7 +374,7 @@ export class HostedHookSession {
         this.recoveredBrokers.get(id) ??
         new HostedWorkspaceBroker(this.options, this.key, id);
       try {
-        await broker.release();
+        await broker.release(drain ? { drain: true } : undefined);
       } catch (cause) {
         if (
           !(cause instanceof HostedWorkspaceBrokerRejection) ||
@@ -1615,11 +1620,17 @@ export class HostedHookSession {
 
   async close(): Promise<void> {
     await this.drain();
-    await this.releaseEarlierOwners();
-    for (const broker of this.recoveredBrokers.values()) await broker.release();
+    // The close is the drain arm. A Hook-configured Shell turn shares this
+    // broker and its `finish()` skips the release, so a background run that
+    // outlives the turn holds this Runtime, and a routine release here
+    // would refuse `runtime_session_held` and fail the Session's close
+    // before its own drain ever runs (#13856).
+    await this.releaseEarlierOwners(true);
+    for (const broker of this.recoveredBrokers.values())
+      await broker.release({ drain: true });
     this.recoveredBrokers.clear();
     if (this.ownsBroker && this.broker.runtime) {
-      await this.broker.release();
+      await this.broker.release({ drain: true });
       this.acquired = false;
     }
   }
