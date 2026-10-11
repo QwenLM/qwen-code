@@ -12230,6 +12230,48 @@ describe('LlmChat', async () => {
       expect(clear).not.toHaveBeenCalled();
     });
 
+    it('disarms every read when a PreToolUse hook could have retargeted the cut one', async () => {
+      const stat = { dev: 1, ino: 100 } as Stats;
+      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
+      // The history-derivable path resolves and is already cached, so the
+      // surgical disarm succeeds and nothing else would flag this batch.
+      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+      const markAllReadsEvictedFromHistory = vi.fn();
+      const clear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear,
+        markReadEvictedFromHistory,
+        markAllReadsEvictedFromHistory,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      mockConfig.hasHooksForEvent = (event: string) => event === 'PreToolUse';
+      mockStreamsOnce(
+        streamOf(
+          modelChunk(
+            [fnCall('read_file', { file_path: 'a.txt' }, 'retargeted-read')],
+            undefined,
+            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+          ),
+        ),
+        textStream('done'),
+      );
+      await sendDrain('read', 'first');
+      await sendDrain(
+        [
+          fnResponse(
+            'read_file',
+            { output: 'x'.repeat(20_000) },
+            'retargeted-read',
+          ),
+        ],
+        'second',
+      );
+      // Only the residency release widens; the shrink itself still happens.
+      expect(resultChars(1)).toBeLessThan(20_000);
+      expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
+      expect(markAllReadsEvictedFromHistory).toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+    });
+
     it.each([
       ['pressure', 200_000],
       ['aggregate', 1_000],
