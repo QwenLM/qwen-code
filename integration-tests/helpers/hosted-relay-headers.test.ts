@@ -117,13 +117,15 @@ describe('Hosted proxy header relay', () => {
     }
   });
 
-  it('keeps the five store relays calling the shared helper', () => {
+  it('keeps the expected store relays calling the shared helper', () => {
     // The sdk-java workflow step runs this file after `cd integration-tests`
     // while the repo-root lanes use `--root ./integration-tests`, so resolve
     // the drivers relative to this file, never process.cwd(). Read source
     // text because importing a driver throws — each parses process.argv[2]
     // at module load. Positive pin only: a new driver hand-rolling its relay
-    // is absent from the enumerated list and still passes.
+    // is absent from the enumerated list and still passes. A new legitimate
+    // caller of the shared helper joins this list deliberately — the list
+    // itself is what this pin keeps countable.
     const dir = dirname(fileURLToPath(import.meta.url));
     const callers = readdirSync(dir)
       .filter((name) => /^hosted-.*-driver\.ts$/.test(name))
@@ -134,6 +136,7 @@ describe('Hosted proxy header relay', () => {
     expect(callers).toEqual([
       'hosted-latency-driver.ts',
       'hosted-process-crash-driver.ts',
+      'hosted-recovery-blocked-wedge-driver.ts',
       'hosted-shell-output-driver.ts',
       'hosted-store-failure-driver.ts',
       'hosted-workspace-tool-turn-driver.ts',
