@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -164,7 +165,7 @@ class ToolPublicationAcknowledgementTest {
                 .put("expiresAt", System.currentTimeMillis() + 300000);
         ObjectNode intent = JSON.createObjectNode().put("executionCallId", "execution-1").put("outcomeSource", "runtime");
         intent.set("argsRef", binding.path("argsRef"));
-        append("tool.dispatch", event(1, "activation.changed", activation) + event(2, "tool.intent", intent) + "{}\n", 2,
+        append("tool.dispatch", event(1, "activation.changed", activation) + event(2, "tool.intent", intent) + COMMIT_MARKER, 2,
                 List.of(resource(binding.path("argsRef"), args), resource(binding.path("checkpointRef"), checkpoint)), "checkpoint-1");
         ObjectNode reserve = JSON.createObjectNode().put("publication", ToolPublicationContract.PROTOCOL).put("operation", "reserve").put("captureBytes", 1024);
         reserve.set("sessionKey", key());
@@ -266,7 +267,7 @@ class ToolPublicationAcknowledgementTest {
     void invalidRawReceiptUtf8RefusesEvenWithUpdatedByteDigest() {
         var row = jdbc.queryForMap("SELECT record_bytes FROM qwen_managed_session_journal_tx WHERE journal_revision = ?", revision);
         byte[] valid = (byte[]) row.get("record_bytes");
-        byte[] changed = (new String(valid, StandardCharsets.UTF_8).replace("{}\n", "{\"unknown\":\"?\"}\n"))
+        byte[] changed = (new String(valid, StandardCharsets.UTF_8).replace(COMMIT_MARKER, "{\"unknown\":\"?\"}\n"))
                 .getBytes(StandardCharsets.UTF_8);
         for (int index = 0; index < changed.length; index++) {
             if (changed[index] == '?') {
@@ -434,7 +435,7 @@ class ToolPublicationAcknowledgementTest {
         payload.set("toolOutcomeRef", admission);
         payload.set("resultRef", manifestRef);
         payload.putArray("resources").add(manifestRef);
-        String records = event(sequence + 1, "tool.receipt", payload) + "{}\n";
+        String records = event(sequence + 1, "tool.receipt", payload) + COMMIT_MARKER;
         var request = request("recordToolResult", "execution-1", admission.path("digest").asText(), records, 1,
                 List.of(resource(admission, null), resource(manifestRef, null)), null);
         admissions.commitReceipt(key(), "pub-1", WRITER_TOKEN, request);
@@ -459,7 +460,9 @@ class ToolPublicationAcknowledgementTest {
         ObjectNode event = JSON.createObjectNode().put("v", 1).put("sequence", number).put("kind", kind);
         event.set("sessionKey", key());
         event.set("payload", payload);
-        event.set("subject", JSON.createObjectNode().put("type", "activation").put("activationId", "activation-1").put("epoch", 1));
+        event.put("eventId", "event-" + number);
+        event.put("occurredAt", 1_000L * number);
+        event.set("subject", JSON.createObjectNode().put("type", "activation").put("scopeId", "activation-1").put("activationId", "activation-1").put("epoch", 1));
         return JSON.createObjectNode().put("subtype", "managed_session_event_v1").set("managedSession", event) + "\n";
     }
     private ManagedSessionStoreModels.CommitTransactionRequest request(String operation, String command, String digest,

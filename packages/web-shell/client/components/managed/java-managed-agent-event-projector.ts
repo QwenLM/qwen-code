@@ -54,7 +54,19 @@ export function projectJavaAgentItem(
       );
   }
   if (item.type === 'tool_call') {
-    const type = toolEventType(item.status);
+    // The raw hint arbitrates only while the canonical status stays
+    // in_progress: the store canonicalizes unknown statuses to in_progress
+    // while keeping the raw value in attributes.status, so an approval-gated
+    // tool replays as requested, not already running. Once settleTurnItems
+    // rewrites item_status (never attributes_json) the canonical value is
+    // authoritative — a tool still pending when its Turn ended must replay
+    // as completed.
+    const rawStatus = item.attributes?.['status'];
+    const type = toolEventType(
+      item.status === 'in_progress' && typeof rawStatus === 'string'
+        ? rawStatus
+        : item.status,
+    );
     return [
       projectedItemEvent(
         item,

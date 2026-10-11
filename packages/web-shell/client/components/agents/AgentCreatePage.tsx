@@ -47,6 +47,7 @@ import {
 import {
   AGENT_PROGRAMS,
   programLabel,
+  runtimePrograms,
   type AgentProgramView,
 } from '../workspace-agents/agents-view-logic';
 
@@ -67,6 +68,11 @@ interface AgentCreatePageProps {
   }[];
   /** Preselects the runtime, e.g. right after it joined. */
   initialHostId?: string;
+  /**
+   * Program ids this computer's daemon reported it can run. Absent (an older
+   * daemon) means Qwen Code only.
+   */
+  localPrograms?: readonly string[];
   onSaveWorkspaceAgent?: (input: {
     name: string;
     description?: string;
@@ -75,7 +81,7 @@ interface AgentCreatePageProps {
     model?: string;
     maxConcurrentRuns: number;
     execution?:
-      | { mode: 'local' }
+      | { mode: 'local'; provider?: AgentProgramView }
       | {
           mode: 'managed-host';
           hostIds: string[];
@@ -130,6 +136,7 @@ export function AgentCreatePage({
   executionHosts = [],
   workspaceCwd,
   initialHostId,
+  localPrograms,
   onSaveWorkspaceAgent,
 }: AgentCreatePageProps) {
   const { t } = useI18n();
@@ -175,8 +182,21 @@ export function AgentCreatePage({
     approvalMode === 'bubble' ? [...approvalModes, 'bubble'] : approvalModes;
   const [maxTurns, setMaxTurns] = useState(agent?.maxTurns?.toString() ?? '');
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState('1');
-  const [executionProvider, setExecutionProvider] =
-    useState<AgentProgramView>('qwen');
+  // What this computer can run; Qwen Code when the daemon reported nothing.
+  const localRuntimePrograms = runtimePrograms({ programs: localPrograms });
+  // Undefined when the chosen runtime offers no program at all: nothing is
+  // selected and Save stays disabled, rather than asserting Qwen Code.
+  const [executionProvider, setExecutionProvider] = useState<
+    AgentProgramView | undefined
+  >(() => {
+    const initialHost = executionHosts.find(
+      (host) => host.id === initialHostId,
+    );
+    const offered = initialHost
+      ? runtimePrograms(initialHost)
+      : localRuntimePrograms;
+    return offered[0];
+  });
   const [executionHostIds, setExecutionHostIds] = useState(
     () => new Set<string>(initialHostId ? [initialHostId] : []),
   );
@@ -246,7 +266,9 @@ export function AgentCreatePage({
   // A workspace Agent needs only a name: a role or the defaults cover the rest.
   const canSave = Boolean(
     name.trim() &&
-      (workspaceAgentMode || (description.trim() && systemPrompt.trim())),
+      (workspaceAgentMode || (description.trim() && systemPrompt.trim())) &&
+      // A runtime that offers no program cannot run the agent.
+      (!workspaceAgentMode || executionProvider !== undefined),
   );
 
   useEffect(
@@ -534,10 +556,18 @@ export function AgentCreatePage({
                 execution: {
                   mode: 'managed-host' as const,
                   hostIds: [...executionHostIds],
-                  provider: executionProvider,
+                  ...(executionProvider ? { provider: executionProvider } : {}),
                 },
               }
-            : {}),
+            : executionProvider && executionProvider !== 'qwen'
+              ? {
+                  // Claude Code or Codex on this computer.
+                  execution: {
+                    mode: 'local' as const,
+                    provider: executionProvider,
+                  },
+                }
+              : {}),
         });
         onCreated(trimmedName);
         return;
@@ -802,7 +832,7 @@ export function AgentCreatePage({
                         checked={executionHostIds.size === 0}
                         onChange={() => {
                           setExecutionHostIds(new Set());
-                          setExecutionProvider('qwen');
+                          setExecutionProvider(localRuntimePrograms[0]);
                         }}
                       />
                       <span>
@@ -823,7 +853,10 @@ export function AgentCreatePage({
                           checked={executionHostIds.has(host.id)}
                           onChange={() => {
                             setExecutionHostIds(new Set([host.id]));
-                            setExecutionProvider('qwen');
+                            // The first program this runtime runs; a runtime
+                            // that offers only Claude Code or Codex has no
+                            // Qwen Code to fall back to.
+                            setExecutionProvider(runtimePrograms(host)[0]);
                             setRole('');
                             setModel('');
                           }}
@@ -856,14 +889,17 @@ export function AgentCreatePage({
                   const host = executionHosts.find((entry) =>
                     executionHostIds.has(entry.id),
                   );
+                  // This computer offers what its daemon's probe found; an
+                  // older daemon that reports nothing runs Qwen Code only.
+                  const offered = host
+                    ? runtimePrograms(host)
+                    : localRuntimePrograms;
                   const missing = (provider: AgentProgramView) =>
-                    provider === 'qwen'
+                    offered.includes(provider)
                       ? undefined
-                      : !host
-                        ? t('collab.agent.programLocal')
-                        : host.programs?.includes(provider)
-                          ? undefined
-                          : t('collab.agent.programMissing');
+                      : host || localPrograms !== undefined
+                        ? t('collab.agent.programMissing')
+                        : t('collab.agent.programLocal');
                   return (
                     <Field className="lg:col-span-2">
                       <FieldLabel>{t('collab.runtime.program')}</FieldLabel>

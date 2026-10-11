@@ -175,6 +175,68 @@ describe('Managed transcript projection', () => {
     expect(new Set(messages.map((message) => message.id)).size).toBe(4);
   });
 
+  it('appends a strictly-newer tail while preserving existing event identity', () => {
+    const base = [
+      event(1, 'accepted'),
+      event(2, 'assistant_delta'),
+      event(3, 'assistant_delta'),
+    ];
+    const merged = mergeManagedEvents(base, [
+      event(4, 'assistant_delta'),
+      event(5, 'completed'),
+    ]);
+    expect(merged.map((item) => item.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(
+      merged.slice(0, 3).every((item, index) => item === base[index]),
+    ).toBe(true);
+  });
+
+  it('still reorders and deduplicates an overlapping or disordered tail', () => {
+    const merged = mergeManagedEvents(
+      [event(1, 'accepted'), event(3, 'assistant_delta')],
+      [
+        event(3, 'assistant_delta', { text: 'newer' }),
+        event(2, 'assistant_delta'),
+        event(4, 'completed'),
+      ],
+    );
+    expect(merged.map((item) => item.id)).toEqual([1, 2, 3, 4]);
+    expect(merged[2]?.data).toEqual({ text: 'newer' });
+  });
+
+  it('returns the current events unchanged for an empty incoming page', () => {
+    expect(
+      mergeManagedEvents([event(1, 'accepted'), event(2, 'completed')], []).map(
+        (item) => item.id,
+      ),
+    ).toEqual([1, 2]);
+    expect(mergeManagedEvents([], []).map((item) => item.id)).toEqual([]);
+  });
+
+  it('appends the first stream event onto an empty current list', () => {
+    expect(
+      mergeManagedEvents([], [event(1, 'accepted')]).map((item) => item.id),
+    ).toEqual([1]);
+  });
+
+  it('sorts an incoming page that is newer but internally disordered', () => {
+    expect(
+      mergeManagedEvents(
+        [event(1, 'accepted')],
+        [event(5, 'assistant_delta'), event(3, 'assistant_delta')],
+      ).map((item) => item.id),
+    ).toEqual([1, 3, 5]);
+  });
+
+  it('deduplicates an equal boundary id in favour of the incoming event', () => {
+    const merged = mergeManagedEvents(
+      [event(1, 'accepted'), event(3, 'assistant_delta')],
+      [event(3, 'assistant_delta', { text: 'newer' }), event(4, 'completed')],
+    );
+    expect(merged.map((item) => item.id)).toEqual([1, 3, 4]);
+    expect(merged[1]?.data).toEqual({ text: 'newer' });
+  });
+
   it('keeps approval updates out of the Turn being streamed', () => {
     const messages = managedEventsToMessages(
       [
@@ -266,6 +328,287 @@ describe('Managed transcript projection', () => {
           args: { input: 'partial input\n[truncated]' },
         },
       ],
+    });
+  });
+
+  it.each([
+    'runtime_starting',
+    'runtime_ready',
+    'runtime_released',
+    'runtime_failed',
+    'stream_gap',
+    'cancelling',
+  ] as const)(
+    'does not split the streamed answer on a stale-Turn %s',
+    (type) => {
+      // The server appends an old Turn's control event above the new Turn's
+      // deltas; only consumed types may settle the Turn boundary.
+      const messages = managedEventsToMessages(
+        [
+          event(
+            1,
+            'accepted',
+            { prompt: [{ type: 'text', text: 'Go' }] },
+            'p2',
+          ),
+          event(2, 'assistant_delta', { text: 'A' }, 'p2'),
+          event(3, type, { message: 'old control event' }, 'p1'),
+          event(4, 'assistant_delta', { text: 'B' }, 'p2'),
+        ],
+        '[truncated]',
+      );
+      expect(messages).toMatchObject([
+        { role: 'user', content: 'Go' },
+        { role: 'assistant', content: 'AB', isStreaming: true },
+      ]);
+      expect(messages).toHaveLength(2);
+    },
+  );
+
+  it('settles the streamed tail when the active Turn reports a Runtime failure', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'accepted', { prompt: [{ type: 'text', text: 'Go' }] }),
+        event(2, 'assistant_delta', { text: 'A' }),
+        event(3, 'runtime_failed', { message: 'warmup died' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'A',
+      isStreaming: false,
+    });
+  });
+
+  it('fails pending tools when the active Turn reports a Runtime failure', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({ tools: [{ status: 'failed' }] });
+  });
+
+  it('stamps the result-supplied end time on a diagnostic-failed tool that recovers', () => {
+    // environment.failed is a non-fatal diagnostic: the Turn keeps running
+    // and the tool recovers, so its end is the result's own timestamp.
+    const source = { ...result, session_id: 's1', turn_id: 'p1' };
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+        event(3, 'tool_started', { toolCallId: 'c', toolName: 'run' }),
+        event(4, 'tool_result_updated', {
+          itemId: 'item-1',
+          toolCallId: 'c',
+          result: source,
+        }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'completed', startTime: 300, endTime: 400 }],
+    });
+  });
+
+  it('re-marks a diagnostic-failed tool when the Turn is cancelled afterwards', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+        event(3, 'cancelled'),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', wasCancelled: true }],
+    });
+  });
+
+  it('stamps the Turn end on a diagnostic-failed tool that never reported', () => {
+    // The diagnostic only floors the end; the terminal Turn event moves it
+    // to the Turn's own end, so the duration cannot grow with the clock.
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'tool_started', { toolCallId: 'c', toolName: 'run' }),
+        event(3, 'runtime_failed', { message: 'warmup died' }),
+        event(4, 'completed'),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', startTime: 200, endTime: 400 }],
+    });
+  });
+
+  it('bounds a diagnostic-failed tool at the diagnostic when the Turn never ends', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'tool_started', { toolCallId: 'c', toolName: 'run' }),
+        event(3, 'runtime_failed', { message: 'warmup died' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', startTime: 200, endTime: 300 }],
+    });
+  });
+
+  it('keeps the completion end time when a later result re-delivers the call', () => {
+    // The projector emits tool_completed and tool_result_updated as
+    // independent server events: the completion's authoritative end must
+    // survive the later result.
+    const source = { ...result, session_id: 's1', turn_id: 'p1' };
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'tool_completed', { toolCallId: 'c', output: 'done' }),
+        event(3, 'tool_result_updated', {
+          itemId: 'item-1',
+          toolCallId: 'c',
+          result: source,
+        }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'completed', endTime: 200, toolResult: source }],
+    });
+  });
+
+  it('keeps the first diagnostic end time when a second one lands on the same Turn', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'tool_started', { toolCallId: 'c', toolName: 'run' }),
+        event(3, 'runtime_failed', { message: 'warmup died' }),
+        event(4, 'runtime_failed', { message: 'warmup died again' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', startTime: 200, endTime: 300 }],
+    });
+  });
+
+  it('lifts the diagnostic end-time floor when the same tool resumes', () => {
+    // The Turn keeps streaming after the non-fatal diagnostic: a tool that
+    // starts again must tick against now, not render an end before its own
+    // start.
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+        event(3, 'tool_started', { toolCallId: 'c', toolName: 'run' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages).toHaveLength(1);
+    const group = messages[0];
+    const tool = group?.role === 'tool_group' ? group.tools[0] : undefined;
+    expect(tool).toMatchObject({ status: 'in_progress', startTime: 300 });
+    expect(tool?.endTime).toBeUndefined();
+  });
+
+  it('keeps an authoritatively failed tool failed when the Turn is cancelled afterwards', () => {
+    // tool_completed already resolved the failure: the diagnostic booking
+    // is retired, so the Turn's cancellation cannot relabel it.
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+        event(3, 'tool_completed', {
+          toolCallId: 'c',
+          failed: true,
+          cancelled: false,
+          output: 'boom exit 1',
+        }),
+        event(4, 'cancelled'),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [
+        {
+          status: 'failed',
+          wasCancelled: false,
+          endTime: 300,
+          rawOutput: 'boom exit 1',
+        },
+      ],
+    });
+  });
+
+  it('keeps an error result authoritative when the Turn is cancelled afterwards', () => {
+    const source = {
+      ...result,
+      session_id: 's1',
+      turn_id: 'p1',
+      execution_status: 'error',
+    };
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }),
+        event(2, 'runtime_failed', { message: 'warmup died' }),
+        event(3, 'tool_result_updated', {
+          itemId: 'item-1',
+          toolCallId: 'c',
+          result: source,
+        }),
+        event(4, 'cancelled'),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', wasCancelled: false, endTime: 300 }],
+    });
+  });
+
+  it('does not re-mark a tool when a different Turn is cancelled', () => {
+    // The diagnostic books the p1 tool under p2 (the Turn it arrived on);
+    // the authoritative completion retires the booking, so p2's
+    // cancellation cannot reach back into p1.
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_requested', { toolCallId: 'c', toolName: 'run' }, 'p1'),
+        event(
+          2,
+          'accepted',
+          { prompt: [{ type: 'text', text: 'Next' }] },
+          'p2',
+        ),
+        event(3, 'runtime_failed', { message: 'warmup died' }, 'p2'),
+        event(5, 'tool_completed', { toolCallId: 'c', failed: true }, 'p1'),
+        event(6, 'cancelled', undefined, 'p2'),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ status: 'failed', wasCancelled: false, endTime: 500 }],
+    });
+  });
+
+  it('does not split the streamed answer when the active Turn reports a Runtime failure', () => {
+    // environment.failed is a non-fatal diagnostic; the Turn keeps streaming.
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'accepted', { prompt: [{ type: 'text', text: 'Go' }] }),
+        event(2, 'assistant_delta', { text: 'A' }),
+        event(3, 'runtime_failed', { message: 'warmup died' }),
+        event(4, 'assistant_delta', { text: 'B' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'AB',
+      isStreaming: true,
     });
   });
 

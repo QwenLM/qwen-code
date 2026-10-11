@@ -10,10 +10,19 @@ public final class HostedHarnessCapabilities {
     private final List<Integer> supportedProtocolVersions;
     private final String bootId;
     private final String capabilityDigest;
+    private final int lifecycleProtocolVersion;
+
+    public int getLifecycleProtocolVersion() { return lifecycleProtocolVersion; }
 
     HostedHarnessCapabilities(int currentProtocolVersion,
             List<Integer> supportedProtocolVersions, String bootId,
             String capabilityDigest) {
+        this(currentProtocolVersion, supportedProtocolVersions, bootId, capabilityDigest, 0);
+    }
+
+    HostedHarnessCapabilities(int currentProtocolVersion, List<Integer> supportedProtocolVersions,
+            String bootId, String capabilityDigest, int lifecycleProtocolVersion) {
+        this.lifecycleProtocolVersion = lifecycleProtocolVersion;
         this.currentProtocolVersion = currentProtocolVersion;
         this.supportedProtocolVersions = Collections.unmodifiableList(
                 new ArrayList<>(supportedProtocolVersions));

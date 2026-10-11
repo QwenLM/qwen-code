@@ -13,6 +13,7 @@
  * - Lifecycle hooks (pre/post tool use, stop) for synchronous callbacks
  */
 
+import type { ToolLifecycleEvent } from '../../telemetry/tool-lifecycle.js';
 import { EventEmitter } from 'events';
 import type {
   ToolCallConfirmationDetails,
@@ -133,6 +134,7 @@ export interface AgentToolCallEvent {
 }
 
 export interface AgentToolResultEvent {
+  lifecycle?: ToolLifecycleEvent;
   subagentId: string;
   round: number;
   callId: string;
@@ -160,6 +162,7 @@ export interface AgentToolResponsesFinalizedEvent {
 }
 
 export interface AgentToolOutputUpdateEvent {
+  lifecycle?: ToolLifecycleEvent;
   subagentId: string;
   round: number;
   callId: string;

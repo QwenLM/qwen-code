@@ -113,7 +113,7 @@ export async function planUserAutoMemoryDreamByAgent(
       }),
     }),
     systemPrompt: USER_DREAM_SYSTEM_PROMPT,
-    maxTurns: MAX_TURNS,
+    maxTurns: config.getMemoryAgentMaxTurns() ?? MAX_TURNS,
     maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? MAX_TIME_MINUTES,
     tools: [
       ToolNames.READ_FILE,

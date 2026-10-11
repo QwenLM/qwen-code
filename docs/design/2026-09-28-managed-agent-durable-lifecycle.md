@@ -297,7 +297,17 @@ instead would make Flyway refuse to start a database that already applied the
 later version. Upgrade tests apply the ordered sequence before service
 startup. Uniqueness across both migration locations is enforced without a
 database by `scripts/check-flyway-migrations.js`, which runs in the SDK Java
-workflow on every pull request and push (#12940).
+workflow on every pull request and push (#12940). That check sees a pull
+request against the `main` of the moment it ran, so every push to `main` that
+changes a migration, and a schedule every 30 minutes, re-check the open pull
+requests against `main` and set the
+`Flyway migration version uniqueness (latest main)` status on each one that
+adds a migration: failure when a version it adds is taken in its merge result
+with `main`, and success otherwise, naming the other open pull requests that
+claim the same version. A pull request whose file list cannot be read in full
+gets error instead, unless the files read already collide. A head that already
+carries the status is re-evaluated even after it stops adding a migration, so
+a stale failure is cleared (#13742).
 
 ## 5. Tests
 

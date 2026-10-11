@@ -134,6 +134,14 @@
                         </configuration>
                     </execution>
                     <execution>
+                        <id>workspace-migration</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>workspace-migration</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceMigrationMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <id>operator-recovery</id>
                         <goals><goal>repackage</goal></goals>
                         <configuration>

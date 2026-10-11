@@ -527,22 +527,43 @@ test.describe('trajectory panel', () => {
       page,
       String(testInfo.project.use.baseURL),
     );
-    await grid.click();
+    await grid.focus();
 
     await page.keyboard.press('ArrowDown');
-    const first = await grid.getAttribute('aria-activedescendant');
-    expect(first).toBeTruthy();
+    const first = grid.locator('[role="row"][aria-rowindex="1"]');
+    await expect(first.getByRole('gridcell')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(grid).toHaveAttribute(
+      'aria-activedescendant',
+      (await first.getAttribute('id'))!,
+    );
     await page.keyboard.press('ArrowDown');
-    const second = await grid.getAttribute('aria-activedescendant');
-    expect(second).not.toBe(first);
+    const second = grid.locator('[role="row"][aria-rowindex="2"]');
+    await expect(second.getByRole('gridcell')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(grid).toHaveAttribute(
+      'aria-activedescendant',
+      (await second.getAttribute('id'))!,
+    );
 
     // The last row has to be reachable and on screen, not merely mounted:
     // a stale scroll offset leaves rows in the DOM below the viewport.
     await page.keyboard.press('End');
-    const active = await grid.getAttribute('aria-activedescendant');
-    // Matched as an attribute, not as `#id`: React's `useId` puts colons in
-    // the value, which a CSS id selector cannot carry.
-    const activeRow = page.locator(`[id="${active}"]`);
+    const activeRow = grid.locator(
+      `[role="row"][aria-rowindex="${TURNS * ROWS_PER_TURN}"]`,
+    );
+    await expect(activeRow.getByRole('gridcell')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(grid).toHaveAttribute(
+      'aria-activedescendant',
+      (await activeRow.getAttribute('id'))!,
+    );
     await expect(activeRow).toBeVisible();
     const [rowBox, gridBox] = await Promise.all([
       activeRow.boundingBox(),
@@ -573,14 +594,20 @@ test.describe('trajectory panel', () => {
     await expect(mountedRows(page).first()).toBeVisible();
   });
 
-  test('says when the page left older history out @smoke', async ({
+  test('blocks historical navigation when the older cursor is missing @smoke', async ({
     page,
   }, testInfo) => {
     await openTrajectory(page, String(testInfo.project.use.baseURL), {
       hasMore: true,
     });
 
-    await expect(page.getByTestId('trajectory-truncated')).toBeVisible();
+    await expect(page.getByTestId('trajectory-older-failed')).toContainText(
+      'the page cursor did not advance',
+    );
+    await expect(page.getByTestId('trajectory-window-older')).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
   });
 
   test('draws one span per timed record @smoke', async ({ page }, testInfo) => {
@@ -1229,6 +1256,298 @@ test.describe('trajectory panel', () => {
       return cursors;
     }
 
+    test('browses bounded history while preserving queries and clearing old inspection @smoke', async ({
+      page,
+    }, testInfo) => {
+      const cursors = trackTranscriptCursors(page);
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+        {
+          transcriptPage: pageChain(9),
+        },
+      );
+      const panel = page.getByTestId('trajectory-panel');
+      const older = panel.getByTestId('trajectory-window-older');
+      const newer = panel.getByTestId('trajectory-window-newer');
+      const latest = panel.getByTestId('trajectory-window-latest');
+      const evidence = resolve(
+        process.cwd(),
+        '../../.qwen/e2e-tests/pr5-evidence',
+      );
+      mkdirSync(evidence, { recursive: true });
+      await expect(grid).toHaveAttribute('aria-rowcount', '400');
+      await panel.screenshot({
+        path: resolve(evidence, 'latest-fixture-en.png'),
+      });
+      await panel.getByTestId('trajectory-row-tool').last().click();
+      await panel.getByRole('button', { name: 'View details' }).click();
+      const inspector = panel.getByTestId('trajectory-inspector');
+      await inspector
+        .getByRole('button', { name: 'Input', exact: true })
+        .click();
+      await expect(inspector.locator('pre')).toContainText('note-180.txt');
+      const search = page.getByRole('searchbox', {
+        name: 'Search loaded records',
+      });
+      await search.fill('note-180.txt');
+      await expect(panel.getByTestId('trajectory-row-tool')).toHaveCount(1);
+      await older.focus();
+      await older.press('Enter');
+      await expect(inspector).toHaveCount(0);
+      await expect(search).toHaveValue('note-180.txt');
+      await expect(panel.getByTestId('trajectory-filter-empty')).toBeVisible();
+      await expect(older).toBeFocused();
+      await expect(newer).toHaveAttribute('aria-disabled', 'true');
+      await expect(panel.getByTestId('trajectory-selected')).toContainText(
+        'Choose a record',
+      );
+      await panel
+        .getByTestId('trajectory-filter-empty')
+        .getByRole('button', { name: 'Clear filters', exact: true })
+        .click();
+      await expect(grid).toHaveAttribute('aria-rowcount', '400');
+      await expect.poll(() => grid.evaluate((node) => node.scrollTop)).toBe(0);
+      await panel.screenshot({
+        path: resolve(evidence, 'history-fixture-en.png'),
+      });
+
+      await older.click();
+      await expect(grid).toHaveAttribute('aria-rowcount', '100');
+      await expect(older).toHaveAttribute('aria-disabled', 'true');
+      await expect(older).toBeFocused();
+      await newer.click();
+      await expect(grid).toHaveAttribute('aria-rowcount', '400');
+      await expect(newer).toHaveAttribute('aria-disabled', 'true');
+      expect(cursors.slice(-4)).toEqual(['c4', 'c5', 'c6', 'c7']);
+      await latest.click();
+      await expect(grid).toHaveAttribute('aria-rowcount', '400');
+      await expect(latest).toHaveCount(0);
+      await expect(
+        panel.getByRole('button', { name: 'Refresh', exact: true }),
+      ).toBeVisible();
+      expect(cursors.slice(-4)).toEqual(['', 'c1', 'c2', 'c3']);
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const element = document.activeElement;
+            return (
+              [
+                'trajectory-window-status',
+                'trajectory-window-navigation',
+              ].includes(element?.getAttribute('data-testid') ?? '') ||
+              element?.getAttribute('aria-label') === 'Refresh'
+            );
+          }),
+        )
+        .toBe(true);
+    });
+
+    test('retains the old inspector on navigation failure and retries only its failed page @smoke', async ({
+      page,
+    }, testInfo) => {
+      await page
+        .context()
+        .grantPermissions(['clipboard-read', 'clipboard-write']);
+      const cursors = trackTranscriptCursors(page);
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+        {
+          transcriptPage: pageChain(9, { c5: { status: 500, withPage: true } }),
+        },
+      );
+      const panel = page.getByTestId('trajectory-panel');
+      await panel.getByTestId('trajectory-row-tool').last().click();
+      await panel.getByRole('button', { name: 'View details' }).click();
+      const inspector = panel.getByTestId('trajectory-inspector');
+      await inspector
+        .getByRole('button', { name: 'Input', exact: true })
+        .click();
+      const before = await inspector.locator('pre').textContent();
+      await panel.getByTestId('trajectory-window-older').click();
+      const error = panel.getByRole('alert');
+      await expect(error).toContainText('Transcript page is unavailable');
+      await expect(grid).toHaveAttribute('aria-rowcount', '400');
+      await expect(inspector.locator('pre')).toHaveText(before!);
+      await inspector
+        .getByRole('button', { name: 'Copy displayed content' })
+        .click();
+      await expect
+        .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+        .toBe(before);
+      const evidence = resolve(
+        process.cwd(),
+        '../../.qwen/e2e-tests/pr5-evidence',
+      );
+      mkdirSync(evidence, { recursive: true });
+      await panel.screenshot({
+        path: resolve(evidence, 'failure-keeps-inspector-fixture-en.png'),
+      });
+      const calls = cursors.length;
+      await error
+        .getByRole('button', { name: 'Try again', exact: true })
+        .click();
+      await expect(error).toHaveCount(0);
+      await expect(inspector).toHaveCount(0);
+      await expect(grid).toHaveAttribute('aria-rowcount', '400');
+      expect(cursors.slice(calls)).toEqual(['c5', 'c6', 'c7']);
+    });
+
+    test('returning to latest supersedes a delayed historical page @smoke', async ({
+      page,
+    }, testInfo) => {
+      const cursors = trackTranscriptCursors(page);
+      const configured = pageChain(9);
+      const grid = await openTrajectory(
+        page,
+        String(testInfo.project.use.baseURL),
+        {
+          transcriptPage: configured,
+        },
+      );
+      let release!: () => void;
+      const gate = new Promise<void>((resolveGate) => {
+        release = resolveGate;
+      });
+      await page.route('**/session/*/transcript?*', async (route) => {
+        if (
+          new URL(route.request().url()).searchParams.get('cursor') !== 'c4'
+        ) {
+          await route.fallback();
+          return;
+        }
+        await gate;
+        await route.fulfill({
+          contentType: 'application/json',
+          body: JSON.stringify({
+            v: 1,
+            sessionId: 'history-fixture',
+            ...configured.older!['c4'],
+          }),
+        });
+      });
+      const requested = page.waitForRequest(
+        (request) => new URL(request.url()).searchParams.get('cursor') === 'c4',
+      );
+      const panel = page.getByTestId('trajectory-panel');
+      await panel.getByTestId('trajectory-window-older').click();
+      await requested;
+      await expect(grid).toHaveAttribute('aria-rowcount', '400');
+      await expect(
+        panel.getByTestId('trajectory-window-older'),
+      ).toHaveAttribute('aria-disabled', 'true');
+      const latestReads = cursors.filter((cursor) => cursor === '').length;
+      await panel.getByRole('button', { name: 'Refresh', exact: true }).click();
+      await expect
+        .poll(() => cursors.filter((cursor) => cursor === '').length)
+        .toBe(latestReads + 1);
+      await expect(
+        panel.getByTestId('trajectory-window-older'),
+      ).not.toHaveAttribute('aria-disabled', 'true');
+      const replied = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).searchParams.get('cursor') === 'c4',
+      );
+      release();
+      await replied;
+      await expect(grid).toHaveAttribute('aria-rowcount', '400');
+      await expect(
+        panel.getByTestId('trajectory-window-newer'),
+      ).toHaveAttribute('aria-disabled', 'true');
+      expect(cursors).not.toContain('c5');
+      await grid.focus();
+      await page.keyboard.press('Home');
+      await page.keyboard.press('ArrowDown');
+      await expect(await activeRowOf(page, grid)).toContainText(
+        'Prompt number 101',
+      );
+    });
+
+    for (const { language, theme } of [
+      { language: 'en-US', theme: 'dark' },
+      { language: 'zh-CN', theme: 'light' },
+    ]) {
+      test(`history controls fit narrow short panels in ${language} ${theme}`, async ({
+        page,
+      }, testInfo) => {
+        await page.setViewportSize({ width: 1800, height: 600 });
+        await page.addInitScript(
+          ({ language, theme }) => {
+            localStorage.setItem('qwen-code-web-shell-language', language);
+            localStorage.setItem('qwen-code-web-shell-theme', theme);
+          },
+          { language, theme },
+        );
+        const grid = await openTrajectory(
+          page,
+          String(testInfo.project.use.baseURL),
+          {
+            transcriptPage: pageChain(9),
+          },
+        );
+        const panel = page.getByTestId('trajectory-panel');
+        await panel.getByTestId('trajectory-window-older').click();
+        await expect(grid).toHaveAttribute('aria-rowcount', '400');
+        const evidence = resolve(
+          process.cwd(),
+          '../../.qwen/e2e-tests/pr5-evidence',
+        );
+        mkdirSync(evidence, { recursive: true });
+        for (const width of [320, 480]) {
+          await panel.evaluate((node) => {
+            node.scrollTop = 0;
+          });
+          const current = (await panel.boundingBox())!.width;
+          const handle = (await page
+            .locator('[role="separator"][aria-orientation="vertical"]')
+            .last()
+            .boundingBox())!;
+          const x = handle.x + handle.width / 2;
+          const y = handle.y + handle.height / 2;
+          await page.mouse.move(x, y);
+          await page.mouse.down();
+          await page.mouse.move(x + current - width, y, { steps: 5 });
+          await page.mouse.up();
+          await expect
+            .poll(async () => Math.round((await panel.boundingBox())!.width))
+            .toBe(width);
+          for (const name of ['older', 'newer', 'latest']) {
+            const button = panel.getByTestId(`trajectory-window-${name}`);
+            await expect(button).toBeInViewport();
+            const box = (await button.boundingBox())!;
+            const panelBox = (await panel.boundingBox())!;
+            expect(box.x).toBeGreaterThanOrEqual(panelBox.x);
+            expect(box.x + box.width).toBeLessThanOrEqual(
+              panelBox.x + panelBox.width + 1,
+            );
+          }
+          await expect
+            .poll(() =>
+              panel.evaluate((node) => node.scrollWidth - node.clientWidth),
+            )
+            .toBeLessThanOrEqual(1);
+          await panel.screenshot({
+            path: resolve(
+              evidence,
+              `history-fixture-${language}-${theme}-${width}x600.png`,
+            ),
+          });
+          await grid.scrollIntoViewIfNeeded();
+          await grid.focus();
+          await page.keyboard.press('Home');
+          await page.keyboard.press('ArrowDown');
+          await expect(await activeRowOf(page, grid)).toBeInViewport();
+          await panel.screenshot({
+            path: resolve(
+              evidence,
+              `history-records-fixture-${language}-${theme}-${width}x600.png`,
+            ),
+          });
+        }
+      });
+    }
+
     test('folds every page it walked back through @smoke', async ({
       page,
     }, testInfo) => {
@@ -1540,4 +1859,167 @@ test.describe('collapsible waterfall', () => {
       page.locator(`[data-row-key="${key}"][data-selected="true"]`),
     ).toBeInViewport();
   });
+});
+
+test.describe('trajectory search and filters', () => {
+  test('keeps unfiltered navigation disabled and preserves the original fold @smoke', async ({
+    page,
+  }, testInfo) => {
+    await openTrajectory(page, String(testInfo.project.use.baseURL), {
+      transcriptPage: { events: transcriptEvents(2) },
+    });
+    const filters = page.locator('[data-trajectory-filters]');
+    await expect(filters.getByRole('status')).toBeEmpty();
+    await expect(
+      filters.getByRole('button', { name: 'Next', exact: true }),
+    ).toBeDisabled();
+    const request = page.getByTestId('trajectory-row-request').first();
+    await request.getByRole('button', { name: /^Collapse/ }).click();
+    const search = page.getByRole('searchbox', {
+      name: 'Search loaded records',
+    });
+    await search.press('Enter');
+    await expect(
+      request.getByRole('button', { name: /^Expand/ }),
+    ).toBeVisible();
+    await search.fill('note-1.txt');
+    await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(1);
+    await filters
+      .getByRole('button', { name: 'Clear filters', exact: true })
+      .click();
+    await expect(
+      request.getByRole('button', { name: /^Expand/ }),
+    ).toBeVisible();
+    await expect(filters.getByRole('status')).toBeEmpty();
+  });
+
+  test('temporarily expands matches, navigates with input focus and restores folding @smoke', async ({
+    page,
+  }, testInfo) => {
+    await openTrajectory(page, String(testInfo.project.use.baseURL), {
+      transcriptPage: { events: transcriptEvents(2) },
+    });
+    const request = page.getByTestId('trajectory-row-request').last();
+    await request.getByRole('button', { name: /^Collapse/ }).click();
+    const search = page.getByRole('searchbox', {
+      name: 'Search loaded records',
+    });
+    await search.fill('note-2.txt');
+    await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(1);
+    await expect(page.getByTestId('trajectory-row-request')).toHaveAttribute(
+      'data-context',
+      'true',
+    );
+    await page
+      .getByTestId('trajectory-row-request')
+      .getByRole('button', { name: /^Collapse/ })
+      .click();
+    await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(0);
+    await search.press('Enter');
+    await expect(search).toBeFocused();
+    await expect(
+      page.locator('[data-testid="trajectory-row-tool"][data-selected="true"]'),
+    ).toBeInViewport();
+    await expect(page.getByTestId('trajectory-inspector')).toHaveCount(0);
+    await page
+      .getByRole('button', { name: 'Clear filters', exact: true })
+      .click();
+    await expect(
+      page
+        .getByTestId('trajectory-row-request')
+        .last()
+        .getByRole('button', { name: /^Expand/ }),
+    ).toBeVisible();
+    await search.fill('impossible phrase');
+    await expect(page.getByTestId('trajectory-filter-empty')).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Next', exact: true }),
+    ).toBeDisabled();
+  });
+
+  test('preserves hidden detail and clipboard, then overview clears diagnostic filters @smoke', async ({
+    page,
+  }, testInfo) => {
+    await page
+      .context()
+      .grantPermissions(['clipboard-read', 'clipboard-write']);
+    await openTrajectory(page, String(testInfo.project.use.baseURL), {
+      transcriptPage: { events: transcriptEvents(2) },
+    });
+    const tool = page.getByTestId('trajectory-row-tool').last();
+    const key = await tool.getAttribute('data-row-key');
+    await tool.click();
+    await page.getByRole('button', { name: 'View details' }).click();
+    const inspector = page.getByTestId('trajectory-inspector');
+    await inspector.getByRole('button', { name: 'Input', exact: true }).click();
+    const content = await inspector.locator('pre').textContent();
+    const search = page.getByRole('searchbox', {
+      name: 'Search loaded records',
+    });
+    await search.fill('qwen3.8-max');
+    await page.getByRole('combobox', { name: 'Record type' }).click();
+    await page.getByRole('option', { name: 'Requests', exact: true }).click();
+    await page.getByRole('combobox', { name: 'Execution status' }).click();
+    await page.getByRole('option', { name: 'Success', exact: true }).click();
+    await expect(inspector).toContainText(
+      'This record does not match the current filters.',
+    );
+    await expect(inspector.locator('pre')).toHaveText(content!);
+    await inspector
+      .getByRole('button', { name: 'Copy displayed content' })
+      .click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      content,
+    );
+    await page
+      .locator(`[data-testid="trajectory-span"][data-row-key="${key}"]`)
+      .click({ force: true });
+    await expect(search).toHaveValue('');
+    await expect(
+      page.getByRole('combobox', { name: 'Record type' }),
+    ).toContainText('All types');
+    await expect(
+      page.getByRole('combobox', { name: 'Execution status' }),
+    ).toContainText('All statuses');
+    await expect(
+      page.locator(
+        `[data-testid="trajectory-row-tool"][data-row-key="${key}"][data-selected="true"]`,
+      ),
+    ).toBeInViewport();
+    await expect(inspector).not.toContainText('does not match');
+  });
+});
+
+test('intersects type and recorded status without treating context as a hit @smoke', async ({
+  page,
+}, testInfo) => {
+  await openTrajectory(page, String(testInfo.project.use.baseURL), {
+    transcriptPage: { events: transcriptEvents(2) },
+  });
+  await page.getByRole('combobox', { name: 'Record type' }).click();
+  await page.getByRole('option', { name: 'Tools', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Execution status' }).click();
+  await page.getByRole('option', { name: 'Success', exact: true }).click();
+  await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(2);
+  await expect(page.getByTestId('trajectory-row-request')).toHaveCount(2);
+  await expect(
+    page.getByTestId('trajectory-row-request').first(),
+  ).toHaveAttribute('data-context', 'true');
+  await expect(page.locator('[data-trajectory-filters]')).toContainText(
+    '2 matching records',
+  );
+  await page.getByRole('combobox', { name: 'Execution status' }).click();
+  await page.getByRole('option', { name: 'Failed', exact: true }).click();
+  await expect(page.getByTestId('trajectory-filter-empty')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Next', exact: true }),
+  ).toBeDisabled();
+  await page
+    .getByTestId('trajectory-filter-empty')
+    .getByRole('button', { name: 'Clear filters', exact: true })
+    .click();
+  await expect(page.getByTestId('trajectory-row-tool')).toHaveCount(2);
+  await expect(
+    page.getByRole('combobox', { name: 'Record type' }),
+  ).toContainText('All types');
 });

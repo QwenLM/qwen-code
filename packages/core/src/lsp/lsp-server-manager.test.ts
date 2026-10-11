@@ -168,10 +168,15 @@ function stubConnection(manager: LspServerManager, result: object) {
 function crashableProcess(
   overrides: Parameters<typeof createMockProcess>[0] = {},
 ) {
-  const crash: { exit?: (code: number | null) => void } = {};
+  const crash: {
+    exit?: (code: number | null, signal?: string | null) => void;
+  } = {};
   const process = createMockProcess(overrides);
   process.once = vi.fn(
-    (event: string, handler: (code: number | null) => void) => {
+    (
+      event: string,
+      handler: (code: number | null, signal?: string | null) => void,
+    ) => {
       if (event === 'exit') {
         crash.exit = handler;
       }
@@ -350,7 +355,7 @@ describe('LspServerManager', () => {
     { openClose: true, change: 2 },
     { openClose: false, change: 0 },
   ])(
-    'retains initialize textDocumentSync %j on the ready handle',
+    'retains textDocumentSync %j without advertising dynamic registration',
     async (textDocumentSync) => {
       const manager = createTrustedManager();
       const connection = createMockConnection({
@@ -375,7 +380,21 @@ describe('LspServerManager', () => {
           status: 'READY',
           textDocumentSync,
         });
-        expect(connection.initialize).toHaveBeenCalledOnce();
+        expect(connection.initialize).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            capabilities: {
+              textDocument: {
+                completion: { dynamicRegistration: false },
+                hover: { dynamicRegistration: false },
+                definition: { dynamicRegistration: false },
+                references: { dynamicRegistration: false },
+                documentSymbol: { dynamicRegistration: false },
+                codeAction: { dynamicRegistration: false },
+              },
+              workspace: { workspaceFolders: true },
+            },
+          }),
+        );
         expect(connection.send).toHaveBeenCalledWith(
           expect.objectContaining({ method: 'initialized' }),
         );
@@ -761,6 +780,67 @@ describe('LspServerManager', () => {
     );
   });
 
+  it('records the refusal cause on the handle when the command does not exist', async () => {
+    const manager = createTrustedManager();
+    openGates(manager).mockResolvedValue(false);
+
+    // Seed a stderr tail from an earlier attempt: the refusal must CLEAR it,
+    // or a stale tail is later rendered as this refusal's cause.
+    const seeded = registerHandle(manager);
+    seeded.processDiagnostics = {
+      stderrTail: 'stale tail from an earlier attempt\n',
+    };
+    await manager.startAll();
+
+    // The diagnostics surfaces render `handle.error`; an admission refusal
+    // that leaves it undefined would show a bare `failed` with no cause.
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe('command not found: clangd');
+    expect(handle?.processDiagnostics).toBeUndefined();
+  });
+
+  it('records the refusal cause on the handle when a trust-requiring folder is untrusted', async () => {
+    // The production entrance: folderTrust sets requireTrustedWorkspace and
+    // the folder is untrusted, so the first gate refuses before any stub.
+    const manager = new LspServerManager(
+      {
+        isTrustedFolder: vi.fn().mockReturnValue(false),
+      } as unknown as CoreConfig,
+      {} as WorkspaceContext,
+      {} as FileDiscoveryService,
+      {
+        requireTrustedWorkspace: true,
+        workspaceRoot: '/workspace',
+      },
+    );
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe('server requires a trusted workspace');
+    expect(handle?.processDiagnostics).toBeUndefined();
+  });
+
+  it('records the refusal cause on the handle for an unsafe command path', async () => {
+    const manager = createTrustedManager();
+    spyPrivate(manager, 'checkWorkspaceTrust').mockResolvedValue(true);
+    spyPrivate(manager, 'isPathSafe').mockReturnValue(false);
+
+    manager.setServerConfigs([
+      { ...serverConfig, command: '../../outside/payload' },
+    ]);
+    await manager.startAll();
+
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe(
+      'command path is unsafe: ../../outside/payload',
+    );
+  });
+
   it('retries the same config after a crash restart failure', async () => {
     const { manager, crash } = crashingManager([true, false, true]);
     const config = { ...serverConfig, restartOnCrash: true };
@@ -821,6 +901,22 @@ describe('LspServerManager', () => {
     await Promise.resolve();
 
     expect(createLspConnection).toHaveBeenCalledOnce();
+  });
+
+  it('records the exit as the cause when a crash marks the server failed', async () => {
+    const { manager, crash } = crashingManager();
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+    expect(crash.exit).toBeDefined();
+
+    crash.exit?.(null, 'SIGKILL');
+
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toBe(
+      'server process exited (code unknown, signal SIGKILL)',
+    );
   });
 
   it('retries the same config after a crash without restartOnCrash', async () => {

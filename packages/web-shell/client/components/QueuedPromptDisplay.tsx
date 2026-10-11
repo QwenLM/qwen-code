@@ -252,13 +252,19 @@ export function QueuedPromptDisplay({
           isRemoving ||
           isInserting;
         const isEditDisabled = isBusy || isSummaryOnly;
+        const isDeleteDisabled =
+          isRunning ||
+          isMidTurnLocked ||
+          prompt.isEditing === true ||
+          isRemoving ||
+          isInserting;
         let editTitle = t('queue.editTip');
         if (isEditDisabled) {
           editTitle = isSummaryOnly
             ? t('queue.summaryEditDisabled')
             : t('queue.submittingDisabled');
         }
-        const deleteTitle = isBusy
+        const deleteTitle = isDeleteDisabled
           ? t('queue.submittingDisabled')
           : t('queue.deleteTip');
         return (
@@ -427,7 +433,7 @@ export function QueuedPromptDisplay({
                     type="button"
                     className={styles.queuedPromptAction}
                     onClick={() => onDelete(prompt.id)}
-                    disabled={isBusy}
+                    disabled={isDeleteDisabled}
                     aria-label={t('queue.delete')}
                     title={deleteTitle}
                   >

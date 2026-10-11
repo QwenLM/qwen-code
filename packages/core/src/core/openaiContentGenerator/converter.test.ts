@@ -33,6 +33,7 @@ import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
+import { appendAutoMemoryContext } from '../../memory/request-context.js';
 import {
   content,
   fnCall,
@@ -248,6 +249,42 @@ describe('OpenAIContentConverter', () => {
   const toSplitMessages = (...contents: Content[]) =>
     toMessagesWith({ splitToolMedia: true }, ...contents);
 
+  it.each(['user question', 'tool result'] as const)(
+    'preserves the serialized prefix before the catalog after a %s',
+    (tail) => {
+      const history = [
+        userText('earlier user turn'),
+        ...(tail === 'user question'
+          ? [modelText('earlier answer'), userText('current question')]
+          : exchange('read-1', 'read_file', { content: 'saved notes' })),
+      ];
+      const request = {
+        ...req(...history),
+        config: { systemInstruction: 'stable memory policy' },
+      };
+      const baseline = JSON.stringify(toOpenAI(request));
+
+      for (const catalog of ['CURRENT_ENTRY', 'UPDATED_LONGER_ENTRY']) {
+        const messages = toOpenAI({
+          ...request,
+          contents: appendAutoMemoryContext(history, catalog),
+        });
+        const last = messages.at(-1);
+        expect(last?.role).toBe('user');
+        const parts = wireParts(last);
+        expect(Array.isArray(parts)).toBe(true);
+        expect(parts.at(-1)).toEqual({ type: 'text', text: catalog });
+        expect(JSON.stringify(messages)).not.toContain('"partMetadata"');
+
+        const prefix = messages.slice(0, -1);
+        if (parts.length > 1) {
+          prefix.push({ ...last!, content: parts.slice(0, -1) } as Message);
+        }
+        expect(JSON.stringify(prefix)).toBe(baseline);
+      }
+    },
+  );
+
   const toLlm = (
     choices: unknown[],
     extra: Record<string, unknown> = {},
@@ -378,6 +415,146 @@ describe('OpenAIContentConverter', () => {
       responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
     });
 
+    it('withholds a split trailing orphan tag until a normal finish', () => {
+      const stream = contentOnlyStream();
+      const responses = [
+        send(stream, { content: 'I need to verify the branch state.\n    <' }),
+        send(stream, { content: '/thi' }),
+        send(stream, { content: 'nk>\n' }),
+      ];
+      expect(responses.flatMap((response) => partsOf(response) ?? [])).toEqual([
+        { text: 'I need to verify the branch state.' },
+      ]);
+      expect(partsOf(finishStream(stream, 'stop'))).toEqual([]);
+      expect((stream as RequestContext).protocolTagSanitized).toEqual({
+        tagName: 'think',
+        toolCallCount: 0,
+      });
+    });
+
+    it.each([
+      'Example: `</think>`\n</think>',
+      '```xml\n</think>\n```\n</think>',
+      '~~~xml\n</thinking>\n~~~\n</thinking>',
+      'Example:\n<think>literal\n</think>',
+      'Explanation:\n</think>\nMore text.',
+      'Pattern to strip:\n\n    </thinking>',
+      'Do this:\n\n\t</think>\n',
+      'Use:\n<pre>\n</thinking>',
+      'Use:\n<textarea>\n</think>',
+      'First the closer:\n</thinking>\nthen again:\n</thinking>',
+    ])('preserves ambiguous or nonterminal literal text: %s', (text) => {
+      const stream = contentOnlyStream();
+      const parts = [...text].flatMap(
+        (character) => partsOf(send(stream, { content: character })) ?? [],
+      );
+      parts.push(...(partsOf(finishStream(stream, 'stop')) ?? []));
+      expect(parts.map((part) => part.text ?? '').join('')).toBe(text);
+    });
+
+    it('suppresses a trailing orphan tag on a tool-call finish', () => {
+      const stream = contentOnlyStream();
+      send(stream, {
+        content: 'I need to verify the branch state.\n    </thinking>',
+      });
+      send(stream, openCall('call_1', 'run_shell_command', '{}'));
+      const last = finishStream(stream, 'tool_calls');
+      expect(partsOf(last)?.some((part) => part.functionCall)).toBe(true);
+      expect(
+        partsOf(last)
+          ?.map((part) => part.text ?? '')
+          .join(''),
+      ).toBe('');
+      expectSanitized(stream, 'thinking', 1);
+    });
+
+    it('also filters a nonstreaming suffix with no finish reason', () => {
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          choices: [choice({ content: 'Answer.\n</thinking>' }, null)],
+        } as OpenAI.Chat.ChatCompletion,
+        contentOnlyStream(),
+      );
+      expect(partsOf(response)).toEqual([{ text: 'Answer.' }]);
+    });
+
+    it.each(['length', 'content_filter', 'an_unmapped_reason'])(
+      'preserves a closing tag when the provider reports %s',
+      (finishReason) => {
+        const stream = contentOnlyStream();
+        const first = send(stream, { content: 'Answer.\n</think>' });
+        const last = finishStream(stream, finishReason);
+        expect(
+          [...(partsOf(first) ?? []), ...(partsOf(last) ?? [])]
+            .map((part) => part.text ?? '')
+            .join(''),
+        ).toBe('Answer.\n</think>');
+        expect((stream as RequestContext).protocolTagSanitized).toBeUndefined();
+      },
+    );
+
+    it('also filters a normally completed nonstreaming prose suffix', () => {
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          choices: [choice({ content: 'Answer.\n    </thinking>\n' })],
+        } as OpenAI.Chat.ChatCompletion,
+        contentOnlyStream(),
+      );
+      expect(partsOf(response)).toEqual([{ text: 'Answer.' }]);
+    });
+
+    it('keeps a nonstreaming suffix when reasoning carried a thinking tag', () => {
+      // The reasoning conjunct of `completedNormally` is the only
+      // cross-channel guard on this path: `hasThinkingTagInReasoning` is
+      // assigned inside `convertOpenAIChunkToLlm` alone, so a non-streaming
+      // completion never carries it. Without the conjunct the tagged
+      // reasoning channel survives while the content channel is stripped,
+      // laundering the leak into clean prose.
+      const context = contentOnlyStream();
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          choices: [
+            choice({
+              content: 'Answer.\n</thinking>',
+              reasoning_content: 'Let me check <thinking>',
+            }),
+          ],
+        } as OpenAI.Chat.ChatCompletion,
+        context,
+      );
+      expect(partsOf(response)).toEqual([
+        thoughtPart('Let me check <thinking>'),
+        { text: 'Answer.\n</thinking>' },
+      ]);
+      expect(context.protocolTagSanitized).toBeUndefined();
+    });
+
+    it('holds a CRLF split across chunks without leaving a carriage return', () => {
+      const stream = contentOnlyStream();
+      const parts = ['Answer.\r', '\n', '</think>'].flatMap(
+        (content) => partsOf(send(stream, { content })) ?? [],
+      );
+      parts.push(...(partsOf(finishStream(stream, 'stop')) ?? []));
+      expect(parts.map((part) => part.text ?? '').join('')).toBe('Answer.');
+    });
+
+    it.each([true, false])(
+      'retains cross-channel leak rejection with reasoning in the same chunk: %s',
+      (sameChunk) => {
+        const stream = contentOnlyStream();
+        const reasoning_content = 'Let me check<think>';
+        if (!sameChunk) send(stream, { reasoning_content });
+        expectThrowType(
+          () =>
+            send(stream, {
+              ...(sameChunk ? { reasoning_content } : {}),
+              content: 'the result\n</think>\n',
+            }),
+          'PROTOCOL_TAG_LEAK',
+        );
+      },
+    );
+
     const emitReasoning = (stream: RequestContext, text = 'Let me check.') =>
       send(stream, { reasoning_content: text });
     /** A plain-parser stream that has already emitted `text` as reasoning. */
@@ -426,7 +603,10 @@ describe('OpenAIContentConverter', () => {
       tagName: string,
       toolCallCount: number,
     ) =>
-      expect(stream.protocolTagSanitized).toEqual({ tagName, toolCallCount });
+      expect((stream as RequestContext).protocolTagSanitized).toEqual({
+        tagName,
+        toolCallCount,
+      });
 
     const expectUnsanitizedLeak = (
       stream: RequestContext,

@@ -224,8 +224,12 @@ describe('defaultModalities', () => {
   describe('ByteDance Doubao', () => {
     casesFor('returns image for', [
       [
+        // #4876 wanted image support here; since #13209 the dotted spelling
+        // also reaches the catalog entry volcengine publishes for
+        // `doubao-seed-2-0-pro`, so it carries that entry's video too instead
+        // of the family row's image-only answer.
         'doubao-seed-2.0-pro (issue #4876)',
-        has({ image: true, video: undefined, audio: undefined }),
+        IMAGE_VIDEO,
         'doubao-seed-2.0-pro',
       ],
       ['doubao-seed-1.6', IMAGE],

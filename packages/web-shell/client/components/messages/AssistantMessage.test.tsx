@@ -815,3 +815,254 @@ describe('AssistantMessage satisfied / not-satisfied marks', () => {
     expect(find(container, '不满意')).not.toBeNull();
   });
 });
+
+describe('AssistantMessage agent replies', () => {
+  it('names the agent and reports a failed run with its error, steps and tokens', () => {
+    const container = render(
+      <AssistantMessage
+        content=""
+        author={{ name: 'reviewer', color: '#f80' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-1',
+          status: 'failed',
+          error: 'tool crashed',
+          steps: [{ id: 's1', title: 'Bash: npm test', status: 'failed' }],
+          totalTokens: 2048,
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain('reviewer');
+    expect(container.textContent).toContain('Failed');
+    expect(container.textContent).toContain('tool crashed');
+    expect(container.textContent).toContain('Bash: npm test');
+    expect(container.textContent).toContain(
+      `${(2048).toLocaleString()} tokens`,
+    );
+  });
+
+  it('shows no status word on a completed run, only its text and usage', () => {
+    const container = render(
+      <AssistantMessage
+        content="All good."
+        author={{ name: 'reviewer' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-2',
+          status: 'completed',
+          totalTokens: 12,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('All good.');
+    expect(container.textContent).toContain('12 tokens');
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it("offers copy alone on an agent's reply", () => {
+    // MessageList passes an agent's reply footer actions without feedback or
+    // branch; the copy button and the status still render.
+    const container = render(
+      <AssistantMessage
+        content="Agent reply"
+        author={{ name: 'reviewer' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-3',
+          status: 'failed',
+        }}
+        showFooterActions
+        showAssistantFeedback={false}
+        showBranchAction={false}
+        onBranchSession={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector('button[aria-label="Copy"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Branch"]')).toBeNull();
+    expect(container.querySelector('button[aria-pressed]')).toBeNull();
+    expect(container.textContent).toContain('Failed');
+  });
+});
+
+describe('AssistantMessage squad replies', () => {
+  it('tags a leader reply with the squad it leads', () => {
+    const container = render(
+      <AssistantMessage
+        content="@alice please take it"
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-4',
+          status: 'completed',
+          author: { agentId: 'ag_lead', name: 'lead', squadName: 'crew' },
+        }}
+      />,
+    );
+    const tag = container.querySelector('[data-squad-tag]');
+    expect(tag?.getAttribute('data-squad-tag')).toBe('crew');
+    expect(tag?.textContent).toBe('crew');
+    // The tag sits on the author line, after the name; no middle dot.
+    expect(tag?.previousElementSibling?.textContent).toBe('lead');
+    expect(container.textContent).not.toContain('·');
+    expect(container.textContent).toContain('@alice please take it');
+  });
+
+  it('labels a member reply with the squad it answered for', () => {
+    const container = render(
+      <AssistantMessage
+        content="Fixed in auth.ts."
+        author={{ name: 'alice' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-9',
+          status: 'completed',
+          author: {
+            agentId: 'ag_alice',
+            name: 'alice',
+            memberSquadName: 'crew',
+          },
+        }}
+      />,
+    );
+    const tag = container.querySelector('[data-squad-tag="crew"]');
+    expect(tag?.previousElementSibling?.textContent).toBe('alice');
+    expect(container.textContent).toContain('Fixed in auth.ts.');
+  });
+
+  it('never renders an empty member reply as no_action', () => {
+    // Only a leader's empty reply means "nothing to do".
+    const container = render(
+      <AssistantMessage
+        content={'\u200B'}
+        author={{ name: 'alice' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-10',
+          status: 'completed',
+          author: {
+            agentId: 'ag_alice',
+            name: 'alice',
+            memberSquadName: 'crew',
+          },
+        }}
+      />,
+    );
+    expect(container.querySelector('[data-squad-outcome]')).toBeNull();
+    expect(container.querySelector('[data-squad-tag="crew"]')).not.toBeNull();
+  });
+
+  it('renders a no_action reply as one muted line', () => {
+    const container = render(
+      <AssistantMessage
+        content=""
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-5',
+          status: 'completed',
+          squadOutcome: 'no_action',
+          author: { agentId: 'ag_lead', name: 'lead', squadName: 'crew' },
+        }}
+        showFooterActions
+      />,
+    );
+    const line = container.querySelector('[data-squad-outcome="no_action"]');
+    expect(line?.getAttribute('role')).toBe('note');
+    // Not a message: no avatar row, no footer.
+    expect(container.querySelector('button')).toBeNull();
+    expect(container.childElementCount).toBe(1);
+    // The squad's tag, then a plain sentence: no avatar, no middle dots.
+    expect(line?.childElementCount).toBe(2);
+    const [tag, sentence] = [...(line?.children ?? [])];
+    expect(tag?.getAttribute('data-squad-tag')).toBe('crew');
+    expect(tag?.querySelector('svg')).not.toBeNull();
+    expect(sentence?.textContent).toBe('lead had nothing to do');
+  });
+
+  it('renders a leader reply of only invisible characters as no_action', () => {
+    // Recorded before the daemon classified U+200B as no reply.
+    const container = render(
+      <AssistantMessage
+        content={'\u200B'}
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-7',
+          status: 'completed',
+          totalTokens: 42,
+          author: { agentId: 'ag_lead', name: 'lead', squadName: 'crew' },
+        }}
+        showFooterActions
+      />,
+    );
+    const line = container.querySelector('[data-squad-outcome="no_action"]');
+    expect(line?.querySelector('[data-squad-tag="crew"]')).not.toBeNull();
+    expect(line?.textContent).toBe('crewlead had nothing to do');
+  });
+
+  it('shows no blank bubble for an agent reply of only invisible characters', () => {
+    const container = render(
+      <AssistantMessage
+        content={' \u200B\u2060 '}
+        author={{ name: 'bob' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-8',
+          status: 'completed',
+          author: { agentId: 'ag_bob', name: 'bob' },
+        }}
+        showFooterActions
+      />,
+    );
+    expect(container.textContent).toContain('bob');
+    expect(container.textContent).not.toContain('\u200B');
+    expect(container.querySelector('[data-squad-outcome]')).toBeNull();
+    // No copy footer for a reply with nothing to copy.
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  it('shows no blank bubble for an agent reply of only bidi marks', () => {
+    const container = render(
+      <AssistantMessage
+        content={'‎⁦⁩'}
+        author={{ name: 'bob' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-9',
+          status: 'completed',
+          author: { agentId: 'ag_bob', name: 'bob' },
+        }}
+        showFooterActions
+      />,
+    );
+    expect(container.textContent).toContain('bob');
+    expect(container.textContent).not.toContain('‎');
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  it('never shows the dictionary key where the collaboration strings are absent', () => {
+    // The transcript build stubs the collaboration dictionary; zh-CN here
+    // still has it, so check the localized label instead.
+    const container = render(
+      <AssistantMessage
+        content=""
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-6',
+          status: 'completed',
+          squadOutcome: 'no_action',
+        }}
+      />,
+      'zh-CN',
+    );
+    // No squad name on the record: the sentence alone, without a tag.
+    expect(container.textContent).toBe('lead 这次无需动作');
+    expect(container.querySelector('[data-squad-tag]')).toBeNull();
+    expect(container.textContent).not.toContain('collab.');
+  });
+});

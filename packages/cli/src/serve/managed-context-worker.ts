@@ -28,6 +28,7 @@ import {
 import {
   createManagedToolSet,
   ManagedToolExecutor,
+  realpathDeepestExisting,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
 import { ManagedChildRunSupervisor } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
@@ -150,6 +151,55 @@ export class ManagedContextMount {
       return undefined;
     }
     return directory;
+  }
+
+  /**
+   * The canonical mount root, or undefined when it is unreadable or its
+   * device and inode no longer match the pinned ones. A binding whose own
+   * directory stopped resolving is still judged against the location it
+   * occupied, which needs the same root `resolve` would have joined onto.
+   */
+  async rootDirectory(): Promise<string | undefined> {
+    if (!isHostAbsolute(this.#mountRoot)) {
+      return undefined;
+    }
+    try {
+      const root = await fs.realpath(this.#mountRoot);
+      const stats = await fs.stat(root, { bigint: true });
+      const pinned = this.#root;
+      if (
+        pinned !== undefined &&
+        (pinned.dev !== stats.dev || pinned.ino !== stats.ino)
+      ) {
+        return undefined;
+      }
+      return root;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * Where an installed sibling Session's directory is now. `mount.resolve`
+ * answers only for a canonical, readable directory; a binding that was
+ * removed, or replaced by a symlink, still has a knowable location. A
+ * resolvable redirect retains ownership of its target; a resolution error
+ * retains the occupied path without vetoing unrelated shared reads.
+ */
+async function siblingDirectory(
+  mount: ManagedContextMount,
+  cwdRelative: string,
+): Promise<string | undefined> {
+  const resolved = await mount.resolve(cwdRelative);
+  if (resolved !== undefined) return resolved;
+  const root = await mount.rootDirectory();
+  if (root === undefined) return undefined;
+  const occupied = path.join(root, ...cwdRelative.split('/'));
+  try {
+    return await realpathDeepestExisting(occupied);
+  } catch {
+    return occupied;
   }
 }
 
@@ -365,6 +415,54 @@ export function registerManagedContextRoutes(
     publisher,
     mcp,
     hooks,
+    async (sessionId, realPath, ownDirectory) => {
+      // A stale binding still owns its missing or symlinked location, but
+      // must not veto targets in unrelated shared directories.
+      const contains = (directory: string, target: string): boolean => {
+        const relative = path.relative(directory, target);
+        return (
+          relative !== '..' &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative)
+        );
+      };
+      const root = await mount.rootDirectory();
+      // A target inside the caller's own directory is the caller's business
+      // only when that directory is private: a Session bound at the mount
+      // root (`'.'`, a Workspace selection without `cwd_relative`) delimits
+      // no private area, so its targets stay subject to sibling ownership.
+      const ownEstate =
+        contains(ownDirectory, realPath) &&
+        (root === undefined || ownDirectory !== root);
+      for (const [otherId, binding] of installations.bindings()) {
+        if (otherId === sessionId) continue;
+        const directory = await siblingDirectory(mount, binding.cwdRelative);
+        // A binding that cannot be located at all cannot prove the outside
+        // target is shared — and it cannot veto the caller's own estate
+        // either, which is the caller's business by the test above.
+        if (directory === undefined) {
+          if (ownEstate) continue;
+          return true;
+        }
+        // Only a binding AT the mount root exempts: the shared Workspace
+        // itself owns nothing. One bound at a non-root ancestor of the
+        // caller still owns its whole subtree, including what spills past
+        // the caller's directory.
+        if (root !== undefined && directory === root) continue;
+        if (!contains(directory, realPath)) continue;
+        // Ownership runs in both directions. Inside the caller's own estate
+        // only a Session installed strictly below it owns the target: one at
+        // the same directory shares it, and one above it leaves it intact, or
+        // the caller could not read its own files.
+        if (
+          !ownEstate ||
+          (directory !== ownDirectory && contains(ownDirectory, directory))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    },
     backgroundSupervisor,
     backgroundRegistry,
     monitorRegistry,

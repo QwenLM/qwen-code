@@ -2223,12 +2223,17 @@ jobs:
     #                                (≤~345s)
     #   resolver/tools, checkout,
     #   pin, upload, cleanup         ~5m
+    #   java toolchain + Maven repo
+    #   + sibling modules            ≤ ~20m, and only when the diff touches
+    #                                packages/sdk-java/. curl --max-time caps
+    #                                each download; `timeout 300` caps each
+    #                                mvn install
     #   ------------------------------------
-    #   worst case                   ~180m  ⇒ 190 leaves 10m of headroom.
+    #   worst case                   ~200m  ⇒ 210 leaves 10m of headroom.
     #
     # Cost of the raise, stated so it is a decision and not a surprise: a
-    # verify run now occupies one ECS slot for up to ~3h instead of 1h.
-    timeout-minutes: 190
+    # verify run now occupies one ECS slot for up to ~3.5h instead of 1h.
+    timeout-minutes: 210
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -2348,6 +2353,13 @@ jobs:
             echo "verdict=n/a" >> "$GITHUB_OUTPUT"
             echo "decision=na" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          # Same full list, same `grep <<<` (a pipe would SIGPIPE under
+          # pipefail). Only packages/sdk-java/ pays for a JDK; the broader
+          # sdk-java.yml path list is mostly core/CLI, and those diffs still
+          # cannot run the database-backed Java ITs this lane does not host.
+          if grep -qE '^packages/sdk-java/' <<< "$files"; then
+            echo "java=true" >> "$GITHUB_OUTPUT"
           fi
           # Snapshot PR metadata for the token-free agent: the agent env
           # carries no GitHub credential, so everything it may cite (title,
@@ -2635,6 +2647,50 @@ jobs:
             rm -f "${RUNNER_TEMP:?}/verify-chromium-deps-ok"
             echo "::warning::Chromium system deps install failed; the verification agent will produce a text-only report."
           fi
+
+      # Before checkout, as root, with no PR tree on disk — same supply-chain
+      # surface as the runner-tools step above. /opt is container-local and
+      # root-owned, so the node user cannot plant the ready marker, and a
+      # fresh container cannot inherit one. Best-effort: a failed download
+      # leaves Java under Not covered instead of failing the verification.
+      - name: 'Install Java toolchain'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'"
+        env:
+          TEMURIN_VERSION: '21.0.12.1+1'
+          TEMURIN_SHA256: 'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94'
+          TEMURIN_URL: 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz'
+          MAVEN_VERSION: '3.9.11'
+          MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
+        run: |-
+          set -uo pipefail
+          prefix=/opt/verify-java
+          rm -rf -- "$prefix"
+          work="$(mktemp -d)"
+          maven_url="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/jdk.tar.gz" "$TEMURIN_URL" \
+            && echo "${TEMURIN_SHA256}  $work/jdk.tar.gz" | sha256sum --check --status \
+            && curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/maven.tar.gz" "$maven_url" \
+            && echo "${MAVEN_SHA512}  $work/maven.tar.gz" | sha512sum --check --status \
+            && tar -xzf "$work/jdk.tar.gz" -C "$work" \
+            && tar -xzf "$work/maven.tar.gz" -C "$work" \
+            && jdk_dir="$(find "$work" -mindepth 1 -maxdepth 1 -type d -name 'jdk-*' -print -quit)" \
+            && [ -n "$jdk_dir" ] \
+            && [ -d "$work/apache-maven-${MAVEN_VERSION}" ] \
+            && mkdir -p "$prefix" \
+            && mv -- "$jdk_dir" "$prefix/jdk" \
+            && mv -- "$work/apache-maven-${MAVEN_VERSION}" "$prefix/maven" \
+            && chmod -R a+rX "$prefix" \
+            && export JAVA_HOME="$prefix/jdk" \
+            && export PATH="$JAVA_HOME/bin:$prefix/maven/bin:$PATH" \
+            && "$prefix/jdk/bin/java" -version \
+            && "$prefix/maven/bin/mvn" -version \
+            && printf 'ok\n' > "$prefix/ready"; then
+            echo "Java toolchain ready at ${prefix} (Temurin ${TEMURIN_VERSION}, Maven ${MAVEN_VERSION})."
+          else
+            rm -rf -- "$prefix"
+            echo "::warning::Java toolchain install failed; sdk-java changes will be reported as not covered."
+          fi
+          rm -rf -- "$work"
 
       # This container mounts the persistent runner workspace, and a previous
       # run EXECUTED PR code as the node user with write access to .git —
@@ -3133,6 +3189,23 @@ jobs:
       - name: 'Report pnpm store hit'
         if: "steps.pr.outputs.decision == 'run'"
         run: 'echo "pnpm store: hit=${{ steps.pnpm-store.outputs.cache-hit }} key=${{ steps.pnpm-store.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
+      # restore-only, before any PR code runs. The producer is
+      # verify-maven-repo.yml on main; a save step here would let a PR write
+      # the shared cache. A cache outage degrades to a cold repo.
+      - name: 'Clear stale verify Maven repo'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'"
+        run: 'rm -rf "$RUNNER_TEMP/verify-maven-repo"'
+
+      - name: 'Restore verify Maven repo'
+        id: 'maven-repo'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'"
+        continue-on-error: true
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/verify-maven-repo'
+          key: "verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml') }}"
+          restore-keys: 'verify-maven-repo-'
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -3959,6 +4032,60 @@ jobs:
           [ "$ncoll" -gt 0 ] && pass_note=" (${ncoll} not collected by the runner — see the log)"
           finish pass "${total} changed test file(s) x ${rounds_done} identical rounds, no divergence${pass_note}"
 
+      # After the TypeScript build, as node, credentials already stripped.
+      # Always exits 0: a sibling-install failure must not turn a TypeScript
+      # verification into fail. The agent reads the exit codes from the log.
+      - name: 'Install Java modules'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true' && steps.prepare.outputs.verdict == ''"
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |-
+          set -uo pipefail
+          log="${RUNNER_TEMP:?}/verify-context/java-prepare.log"
+          mkdir -p "${RUNNER_TEMP:?}/verify-context"
+          : > "$log"
+          echo "verify Maven repo: hit=${{ steps.maven-repo.outputs.cache-hit }} key=${{ steps.maven-repo.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f /opt/verify-java/ready ]; then
+            echo "::warning::Java toolchain is not ready; skipping sibling module install."
+            printf 'toolchain=missing\n' >> "$log"
+            exit 0
+          fi
+          repo="${RUNNER_TEMP:?}/verify-maven-repo"
+          mkdir -p "$repo"
+          if ! chown -R node:node "$repo"; then
+            echo "::warning::could not hand the Maven repo to the build user; sibling install skipped."
+            printf 'toolchain=chown-failed\n' >> "$log"
+            exit 0
+          fi
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+          JAVA_HOME=/opt/verify-java/jdk
+          PATH="/opt/verify-java/jdk/bin:/opt/verify-java/maven/bin:${PATH}"
+          run_mvn() {
+            local pom="$1"
+            shift
+            printf '\n$ mvn -f %s %s\n' "$pom" "$*"
+            timeout -k 30 300 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_RUNTIME_URL -u ACTIONS_CACHE_URL \
+              -u GITHUB_TOKEN -u GH_TOKEN \
+              HOME=/home/node \
+              USER=node \
+              JAVA_HOME="$JAVA_HOME" \
+              PATH="$PATH" \
+              LANG="${LANG:-C.UTF-8}" \
+              mvn --batch-mode --no-transfer-progress \
+                -Dmaven.repo.local="$repo" \
+                -f "$pom" "$@"
+          }
+          set +e
+          {
+            run_mvn packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+            qwencode_status=$?
+            run_mvn packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
+            broker_status=$?
+          } >> "$log" 2>&1
+          printf 'qwencode=%s runtime-broker=%s\n' "$qwencode_status" "$broker_status" >> "$log"
+
       - name: 'Install evidence browser'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
         env:
@@ -4449,6 +4576,16 @@ jobs:
             QWEN_ENV+=(
               "PLAYWRIGHT_BROWSERS_PATH=$CHROMIUM_PATH"
               "QWEN_VERIFY_CHROMIUM=1"
+            )
+          fi
+          # env applies QWEN_ENV left to right, so this PATH overrides the
+          # one above. ready is root-owned under /opt; node cannot create it.
+          if [ -f /opt/verify-java/ready ]; then
+            QWEN_ENV+=(
+              "PATH=/opt/verify-java/jdk/bin:/opt/verify-java/maven/bin:${PATH}"
+              "JAVA_HOME=/opt/verify-java/jdk"
+              "MAVEN_ARGS=-Dmaven.repo.local=${RUNNER_TEMP}/verify-maven-repo"
+              "QWEN_VERIFY_JAVA=1"
             )
           fi
           if [ -n "${OPENAI_MODEL:-}" ]; then

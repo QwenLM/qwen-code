@@ -43,6 +43,7 @@ describe('Hosted Harness private contract', () => {
       protocolVersions: { current: 1, supported: [1] },
       bootId: BOOT_ID,
       capabilityDigest: DIGEST,
+      lifecycleProtocolVersion: 1,
     });
     expect(Object.isFrozen(contract)).toBe(true);
     expect(Object.isFrozen(contract.protocolVersions)).toBe(true);

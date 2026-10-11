@@ -748,6 +748,178 @@ describe('GlobTool', () => {
     });
   });
 
+  describe('containmentRoot', () => {
+    let session: string;
+
+    beforeEach(async () => {
+      await mkdirp('session/src');
+      await mkdirp('web');
+      await put('session/src/index.ts');
+      await put('web/secret.txt', 'sibling');
+      await fs.symlink(
+        path.join('..', 'web'),
+        path.join(tempRootDir, 'session/peek'),
+      );
+      session = path.join(tempRootDir, 'session');
+    });
+
+    const contained = () =>
+      new GlobTool(mockConfig, { containmentRoot: session });
+
+    it.each([
+      '[.][.]/web/secret.txt',
+      '\\.\\./web/*',
+      '{.,..}/**/*',
+      'peek/**/*',
+      '{**/*.ts,peek/*}',
+    ])('never walks or reports outside the root: %s', async (pattern) => {
+      const result = await run({ pattern, path: session }, contained());
+      // The no-match message quotes the caller's own pattern back, so a leak
+      // has to be judged by the paths a walk would have reported — matching on
+      // the pattern's spelling of them fails on the pattern itself.
+      const reported = String(result.llmContent);
+      expect(reported).not.toContain(path.join(tempRootDir, 'web'));
+      expect(reported).not.toContain(path.join(session, 'peek', 'secret.txt'));
+    });
+
+    it('answers an existing and a missing outside file alike', async () => {
+      const existing = await run(
+        { pattern: '[.][.]/web/secret.txt', path: session },
+        contained(),
+      );
+      const missing = await run(
+        { pattern: '[.][.]/web/nope.txt', path: session },
+        contained(),
+      );
+      expect(existing.returnDisplay).toBe('No files found');
+      expect(missing.returnDisplay).toBe('No files found');
+    });
+
+    it('still finds and lists what is inside the root', async () => {
+      const result = await run({ pattern: '**/*', path: session }, contained());
+      expect(result.llmContent).toContain(
+        path.join(session, 'src', 'index.ts'),
+      );
+      // A merely listed outward symlink keeps its in-root name.
+      expect(result.llmContent).toContain(path.join(session, 'peek'));
+    });
+
+    it.each([false, true])(
+      'finds files with a symlinked root (explicit path: %s)',
+      async (explicitPath) => {
+        const realSession = await fs.realpath(session);
+        const alias = path.join(tempRootDir, 'session-alias');
+        await fs.symlink(realSession, alias, 'junction');
+        const tool = new GlobTool(
+          {
+            ...mockConfig,
+            getTargetDir: () => alias,
+            getWorkspaceContext: () => createMockWorkspaceContext(realSession),
+            getFileService: () => new FileDiscoveryService(alias),
+          } as unknown as Config,
+          { containmentRoot: alias },
+        );
+        const result = await run(
+          { pattern: '**/*.ts', ...(explicitPath ? { path: alias } : {}) },
+          tool,
+        );
+        expect(result.error).toBeUndefined();
+        expect(
+          await Promise.all(
+            (result.collectedFilePaths ?? []).map((file) => fs.realpath(file)),
+          ),
+        ).toEqual([path.join(realSession, 'src/index.ts')]);
+      },
+    );
+
+    it.each([false, true])(
+      'reports the matched files when climbing an inward link (linked root: %s)',
+      async (linkedRoot) => {
+        await mkdirp('session/deep/real');
+        await put('session/deep/x.ts', 'matched');
+        await put('session/x.ts', 'decoy');
+        await put('session/b.md', 'two-level match');
+        await put('session/deep/real/inside.ts', 'descendant');
+        await fs.symlink(
+          path.join(session, 'deep/real'),
+          path.join(session, 'link'),
+          'junction',
+        );
+        const realSession = await fs.realpath(session);
+        const root = linkedRoot
+          ? path.join(tempRootDir, 'session-alias')
+          : session;
+        if (linkedRoot) await fs.symlink(realSession, root, 'junction');
+        const tool = new GlobTool(
+          {
+            ...mockConfig,
+            getTargetDir: () => root,
+            getWorkspaceContext: () => createMockWorkspaceContext(realSession),
+            getFileService: () => new FileDiscoveryService(root),
+          } as unknown as Config,
+          { containmentRoot: root },
+        );
+        for (const [pattern, relative, content] of [
+          ['[.][.]/*.ts', 'deep/x.ts', 'matched'],
+          ['[.][.]/[.][.]/b.md', 'b.md', 'two-level match'],
+          ['*.ts', 'link/inside.ts', 'descendant'],
+        ]) {
+          const result = await run(
+            { pattern, path: path.join(root, 'link') },
+            tool,
+          );
+          const expected = path.join(root, relative);
+          expect(result.error).toBeUndefined();
+          expect(result.collectedFilePaths).toEqual([expected]);
+          expect(result.llmContent).toContain(expected);
+          expect(await fs.readFile(result.collectedFilePaths![0], 'utf8')).toBe(
+            content,
+          );
+        }
+      },
+    );
+
+    it('searches when the containment root is a symlink to the search dir', async () => {
+      // `createManagedToolSet` passes the raw target directory as the
+      // containment root while the search directories are canonicalized, so
+      // one directory reaches the walk under two spellings. Judging walked
+      // entries only against the raw spelling prunes the whole walk and
+      // answers "No files found" with no error.
+      await fs.symlink('session', path.join(tempRootDir, 'link'));
+      const linked = path.join(tempRootDir, 'link');
+      const containedByLink = () =>
+        new GlobTool(mockConfig, { containmentRoot: linked });
+
+      const result = await run(
+        { pattern: '**/*', path: session },
+        containedByLink(),
+      );
+      expect(result.collectedFilePaths).toContain(
+        path.join(session, 'src', 'index.ts'),
+      );
+
+      // The realpath arm still holds under the linked spelling.
+      const escaping = await run(
+        { pattern: 'peek/**/*', path: session },
+        containedByLink(),
+      );
+      expect(escaping.collectedFilePaths ?? []).not.toContain(
+        path.join(tempRootDir, 'web', 'secret.txt'),
+      );
+      expect(String(escaping.llmContent)).not.toContain('sibling');
+    });
+
+    it('leaves the ordinary tool able to search outside', async () => {
+      const result = await run({
+        pattern: '[.][.]/web/secret.txt',
+        path: session,
+      });
+      expect(result.collectedFilePaths).toContain(
+        path.join(tempRootDir, 'web/secret.txt'),
+      );
+    });
+  });
+
   describe('getDescription', () => {
     const descriptionOf = (params: GlobToolParams) =>
       globTool.build(params).getDescription();

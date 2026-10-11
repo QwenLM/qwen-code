@@ -82,6 +82,7 @@
     "jsonc-parser": "^3.3.1",
     "lowlight": "^3.3.0",
     "markdown-it": "^15.0.0",
+    "minimatch": "^9.0.4",
     "open": "^10.2.0",
     "p-limit": "^7.3.0",
     "prompts": "^2.4.2",

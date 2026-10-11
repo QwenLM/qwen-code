@@ -670,6 +670,9 @@ importers:
       markdown-it:
         specifier: ^15.0.0
         version: 15.0.0
+      minimatch:
+        specifier: ^9.0.4
+        version: 9.0.9
       open:
         specifier: ^10.2.0
         version: 10.2.0
@@ -1550,6 +1553,9 @@ importers:
       '@playwright/test':
         specifier: 1.61.1
         version: 1.61.1
+      '@qwen-code/acp-bridge':
+        specifier: workspace:*
+        version: link:../acp-bridge
       '@qwen-code/sdk':
         specifier: workspace:*
         version: link:../sdk-typescript

@@ -34,6 +34,7 @@ import {
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
 import { getCachedGitBranch } from '../utils/gitUtils.js';
+import { readManagedMessageBody } from './managed-message-chunks.js';
 
 /** The tool protocol the local host dispatches over. */
 export const MANAGED_RUNTIME_TOOL_CAPABILITY_VERSION =
@@ -414,8 +415,10 @@ export class LocalManagedRuntimeOutcomes {
         event.payload['contentRef'],
         'message.committed.contentRef',
       );
-      const body = await session.resources
-        .read(ref)
+      const body = await readManagedMessageBody(
+        (bodyRef) => session.resources.read(bodyRef),
+        ref,
+      )
         .then((bytes) => bytes.toString())
         .catch(() => undefined);
       if (body === undefined) continue;

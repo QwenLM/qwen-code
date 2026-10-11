@@ -1372,6 +1372,8 @@ describe('qwen-autofix workflow', () => {
       'The runner has been terminated',
       'fatal: fetch-pack: invalid index-pack output',
       'error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)',
+      // #13622: the hosted pool never assigned a runner — no step ran.
+      'The job was not started because it repeatedly failed to be acquired (5 attempts).',
     ]) {
       expect(run({ checks: [FAIL], annotations: msg })).toEqual({
         reran: true,

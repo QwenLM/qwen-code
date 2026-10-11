@@ -34,6 +34,32 @@ class RuntimeHarnessDrainTest {
     private final Provider provisioner = new Provider();
     private final Transport transport = new Transport();
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void storageFenceBlocksLateSessionAdmissionAfterBindingReady(boolean jdbc) {
+        RuntimeBindingRepository registry = jdbc ? bindings : new InMemoryRuntimeBindingRepository();
+        RuntimeSessionRepository sessionRepository = jdbc ? sessions : new InMemoryRuntimeSessionRepository();
+        var binding = ready(registry);
+        var original = candidate(binding, "original");
+        registry.admitSession(sessionRepository, original);
+        registry.requestStorageFence("tenant", "storage", "migration");
+
+        var failure = assertThrows(RuntimeBrokerException.class,
+                () -> registry.admitSession(sessionRepository, candidate(binding, "late")));
+        assertEquals(409, failure.getStatusCode());
+        assertEquals("workspace_migrating", failure.getCode());
+        assertFalse(failure.isRetryable());
+        assertNull(sessionRepository.findById(scope, "late"));
+        var retained = sessionRepository.findById(scope, "original");
+        assertTrue(original.sameIdentity(retained));
+        assertEquals(RuntimeSessionRecord.State.ACQUIRING, retained.getState());
+        assertEquals(1, sessionRepository.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+        assertEquals(RuntimeBindingRecord.State.READY, registry.findById(binding.getBindingId()).getState());
+        assertEquals(binding.getGeneration(), registry.findById(binding.getBindingId()).getGeneration());
+        assertTrue(registry.isStorageFenced("tenant", "storage", "migration"));
+        assertFalse(registry.isHarnessDraining("tenant", "harness"));
+    }
+
     @Test
     void fenceSurvivesRestartAndBlocksLateWarmAndAdmissions() throws Exception {
         var binding = ready();

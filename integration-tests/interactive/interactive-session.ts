@@ -31,6 +31,7 @@ import {
   pickE2eRenderer,
   resolveE2eCliCommand,
 } from '../renderer-matrix.js';
+import { readyPromptBudgetMs } from '../ready-prompt-budget.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -79,6 +80,8 @@ export interface InteractiveSessionOptions {
   env?: NodeJS.ProcessEnv;
   /** Extra CLI arguments (e.g. ['--approval-mode', 'yolo']) */
   args?: string[];
+  /** Spawn this instead of the built CLI bundle (drives stub processes in tests). */
+  command?: { bin: string; args: string[] };
 }
 
 export class InteractiveSession {
@@ -86,6 +89,7 @@ export class InteractiveSession {
   private terminal: Terminal;
   private rawOutput = '';
   private pendingWrite: Promise<void> = Promise.resolve();
+  private closed = false;
 
   private constructor(ptyProcess: pty.IPty, terminal: Terminal) {
     this.ptyProcess = ptyProcess;
@@ -144,21 +148,62 @@ export class InteractiveSession {
       allowProposedApi: true,
     });
 
-    const bundlePath = join(__dirname, '..', '..', 'dist/cli.js');
-    const ptyProcess = pty.spawn(
-      resolveE2eCliCommand(pickE2eRenderer()),
-      [bundlePath, ...args],
-      {
-        name: 'xterm-256color',
-        cols,
-        rows,
-        cwd,
-        env: env as Record<string, string>,
-      },
-    );
+    const target = options?.command ?? {
+      bin: resolveE2eCliCommand(pickE2eRenderer()),
+      args: [join(__dirname, '..', '..', 'dist/cli.js'), ...args],
+    };
+    const ptyProcess = pty.spawn(target.bin, target.args, {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      cwd,
+      env: env as Record<string, string>,
+    });
 
     const session = new InteractiveSession(ptyProcess, terminal);
-    await session.waitFor('Type your message', 30_000);
+    // A child that dies during startup fails fast with its exit code instead
+    // of waiting the budget out; only a live-but-slow boot (#13552) pays the
+    // full readyPromptBudgetMs window. The tail reuses waitFor's spelling so
+    // both failure paths grep the same in a job log — the catch below closes
+    // the session, which disposes the terminal and would otherwise discard
+    // the boot log unread.
+    let startupUndecided = true;
+    const exited = new Promise<never>((_, reject) => {
+      ptyProcess.onExit(({ exitCode, signal }) => {
+        // close()'s kill() fires this handler on every healthy session's
+        // teardown; the strip pass over an unbounded transcript and the
+        // rejection a settled race never observes are waste once startup is
+        // decided.
+        if (!startupUndecided) return;
+        // Worded neutrally: whether the prompt reached rawOutput is not
+        // decidable here — a child that out-writes the parent's read loop
+        // loses every byte past the first 4095-byte chunk — so the tail is
+        // best-effort, not necessarily the fatal lines.
+        reject(
+          new Error(
+            `CLI exited during startup (code ${exitCode}, signal ${signal})\n` +
+              `Last 500 chars: ${stripAnsi(session.rawOutput).slice(-500)}`,
+          ),
+        );
+      });
+    });
+    try {
+      await Promise.race([
+        session.waitFor('Type your message', readyPromptBudgetMs(process.env)),
+        exited,
+      ]);
+      startupUndecided = false;
+    } catch (err) {
+      startupUndecided = false;
+      // start() must not orphan the child, pty, and terminal it refuses to
+      // hand out.
+      try {
+        await session.close();
+      } catch {
+        // Cleanup must not mask the startup failure.
+      }
+      throw err;
+    }
     return session;
   }
 
@@ -181,13 +226,16 @@ export class InteractiveSession {
   /** Wait for text to appear in raw output. */
   async waitFor(text: string, timeout = 120_000): Promise<void> {
     const start = Date.now();
-    while (Date.now() - start < timeout) {
+    while (!this.closed && Date.now() - start < timeout) {
       if (
         stripAnsi(this.rawOutput).toLowerCase().includes(text.toLowerCase())
       ) {
         return;
       }
       await sleep(200);
+    }
+    if (this.closed) {
+      throw new Error(`Session closed while waiting for text: "${text}"`);
     }
     throw new Error(
       `Timeout (${timeout}ms) waiting for text: "${text}"\n` +
@@ -256,6 +304,10 @@ export class InteractiveSession {
 
   /** Kill the PTY process and dispose the terminal. */
   async close(): Promise<void> {
+    // Set the flag first so a waitFor poll abandoned by start()'s fail-fast
+    // race stops at its next tick instead of re-scanning a dead pty's output
+    // until its own budget expires.
+    this.closed = true;
     try {
       this.ptyProcess.kill();
     } catch {

@@ -279,6 +279,7 @@ class ManagedContextRecoveryTest {
                     REQUEST.getScope(), null, REQUEST.getProvisionerKind());
             RuntimeBindingRecord old = repository(source).findOrCreate(legacy);
             try (Connection connection = source.getConnection(); var statement = connection.createStatement()) {
+                statement.execute("DROP INDEX qwen_runtime_storage_bindings_idx");
                 statement.execute("ALTER TABLE qwen_runtime_binding DROP COLUMN storage_id");
                 statement.execute("ALTER TABLE qwen_runtime_binding_slot DROP COLUMN storage_id");
                 if (flyway) {

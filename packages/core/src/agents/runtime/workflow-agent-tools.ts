@@ -92,6 +92,14 @@ export interface AgentToolNarrowingInput {
    * Entries may be MCP patterns.
    */
   readonly denies: readonly string[];
+  /**
+   * Resolves a registered name to its producer-carried MCP identity, so deny
+   * patterns read the server boundary from the producer instead of a
+   * flattened spelling (foo vs foo_).
+   */
+  readonly getMcpIdentity?: (
+    name: string,
+  ) => { serverName: string; serverToolName: string } | undefined;
   /** Whether the agent answers through `structured_output`. */
   readonly schema: boolean;
 }
@@ -120,7 +128,14 @@ export function narrowAgentTools(input: AgentToolNarrowingInput): string[] {
 
   const allowed = bounded.filter(
     (name) =>
-      !input.denies.some((pattern) => matchesToolPattern(pattern, name)),
+      !input.denies.some((pattern) =>
+        matchesToolPattern(
+          pattern,
+          name,
+          undefined,
+          input.getMcpIdentity?.(name),
+        ),
+      ),
   );
   if (allowed.length === 0) {
     throw new Error(

@@ -348,7 +348,6 @@ function OpenTuiEntryApp({
       onStartNewSession={handleStartNewSession}
       updateNotice={updateNotice}
       exitHint={exitHint}
-      availableTerminalHeight={height}
       streaming={live.streaming}
       streamingCharsRef={live.streamingCharsRef}
       isReceivingContent={live.isReceivingContent}

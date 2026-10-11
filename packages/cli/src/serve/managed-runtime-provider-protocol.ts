@@ -43,6 +43,26 @@ export const MANAGED_RUNTIME_PROVIDER_ROUTE = Object.freeze({
   cacheControl: 'no-store',
 } as const);
 
+/**
+ * The project instruction files a Hosted turn reads from the Session's
+ * working directory, in prompt order.
+ */
+export const MANAGED_WORKSPACE_CONTEXT_FILES = [
+  'QWEN.md',
+  'AGENTS.md',
+] as const;
+
+/**
+ * Each file's text is capped in characters so the whole result stays under
+ * the 1 MiB control limit even when every character JSON-escapes to six bytes.
+ */
+export const MANAGED_WORKSPACE_CONTEXT_FILE_CHARS = 64 * 1024;
+
+export interface ManagedWorkspaceContextFile {
+  name: (typeof MANAGED_WORKSPACE_CONTEXT_FILES)[number];
+  text: string;
+}
+
 export interface ManagedRuntimeProviderSession {
   readonly harnessSessionId: string;
   readonly runtimeSessionId: string;
@@ -51,7 +71,7 @@ export interface ManagedRuntimeProviderSession {
 
 export type ManagedRuntimeProviderControl =
   | RawFileHistoryOperation
-  | { kind: 'manifest' | 'history' }
+  | { kind: 'manifest' | 'history' | 'workspace-context' }
   | { kind: 'begin-turn'; identity: ManagedToolCallIdentity }
   | {
       kind: 'prepare';
@@ -223,6 +243,7 @@ export function parseManagedRuntimeProviderOperation(
     case 'release':
     case 'manifest':
     case 'history':
+    case 'workspace-context':
       keys(op, ['kind']);
       break;
     case 'begin-turn':
@@ -398,6 +419,29 @@ export function parseManagedRuntimeProviderResult(
           'Invalid Hosted file history rewind outcome.',
         );
       break;
+    }
+    case 'workspace-context': {
+      keys(result, ['files']);
+      if (!Array.isArray(result['files']))
+        throw new ManagedRuntimeProviderProtocolError();
+      let next = 0;
+      for (const entry of result['files']) {
+        const file = object(entry);
+        keys(file, ['name', 'text']);
+        const index = MANAGED_WORKSPACE_CONTEXT_FILES.indexOf(
+          file['name'] as ManagedWorkspaceContextFile['name'],
+        );
+        if (
+          index < next ||
+          typeof file['text'] !== 'string' ||
+          file['text'].length > MANAGED_WORKSPACE_CONTEXT_FILE_CHARS
+        )
+          throw new ManagedRuntimeProviderProtocolError(
+            'Invalid Workspace context result.',
+          );
+        next = index + 1;
+      }
+      return result['files'] as ManagedWorkspaceContextFile[];
     }
     case 'bind-history':
     case 'checkpoint':

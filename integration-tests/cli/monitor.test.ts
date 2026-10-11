@@ -51,6 +51,13 @@ describe('monitor-tool', () => {
       rig.waitForToolCall('monitor', 180_000),
     ]);
     expect(foundMonitor).toBeTruthy();
+    const monitorCalls = rig
+      .readToolLogs()
+      .filter((log) => log.toolRequest.name === 'monitor');
+    expect(
+      monitorCalls.some((log) => log.toolRequest.success === true),
+      `monitor call did not succeed: ${JSON.stringify(monitorCalls)}`,
+    ).toBe(true);
     validateModelOutput(result, null, 'monitor tool call');
   });
 });
