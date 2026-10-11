@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
 import { constants, promises as fs, type BigIntStats } from 'node:fs';
 import path from 'node:path';
 import { sessionIdContext } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
@@ -281,6 +282,8 @@ export function registerManagedContextRoutes(
   mount = new ManagedContextMount(bootDocument.mountRoot),
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
+  if (boot.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST)
+    throw new Error('Private CSI file profile requires its dedicated worker.');
   const installations = new ManagedContextInstallations(boot);
   const activations = new WorkspaceActivations();
   const requiresActivation =

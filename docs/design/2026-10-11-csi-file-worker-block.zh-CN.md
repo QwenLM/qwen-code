@@ -1,0 +1,103 @@
+# 私有 CSI 文件 worker 与保留历史
+
+[English](2026-10-11-csi-file-worker-block.md) | [简体中文](2026-10-11-csi-file-worker-block.zh-CN.md)
+
+## 目的和基线
+
+本改动从 PR #13526 的 `edef0d54c246eeb554727564e50b3dab200a5cf5` 拆出
+worker 侧特性，基于主干 `fce50611b665989494df5fbd8bc91b4cad7b723c`。
+主干已有 CSI mount 身份、保留读取 source 和普通 managed worker，但没有
+私有文件 worker。本 PR 提供从已有 container boot 入口到描述符
+Read/Write/Edit 和保留文件历史的完整 worker 侧调用链，以 Draft 提交架构评审。
+
+Java native SQL issuer 和 Hosted Session 编排仍是独立特性。本 worker
+要求它们提供远程 authority 契约；主干普通生产 Session 路径尚不能产生该
+authority。合成 authority 响应可以验证组件契约，但不证明 SQL 准入、完整
+Hosted turn 或 Kubernetes 部署。
+
+## 包含的调用链
+
+已有 managed runtime CLI 读取 container boot 文档，将版本 4、5 分派给
+专用文件 worker。旧 stdin/context worker 拒绝精确私有能力。版本 4 仅提供
+构造、attestation 和 context 安装；版本 5 还固定 authority origin，在其
+提供有效证据时支持文件执行。
+
+| 层                        | 职责                                                                      | 消费者                                 |
+| ------------------------- | ------------------------------------------------------------------------- | -------------------------------------- |
+| File boot 和 wire 契约    | 封闭 JSON、精确身份、lease、incarnation、Pod/storage/mount attestation    | Container worker 启动和私有 HTTP 路由  |
+| Native readback 客户端    | 认证当前 bind/prepare/execute 证据，封闭 grant/resource 校验              | 文件历史绑定、准备和 native tool 执行  |
+| Composer 和描述符 backend | 单一原始 Session、验证 root、no-follow 遍历、原始观察和写入、保留备份认证 | 实际 Core Read/Write/Edit 工具         |
+| 保留历史                  | Snapshot/preimage 准备和认证备份观察，无通用 rewind 或删除                | 同一 composer 和 executor history 实例 |
+| Core mutation 契约        | 可选 scoped 观察和修改，不回退到环境中的 pathname                         | 提供给实际工具 Config 的描述符 backend |
+
+绑定在构造工具前认证当前安装的 context 和 authority。准备在保留 preimage
+前验证完整接受成员及原始输入。执行认证精确 grant、安装 Session 和准备历史，
+随后使用同一组工具和 history。Backend 始终使用原始 root 和保留描述符。
+重试保留身份，不替换成无关的 history 实例。
+
+## 决策和约束
+
+能力 manifest 和协议 fixture 保留 PR #13526 的字节。新的 scoped mutation
+及 retained storage 参数在 composer 中有实际生产 setter，在工具、history
+和 executor 中有实际 read site。普通 worker 不选择该 backend，保留已有行为。
+
+拆分还补齐依赖评审中发现的三处 worker 侧缺口。Retained executor 使用词法
+containment，并让原始描述符 backend 负责 no-follow 准入，不再观察环境中的
+realpath。准备阶段在保留 preimage 前核对声明的 request digest 与原始 payload
+字节。Execute readback 要求封闭 input wrapper 的 harness 和 runtime Session
+均属于同一所有者，并验证 payload digest，包括没有 preparation 的只读调用。
+
+保留主干特殊文件准入、零长度处理及 `O_NOCTTY` 读取、当前 mount root 生命周期
+检查、兄弟所有权 fence 和 worker 聚合清理。仅从旧 source 文件抽取新 worker
+dispatch 和文件契约，不用 PR #13526 的版本覆盖主干。
+
+路由由不可变 boot 指定的单一存活 worker Session 所有，使用精确
+lease/token/incarnation 和安装 context。Native readback 由另行配置的
+authority origin 和当前持久 Session 所有；worker 不能自行生成 SQL 授权。
+缺失、格式错误、冲突、过期或不可用证据在文件效果前拒绝。不回退到普通 worker、
+其他 Session 或替换 mount。
+
+Backend 失败关闭准入。清理等待在途操作并保留错误。保留 snapshot 不授予
+rewind、备份删除、退役或复用权限。Drain 仍是拒绝边界，报告
+`DRAINING`/`BLOCKED`；此增量不证明 `QUIESCENT`、物理终止、CSI unpublish
+或卷释放。
+
+## 文件和排除范围
+
+生产范围是 `packages/cli/src/serve` 下新增的 `managed-csi-file-*` 和
+`managed-csi-native-readback` 模块、container 入口及 context/executor/history
+接线，以及 Core 文件 mutation、保留 history 和 workspace memory guard
+消费者。各层包含测试和共享 wire fixture。
+
+不包含 Java SQL issuer、migration、Hosted runner、Session activation/recovery、
+原始 checkpoint proof、application finalize、物理释放或公开 profile 选择。
+已有 Java 本地拒绝 PR #13893 和 publication 锁顺序 PR #13894 保持独立评审。
+
+## 验证和验收
+
+先执行全局 CLI baseline，确认当前主干或安装 worker 不能选择新 boot 契约。
+无法进入 CSI 执行是特性缺失基线，不是已有生产 bug。
+
+在候选验证 boot 4/5 解析、实际 container 入口分派、旧路径拒绝、context 和
+attestation 授权及封闭路由处理。执行契约使用真实 HTTP authority fixture
+以及实际 worker、composer、executor、Core 工具和 retained storage，观察完整
+bind/prepare/Read/Write/Edit/history-snapshot 序列、原始 preimage 和结果字节。
+篡改身份、grant、resource，错误所有权、不可用 authority 和封闭准入应无新文件效果。
+
+Fixture 传输证据与真实 SQL issuer 证据分开记录。非 Linux 主机上的任何 Linux
+mount 或描述符映射都必须明确标注；未修改的生产启动仍应拒绝不支持的 mount。
+这类探针不证明 Linux CSI 或目标集群生命周期行为。
+
+此 Draft 验收要求根目录 build/typecheck/bundle、Core 和 CLI 定向回归测试、
+范围内格式和 lint、独立 test-engineer 报告及两次干净的完整 diff 自审。
+评审需一起判断跨包契约和必要远程 authority。部署和完整 native 验收是后续 gate。
+
+## 风险和后续
+
+这是涉及 Core 和 CLI 的较大 feature，触发仓库生产行数 advisory，需要
+maintainer 架构评审。主干尚无 worker authority producer；普通私有 Session
+使用该组件前必须另行接入。
+
+后续 PR 应提供持久 Session/native SQL authority、Hosted 执行/receipt/consumption
+调用链、冷恢复和完整退役资格。开放设计问题是 worker 侧模块及严格远程契约是否
+应先合入，还是与 producer 一起交付。

@@ -132,7 +132,26 @@ export type FileEncodingType = (typeof FileEncoding)[keyof typeof FileEncoding];
 /**
  * Interface for file system operations that may be delegated to different implementations
  */
+export type TextFileObservation =
+  | { kind: 'missing' }
+  | { kind: 'file'; response: ReadTextFileResponse; stats: Stats };
+
+export interface TextFileMutation {
+  readonly original: TextFileObservation;
+  write(params: CoreWriteTextFileRequest): Promise<Stats>;
+}
+
+export interface TextFileIo {
+  inspect(path: string, signal?: AbortSignal): Promise<TextFileObservation>;
+  withMutation<T>(
+    path: string,
+    signal: AbortSignal,
+    operation: (mutation: TextFileMutation) => Promise<T>,
+  ): Promise<T>;
+}
+
 export interface FileSystemService {
+  readonly textFileIo?: TextFileIo;
   withReadFile?<T>(
     request: FileReadRequest,
     operation: (source: FileReadSource) => Promise<T>,

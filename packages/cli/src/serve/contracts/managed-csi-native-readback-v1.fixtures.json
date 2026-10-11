@@ -1,0 +1,4091 @@
+{
+  "contractVersion": 1,
+  "boot": {
+    "type": "boot",
+    "version": 5,
+    "managedCsi": "managed-csi/2",
+    "identity": {
+      "profile": "csi-files-retirement/1",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+    },
+    "context": {
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+      "epoch": 4,
+      "isolationClass": "session",
+      "leaseId": "lease-01",
+      "managedContext": "managed-context/1",
+      "mountRoot": "/runtime/workspaces/workspace-a",
+      "provisionRequestId": "provision-01",
+      "runtimeIncarnation": "boot-01",
+      "runtimeInstanceId": "runtime-01",
+      "storageId": "storage://pvc/workspace-a",
+      "tenantId": "tenant-a",
+      "token": "fixture-token",
+      "type": "boot",
+      "version": 2,
+      "workspaceGeneration": "7",
+      "workspaceId": "workspace-a"
+    },
+    "storage": {
+      "clusterDomain": "cluster-a",
+      "namespace": "runtimes",
+      "pvcUid": "pvc-01",
+      "pvUid": "pv-01",
+      "driver": "diskplugin.csi.alibabacloud.com",
+      "volumeHandle": "opaque-handle",
+      "backendDomain": "ack:account-a:cn-beijing",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "physicalKey": "fd253342f447e25d365b3ba1d37f108c06b25cfba254de78c7d830c36029c5cb",
+      "registrationRevision": "1",
+      "reservationId": "12345678-1234-5678-9abc-123456789abc",
+      "reservationRevision": "1"
+    },
+    "authority": {
+      "protocolVersion": 1,
+      "origin": "https://broker.example"
+    }
+  },
+  "valid": [
+    {
+      "name": "bind",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "bind",
+        "subject": null
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "bind",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "ready"
+        }
+      }
+    },
+    {
+      "name": "prepare",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "subject": {
+          "resourceId": "00000000-0000-4000-8000-000000000010",
+          "kind": "managed-file_history",
+          "schemaVersion": 1,
+          "byteLength": 44,
+          "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "intent",
+          "intentRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000010",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 44,
+            "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000010",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 44,
+                "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOi0xLjI1ZS0xMH0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcInJlYWRfZmlsZVwiLFwiaW5wdXRcIjp7XCJmaWxlX3BhdGhcIjpcIm5vdGUudHh0XCIsXCJudW1iZXJcIjotMS4yNWUtMTB9fSJ9"
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "bytesBase64": "eyJuYW1lIjoicmVhZF9maWxlIiwiZnJhY3Rpb24iOjAuMTI1fQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            }
+          ],
+          "members": [
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            },
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 2,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "execute",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "subject": "execution-call"
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "authorization",
+          "executionReference": {
+            "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+            "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+            "callId": "00000000-0000-4000-8000-000000000101",
+            "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+            "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+            "functionCallId": "function-1",
+            "partIndex": 2,
+            "ordinal": 2,
+            "inputRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000016",
+              "kind": "managed-tool-input",
+              "schemaVersion": 1,
+              "byteLength": 223,
+              "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+            },
+            "toolDefinitionRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000017",
+              "kind": "managed-tool-definition",
+              "schemaVersion": 1,
+              "byteLength": 38,
+              "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+            },
+            "dispatchMode": "deferred"
+          },
+          "preparedRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000011",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 40,
+            "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+          },
+          "authorizationRevision": 8,
+          "authorizationSequence": 16,
+          "grant": {
+            "protocolVersion": 1,
+            "runtimeBindingId": "binding-1",
+            "bindingGeneration": "1",
+            "authorizedBindingVersion": "2",
+            "executionCallId": "execution-call",
+            "dispatchGeneration": "1",
+            "authorizationRevision": 8,
+            "authorizationSequence": 16,
+            "executionReference": {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 2,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            },
+            "intent": {
+              "revision": 7,
+              "sequence": 15
+            },
+            "checkpointRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000012",
+              "kind": "managed-checkpoint",
+              "schemaVersion": 1,
+              "byteLength": 23,
+              "digest": "f4f2368e27a9888a745d9ea716a0e0b012dd41cbbe18a9e47d0a681eb735faed"
+            },
+            "preparedRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000011",
+              "kind": "managed-file_history",
+              "schemaVersion": 1,
+              "byteLength": 40,
+              "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+            },
+            "identity": {
+              "profile": "csi-files-retirement/1",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+            },
+            "context": {
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+              "epoch": 4,
+              "isolationClass": "session",
+              "leaseId": "lease-01",
+              "managedContext": "managed-context/1",
+              "mountRoot": "/runtime/workspaces/workspace-a",
+              "provisionRequestId": "provision-01",
+              "runtimeIncarnation": "boot-01",
+              "runtimeInstanceId": "runtime-01",
+              "storageId": "storage://pvc/workspace-a",
+              "tenantId": "tenant-a",
+              "workspaceGeneration": "7",
+              "workspaceId": "workspace-a",
+              "protocolVersion": 3
+            },
+            "installedContext": {
+              "protocolVersion": 3,
+              "managedContext": "managed-context/1",
+              "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+              "binding": {
+                "tenantId": "tenant-a",
+                "workspaceId": "workspace-a",
+                "workspaceGeneration": "7",
+                "storageId": "storage://pvc/workspace-a",
+                "cwdRelative": ".",
+                "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+                "contextRevision": "1"
+              }
+            }
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000011",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 40,
+                "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOjAuMTI1fQ=="
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "execute-read-only",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "subject": "execution-call"
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "authorization",
+          "executionReference": {
+            "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+            "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+            "callId": "00000000-0000-4000-8000-000000000100",
+            "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+            "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+            "functionCallId": "function-0",
+            "partIndex": 1,
+            "ordinal": 0,
+            "inputRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000014",
+              "kind": "managed-tool-input",
+              "schemaVersion": 1,
+              "byteLength": 222,
+              "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+            },
+            "toolDefinitionRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000015",
+              "kind": "managed-tool-definition",
+              "schemaVersion": 1,
+              "byteLength": 37,
+              "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+            },
+            "dispatchMode": "deferred"
+          },
+          "preparedRef": null,
+          "authorizationRevision": 8,
+          "authorizationSequence": 16,
+          "grant": {
+            "protocolVersion": 1,
+            "runtimeBindingId": "binding-1",
+            "bindingGeneration": "1",
+            "authorizedBindingVersion": "2",
+            "executionCallId": "execution-call",
+            "dispatchGeneration": "1",
+            "authorizationRevision": 8,
+            "authorizationSequence": 16,
+            "executionReference": {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            },
+            "intent": {
+              "revision": 7,
+              "sequence": 15
+            },
+            "checkpointRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000012",
+              "kind": "managed-checkpoint",
+              "schemaVersion": 1,
+              "byteLength": 23,
+              "digest": "f4f2368e27a9888a745d9ea716a0e0b012dd41cbbe18a9e47d0a681eb735faed"
+            },
+            "preparedRef": null,
+            "identity": {
+              "profile": "csi-files-retirement/1",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+            },
+            "context": {
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+              "epoch": 4,
+              "isolationClass": "session",
+              "leaseId": "lease-01",
+              "managedContext": "managed-context/1",
+              "mountRoot": "/runtime/workspaces/workspace-a",
+              "provisionRequestId": "provision-01",
+              "runtimeIncarnation": "boot-01",
+              "runtimeInstanceId": "runtime-01",
+              "storageId": "storage://pvc/workspace-a",
+              "tenantId": "tenant-a",
+              "workspaceGeneration": "7",
+              "workspaceId": "workspace-a",
+              "protocolVersion": 3
+            },
+            "installedContext": {
+              "protocolVersion": 3,
+              "managedContext": "managed-context/1",
+              "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+              "binding": {
+                "tenantId": "tenant-a",
+                "workspaceId": "workspace-a",
+                "workspaceGeneration": "7",
+                "storageId": "storage://pvc/workspace-a",
+                "cwdRelative": ".",
+                "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+                "contextRevision": "1"
+              }
+            }
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcInJlYWRfZmlsZVwiLFwiaW5wdXRcIjp7XCJmaWxlX3BhdGhcIjpcIm5vdGUudHh0XCIsXCJudW1iZXJcIjotMS4yNWUtMTB9fSJ9"
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "bytesBase64": "eyJuYW1lIjoicmVhZF9maWxlIiwiZnJhY3Rpb24iOjAuMTI1fQ=="
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "action-kind-crossed",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "bind",
+        "subject": null
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "bind",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "intent"
+        }
+      }
+    },
+    {
+      "name": "wrong-installation-operation",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "bind",
+        "subject": null
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "bind",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "ready"
+        }
+      }
+    },
+    {
+      "name": "extra-evidence-field",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "bind",
+        "subject": null
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "bind",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "ready",
+          "grant": {}
+        }
+      }
+    },
+    {
+      "name": "missing-resource",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "subject": {
+          "resourceId": "00000000-0000-4000-8000-000000000010",
+          "kind": "managed-file_history",
+          "schemaVersion": 1,
+          "byteLength": 44,
+          "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "intent",
+          "intentRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000010",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 44,
+            "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000010",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 44,
+                "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOi0xLjI1ZS0xMH0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcInJlYWRfZmlsZVwiLFwiaW5wdXRcIjp7XCJmaWxlX3BhdGhcIjpcIm5vdGUudHh0XCIsXCJudW1iZXJcIjotMS4yNWUtMTB9fSJ9"
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "bytesBase64": "eyJuYW1lIjoicmVhZF9maWxlIiwiZnJhY3Rpb24iOjAuMTI1fQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            }
+          ],
+          "members": [
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            },
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 2,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "duplicate-resource",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "subject": {
+          "resourceId": "00000000-0000-4000-8000-000000000010",
+          "kind": "managed-file_history",
+          "schemaVersion": 1,
+          "byteLength": 44,
+          "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "intent",
+          "intentRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000010",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 44,
+            "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000010",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 44,
+                "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOi0xLjI1ZS0xMH0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcInJlYWRfZmlsZVwiLFwiaW5wdXRcIjp7XCJmaWxlX3BhdGhcIjpcIm5vdGUudHh0XCIsXCJudW1iZXJcIjotMS4yNWUtMTB9fSJ9"
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "bytesBase64": "eyJuYW1lIjoicmVhZF9maWxlIiwiZnJhY3Rpb24iOjAuMTI1fQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000010",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 44,
+                "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOi0xLjI1ZS0xMH0="
+            }
+          ],
+          "members": [
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            },
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 2,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reversed-members",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "subject": {
+          "resourceId": "00000000-0000-4000-8000-000000000010",
+          "kind": "managed-file_history",
+          "schemaVersion": 1,
+          "byteLength": 44,
+          "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "intent",
+          "intentRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000010",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 44,
+            "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000010",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 44,
+                "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOi0xLjI1ZS0xMH0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcInJlYWRfZmlsZVwiLFwiaW5wdXRcIjp7XCJmaWxlX3BhdGhcIjpcIm5vdGUudHh0XCIsXCJudW1iZXJcIjotMS4yNWUtMTB9fSJ9"
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "bytesBase64": "eyJuYW1lIjoicmVhZF9maWxlIiwiZnJhY3Rpb24iOjAuMTI1fQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            }
+          ],
+          "members": [
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 2,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            },
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "changed-original-ordinal",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "subject": {
+          "resourceId": "00000000-0000-4000-8000-000000000010",
+          "kind": "managed-file_history",
+          "schemaVersion": 1,
+          "byteLength": 44,
+          "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "intent",
+          "intentRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000010",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 44,
+            "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000010",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 44,
+                "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOi0xLjI1ZS0xMH0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcInJlYWRfZmlsZVwiLFwiaW5wdXRcIjp7XCJmaWxlX3BhdGhcIjpcIm5vdGUudHh0XCIsXCJudW1iZXJcIjotMS4yNWUtMTB9fSJ9"
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "bytesBase64": "eyJuYW1lIjoicmVhZF9maWxlIiwiZnJhY3Rpb24iOjAuMTI1fQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            }
+          ],
+          "members": [
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            },
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "changed-resource-bytes",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "subject": {
+          "resourceId": "00000000-0000-4000-8000-000000000010",
+          "kind": "managed-file_history",
+          "schemaVersion": 1,
+          "byteLength": 44,
+          "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "intent",
+          "intentRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000010",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 44,
+            "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000010",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 44,
+                "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+              },
+              "bytesBase64": "e30="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcInJlYWRfZmlsZVwiLFwiaW5wdXRcIjp7XCJmaWxlX3BhdGhcIjpcIm5vdGUudHh0XCIsXCJudW1iZXJcIjotMS4yNWUtMTB9fSJ9"
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "bytesBase64": "eyJuYW1lIjoicmVhZF9maWxlIiwiZnJhY3Rpb24iOjAuMTI1fQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            }
+          ],
+          "members": [
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            },
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 2,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unknown-resource",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "subject": {
+          "resourceId": "00000000-0000-4000-8000-000000000010",
+          "kind": "managed-file_history",
+          "schemaVersion": 1,
+          "byteLength": 44,
+          "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "prepare",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "intent",
+          "intentRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000010",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 44,
+            "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000010",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 44,
+                "digest": "e00e53e2e2a7af97ec86d5a906b01aa50891bfabb0ab3a9e8d8877e08ffc17d1"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOi0xLjI1ZS0xMH0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcInJlYWRfZmlsZVwiLFwiaW5wdXRcIjp7XCJmaWxlX3BhdGhcIjpcIm5vdGUudHh0XCIsXCJudW1iZXJcIjotMS4yNWUtMTB9fSJ9"
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "bytesBase64": "eyJuYW1lIjoicmVhZF9maWxlIiwiZnJhY3Rpb24iOjAuMTI1fQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000012",
+                "kind": "managed-checkpoint",
+                "schemaVersion": 1,
+                "byteLength": 23,
+                "digest": "f4f2368e27a9888a745d9ea716a0e0b012dd41cbbe18a9e47d0a681eb735faed"
+              },
+              "bytesBase64": "eyJvcGFxdWVOdW1iZXIiOjFlLTEwMH0="
+            }
+          ],
+          "members": [
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            },
+            {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 2,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "missing-prepared-for-write",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "subject": "execution-call"
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "authorization",
+          "executionReference": {
+            "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+            "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+            "callId": "00000000-0000-4000-8000-000000000101",
+            "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+            "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+            "functionCallId": "function-1",
+            "partIndex": 2,
+            "ordinal": 2,
+            "inputRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000016",
+              "kind": "managed-tool-input",
+              "schemaVersion": 1,
+              "byteLength": 223,
+              "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+            },
+            "toolDefinitionRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000017",
+              "kind": "managed-tool-definition",
+              "schemaVersion": 1,
+              "byteLength": 38,
+              "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+            },
+            "dispatchMode": "deferred"
+          },
+          "preparedRef": null,
+          "authorizationRevision": 8,
+          "authorizationSequence": 16,
+          "grant": {
+            "protocolVersion": 1,
+            "runtimeBindingId": "binding-1",
+            "bindingGeneration": "1",
+            "authorizedBindingVersion": "2",
+            "executionCallId": "execution-call",
+            "dispatchGeneration": "1",
+            "authorizationRevision": 8,
+            "authorizationSequence": 16,
+            "executionReference": {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 2,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            },
+            "intent": {
+              "revision": 7,
+              "sequence": 15
+            },
+            "checkpointRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000012",
+              "kind": "managed-checkpoint",
+              "schemaVersion": 1,
+              "byteLength": 23,
+              "digest": "f4f2368e27a9888a745d9ea716a0e0b012dd41cbbe18a9e47d0a681eb735faed"
+            },
+            "preparedRef": null,
+            "identity": {
+              "profile": "csi-files-retirement/1",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+            },
+            "context": {
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+              "epoch": 4,
+              "isolationClass": "session",
+              "leaseId": "lease-01",
+              "managedContext": "managed-context/1",
+              "mountRoot": "/runtime/workspaces/workspace-a",
+              "provisionRequestId": "provision-01",
+              "runtimeIncarnation": "boot-01",
+              "runtimeInstanceId": "runtime-01",
+              "storageId": "storage://pvc/workspace-a",
+              "tenantId": "tenant-a",
+              "workspaceGeneration": "7",
+              "workspaceId": "workspace-a",
+              "protocolVersion": 3
+            },
+            "installedContext": {
+              "protocolVersion": 3,
+              "managedContext": "managed-context/1",
+              "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+              "binding": {
+                "tenantId": "tenant-a",
+                "workspaceId": "workspace-a",
+                "workspaceGeneration": "7",
+                "storageId": "storage://pvc/workspace-a",
+                "cwdRelative": ".",
+                "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+                "contextRevision": "1"
+              }
+            }
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "grant-counter-crossed",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "subject": "execution-call"
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "authorization",
+          "executionReference": {
+            "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+            "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+            "callId": "00000000-0000-4000-8000-000000000101",
+            "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+            "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+            "functionCallId": "function-1",
+            "partIndex": 2,
+            "ordinal": 2,
+            "inputRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000016",
+              "kind": "managed-tool-input",
+              "schemaVersion": 1,
+              "byteLength": 223,
+              "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+            },
+            "toolDefinitionRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000017",
+              "kind": "managed-tool-definition",
+              "schemaVersion": 1,
+              "byteLength": 38,
+              "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+            },
+            "dispatchMode": "deferred"
+          },
+          "preparedRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000011",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 40,
+            "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+          },
+          "authorizationRevision": 8,
+          "authorizationSequence": 16,
+          "grant": {
+            "protocolVersion": 1,
+            "runtimeBindingId": "binding-1",
+            "bindingGeneration": "1",
+            "authorizedBindingVersion": "2",
+            "executionCallId": "execution-call",
+            "dispatchGeneration": "1",
+            "authorizationRevision": 9,
+            "authorizationSequence": 16,
+            "executionReference": {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 2,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            },
+            "intent": {
+              "revision": 7,
+              "sequence": 15
+            },
+            "checkpointRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000012",
+              "kind": "managed-checkpoint",
+              "schemaVersion": 1,
+              "byteLength": 23,
+              "digest": "f4f2368e27a9888a745d9ea716a0e0b012dd41cbbe18a9e47d0a681eb735faed"
+            },
+            "preparedRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000011",
+              "kind": "managed-file_history",
+              "schemaVersion": 1,
+              "byteLength": 40,
+              "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+            },
+            "identity": {
+              "profile": "csi-files-retirement/1",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+            },
+            "context": {
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+              "epoch": 4,
+              "isolationClass": "session",
+              "leaseId": "lease-01",
+              "managedContext": "managed-context/1",
+              "mountRoot": "/runtime/workspaces/workspace-a",
+              "provisionRequestId": "provision-01",
+              "runtimeIncarnation": "boot-01",
+              "runtimeInstanceId": "runtime-01",
+              "storageId": "storage://pvc/workspace-a",
+              "tenantId": "tenant-a",
+              "workspaceGeneration": "7",
+              "workspaceId": "workspace-a",
+              "protocolVersion": 3
+            },
+            "installedContext": {
+              "protocolVersion": 3,
+              "managedContext": "managed-context/1",
+              "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+              "binding": {
+                "tenantId": "tenant-a",
+                "workspaceId": "workspace-a",
+                "workspaceGeneration": "7",
+                "storageId": "storage://pvc/workspace-a",
+                "cwdRelative": ".",
+                "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+                "contextRevision": "1"
+              }
+            }
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000011",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 40,
+                "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOjAuMTI1fQ=="
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "grant-after-head",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "subject": "execution-call"
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "head": {
+          "revision": 10,
+          "sequence": 1,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "authorization",
+          "executionReference": {
+            "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+            "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+            "callId": "00000000-0000-4000-8000-000000000101",
+            "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+            "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+            "functionCallId": "function-1",
+            "partIndex": 2,
+            "ordinal": 2,
+            "inputRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000016",
+              "kind": "managed-tool-input",
+              "schemaVersion": 1,
+              "byteLength": 223,
+              "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+            },
+            "toolDefinitionRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000017",
+              "kind": "managed-tool-definition",
+              "schemaVersion": 1,
+              "byteLength": 38,
+              "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+            },
+            "dispatchMode": "deferred"
+          },
+          "preparedRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000011",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 40,
+            "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+          },
+          "authorizationRevision": 8,
+          "authorizationSequence": 16,
+          "grant": {
+            "protocolVersion": 1,
+            "runtimeBindingId": "binding-1",
+            "bindingGeneration": "1",
+            "authorizedBindingVersion": "2",
+            "executionCallId": "execution-call",
+            "dispatchGeneration": "1",
+            "authorizationRevision": 8,
+            "authorizationSequence": 16,
+            "executionReference": {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000101",
+              "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-1",
+              "partIndex": 2,
+              "ordinal": 2,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "dispatchMode": "deferred"
+            },
+            "intent": {
+              "revision": 7,
+              "sequence": 15
+            },
+            "checkpointRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000012",
+              "kind": "managed-checkpoint",
+              "schemaVersion": 1,
+              "byteLength": 23,
+              "digest": "f4f2368e27a9888a745d9ea716a0e0b012dd41cbbe18a9e47d0a681eb735faed"
+            },
+            "preparedRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000011",
+              "kind": "managed-file_history",
+              "schemaVersion": 1,
+              "byteLength": 40,
+              "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+            },
+            "identity": {
+              "profile": "csi-files-retirement/1",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+            },
+            "context": {
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+              "epoch": 4,
+              "isolationClass": "session",
+              "leaseId": "lease-01",
+              "managedContext": "managed-context/1",
+              "mountRoot": "/runtime/workspaces/workspace-a",
+              "provisionRequestId": "provision-01",
+              "runtimeIncarnation": "boot-01",
+              "runtimeInstanceId": "runtime-01",
+              "storageId": "storage://pvc/workspace-a",
+              "tenantId": "tenant-a",
+              "workspaceGeneration": "7",
+              "workspaceId": "workspace-a",
+              "protocolVersion": 3
+            },
+            "installedContext": {
+              "protocolVersion": 3,
+              "managedContext": "managed-context/1",
+              "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+              "binding": {
+                "tenantId": "tenant-a",
+                "workspaceId": "workspace-a",
+                "workspaceGeneration": "7",
+                "storageId": "storage://pvc/workspace-a",
+                "cwdRelative": ".",
+                "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+                "contextRevision": "1"
+              }
+            }
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000011",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 40,
+                "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOjAuMTI1fQ=="
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "grant-ref-crossed",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "subject": "execution-call"
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "authorization",
+          "executionReference": {
+            "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+            "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+            "callId": "00000000-0000-4000-8000-000000000101",
+            "argsDigest": "sha256:a7f45eff3130d6985604607f784b71a364014a6f4aebb32bcbd72e1e61e96e86",
+            "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+            "functionCallId": "function-1",
+            "partIndex": 2,
+            "ordinal": 2,
+            "inputRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000016",
+              "kind": "managed-tool-input",
+              "schemaVersion": 1,
+              "byteLength": 223,
+              "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+            },
+            "toolDefinitionRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000017",
+              "kind": "managed-tool-definition",
+              "schemaVersion": 1,
+              "byteLength": 38,
+              "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+            },
+            "dispatchMode": "deferred"
+          },
+          "preparedRef": {
+            "resourceId": "00000000-0000-4000-8000-000000000011",
+            "kind": "managed-file_history",
+            "schemaVersion": 1,
+            "byteLength": 40,
+            "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+          },
+          "authorizationRevision": 8,
+          "authorizationSequence": 16,
+          "grant": {
+            "protocolVersion": 1,
+            "runtimeBindingId": "binding-1",
+            "bindingGeneration": "1",
+            "authorizedBindingVersion": "2",
+            "executionCallId": "execution-call",
+            "dispatchGeneration": "1",
+            "authorizationRevision": 8,
+            "authorizationSequence": 16,
+            "executionReference": {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            },
+            "intent": {
+              "revision": 7,
+              "sequence": 15
+            },
+            "checkpointRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000012",
+              "kind": "managed-checkpoint",
+              "schemaVersion": 1,
+              "byteLength": 23,
+              "digest": "f4f2368e27a9888a745d9ea716a0e0b012dd41cbbe18a9e47d0a681eb735faed"
+            },
+            "preparedRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000011",
+              "kind": "managed-file_history",
+              "schemaVersion": 1,
+              "byteLength": 40,
+              "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+            },
+            "identity": {
+              "profile": "csi-files-retirement/1",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+            },
+            "context": {
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+              "epoch": 4,
+              "isolationClass": "session",
+              "leaseId": "lease-01",
+              "managedContext": "managed-context/1",
+              "mountRoot": "/runtime/workspaces/workspace-a",
+              "provisionRequestId": "provision-01",
+              "runtimeIncarnation": "boot-01",
+              "runtimeInstanceId": "runtime-01",
+              "storageId": "storage://pvc/workspace-a",
+              "tenantId": "tenant-a",
+              "workspaceGeneration": "7",
+              "workspaceId": "workspace-a",
+              "protocolVersion": 3
+            },
+            "installedContext": {
+              "protocolVersion": 3,
+              "managedContext": "managed-context/1",
+              "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+              "binding": {
+                "tenantId": "tenant-a",
+                "workspaceId": "workspace-a",
+                "workspaceGeneration": "7",
+                "storageId": "storage://pvc/workspace-a",
+                "cwdRelative": ".",
+                "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+                "contextRevision": "1"
+              }
+            }
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000016",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 223,
+                "digest": "e8aa6e08c1a359d0cd6f8a03a2a325b49c5042be836dd918502c71693c3b1128"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcIndyaXRlX2ZpbGVcIixcImlucHV0XCI6e1wiZmlsZV9wYXRoXCI6XCJub3RlLnR4dFwiLFwibnVtYmVyXCI6LTEuMjVlLTEwfX0ifQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000017",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 38,
+                "digest": "56ea3b7aa481ec8175e9c657b980e31eb11bd2eb25b9a429ce677c07a7035be8"
+              },
+              "bytesBase64": "eyJuYW1lIjoid3JpdGVfZmlsZSIsImZyYWN0aW9uIjowLjEyNX0="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000011",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 40,
+                "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOjAuMTI1fQ=="
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "null-prepared-with-extra-resource",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "subject": "execution-call"
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "authorization",
+          "executionReference": {
+            "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+            "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+            "callId": "00000000-0000-4000-8000-000000000100",
+            "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+            "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+            "functionCallId": "function-0",
+            "partIndex": 1,
+            "ordinal": 0,
+            "inputRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000014",
+              "kind": "managed-tool-input",
+              "schemaVersion": 1,
+              "byteLength": 222,
+              "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+            },
+            "toolDefinitionRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000015",
+              "kind": "managed-tool-definition",
+              "schemaVersion": 1,
+              "byteLength": 37,
+              "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+            },
+            "dispatchMode": "deferred"
+          },
+          "preparedRef": null,
+          "authorizationRevision": 8,
+          "authorizationSequence": 16,
+          "grant": {
+            "protocolVersion": 1,
+            "runtimeBindingId": "binding-1",
+            "bindingGeneration": "1",
+            "authorizedBindingVersion": "2",
+            "executionCallId": "execution-call",
+            "dispatchGeneration": "1",
+            "authorizationRevision": 8,
+            "authorizationSequence": 16,
+            "executionReference": {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            },
+            "intent": {
+              "revision": 7,
+              "sequence": 15
+            },
+            "checkpointRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000012",
+              "kind": "managed-checkpoint",
+              "schemaVersion": 1,
+              "byteLength": 23,
+              "digest": "f4f2368e27a9888a745d9ea716a0e0b012dd41cbbe18a9e47d0a681eb735faed"
+            },
+            "preparedRef": null,
+            "identity": {
+              "profile": "csi-files-retirement/1",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+            },
+            "context": {
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+              "epoch": 4,
+              "isolationClass": "session",
+              "leaseId": "lease-01",
+              "managedContext": "managed-context/1",
+              "mountRoot": "/runtime/workspaces/workspace-a",
+              "provisionRequestId": "provision-01",
+              "runtimeIncarnation": "boot-01",
+              "runtimeInstanceId": "runtime-01",
+              "storageId": "storage://pvc/workspace-a",
+              "tenantId": "tenant-a",
+              "workspaceGeneration": "7",
+              "workspaceId": "workspace-a",
+              "protocolVersion": 3
+            },
+            "installedContext": {
+              "protocolVersion": 3,
+              "managedContext": "managed-context/1",
+              "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+              "binding": {
+                "tenantId": "tenant-a",
+                "workspaceId": "workspace-a",
+                "workspaceGeneration": "7",
+                "storageId": "storage://pvc/workspace-a",
+                "cwdRelative": ".",
+                "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+                "contextRevision": "1"
+              }
+            }
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcInJlYWRfZmlsZVwiLFwiaW5wdXRcIjp7XCJmaWxlX3BhdGhcIjpcIm5vdGUudHh0XCIsXCJudW1iZXJcIjotMS4yNWUtMTB9fSJ9"
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "bytesBase64": "eyJuYW1lIjoicmVhZF9maWxlIiwiZnJhY3Rpb24iOjAuMTI1fQ=="
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000011",
+                "kind": "managed-file_history",
+                "schemaVersion": 1,
+                "byteLength": 40,
+                "digest": "06ab65ebf09bfad85799bbfd6d88c2bbd305572c2ab4e3a6da73c41301064659"
+              },
+              "bytesBase64": "eyJzY2hlbWFWZXJzaW9uIjoyLCJvcGFxdWVOdW1iZXIiOjAuMTI1fQ=="
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "payload-bare-json-in-envelope",
+      "request": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "subject": "execution-call"
+      },
+      "response": {
+        "protocolVersion": 1,
+        "requestId": "99c13242-2fe9-4129-8f54-70fc2b8c4a27",
+        "identity": {
+          "profile": "csi-files-retirement/1",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+        },
+        "context": {
+          "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+          "epoch": 4,
+          "isolationClass": "session",
+          "leaseId": "lease-01",
+          "managedContext": "managed-context/1",
+          "mountRoot": "/runtime/workspaces/workspace-a",
+          "provisionRequestId": "provision-01",
+          "runtimeIncarnation": "boot-01",
+          "runtimeInstanceId": "runtime-01",
+          "storageId": "storage://pvc/workspace-a",
+          "tenantId": "tenant-a",
+          "workspaceGeneration": "7",
+          "workspaceId": "workspace-a",
+          "protocolVersion": 3
+        },
+        "installedContext": {
+          "protocolVersion": 3,
+          "managedContext": "managed-context/1",
+          "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+          "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+          "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+          "binding": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "workspaceGeneration": "7",
+            "storageId": "storage://pvc/workspace-a",
+            "cwdRelative": ".",
+            "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+            "contextRevision": "1"
+          }
+        },
+        "action": "execute",
+        "head": {
+          "revision": 10,
+          "sequence": 20,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "evidence": {
+          "kind": "authorization",
+          "executionReference": {
+            "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+            "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+            "callId": "00000000-0000-4000-8000-000000000100",
+            "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+            "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+            "functionCallId": "function-0",
+            "partIndex": 1,
+            "ordinal": 0,
+            "inputRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000014",
+              "kind": "managed-tool-input",
+              "schemaVersion": 1,
+              "byteLength": 222,
+              "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+            },
+            "toolDefinitionRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000015",
+              "kind": "managed-tool-definition",
+              "schemaVersion": 1,
+              "byteLength": 37,
+              "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+            },
+            "dispatchMode": "deferred"
+          },
+          "preparedRef": null,
+          "authorizationRevision": 8,
+          "authorizationSequence": 16,
+          "grant": {
+            "protocolVersion": 1,
+            "runtimeBindingId": "binding-1",
+            "bindingGeneration": "1",
+            "authorizedBindingVersion": "2",
+            "executionCallId": "execution-call",
+            "dispatchGeneration": "1",
+            "authorizationRevision": 8,
+            "authorizationSequence": 16,
+            "executionReference": {
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "promptId": "efc77f5b-b444-49bf-bbe4-d2f4cc7cf128",
+              "callId": "00000000-0000-4000-8000-000000000100",
+              "argsDigest": "sha256:a1616feecc6d50d90cfc0f0586cca04a9f15b24646153b163524a442ae14331d",
+              "batchId": "04f10884-5bbc-4aca-bdce-671369923e17",
+              "functionCallId": "function-0",
+              "partIndex": 1,
+              "ordinal": 0,
+              "inputRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "toolDefinitionRef": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "dispatchMode": "deferred"
+            },
+            "intent": {
+              "revision": 7,
+              "sequence": 15
+            },
+            "checkpointRef": {
+              "resourceId": "00000000-0000-4000-8000-000000000012",
+              "kind": "managed-checkpoint",
+              "schemaVersion": 1,
+              "byteLength": 23,
+              "digest": "f4f2368e27a9888a745d9ea716a0e0b012dd41cbbe18a9e47d0a681eb735faed"
+            },
+            "preparedRef": null,
+            "identity": {
+              "profile": "csi-files-retirement/1",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+            },
+            "context": {
+              "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+              "epoch": 4,
+              "isolationClass": "session",
+              "leaseId": "lease-01",
+              "managedContext": "managed-context/1",
+              "mountRoot": "/runtime/workspaces/workspace-a",
+              "provisionRequestId": "provision-01",
+              "runtimeIncarnation": "boot-01",
+              "runtimeInstanceId": "runtime-01",
+              "storageId": "storage://pvc/workspace-a",
+              "tenantId": "tenant-a",
+              "workspaceGeneration": "7",
+              "workspaceId": "workspace-a",
+              "protocolVersion": 3
+            },
+            "installedContext": {
+              "protocolVersion": 3,
+              "managedContext": "managed-context/1",
+              "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+              "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+              "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+              "binding": {
+                "tenantId": "tenant-a",
+                "workspaceId": "workspace-a",
+                "workspaceGeneration": "7",
+                "storageId": "storage://pvc/workspace-a",
+                "cwdRelative": ".",
+                "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+                "contextRevision": "1"
+              }
+            }
+          },
+          "resources": [
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000014",
+                "kind": "managed-tool-input",
+                "schemaVersion": 1,
+                "byteLength": 222,
+                "digest": "cec3b8d1d2997e3cfdcae3e3fdfe31200a8b714e63ad76dac3db7d815dc6f1b7"
+              },
+              "bytesBase64": "eyJoYXJuZXNzU2Vzc2lvbklkIjoiYzkxMWM1NGYtYWQ3Ni00MjBmLThjNzYtZmIxMjRjMGNlNjIzIiwicnVudGltZVNlc3Npb25JZCI6ImM5MTFjNTRmLWFkNzYtNDIwZi04Yzc2LWZiMTI0YzBjZTYyMyIsInBheWxvYWRKc29uIjoie1widG9vbE5hbWVcIjpcInJlYWRfZmlsZVwiLFwiaW5wdXRcIjp7XCJmaWxlX3BhdGhcIjpcIm5vdGUudHh0XCIsXCJudW1iZXJcIjotMS4yNWUtMTB9fSJ9",
+              "payload": {
+                "fraction": 0.125
+              }
+            },
+            {
+              "reference": {
+                "resourceId": "00000000-0000-4000-8000-000000000015",
+                "kind": "managed-tool-definition",
+                "schemaVersion": 1,
+                "byteLength": 37,
+                "digest": "43a5d4d54533365ec0e08279f833a68a9496190ee3c767ce8e43c3d7c83499eb"
+              },
+              "bytesBase64": "eyJuYW1lIjoicmVhZF9maWxlIiwiZnJhY3Rpb24iOjAuMTI1fQ=="
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "invalidJson": [
+    "{\"protocolVersion\":1,\"protocolVersion\":1}",
+    "{\"counter\":1e0}",
+    "{\"counter\":-0}",
+    "{\"counter\":0.5}"
+  ],
+  "intentLocatorCases": [
+    {
+      "name": "minimum original position",
+      "intent": {
+        "revision": 1,
+        "sequence": 1
+      },
+      "accepted": true
+    },
+    {
+      "name": "last position before authorization",
+      "intent": {
+        "revision": 7,
+        "sequence": 15
+      },
+      "accepted": true
+    },
+    {
+      "name": "older original position",
+      "intent": {
+        "revision": 2,
+        "sequence": 9
+      },
+      "accepted": true
+    },
+    {
+      "name": "null locator",
+      "intent": null,
+      "accepted": false
+    },
+    {
+      "name": "missing revision",
+      "intent": {
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "missing sequence",
+      "intent": {
+        "revision": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "extra locator field",
+      "intent": {
+        "revision": 1,
+        "sequence": 1,
+        "resourceId": "extra"
+      },
+      "accepted": false
+    },
+    {
+      "name": "resource-shaped locator",
+      "intent": {
+        "resourceId": "00000000-0000-4000-8000-000000000013",
+        "kind": "managed-tool-intent",
+        "schemaVersion": 1,
+        "byteLength": 22,
+        "digest": "f8d4c77bfb170cfd9be5653febe0c3c23781492dc0c3c1936df6b3b8aa2f47ac"
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision zero",
+      "intent": {
+        "revision": 0,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision negative",
+      "intent": {
+        "revision": -1,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision string",
+      "intent": {
+        "revision": "1",
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision fraction",
+      "intent": {
+        "revision": 1.5,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision unsafe",
+      "intent": {
+        "revision": 9007199254740992,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision boolean",
+      "intent": {
+        "revision": true,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision equal to authorization",
+      "intent": {
+        "revision": 8,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "revision after authorization",
+      "intent": {
+        "revision": 9,
+        "sequence": 1
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence zero",
+      "intent": {
+        "revision": 1,
+        "sequence": 0
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence negative",
+      "intent": {
+        "revision": 1,
+        "sequence": -1
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence string",
+      "intent": {
+        "revision": 1,
+        "sequence": "1"
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence fraction",
+      "intent": {
+        "revision": 1,
+        "sequence": 1.5
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence unsafe",
+      "intent": {
+        "revision": 1,
+        "sequence": 9007199254740992
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence boolean",
+      "intent": {
+        "revision": 1,
+        "sequence": true
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence equal to authorization",
+      "intent": {
+        "revision": 1,
+        "sequence": 16
+      },
+      "accepted": false
+    },
+    {
+      "name": "sequence after authorization",
+      "intent": {
+        "revision": 1,
+        "sequence": 17
+      },
+      "accepted": false
+    },
+    {
+      "name": "maximum safe position before authorization",
+      "intent": {
+        "revision": 9007199254740990,
+        "sequence": 9007199254740990
+      },
+      "authorization": {
+        "revision": 9007199254740991,
+        "sequence": 9007199254740991
+      },
+      "accepted": true
+    }
+  ]
+}

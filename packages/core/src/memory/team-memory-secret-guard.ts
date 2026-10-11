@@ -5,7 +5,9 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { isTeamAutoMemPath } from './paths.js';
+import path from 'node:path';
+import { isTeamAutoMemPath, TEAM_AUTO_MEMORY_DIRNAME } from './paths.js';
+import { isSubpath, QWEN_DIR } from '../utils/paths.js';
 import { scanForSecrets } from './secret-scanner.js';
 
 const debugLogger = createDebugLogger('TEAM_MEMORY_SECRET_GUARD');
@@ -28,6 +30,26 @@ export function checkTeamMemorySecrets(
   if (!isTeamAutoMemPath(filePath, projectRoot)) {
     return null;
   }
+  return checkTeamMemoryContent(content);
+}
+
+/** Only for a no-follow backend that admits paths inside this workspace. */
+export function checkWorkspaceTeamMemorySecrets(
+  filePath: string,
+  content: string,
+  workspaceRoot: string,
+): string | null {
+  if (
+    !isSubpath(
+      path.join(workspaceRoot, QWEN_DIR, TEAM_AUTO_MEMORY_DIRNAME),
+      path.resolve(filePath),
+    )
+  )
+    return null;
+  return checkTeamMemoryContent(content);
+}
+
+function checkTeamMemoryContent(content: string): string | null {
   const matches = scanForSecrets(content);
   if (matches.length === 0) {
     return null;
