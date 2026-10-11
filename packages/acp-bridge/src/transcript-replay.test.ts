@@ -2022,6 +2022,68 @@ describe('createTranscriptReplayMachine', () => {
     },
   );
 
+  it('hoists a persisted peer identity onto the replayed notification frame', () => {
+    // The teammate's identity persists inside `backgroundTask.agent`; the
+    // frame-level `_meta.agent` is what the block reducer and the Web Shell
+    // read, so replay must lift it — otherwise a reloaded session renders
+    // peer notices unattributed.
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('peer-notice', 'user', {
+        subtype: 'notification',
+        systemPayload: {
+          displayText: '[team] security: found an injection',
+          backgroundTask: {
+            taskId: 'teammate-message-2',
+            status: 'message',
+            kind: 'peer',
+            agent: {
+              agentName: '/root/security',
+              depth: 1,
+              kind: 'teammate',
+            },
+          },
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      _meta: {
+        source: 'background_notification',
+        agent: {
+          agentName: '/root/security',
+          depth: 1,
+          kind: 'teammate',
+        },
+      },
+    });
+  });
+
+  it('keeps a malformed persisted identity off the frame', () => {
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('peer-notice', 'user', {
+        subtype: 'notification',
+        systemPayload: {
+          displayText: '[team] security: found an injection',
+          backgroundTask: {
+            taskId: 'teammate-message-2',
+            status: 'message',
+            kind: 'peer',
+            agent: { agentName: '/root/security' },
+          },
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(
+      (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+    ).toBeUndefined();
+  });
+
   it('rebuilds agent identity on a replayed Agent result', () => {
     const machine = createTranscriptReplayMachine();
     const result = updates(

@@ -1032,9 +1032,9 @@ describe('background continuation', () => {
   );
 
   it('names the teammate from the persisted peer identity after reload', () => {
-    // Live frames carry `_meta.agent`; after a reload the identity only
-    // survives inside the persisted `backgroundTask` payload the replay
-    // restores — the bubble must attribute the message either way.
+    // Live frames carry `_meta.agent`; after a reload the identity survives
+    // only in the persisted `backgroundTask` payload, which the adapter
+    // re-projects as the `teammate` prop (see transcriptToMessages tests).
     const container = render(
       <SystemMessage
         content="[team] security: found an injection"
@@ -1044,16 +1044,12 @@ describe('background continuation', () => {
           kind: 'peer',
           status: 'message',
           taskId: 'teammate-message-1',
-          agent: {
-            agentName: '/root/security',
-            depth: 1,
-            kind: 'teammate',
-          },
         }}
+        teammate={{ name: 'security' }}
       />,
     );
-    expect(container.textContent).toContain('/root/security');
-    expect(container.querySelector('[title="/root/security"]')).not.toBeNull();
+    expect(container.textContent).toContain('@security');
+    expect(container.querySelector('[title="security"]')).not.toBeNull();
   });
 
   it('leaves a peer notice unattributed when no identity persisted', () => {
@@ -1069,7 +1065,7 @@ describe('background continuation', () => {
         }}
       />,
     );
-    expect(container.textContent).not.toContain('/root/');
+    expect(container.textContent).not.toContain('@security');
   });
 
   it('renders an Agent Team peer report without a task-completion label', () => {
@@ -1096,5 +1092,32 @@ describe('background continuation', () => {
     expect(container.textContent).not.toContain('notification.peer');
     expect(container.textContent).not.toContain('Background task completed');
     expect(container.querySelector('[data-tone="neutral"]')).not.toBeNull();
+  });
+});
+
+describe('SystemMessage — teammate attribution', () => {
+  it('renders an @name chip for a teammate-authored peer notification', () => {
+    const container = render(
+      <SystemMessage
+        content="[team] correctness: the workspace is empty"
+        variant="info"
+        source="background_notification"
+        data={{ taskId: 'teammate-message-2', status: 'message', kind: 'peer' }}
+        teammate={{ name: 'correctness' }}
+      />,
+    );
+    expect(container.textContent).toContain('@correctness');
+  });
+
+  it('renders no chip when the notification has no teammate author', () => {
+    const container = render(
+      <SystemMessage
+        content="Background agent completed."
+        variant="info"
+        source="background_notification"
+        data={{ taskId: 'task-1', status: 'completed' }}
+      />,
+    );
+    expect(container.textContent).not.toContain('@');
   });
 });

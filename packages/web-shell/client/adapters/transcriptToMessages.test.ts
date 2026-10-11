@@ -553,6 +553,87 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('attributes a peer notification to its teammate author', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'peer-1',
+        'user',
+        '[team] correctness: the workspace is empty PEERMARK-9902',
+        1,
+        false,
+        {
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'teammate-message-2',
+              status: 'message',
+              kind: 'peer',
+            },
+          },
+          agent: {
+            agentName: '/root/correctness',
+            depth: 1,
+            kind: 'teammate',
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'peer-1',
+        role: 'system',
+        content: '[team] correctness: the workspace is empty PEERMARK-9902',
+        variant: 'info',
+        source: 'background_notification',
+        data: {
+          taskId: 'teammate-message-2',
+          status: 'message',
+          kind: 'peer',
+        },
+        teammate: { name: 'correctness' },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('attributes a teammate roster change delivered as background_task_completed', () => {
+    // Real peer frames carry `_meta.source: 'background_task_completed'`, so
+    // the attribution must live on that push site too, not only on the
+    // 'background_notification' one.
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'peer-2',
+        'assistant',
+        'teammate correctness joined the team',
+        1,
+        false,
+        {
+          meta: {
+            source: 'background_task_completed',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'teammate-roster-1',
+              status: 'joined',
+              kind: 'peer',
+            },
+          },
+          agent: {
+            agentName: '/root/correctness',
+            depth: 1,
+            kind: 'teammate',
+          },
+        },
+      ),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      source: 'background_task_completed',
+      teammate: { name: 'correctness' },
+    });
+  });
+
   it('keeps vision bridge notices separate from assistant output', () => {
     const notice = {
       status: 'skipped',
