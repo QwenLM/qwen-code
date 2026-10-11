@@ -112,6 +112,30 @@ describe('agent identity projection', () => {
   });
 });
 
+describe('agent identity on user chunks', () => {
+  it('extracts a replayed peer notice identity from a flat user_message_chunk', () => {
+    // The REST transcript wraps no `update` object; the identity rides
+    // `_meta` and must survive to `user.text.delta` for the block reducer.
+    const events = normalizeDaemonEvent({
+      id: 41,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'teammate security joined the team' },
+        _meta: {
+          source: 'background_notification',
+          agent: SECURITY,
+        },
+      },
+    } as never);
+    expect(events[0]).toMatchObject({
+      type: 'user.text.delta',
+      agent: SECURITY,
+    });
+  });
+});
+
 describe('agent identity transcript reduction', () => {
   const raw = (
     id: number,

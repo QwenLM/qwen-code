@@ -927,12 +927,19 @@ function normalizeSessionUpdate(
           return [];
         }
         if (part.kind === 'text') {
+          // A replayed peer notification arrives as a user chunk whose
+          // `_meta` carries the producing teammate's identity (hoisted by the
+          // replay machine); without extracting it here the block reducer
+          // never sees `block.agent`, and a reloaded session renders the
+          // notice unattributed.
+          const agent = extractAgentIdentity(update);
           return part.text
             ? [
                 {
                   ...base,
                   type: 'user.text.delta',
                   text: part.text,
+                  ...(agent ? { agent } : {}),
                   ...(meta ? { meta } : {}),
                 },
               ]
@@ -970,12 +977,14 @@ function normalizeSessionUpdate(
         ];
       }
       const text = getTextContent(content);
+      const agent = extractAgentIdentity(update);
       return text
         ? [
             {
               ...base,
               type: 'user.text.delta',
               text,
+              ...(agent ? { agent } : {}),
               ...(meta ? { meta } : {}),
             },
           ]
