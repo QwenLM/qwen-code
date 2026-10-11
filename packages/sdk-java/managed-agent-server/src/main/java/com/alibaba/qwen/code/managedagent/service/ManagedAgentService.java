@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
@@ -47,7 +48,9 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -55,6 +58,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
@@ -91,6 +95,14 @@ public class ManagedAgentService {
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
     private RuntimeWarmer runtimeWarmer;
+    private ManagedAgentProperties.Dispatch renameDispatch = new ManagedAgentProperties.Dispatch();
+    private Clock renameClock = Clock.systemUTC();
+
+    @Autowired
+    void configureRenameDelivery(ManagedAgentProperties properties, Clock clock) {
+        renameDispatch = properties.getDispatch();
+        renameClock = clock;
+    }
 
     @Autowired(required = false)
     void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
@@ -234,6 +246,19 @@ public class ManagedAgentService {
     public CommandAdmission createChildSession(String tenantId,
             String parentSessionId, String childRunId, String description,
             String prompt) {
+        return createChildSession(tenantId, parentSessionId, childRunId,
+                description, prompt, false);
+    }
+
+    /**
+     * The same creation; {@code isolated} binds the child to its run's
+     * ready child Workspace (#13753 I1) instead of the parent's directory.
+     * The child directory joins the request digest, so a replay that names
+     * a different binding is an idempotency conflict.
+     */
+    public CommandAdmission createChildSession(String tenantId,
+            String parentSessionId, String childRunId, String description,
+            String prompt, boolean isolated) {
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
         if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
             throw new ApiException(HttpStatus.CONFLICT,
@@ -261,16 +286,35 @@ public class ManagedAgentService {
         String title = description.isBlank() ? "child agent"
                 : description.length() > 256 ? description.substring(0, 256)
                         : description;
+        String childCwd = null;
+        if (isolated) {
+            childCwd = store.findChildWorkspaceCwd(tenantId,
+                    parentSessionId, childRunId);
+            if (childCwd == null) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "child_workspace_not_ready",
+                        "The child run's Workspace is not ready to bind a child Session.");
+            }
+        }
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("child", childRunId);
         semantic.put("title", title);
         semantic.put("input", input);
+        if (childCwd != null) {
+            semantic.put("workspace", childCwd);
+        }
         String requestDigest = digests.digest(semantic);
         StoreModels.Admission admission;
         try {
-            admission = store.insertChildSessionCommand(tenantId,
-                    parentSessionId, creationKey, requestDigest, title, input,
-                    SubmitHarnessTurn.computePayloadDigest(input), lineage);
+            admission = childCwd == null
+                    ? store.insertChildSessionCommand(tenantId,
+                            parentSessionId, creationKey, requestDigest, title,
+                            input, SubmitHarnessTurn.computePayloadDigest(input),
+                            lineage)
+                    : store.insertChildSessionCommand(tenantId,
+                            parentSessionId, creationKey, requestDigest, title,
+                            input, SubmitHarnessTurn.computePayloadDigest(input),
+                            lineage, childCwd);
         } catch (DuplicateKeyException error) {
             admission = store.replayChildSessionCommand(tenantId,
                     parentSessionId, creationKey, requestDigest);
@@ -294,16 +338,12 @@ public class ManagedAgentService {
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
-        requireReadableSession(tenantId, actorId, sessionId);
-        requireBoundCreator(tenantId, actorId, sessionId);
+        SessionRecord session = requireReadableSession(tenantId, actorId,
+                sessionId);
+        requireSubmitterRole(session, actorId);
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
-        // Replay is a read of the recorded admission, not a re-admission:
-        // answer a same-key retry before the admission gate, which may now
-        // refuse on state that postdates the recorded admission (a
-        // re-registered Workspace, a revoked grant, a DRAINING registry),
-        // or the client can never recover the Turn it was given.
         Admission replay = replay(tenantId, SUBMIT, idempotencyKey,
                 requestDigest);
         if (replay != null) {
@@ -311,7 +351,7 @@ public class ManagedAgentService {
             dispatch(tenantId, replay);
             return response(replay);
         }
-        requireSubmitter(tenantId, actorId, sessionId);
+        requireSubmitterFacts(session, actorId);
         requireHarness();
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
         Admission admission;
@@ -330,7 +370,9 @@ public class ManagedAgentService {
     public CommandAdmission cancelTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId, String turnId) {
         validateIdempotencyKey(idempotencyKey);
-        requireCanceller(tenantId, actorId, sessionId);
+        SessionRecord session = requireReadableSession(tenantId, actorId,
+                sessionId);
+        requireCanceller(session, actorId);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "turnId", turnId));
         Admission replay = replay(tenantId, CANCEL, idempotencyKey,
@@ -356,19 +398,56 @@ public class ManagedAgentService {
         return response(admission);
     }
 
+    /**
+     * H4f: stops the child Session's running Turn on behalf of its parent
+     * run's committed stop request, called only by the child result relay.
+     * The key derives from the parent, the run and the Turn, so a redriven
+     * stop replays its admission and never mints a second cancel; a Turn
+     * that already ended answers without effect. The child acts under no
+     * caller: the request is the parent authority's own durable record.
+     */
+    public CommandAdmission cancelChildTurn(String tenantId,
+            String parentSessionId, String childSessionId, String childRunId,
+            String turnId) {
+        String key = childStopKey(parentSessionId, childRunId, turnId);
+        String requestDigest = digests.digest(Map.of(
+                "sessionId", childSessionId, "turnId", turnId));
+        Admission replay = replay(tenantId, CANCEL, key, requestDigest);
+        if (replay != null) {
+            dispatch(tenantId, replay);
+            return response(replay);
+        }
+        Admission admission;
+        try {
+            admission = store.insertCancelCommand(tenantId, CANCEL, key,
+                    requestDigest, childSessionId, turnId);
+        } catch (DuplicateKeyException error) {
+            admission = store.replayCommand(tenantId, CANCEL, key,
+                    requestDigest);
+        }
+        if (admission.commandEffect()) {
+            coordinator.cancel(tenantId, admission.sessionId(),
+                    admission.turnId());
+        } else {
+            dispatch(tenantId, admission);
+        }
+        return response(admission);
+    }
+
     public SessionMutationResult<PublicSession> renameSession(
             String tenantId, String actorId, String idempotencyKey, String sessionId,
             String title) {
         validateIdempotencyKey(idempotencyKey);
-        requireReadableSession(tenantId, actorId, sessionId);
-        requireBoundCreator(tenantId, actorId, sessionId);
+        SessionRecord subject = requireReadableSession(tenantId, actorId,
+                sessionId);
+        requireSubmitterRole(subject, actorId);
         String effectiveTitle = validRenameTitle(title);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "title", effectiveTitle));
-        // A completed rename is answered from its record before the
-        // admission gate: the gate may now refuse on state that postdates
-        // the recorded outcome, and a same-key retry must not lose it.
-        // A PENDING row falls through so beginSessionMutation answers it as
+        // A completed rename is answered from its record after the
+        // admission gate: the command family's replay is not actor-scoped,
+        // so the gate must refuse before any recorded key is honoured, and
+        // a PENDING row falls through so beginSessionRename answers it as
         // replayed and the retry re-drives the unfinished mutation.
         Optional<CommandRecord> recorded = store.findCommand(tenantId,
                 RENAME, idempotencyKey);
@@ -385,29 +464,47 @@ public class ManagedAgentService {
                         sessionId), true);
             }
         }
-        requireSubmitter(tenantId, actorId, sessionId);
-        SessionMutationCommand command = store.beginSessionMutation(tenantId,
-                RENAME, idempotencyKey, requestDigest, sessionId,
-                SessionMutationKind.RENAME);
+        requireSubmitterFacts(subject, actorId);
+        requireHarness();
+        if (!harness.supportsFencedTitles()) {
+            throw dependencyUnavailable("hosted_harness_unavailable",
+                    "The Hosted Harness must support title protocol version 1.");
+        }
+        SessionMutationCommand command = store.beginSessionRename(tenantId,
+                idempotencyKey, requestDigest, sessionId, effectiveTitle);
         if (!"COMPLETED".equals(command.status())) {
+            String owner = UUID.randomUUID().toString();
+            var candidate = new StoreModels.RenameDelivery(tenantId, sessionId,
+                    idempotencyKey, effectiveTitle, command.renameRevision(), 0);
+            var delivery = store.claimRename(candidate, owner, renameDispatch.getLeaseDuration()).orElse(null);
+            if (delivery == null) {
+                throw dependencyUnavailable("hosted_harness_unavailable",
+                        "The Session title is already being delivered.");
+            }
             try {
-                requireHarness();
                 SessionRecord session = store.requireSession(tenantId, sessionId);
                 HarnessConnector.Attachment attachment = harness.createOrLoad(tenantId, sessionId,
-                        session.harnessBootId() != null);
-                harness.rename(tenantId, sessionId, effectiveTitle);
-                session = store.completeSessionMutation(tenantId, RENAME,
-                        idempotencyKey, sessionId, SessionMutationKind.RENAME,
-                        effectiveTitle, attachment.bootId());
+                        session.harnessBootId() != null, true);
+                harness.rename(tenantId, sessionId, effectiveTitle, command.renameRevision());
+                session = store.completeSessionRename(tenantId, idempotencyKey, sessionId,
+                        effectiveTitle, attachment.bootId(), command.renameRevision());
                 return new SessionMutationResult<>(publicSession(session),
                         command.replayed());
             } catch (RuntimeException error) {
                 try {
-                    store.abandonSessionMutation(tenantId, RENAME,
-                            idempotencyKey, sessionId);
+                    store.abandonSessionRename(tenantId, idempotencyKey, sessionId,
+                            command.renameRevision(), owner);
+                    store.retryRename(delivery, owner, renameClock.millis());
                 } catch (RuntimeException cleanupError) {
                     LOG.warn("Failed to retire rename tenant={} session={}",
                             tenantId, sessionId, cleanupError);
+                }
+                if (error instanceof DaemonHttpException refusal
+                        && refusal.getStatusCode() == HttpStatus.CONFLICT.value()
+                        && "session_mutation_superseded".equals(refusal.getErrorCode())) {
+                    throw new ApiException(HttpStatus.CONFLICT,
+                            "session_mutation_superseded",
+                            "A later Session title attempt has been admitted.");
                 }
                 if (error instanceof ApiException failure) {
                     throw failure;
@@ -696,6 +793,7 @@ public class ManagedAgentService {
                 "agent.session",
                 session.agentId(),
                 session.agentRevision(),
+                session.agentDefinitionDigest(),
                 session.status().toLowerCase(),
                 session.createdAt() / 1000,
                 session.updatedAt() / 1000,
@@ -730,32 +828,58 @@ public class ManagedAgentService {
         Map<String, EventRecord> environmentEvents = store
                 .findLatestEnvironmentEvents(tenantId, latestTurns);
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
-        // The creator-submit capability batches its registry reads like the
-        // close state: one IN query over the submit-shaped Sessions, then
-        // one over the creator-owned ones' workspaces.
+        // Cwd admission has no Turn execution-profile restriction. One role
+        // grant read covers the workspaces of both shapes; the executable
+        // facts read covers both id sets, retaining each capability's gates.
         Set<String> shaped = sessions.stream().filter(this::maySubmitShape)
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
-        Set<String> creatorOwns = shaped.isEmpty() ? Set.of()
-                : workspaces.createdSessions(tenantId, actorId,
-                        List.copyOf(shaped));
-        Set<String> grantWorkspaces = creatorOwns.isEmpty() ? Set.of()
+        Set<String> cwdShaped = sessions.stream().filter(this::mayChangeCwdShape)
+                .map(SessionRecord::sessionId)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> candidateIds = new java.util.HashSet<>(shaped);
+        candidateIds.addAll(cwdShaped);
+        Set<String> grantWorkspaces = candidateIds.isEmpty() ? Set.of()
                 : sessions.stream()
-                        .filter(session -> creatorOwns.contains(
+                        .filter(session -> candidateIds.contains(
                                 session.sessionId()))
                         .map(session -> session.workspace().getWorkspaceId())
                         .collect(java.util.stream.Collectors.toSet());
         Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants =
-                grantWorkspaces.isEmpty() ? Map.of()
-                        : workspaces.findReadable(tenantId, actorId,
-                                grantWorkspaces);
+                grantWorkspaces.isEmpty() || actorId == null
+                        || actorId.isEmpty() ? Map.of()
+                        : submitterGrants(tenantId, actorId, grantWorkspaces);
+        // The admission conjunct this mirrors: the caller's role above,
+        // and the creator-keyed execution facts of each candidate Session,
+        // batched exactly like the close state — skipped when the grant
+        // read already proved nothing on the page can be admitted, the
+        // zero-query shape the removed creator chain provided.
+        boolean operatorGrant = grants.values().stream().anyMatch(
+                ManagedWorkspaceRegistry.ReadableGrant::canCreateSession);
+        Set<String> executable =
+                candidateIds.isEmpty() || !operatorGrant ? Set.of()
+                        : store.sessionsWithExecutionRegistryFacts(tenantId,
+                                candidateIds);
         return sessions.stream()
                 .map(session -> webShellSession(session,
                         latestTurns.get(session.sessionId()),
                         environmentEvents.get(session.sessionId()),
                         retention(session, closed),
-                        maySubmitWorkspaceTurn(session, creatorOwns, grants)))
+                        maySubmitWorkspaceTurn(session, grants, executable),
+                        mayChangeCwd(session, grants, executable)))
                 .toList();
+    }
+
+    // The registry key cannot encode every actor id a filter can supply;
+    // that caller's page simply advertises no Workspace Turns.
+    private Map<String, ManagedWorkspaceRegistry.ReadableGrant>
+            submitterGrants(String tenantId, String actorId,
+                    Set<String> workspaceIds) {
+        try {
+            return workspaces.findReadable(tenantId, actorId, workspaceIds);
+        } catch (IllegalArgumentException error) {
+            return Map.of();
+        }
     }
 
     private WebShellSession webShellSession(SessionRecord session,
@@ -765,7 +889,7 @@ public class ManagedAgentService {
 
     private WebShellSession webShellSession(SessionRecord session,
             TurnSummary latestTurn, EventRecord environmentEvent,
-            boolean retention, boolean maySubmit) {
+            boolean retention, boolean maySubmit, boolean mayChangeCwd) {
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -781,7 +905,8 @@ public class ManagedAgentService {
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session),
                         hasActions(session), maySubmit, supportsClose(session),
-                        retention, retention, supportsDelete(session, retention)));
+                        retention, retention, supportsDelete(session, retention),
+                        mayChangeCwd));
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
@@ -926,94 +1051,130 @@ public class ManagedAgentService {
     }
 
     // Later Turns of a Workspace-bound Session run under the creator's
-    // Workspace grants (WorkspaceExecutionStore.authorize), so only the
-    // creator may submit them or rename the Session, and only with Workspace
-    // files enabled. Everyone else keeps the existing refusal. Cancelling
+    // Workspace grants (WorkspaceExecutionStore.authorize), so new-work
+    // admission certifies two conjuncts: the caller holds OPERATOR
+    // (requireSubmitterRole), and the Session's creator-keyed execution
+    // facts still hold (requireSubmitterFacts). The command family's
+    // replay is NOT actor-scoped (#13619), so the role gate runs before
+    // the replay: below-OPERATOR never reaches a recorded key. The facts
+    // gate follows the replay: it certifies new work only, so a recorded
+    // completed outcome always answers — a Workspace re-registration, a
+    // DRAINING row or a creator demotion must not retire it. Cancelling
     // has its own, narrower rule (requireCanceller).
-    private void requireSubmitter(String tenantId, String actorId,
-            String sessionId) {
-        SessionRecord session = store.requireSession(tenantId, sessionId);
-        if (!maySubmitWorkspaceTurn(session, actorId)) {
-            requireLegacyWorkspace(session, actorId);
-        }
-    }
-
-    // Replay skips the admission gate, so a bound Session's recorded
-    // admission answers only its creator. The creation receipt survives a
-    // revoked grant, a draining Workspace and a re-registration, so the
-    // creator's own same-key retry still replays.
-    private void requireBoundCreator(String tenantId, String actorId,
-            String sessionId) {
-        SessionRecord session = store.requireSession(tenantId, sessionId);
+    private void requireSubmitterRole(SessionRecord session,
+            String actorId) {
         if (session.workspace() != null
-                && !workspaces.createdSession(tenantId, actorId, sessionId)) {
+                && !workspaces.accessOf(session.tenantId(), actorId,
+                        session.workspace().getWorkspaceId())
+                        .atLeast(WorkspaceAccess.OPERATOR)) {
             requireLegacyWorkspace(session, actorId);
         }
     }
 
-    // Cancelling aborts work that is already running, so it needs only what
-    // identifies the creator, not the grants that admit new work: the
-    // creator who can still read the Workspace may cancel while can_create is
-    // revoked, the Workspace is draining or it was re-registered. The shape
-    // term stays: a Session that can no longer execute keeps the refusal.
-    private void requireCanceller(String tenantId, String actorId,
-            String sessionId) {
-        SessionRecord session = store.requireSession(tenantId, sessionId);
-        if (!maySubmitShape(session)
-                || !workspaces.canRead(session.tenantId(), actorId,
-                        session.workspace().getWorkspaceId())
-                || !workspaces.createdSession(session.tenantId(), actorId,
-                        session.sessionId())) {
+    private void requireSubmitterFacts(SessionRecord session,
+            String actorId) {
+        if (session.workspace() != null
+                && !maySubmitWorkspaceTurn(session, actorId)) {
             requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    // Cancelling aborts work that is already running, so it needs the
+    // caller's OPERATOR and the Session's executable shape, not the
+    // creator-keyed execution facts new work certifies: the delivery
+    // reuses the admitted attachment and re-checks no grants.
+    private void requireCanceller(SessionRecord session, String actorId) {
+        if (!maySubmitShape(session)
+                || !workspaces.accessOf(session.tenantId(), actorId,
+                        session.workspace().getWorkspaceId())
+                        .atLeast(WorkspaceAccess.OPERATOR)) {
+            requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    // The tenant-wide command namespace is shared with callers' keys,
+    // which are visible ASCII only (validateIdempotencyKey): the space
+    // makes this key one no caller can claim first.
+    private String childStopKey(String parentSessionId, String childRunId,
+            String turnId) {
+        return "child-stop " + digests.digest(Map.of(
+                "parentSessionId", parentSessionId, "childRunId", childRunId,
+                "turnId", turnId));
+    }
+
+    /**
+     * H4f: who may cancel a task. A bound Session's tasks run under its
+     * Workspace, so the caller needs OPERATOR there, as for cancelling a
+     * Turn; a readable caller below it gets {@code 403 task_forbidden}.
+     * Unlike the Turn rule, the Session's executable shape is not an
+     * authorization fact: a Session that stopped serving work answers the
+     * new-request state checks instead. An unbound Session has no role
+     * model beyond its read access.
+     */
+    void requireTaskCanceller(SessionRecord session, String actorId) {
+        if (session.workspace() != null
+                && !workspaces.accessOf(session.tenantId(), actorId,
+                        session.workspace().getWorkspaceId())
+                        .atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "task_forbidden",
+                    "Only a Workspace operator may cancel the task.");
         }
     }
 
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
             String actorId) {
+        if (!maySubmitShape(session) || actorId == null
+                || actorId.isEmpty()) {
+            return false;
+        }
+        // findReadable throws on an actor id the registry key cannot
+        // encode; that caller is simply not a submitter.
+        ManagedWorkspaceRegistry.WorkspaceSummary summary;
+        try {
+            summary = workspaces.findReadable(session.tenantId(), actorId,
+                    session.workspace().getWorkspaceId());
+        } catch (IllegalArgumentException error) {
+            return false;
+        }
+        // The caller's role and registry state, and on top of them the
+        // creator-keyed facts the execution authority re-verifies: the
+        // Registry still backs the binding exactly and stays ACTIVE, and
+        // the create-command actor keeps OPERATOR or above — after a
+        // demotion or re-registration admission refuses first instead of
+        // accepting a Turn that can only fail.
+        return summary != null && summary.canCreateSession()
+                && store.hasExecutionRegistryFacts(session.tenantId(),
+                        session.sessionId());
+    }
+
+    // The page twin of the singular: the same rule answered from the two
+    // batch reads the assembler already made — the caller's role from the
+    // grant batch, the creator-keyed facts of each submit-shaped Session
+    // from the facts batch.
+    private boolean maySubmitWorkspaceTurn(SessionRecord session,
+            Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants,
+            java.util.Set<String> executable) {
         if (!maySubmitShape(session)) {
             return false;
         }
-        // createdSession precedes findReadable: it answers false for an actor
-        // id the registry key cannot encode, where findReadable throws.
-        if (!workspaces.createdSession(session.tenantId(), actorId,
-                session.sessionId())) {
-            return false;
-        }
-        // The caller is the Session's creator, so this reads the creator's
-        // grant row, as the execution authority's join does: READER or
-        // above (the join's own filter) and OPERATOR for creation, on a
-        // registry whose state is ACTIVE.
-        ManagedWorkspaceRegistry.WorkspaceSummary summary =
-                workspaces.findReadable(session.tenantId(), actorId,
-                        session.workspace().getWorkspaceId());
-        // Execution also requires the Workspace generation and storage the
-        // Session was bound to; after a re-registration it refuses, so
-        // admission must refuse first instead of accepting a Turn that fails.
-        return summary != null && summary.canCreateSession()
-                && workspaces.bindingCurrent(session.tenantId(),
-                        session.workspace().getWorkspaceId(),
-                        session.workspace().getWorkspaceGeneration(),
-                        session.workspace().getStorageId());
+        var grant = grants.get(session.workspace().getWorkspaceId());
+        return grant != null && grant.canCreateSession()
+                && executable.contains(session.sessionId());
     }
 
-    // The page twin of the singular: the same rule answered from the batch
-    // reads the assembler already made. The grant batch carries the registry's
-    // binding stamp, so a re-registration drops the capability here exactly as
-    // bindingCurrent drops it in the singular.
-    private boolean maySubmitWorkspaceTurn(SessionRecord session,
-            Set<String> creatorOwns,
-            Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants) {
-        if (!maySubmitShape(session)
-                || !creatorOwns.contains(session.sessionId())) {
+    // The cwd twin of the submit predicate above, mirroring admitCwdChange:
+    // the caller's OPERATOR-or-above role (canCreateSession) and the same
+    // creator-keyed executable facts admission re-checks — a capability
+    // must not certify what admission would refuse.
+    private boolean mayChangeCwd(SessionRecord session,
+            Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants,
+            java.util.Set<String> executable) {
+        if (!mayChangeCwdShape(session)) {
             return false;
         }
         var grant = grants.get(session.workspace().getWorkspaceId());
-        if (grant == null || !grant.canCreateSession()) {
-            return false;
-        }
-        var binding = session.workspace();
-        return grant.workspaceGeneration() == binding.getWorkspaceGeneration()
-                && grant.storageId().equals(binding.getStorageId());
+        return grant != null && grant.canCreateSession()
+                && executable.contains(session.sessionId());
     }
 
     private boolean maySubmitShape(SessionRecord session) {
@@ -1026,9 +1187,15 @@ public class ManagedAgentService {
         // that fails them can never execute, so admission must not certify
         // it. Empty bound creation skips that validation by design.
         return "ACTIVE".equals(session.status()) && session.deletedAt() == null
-                && "qwen-code".equals(session.agentId())
+                && ("qwen-code".equals(session.agentId())
+                        || session.agentDefinitionDigest() != null)
                 && WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         session.workspace().getContextConfigRef());
+    }
+
+    private boolean mayChangeCwdShape(SessionRecord session) {
+        return session.workspace() != null && "ACTIVE".equals(session.status())
+                && session.deletedAt() == null && store.workspaceFilesEnabled();
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,
@@ -1037,16 +1204,28 @@ public class ManagedAgentService {
                 actorId);
     }
 
+    // The submitter family's bound-refusal split: an actor without a read
+    // grant gets the invisible 404, a readable actor below OPERATOR the
+    // 403 of the sibling lifecycle refusal, and an OPERATOR blocked by the
+    // shape gates or the creator-keyed facts the family's domain 409.
     private void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
         if (session.workspace() != null) {
-            if (!workspaces.canRead(session.tenantId(), actorId,
-                    session.workspace().getWorkspaceId())) {
+            String workspaceId = session.workspace().getWorkspaceId();
+            WorkspaceAccess access = workspaces.accessOf(session.tenantId(),
+                    actorId, workspaceId);
+            if (!access.canRead()) {
                 throw new ApiException(HttpStatus.NOT_FOUND,
                         "session_not_found", "The Session was not found.");
             }
-            throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable",
-                    "Hosted Workspace execution is not available.");
+            if (access.atLeast(WorkspaceAccess.OPERATOR)) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "workspace_unavailable",
+                        "Hosted Workspace execution is not available.");
+            }
+            throw new ApiException(HttpStatus.FORBIDDEN,
+                    "session_operation_forbidden",
+                    "Only a Workspace operator may use the Session.");
         }
     }
 
@@ -1166,7 +1345,9 @@ public class ManagedAgentService {
     }
 
     private static String validRenameTitle(String title) {
-        if (title == null || title.isBlank() || title.length() > 256) {
+        if (title == null || title.length() > 256
+                || title.codePoints().allMatch(character -> Character.isWhitespace(character)
+                        || Character.isSpaceChar(character) || character == 0xfeff)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
                     "Title must contain 1-256 characters.");
         }

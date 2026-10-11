@@ -40,8 +40,8 @@
       "argsDigest": "sha256:e280e95a318be2942314f9189cb77a71a9e843b57387f21926361ef2a555306a"
     },
     {
-      "id": "background-false-flag",
-      "valid": false,
+      "id": "background-explicit-false",
+      "valid": true,
       "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\",\"is_background\":false}}",
       "requestDigest": "sha256:55096daad2f54b6784c7213c20902325d0ebe4b38002519655eb16e6b6178ff1",
       "argsDigest": "sha256:979825f64b90d9df3850567dabc993724aa8734e9b12aed127e6bf05b86bb4f0"
@@ -61,8 +61,8 @@
       "argsDigest": "sha256:fe59bea464d33e1d18e55464a0107793e1c57f18d6b9f696af3d677bbbf9b7ea"
     },
     {
-      "id": "monitor-missing-marker",
-      "valid": false,
+      "id": "monitor-no-marker",
+      "valid": true,
       "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\"}}",
       "requestDigest": "sha256:fb9e80ff565fce70d0b8f6cdc615192714c96f3c71ecfea2adf4bdd1c7a7dfdd",
       "argsDigest": "sha256:858bba3697d3750ca35b16a3619c3279195ac60ebfc2f4b63fb2fbc5c06c12d1"
@@ -1871,5 +1871,19 @@
   "tokenVector": {
     "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "hash": "0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a"
-  }
+  },
+  "payloadCases": [
+    {
+      "id": "background-shell",
+      "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"echo B1-OUT; sleep 900\",\"is_background\":true}}",
+      "requestDigest": "sha256:f83d7f3f1dcf74d642b15e122fc44eb6a70c90d844a98f2f95f80d44dbe6ee00",
+      "argsDigest": "sha256:89255d588c8bc086c77358c3f9d365d497a03791e24ea43383eb25cc85de7255"
+    },
+    {
+      "id": "monitor",
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"while true; do echo tick; sleep 5; done\",\"description\":\"watch ticks\",\"max_events\":100,\"idle_timeout_ms\":300000,\"is_monitor\":true}}",
+      "requestDigest": "sha256:06dade6f696f7d0182c24280475d93c19d2efe72bcc8e7580ddf604b9b6bf0d4",
+      "argsDigest": "sha256:c126dbf7eb742625012b1feb10f1be9bb504d93a135f6f253d0779d3a1130a8e"
+    }
+  ]
 }

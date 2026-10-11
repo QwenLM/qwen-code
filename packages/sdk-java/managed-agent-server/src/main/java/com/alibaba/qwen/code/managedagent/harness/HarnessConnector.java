@@ -14,6 +14,8 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsLifecycle() { return false; }
 
+    default boolean supportsFencedTitles() { return false; }
+
     default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
@@ -84,6 +86,18 @@ public interface HarnessConnector extends AutoCloseable {
     void cancel(String tenantId, String sessionId);
 
     /**
+     * H6b/H6c: one automation operation onto the Session's journal, from the
+     * control plane's automation service and scanner (define_schedule,
+     * retire_schedule, fire_run). The Hosted side settles it before
+     * answering, and the answer carries the operation's result.
+     */
+    default Map<String, Object> runAutomationOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
+        throw new UnsupportedOperationException(
+                "Automation operations are unavailable");
+    }
+
+    /**
      * H4b: one child operation onto the Session's journal, from the
      * control plane's relay (dispatch/attach/result/accept/cancel/
      * close-scope). The Hosted side settles it before answering.
@@ -92,6 +106,21 @@ public interface HarnessConnector extends AutoCloseable {
             Map<String, Object> body) {
         throw new UnsupportedOperationException(
                 "Child operations are unavailable");
+    }
+
+    /**
+     * H4d-b: one session message operation onto the Session's journal,
+     * from the control plane's message relay (handover, receive, accepted,
+     * consumed, cancelled, rejected, unknown, consume), and the child
+     * result relay's stop of a stopped run's message turns (stop). The
+     * Hosted side settles it before answering. A receive or consume starts
+     * work in the Session, so it takes the same Workspace admission as a
+     * submit.
+     */
+    default void runMessageOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        throw new UnsupportedOperationException(
+                "Message operations are unavailable");
     }
 
     /**
@@ -108,6 +137,10 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     void rename(String tenantId, String sessionId, String title);
+
+    default void rename(String tenantId, String sessionId, String title, long revision) {
+        throw new UnsupportedOperationException("Fenced Session titles are unavailable");
+    }
 
     /**
      * Closes the Session and returns the boot ID of the Harness that

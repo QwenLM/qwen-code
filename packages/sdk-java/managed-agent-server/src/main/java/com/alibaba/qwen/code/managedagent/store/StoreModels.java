@@ -18,7 +18,21 @@ public final class StoreModels {
             long harnessLastEventId, long lastSequence,
             long replayFloorSequence, long createdAt, long updatedAt,
             Long deletedAt, long version, ContextBinding workspace,
-            String approvalMode, String toolProfile) {
+            String approvalMode, String toolProfile,
+            String agentDefinitionDigest) {
+        public SessionRecord(String tenantId, String sessionId,
+                String agentId, String agentRevision, String title,
+                String status, String harnessBootId, String harnessEventEpoch,
+                long harnessLastEventId, long lastSequence,
+                long replayFloorSequence, long createdAt, long updatedAt,
+                Long deletedAt, long version, ContextBinding workspace,
+                String approvalMode, String toolProfile) {
+            this(tenantId, sessionId, agentId, agentRevision, title, status,
+                    harnessBootId, harnessEventEpoch, harnessLastEventId,
+                    lastSequence, replayFloorSequence, createdAt, updatedAt,
+                    deletedAt, version, workspace, approvalMode, toolProfile,
+                    null);
+        }
         public SessionRecord(String tenantId, String sessionId,
                 String agentId, String title, String status,
                 String harnessBootId, String harnessEventEpoch,
@@ -27,7 +41,7 @@ public final class StoreModels {
             this(tenantId, sessionId, agentId, null, title, status,
                     harnessBootId, harnessEventEpoch, harnessLastEventId,
                     lastSequence, 0, createdAt, updatedAt, deletedAt, version,
-                    null, "yolo", null);
+                    null, "yolo", null, null);
         }
     }
 
@@ -89,7 +103,14 @@ public final class StoreModels {
     }
 
     public record SessionMutationCommand(String sessionId, String status,
-            boolean replayed) {
+            boolean replayed, long renameRevision) {
+        public SessionMutationCommand(String sessionId, String status, boolean replayed) {
+            this(sessionId, status, replayed, 0);
+        }
+    }
+
+    public record RenameDelivery(String tenantId, String sessionId,
+            String idempotencyKey, String title, long revision, int attemptCount) {
     }
 
     public record SessionMutation(SessionRecord session, boolean replayed) {
@@ -100,13 +121,14 @@ public final class StoreModels {
         ARCHIVE,
         DELETE,
         ACTION_RESPONSE,
-        CWD_CHANGE
+        CWD_CHANGE,
+        TASK_CANCEL
     }
 
     /**
      * A durable lifecycle operation. {@code sessionStatusBefore} is the
      * Session status when it was admitted; only an operation admitted on an
-     * active Session closes the Harness. The cwd fields and
+     * active Session closes the Harness. The cwd fields, {@code taskId} and
      * {@code failureCode} are set only for the kinds that populate them.
      */
     public record OperationRecord(String tenantId, String sessionId,
@@ -115,14 +137,26 @@ public final class StoreModels {
             String sessionStatusBefore, String receiptId, String leaseOwner,
             long claimGeneration, int attemptCount, String targetCwdRelative,
             Long expectedContextRevision, Long resultContextRevision,
-            String failureCode, int lifecycleProtocolVersion) {
+            String failureCode, int lifecycleProtocolVersion,
+            byte[] actorKey, String taskId) {
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState,
+                String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration,
+                int attemptCount, String targetCwdRelative, Long expectedContextRevision,
+                Long resultContextRevision, String failureCode, int lifecycleProtocolVersion, byte[] actorKey) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
+                    expectedContextRevision, resultContextRevision, failureCode, lifecycleProtocolVersion, actorKey,
+                    null);
+        }
+
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
                 String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
                 String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String targetCwdRelative,
                 Long expectedContextRevision, Long resultContextRevision, String failureCode) {
             this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
                     sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
-                    expectedContextRevision, resultContextRevision, failureCode, 0);
+                    expectedContextRevision, resultContextRevision, failureCode, 0, null);
         }
 
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
@@ -131,7 +165,7 @@ public final class StoreModels {
                 int lifecycleProtocolVersion) {
             this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
                     sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, null, null,
-                    failureCode, lifecycleProtocolVersion);
+                    failureCode, lifecycleProtocolVersion, null);
         }
 
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,

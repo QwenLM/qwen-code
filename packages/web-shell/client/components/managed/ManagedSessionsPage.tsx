@@ -19,6 +19,8 @@ import {
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
 import { useManagedActions } from './use-managed-actions';
+import { useManagedCwdChange } from './use-managed-cwd-change';
+import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
@@ -176,6 +178,13 @@ function ManagedSessionsContent({
         : null,
     [approvals.action, messages],
   );
+  const cwd = useManagedCwdChange(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    detail.refreshSummary,
+  );
   // The reason line below is mounted exactly when this holds, so the dialog can
   // point at it without ever leaving a dangling IDREF. A latch-only render has
   // no `alert` node and no operable option left, so this line is the only place
@@ -306,7 +315,7 @@ function ManagedSessionsContent({
 
   async function submit() {
     const abort = lifetime.current;
-    if (!abort || abort.signal.aborted || busy) return;
+    if (!abort || abort.signal.aborted || busy || cwd.isBlocked()) return;
     setDiscarded(false);
     let attempt = pendingRef.current;
     if (!attempt) {
@@ -444,11 +453,20 @@ function ManagedSessionsContent({
           {t('managed.refresh')}
         </Button>
       </div>
-      {(error || detail.error) && (
-        <p role="alert" className="text-sm text-destructive">
-          {error || detail.error}
+      {/* One server condition can surface through both channels; announce
+          each distinct message once, keyed by the message so a standing
+          alert keeps its node when a duplicate of it stops rendering. */}
+      {[
+        ...new Set(
+          [detail.stoppedReason, detail.error, error].filter(
+            (message): message is string => Boolean(message),
+          ),
+        ),
+      ].map((message) => (
+        <p key={message} role="alert" className="text-sm text-destructive">
+          {message}
         </p>
-      )}
+      ))}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]">
         <nav
           ref={sessionsNavRef}
@@ -547,6 +565,30 @@ function ManagedSessionsContent({
                 {t('managed.workspaceDirectory')}:{' '}
                 {summary.workspace.cwdRelative}
               </p>
+              <ManagedSessionCwdControl
+                key={`${provider.storageKey}:${summary.sessionId}`}
+                summary={summary}
+                supported={Boolean(provider.cwdChange)}
+                cwd={cwd}
+                disabledReason={
+                  active ||
+                  pendingApproval ||
+                  busy ||
+                  pending?.sessionId === sessionId
+                    ? t('managed.cwd.busy')
+                    : undefined
+                }
+                onSubmit={(path, revision) => {
+                  if (
+                    pendingRef.current?.sessionId === sessionId ||
+                    busy ||
+                    active ||
+                    pendingApproval
+                  )
+                    return Promise.resolve();
+                  return cwd.submit(path, revision);
+                }}
+              />
               {!summary.capabilities.workspaceTurns && (
                 <p className="text-muted-foreground">
                   {t('managed.workspaceExecutionUnavailable')}
@@ -639,9 +681,11 @@ function ManagedSessionsContent({
                 request={pendingApproval}
                 variant="floating"
                 keyboardActive={false}
-                // Only the Session creator may answer; once the service says
-                // so, that is true of every approval this Session raises, so
-                // the latch is scoped to the Session rather than the Action.
+                // Answering needs the Session's owner or a Workspace
+                // operator; once the service refuses this viewer, that
+                // holds for every approval this Session raises — until an
+                // explicit retry re-probes, so the latch is scoped to the
+                // Session rather than the Action.
                 disabled={approvals.respondForbidden}
                 extraDescriptionId={
                   [
@@ -696,20 +740,30 @@ function ManagedSessionsContent({
               guard only bounds the latch: the reason describes a card, and
               once the Session has none there is nothing left to explain. */}
           {pendingApproval !== null && answerNoticeShown && (
-            <p
-              id={answerNoticeId}
-              // The first refusal is news; the latch that keeps every later
-              // approval of this Session disabled only restates it, so it is
-              // a status line rather than a second alert.
-              role={approvals.answerError !== undefined ? 'alert' : 'status'}
-              className="text-sm text-destructive"
-            >
-              {t(
-                approvals.respondForbidden
-                  ? 'managed.approval.forbidden'
-                  : 'managed.approval.failed',
+            <div className="flex items-center gap-2">
+              <p
+                id={answerNoticeId}
+                // The first refusal is news; the latch that keeps every
+                // later approval of this Session disabled only restates it,
+                // so it is a status line rather than a second alert.
+                role={approvals.answerError !== undefined ? 'alert' : 'status'}
+                className="text-sm text-destructive"
+              >
+                {t(
+                  approvals.respondForbidden
+                    ? 'managed.approval.forbidden'
+                    : 'managed.approval.failed',
+                )}
+              </p>
+              {approvals.respondForbidden && (
+                // The refusal came from the viewer's role row, which an
+                // operator can raise while the page stays open — unlike the
+                // load-error retry this renders without a `loadError`.
+                <Button variant="outline" size="sm" onClick={approvals.retry}>
+                  {t('managed.approval.retry')}
+                </Button>
               )}
-            </p>
+            </div>
           )}
           <ManagedSessionProgress
             summary={summary}
@@ -753,6 +807,7 @@ function ManagedSessionsContent({
                   type="submit"
                   disabled={
                     busy ||
+                    cwd.blocked ||
                     (!pending &&
                       (!text.trim() ||
                         Boolean(sessionId && !summary?.capabilities.canSend)))

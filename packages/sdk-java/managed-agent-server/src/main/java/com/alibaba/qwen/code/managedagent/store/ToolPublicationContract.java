@@ -155,16 +155,25 @@ public final class ToolPublicationContract {
                 StandardCharsets.UTF_8)), "Invalid payload encoding");
         JsonNode body = readJson(bytes);
         closed(body, Set.of("toolName", "input"));
-        String toolName = text(body, "toolName");
-        require(PUBLISHABLE_TOOL_NAMES.contains(toolName),
-                "Only Shell and Monitor tools can publish");
-        switch (toolName) {
-            case "run_shell_command" -> requireShellPayloadInput(body.get("input"));
-            case "monitor" -> requireMonitorPayloadInput(body.get("input"));
-            default -> throw new IllegalArgumentException(
-                    "Publishable tool lacks a contract arm");
-        }
+        require(body.get("input") != null && body.get("input").isObject(),
+                "Shell input is invalid");
         JsonNode input = body.get("input");
+        String toolName = text(body, "toolName");
+        // H3: the detached capture family publishes background Shell and
+        // Monitor payloads beside the foreground Shell; each family keeps its
+        // own closed input shape. Admission takes the family list from one
+        // place — the store's checkpoint gate reads the same constant, and a
+        // second hard-coded copy is what refused the Monitor reserve one layer
+        // below this contract (#13533).
+        require(PUBLISHABLE_TOOL_NAMES.contains(toolName),
+                "Only Shell and Monitor payloads can publish");
+        if ("run_shell_command".equals(toolName)) {
+            requireShellInput(input);
+        } else if ("monitor".equals(toolName)) {
+            requireMonitorInput(input);
+        } else {
+            throw new IllegalArgumentException("Publishable tool lacks a contract arm");
+        }
         require(("sha256:" + sha256(bytes)).equals(text(binding, "requestDigest")),
                 "Original payload digest conflicts");
         require(("sha256:" + sha256(canonicalText(canonical(input)).getBytes(StandardCharsets.UTF_8)))
@@ -172,42 +181,36 @@ public final class ToolPublicationContract {
                 "Canonical Shell input digest conflicts");
     }
 
-    /**
-     * The Shell payload family, foreground and background. The hosted turn
-     * marks an admitted background call with the boolean `is_background`
-     * flag and refuses every other value it could not admit, so the flag
-     * may only ever appear as {@code true} here.
-     */
-    private static void requireShellPayloadInput(JsonNode input) {
-        require(input != null && input.isObject(), "Shell input is invalid");
+    private static void requireShellInput(JsonNode input) {
         require(input.has("command") && input.get("command").isTextual()
                 && !input.get("command").textValue().isEmpty(), "Shell command is invalid");
         input.fieldNames().forEachRemaining(name -> require(
-                Set.of("command", "timeout", "description", "is_background").contains(name),
-                "Shell input field is invalid"));
-        JsonNode background = input.get("is_background");
-        require(background == null || background.isBoolean() && background.booleanValue(),
-                "Shell background flag is invalid");
+                Set.of("command", "timeout", "description", "is_background", "directory")
+                        .contains(name), "Shell input field is invalid"));
         boundedIntField(input, "timeout", 600_000, "Shell timeout is invalid");
         require(!input.has("description") || input.get("description").isTextual(),
                 "Shell description is invalid");
+        require(!input.has("is_background") || input.get("is_background").isBoolean(),
+                "Shell background flag is invalid");
+        require(!input.has("directory") || input.get("directory").isTextual()
+                && !input.get("directory").textValue().isEmpty(), "Shell directory is invalid");
     }
 
-    /** The Monitor payload family, always marked with `is_monitor`. */
-    private static void requireMonitorPayloadInput(JsonNode input) {
-        require(input != null && input.isObject(), "Monitor input is invalid");
+    private static void requireMonitorInput(JsonNode input) {
         require(input.has("command") && input.get("command").isTextual()
                 && !input.get("command").textValue().isEmpty(), "Monitor command is invalid");
         input.fieldNames().forEachRemaining(name -> require(
-                Set.of("command", "idle_timeout_ms", "max_events", "description", "is_monitor")
+                Set.of("command", "description", "max_events", "idle_timeout_ms", "directory",
+                        "is_monitor")
                         .contains(name), "Monitor input field is invalid"));
-        JsonNode marker = input.get("is_monitor");
-        require(marker != null && marker.isBoolean() && marker.booleanValue(),
-                "Monitor marker is invalid");
-        boundedIntField(input, "idle_timeout_ms", 600_000, "Monitor idle timeout is invalid");
-        boundedIntField(input, "max_events", 10_000, "Monitor max events is invalid");
         require(!input.has("description") || input.get("description").isTextual(),
                 "Monitor description is invalid");
+        require(!input.has("is_monitor") || input.get("is_monitor").isBoolean(),
+                "Monitor marker is invalid");
+        boundedIntField(input, "max_events", 10_000, "Monitor max_events is invalid");
+        boundedIntField(input, "idle_timeout_ms", 600_000, "Monitor idle timeout is invalid");
+        require(!input.has("directory") || input.get("directory").isTextual()
+                && !input.get("directory").textValue().isEmpty(), "Monitor directory is invalid");
     }
 
     /**
