@@ -17,13 +17,35 @@ import {
   type ReportItem,
 } from './contracts.js';
 
+function failFastArray<T>(element: z.ZodType<T, z.ZodTypeDef, unknown>) {
+  return z.unknown().transform((value, ctx): T[] => {
+    if (!Array.isArray(value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Expected an array.',
+      });
+      return z.NEVER;
+    }
+    const entries: T[] = [];
+    for (const entry of value) {
+      const result = element.safeParse(entry);
+      if (!result.success) {
+        ctx.addIssue(result.error.issues[0]);
+        return z.NEVER;
+      }
+      entries.push(result.data);
+    }
+    return entries;
+  });
+}
+
 const optionalTime = z.number().finite().nonnegative().nullish();
 const assertionSchema = z.object({
-  ancestorTitles: z.array(z.string()),
+  ancestorTitles: failFastArray(z.string()),
   fullName: z.string(),
   title: z.string(),
   status: testStatusSchema,
-  failureMessages: z.array(z.string()).nullable(),
+  failureMessages: failFastArray(z.string()).nullable(),
   duration: optionalTime,
   location: z
     .object({
@@ -34,20 +56,52 @@ const assertionSchema = z.object({
 });
 const sourceSchema = reportedSchema
   .extend({
-    testResults: z.array(
+    testResults: failFastArray(
       z.object({
         name: z.string(),
         status: z.enum(['passed', 'failed']),
         message: z.string(),
         startTime: z.number().finite().nonnegative(),
         endTime: z.number().finite().nonnegative(),
-        assertionResults: z.array(assertionSchema),
+        assertionResults: failFastArray(assertionSchema),
       }),
     ),
   })
   .strip();
 
+function checkCollectionLimits(value: unknown): void {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    !('testResults' in value) ||
+    !Array.isArray(value.testResults)
+  ) {
+    return;
+  }
+  let assertions = 0;
+  if (
+    value.testResults.length > MAX_FILES ||
+    value.testResults.some((file: unknown) => {
+      if (
+        file !== null &&
+        typeof file === 'object' &&
+        'assertionResults' in file &&
+        Array.isArray(file.assertionResults)
+      ) {
+        assertions += file.assertionResults.length;
+      }
+      return assertions > MAX_ASSERTIONS;
+    })
+  ) {
+    throw new ExplorerError(
+      'REPORT_TOO_LARGE',
+      `Reports support at most ${MAX_FILES} file entries and ${MAX_ASSERTIONS} assertions.`,
+    );
+  }
+}
+
 export function parseVitestReport(value: unknown): NormalizedReport {
+  checkCollectionLimits(value);
   const result = sourceSchema.safeParse(value);
   if (!result.success) {
     throw new ExplorerError(
@@ -56,16 +110,6 @@ export function parseVitestReport(value: unknown): NormalizedReport {
     );
   }
   const { testResults, ...reported } = result.data;
-  if (
-    testResults.length > MAX_FILES ||
-    testResults.reduce((sum, file) => sum + file.assertionResults.length, 0) >
-      MAX_ASSERTIONS
-  ) {
-    throw new ExplorerError(
-      'REPORT_TOO_LARGE',
-      `Reports support at most ${MAX_FILES} file entries and ${MAX_ASSERTIONS} assertions.`,
-    );
-  }
   const computed: NormalizedReport['computed'] = {
     fileEntries: testResults.length,
     passedFiles: 0,

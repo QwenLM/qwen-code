@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +12,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { MAX_RESULT_CHARS } from './contracts.js';
+import { MAX_ASSERTIONS, MAX_FILES, MAX_RESULT_CHARS } from './contracts.js';
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
 const bundle = join(packageRoot, 'dist/main.js');
@@ -62,6 +62,75 @@ afterEach(async () => {
 });
 
 describe('actual stdio MCP artifact', () => {
+  it('rejects malformed collections without publishing snapshots and keeps serving', async () => {
+    const root = await temporary();
+    await copyReport(root);
+    const valid = JSON.parse(await readFile(join(root, 'report.json'), 'utf8'));
+    const client = await connect(root);
+    const invalidReports = [
+      {
+        report: { ...valid, testResults: Array(MAX_FILES + 1).fill(null) },
+        code: 'REPORT_TOO_LARGE',
+      },
+      {
+        report: {
+          ...valid,
+          testResults: [
+            {
+              ...valid.testResults[0],
+              assertionResults: Array(MAX_ASSERTIONS + 1).fill(null),
+            },
+          ],
+        },
+        code: 'REPORT_TOO_LARGE',
+      },
+      ...['ancestorTitles', 'failureMessages'].map((field) => ({
+        report: {
+          ...valid,
+          testResults: [
+            {
+              ...valid.testResults[0],
+              assertionResults: [
+                {
+                  ...valid.testResults[0].assertionResults[0],
+                  [field]: Array(2_000).fill(null),
+                },
+              ],
+            },
+          ],
+        },
+        code: 'INVALID_REPORT',
+      })),
+    ];
+    for (const { report, code } of invalidReports) {
+      await writeFile(join(root, 'invalid.json'), JSON.stringify(report));
+      const rejected = await call(client, 'test_report_import', {
+        relativePath: 'invalid.json',
+      });
+      expect(rejected.isError).toBe(true);
+      expect(rejected.structuredContent).toMatchObject({ code });
+    }
+    expect(
+      await readdir(join(root, '.qwen/test-failure-explorer/reports')).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return [];
+          throw error;
+        },
+      ),
+    ).toEqual([]);
+    const imported = await call(client, 'test_report_import', {
+      relativePath: 'report.json',
+    });
+    expect(imported.isError).not.toBe(true);
+    const summary = await call(client, 'test_report_query', {
+      reportId: imported.structuredContent!['reportId'],
+      query: { kind: 'summary' },
+    });
+    expect(summary.structuredContent!['summary']).toMatchObject({
+      computed: { fileEntries: 2, assertions: 4, failures: 1 },
+    });
+  }, 30_000);
+
   it('exposes model-only tools with accurate mutation annotations and queries after restart', async () => {
     const root = await temporary();
     await copyReport(root);

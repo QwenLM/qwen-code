@@ -5,7 +5,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   MAX_ASSERTIONS,
   MAX_FILES,
@@ -274,5 +274,83 @@ describe('Vitest 3.2 report normalization', () => {
         ]),
       ),
     ).toThrow(expect.objectContaining({ code: 'REPORT_TOO_LARGE' }));
+  });
+
+  it.each([
+    [
+      'files',
+      MAX_FILES,
+      (entries: unknown[]) => ({ ...report(), testResults: entries }),
+    ],
+    [
+      'assertions',
+      MAX_ASSERTIONS,
+      (entries: unknown[]) => report([file(entries)]),
+    ],
+    [
+      'assertions across files',
+      MAX_ASSERTIONS / 2,
+      (entries: unknown[]) => report([file(entries), file(entries)]),
+    ],
+  ])('checks the raw %s limit before reading elements', (_, limit, wrap) => {
+    const entries: unknown[] = Array(limit + 1).fill(null);
+    const read = vi.fn(() => {
+      throw new Error('Oversized collection was traversed');
+    });
+    Object.defineProperty(entries, 0, { get: read });
+    expect(() => parseVitestReport(wrap(entries))).toThrow(
+      expect.objectContaining({ code: 'REPORT_TOO_LARGE' }),
+    );
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['files', (entries: unknown[]) => ({ ...report(), testResults: entries })],
+    ['assertions', (entries: unknown[]) => report([file(entries)])],
+    [
+      'ancestor titles',
+      (entries: unknown[]) =>
+        report([file([{ ...assertion(), ancestorTitles: entries }])]),
+    ],
+    [
+      'failure messages',
+      (entries: unknown[]) =>
+        report([file([{ ...assertion(), failureMessages: entries }])]),
+    ],
+  ])(
+    'stops recursively validating %s at the first invalid element',
+    (name, wrap) => {
+      const entries: unknown[] = [null, null];
+      const read = vi.fn(() => null);
+      if (name === 'files') {
+        const next = file([]);
+        Object.defineProperty(next, 'name', { get: read });
+        entries[1] = next;
+      } else {
+        Object.defineProperty(entries, 1, { get: read });
+      }
+      expect(() => parseVitestReport(wrap(entries))).toThrow(
+        expect.objectContaining({ code: 'INVALID_REPORT' }),
+      );
+      expect(read).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts reports at both collection limits', () => {
+    const parsed = parseVitestReport(
+      report(
+        Array.from({ length: MAX_FILES }, () =>
+          file(
+            Array.from({ length: MAX_ASSERTIONS / MAX_FILES }, () =>
+              assertion(),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(parsed.computed).toMatchObject({
+      fileEntries: MAX_FILES,
+      assertions: MAX_ASSERTIONS,
+    });
   });
 });
