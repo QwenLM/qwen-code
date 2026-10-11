@@ -99,6 +99,75 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private final ConcurrentMap<String, CooledObservation>
             unknownLookupCooldowns = new ConcurrentHashMap<>();
 
+    /**
+     * H4b: the live physical Runtime binding of a Harness Session — how
+     * the child result relay and the close cascade confirm the child
+     * Session's Runtime identity and generation. {@code warm()} creates
+     * the binding when the Hosted tool turn is constructed, so it exists
+     * even for a child that finishes without ever acquiring a tool
+     * Session. Only READY rows answer: a drained, lost, recovering or
+     * released binding no longer holds the live Runtime it would pin.
+     * "Latest" is the greatest READY binding id across the whole
+     * traversal — the page a row lands on says nothing, and
+     * {@code generation} is not consulted for the choice.
+     */
+    public RuntimeBindingRecord findLatestBindingByHarnessSession(
+            String tenantId, String harnessSessionId) {
+        String after = null;
+        RuntimeBindingRecord best = null;
+        for (;;) {
+            List<RuntimeBindingRecord> page = bindingRepository
+                    .findByHarnessSession(tenantId, harnessSessionId, after,
+                            100);
+            if (page.isEmpty()) {
+                return best;
+            }
+            for (RuntimeBindingRecord candidate : page) {
+                if (candidate.getState() == RuntimeBindingRecord.State.READY
+                        && (best == null || candidate.getBindingId()
+                                .compareTo(best.getBindingId()) > 0)) {
+                    best = candidate;
+                }
+            }
+            if (page.size() < 100) {
+                return best;
+            }
+            after = page.get(page.size() - 1).getBindingId();
+        }
+    }
+
+    /**
+     * The newest binding row of a Harness Session in ANY state — evidence
+     * reads only: the close cascade's started proof and its repair's
+     * dispatch identity. A RELEASED or LOST row still proves the child
+     * once dispatched (and names the identity that dispatch committed),
+     * while it can never warm a retry, so the repair-for-warmth read
+     * above stays READY-only.
+     */
+    public RuntimeBindingRecord findLatestBindingByHarnessSessionAnyState(
+            String tenantId, String harnessSessionId) {
+        String after = null;
+        RuntimeBindingRecord best = null;
+        for (;;) {
+            List<RuntimeBindingRecord> page = bindingRepository
+                    .findByHarnessSession(tenantId, harnessSessionId, after,
+                            100);
+            if (page.isEmpty()) {
+                return best;
+            }
+            for (RuntimeBindingRecord candidate : page) {
+                if (best == null || candidate.getBindingId()
+                        .compareTo(best.getBindingId()) > 0) {
+                    best = candidate;
+                }
+            }
+            if (page.size() < 100) {
+                return best;
+            }
+            after = page.get(page.size() - 1).getBindingId();
+        }
+    }
+
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
             RuntimeProvisioner provisioner, RuntimeTransport transport,
             RuntimeBindingRepository bindingRepository,
@@ -1486,10 +1555,52 @@ public final class RuntimeBrokerService implements AutoCloseable {
             });
         }
         // Yield between pages even when every status completes synchronously.
-        return scanned.thenComposeAsync(ignored -> batch.size() < 100
-                ? CompletableFuture.completedFuture(context)
-                : scanExecutions(context, session,
-                        batch.get(batch.size() - 1).getExecutionCallId()));
+        return scanned.thenComposeAsync(ignored -> {
+            if (batch.size() < 100) {
+                observeScannedBackgroundProcesses(context);
+                return CompletableFuture.completedFuture(context);
+            }
+            return scanExecutions(context, session,
+                    batch.get(batch.size() - 1).getExecutionCallId());
+        });
+    }
+
+    /**
+     * A background `:process` row stays PREPARED for the process's life, so
+     * the reconcile filter above never reaches it — after the last page,
+     * observe each live one from durable evidence: a provable exit settles
+     * the row here, and anything else keeps it holding. Every observation
+     * is fire-and-forget (an acquire never waits on it) and per-row
+     * isolated (a store fault or a broken control must never fail an
+     * acquire); the release sweep or a later scan asks again. The release
+     * sweep's per-row prelude in {@code settleUnprovenBackgroundRows} is
+     * the same shape, kept separate because it owns the in-memory index
+     * and the status→terminate→status follow-up.
+     */
+    private void observeScannedBackgroundProcesses(SessionContext context) {
+        List<ToolExecutionRecord> rows;
+        try {
+            rows = durableBackgroundProcessRows(context);
+        } catch (RuntimeException listing) {
+            return;
+        }
+        for (ToolExecutionRecord row : rows) {
+            if (row.isTerminal()) {
+                continue;
+            }
+            ToolExecutionRecord invocation;
+            try {
+                invocation = requireExecution(context, referenceString(
+                        row.getReference(), "processOf"));
+            } catch (RuntimeException missing) {
+                continue;
+            }
+            ToolExecutionRecord parent = invocation;
+            CompletableFuture.completedFuture(null)
+                    .thenComposeAsync(ignored -> observeScannedProcessRow(
+                            context, parent, row))
+                    .exceptionally(failure -> null);
+        }
     }
 
     public CompletionStage<Boolean> release(String harnessSessionId,
@@ -1719,7 +1830,21 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<ToolExecutionRecord> observeProcessRow(
             SessionContext context, ToolExecutionRecord invocation,
             ToolExecutionRecord process) {
-        return controlProcessRow(context, invocation, process, "shell-status");
+        return controlProcessRow(context, invocation, process, "shell-status",
+                true);
+    }
+
+    /**
+     * The scan's read-only maintenance ask runs unfenced: it must not hold
+     * `activeControls` past the sweep's own proof, or a release that settled
+     * every row would still refuse `runtime_session_busy` solely for the
+     * outstanding status answer (#13830 review).
+     */
+    private CompletionStage<ToolExecutionRecord> observeScannedProcessRow(
+            SessionContext context, ToolExecutionRecord invocation,
+            ToolExecutionRecord process) {
+        return controlProcessRow(context, invocation, process, "shell-status",
+                false);
     }
 
     /**
@@ -1732,6 +1857,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<ToolExecutionRecord> controlProcessRow(
             SessionContext context, ToolExecutionRecord invocation,
             ToolExecutionRecord process, String kind) {
+        return controlProcessRow(context, invocation, process, kind, true);
+    }
+
+    private CompletionStage<ToolExecutionRecord> controlProcessRow(
+            SessionContext context, ToolExecutionRecord invocation,
+            ToolExecutionRecord process, String kind, boolean fenced) {
         if (process.isTerminal()) {
             return CompletableFuture.completedFuture(process);
         }
@@ -1744,7 +1875,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         operation.put("operationId", process.getExecutionCallId());
         operation.put("targetOperationId",
                 referenceString(invocation.getReference(), "callId"));
-        context.beginControl();
+        if (fenced) {
+            context.beginControl();
+        }
         return mapFailure(safeStage(() -> {
             requireUsableLease(context);
             return transport.control(context.lease(), context.session(),
@@ -1760,7 +1893,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         .findByExecutionCallId(process.getExecutionCallId());
                 return current == null ? process : current;
             })
-            .whenComplete((ignored, error) -> context.endControl());
+            .whenComplete((ignored, error) -> {
+                if (fenced) {
+                    context.endControl();
+                }
+            });
     }
 
     /**

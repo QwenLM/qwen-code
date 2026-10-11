@@ -136,7 +136,7 @@ V17 把每条待定的 `ARCHIVE_SESSION` 与 `DELETE_SESSION` 命令转换为待
 不支持新旧版本混跑的滚动升级：V17 运行之前必须停掉所有旧版本服务器。升级之后由旧服务器留下的待定 archive 或 delete 不会被转换，它的待定命令会让该 Session 之后的所有生命周期变更都返回 `409 session_operation_active`；旧服务器的 unarchive 还会重新打开被 D4 关闭的 Session。
 
 W0e（#12839）先占用了 V16，因此本迁移为 V17，即 `main` 上下一个空闲版本号。使用 V17 或更高版本的未合并 PR 必须重新编号到它之后；如果改为留出空号，已经应用了更高版本的数据库会被 Flyway 拒绝启动。
-本分支的 O2 publication 迁移接续使用 V18 和 V19。升级测试按此顺序应用迁移后再启动服务。两个迁移目录之间的版本号唯一性由 `scripts/check-flyway-migrations.js` 在不依赖数据库的情况下强制校验，它在 SDK Java workflow 的每个 pull request 与 push 上运行（#12940）。
+本分支的 O2 publication 迁移接续使用 V18 和 V19。升级测试按此顺序应用迁移后再启动服务。两个迁移目录之间的版本号唯一性由 `scripts/check-flyway-migrations.js` 在不依赖数据库的情况下强制校验，它在 SDK Java workflow 的每个 pull request 与 push 上运行（#12940）。该检查只看到 pull request 与它运行那一刻的 `main` 合并的结果，所以每次改动迁移的 `main` push，以及每 30 分钟一次的定时任务，都会针对 `main` 重新检查开放的 pull request，并在每个新增迁移的 PR 上设置 `Flyway migration version uniqueness (latest main)` 状态：它新增的某个版本号在与 `main` 的合并结果中已被占用时为失败，其他情况为成功，并列出占用同一版本号的其他开放 PR。无法完整读取文件列表的 PR 改为错误，除非已读到的文件已经撞号。已带有该状态的 head 即使不再新增迁移也会被重新评估，因此过期的失败状态会被清除（#13742）。
 
 ## 5. 测试
 

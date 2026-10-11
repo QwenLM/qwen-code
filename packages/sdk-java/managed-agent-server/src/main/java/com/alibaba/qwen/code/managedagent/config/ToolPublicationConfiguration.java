@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.store.AliyunToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.SessionResourceCollectionCollector;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
@@ -133,6 +134,12 @@ public class ToolPublicationConfiguration {
     public ToolPublicationCollector toolPublicationCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ToolPublicationRetentionStore retention, ToolPublicationObjectStore objects, ManagedAgentProperties properties) {
         return new ToolPublicationCollector(jdbc, manager, retention, objects, properties);
+    }
+
+    @Bean
+    public SessionResourceCollectionCollector sessionResourceCollectionCollector(JdbcTemplate jdbc,
+            PlatformTransactionManager manager, ManagedAgentProperties properties) {
+        return new SessionResourceCollectionCollector(jdbc, manager, properties);
     }
 
     private static String required(String value, String label) {

@@ -7,10 +7,12 @@ import {
   readRemoteConnections,
   rememberRemoteConnection,
 } from './remote-connections';
+import { readWorkspaceHosts, rememberWorkspaceHost } from './workspace-hosts';
 
 describe('remote connections', () => {
   beforeEach(() => {
     window.localStorage.clear();
+    window.sessionStorage.clear();
   });
 
   it('remembers normalized remote origins without duplicates', () => {
@@ -53,5 +55,46 @@ describe('remote connections', () => {
       'https://two.example',
     ]);
     expect(isRemoteConnectionKnown('https://one.example')).toBe(false);
+  });
+
+  it('forgetting a connection also clears its workspace catalog, token, and notifies listeners', () => {
+    rememberRemoteConnection('https://one.example');
+    rememberWorkspaceHost('https://one.example', [
+      { id: 'ws-1', cwd: '/repo/one' },
+    ]);
+    rememberWorkspaceHost('https://two.example', [
+      { id: 'ws-2', cwd: '/repo/two' },
+    ]);
+    window.sessionStorage.setItem(
+      'qwen-daemon-token:https://one.example',
+      'tok-one',
+    );
+    const events: string[] = [];
+    window.addEventListener('qwen-remote-connections', () =>
+      events.push('connections'),
+    );
+    window.addEventListener('qwen-workspace-hosts', () =>
+      events.push('workspace-hosts'),
+    );
+
+    forgetRemoteConnection('https://one.example');
+
+    // The fan-out group unions both catalogs, so a removal must clear both —
+    // otherwise the host would stay listed in the same tab.
+    expect(readRemoteConnections()).toEqual([]);
+    expect(
+      readWorkspaceHosts().find(
+        (host) => host.origin === 'https://one.example',
+      ),
+    ).toBeUndefined();
+    expect(
+      readWorkspaceHosts().find((host) => host.origin === 'https://two.example')
+        ?.workspaces[0]?.cwd,
+    ).toBe('/repo/two');
+    expect(
+      window.sessionStorage.getItem('qwen-daemon-token:https://one.example'),
+    ).toBeNull();
+    expect(events).toContain('connections');
+    expect(events).toContain('workspace-hosts');
   });
 });

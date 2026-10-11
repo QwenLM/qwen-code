@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
+  artifactDisplayName,
   artifactKindLabel,
   artifactPreviewDocument,
   loadArtifactPreviewDocument,
@@ -18,6 +19,32 @@ import {
 } from './artifactUtils';
 
 describe('artifactUtils', () => {
+  it('shows a workspace file by filename and keeps a title without a file', () => {
+    expect(
+      artifactDisplayName({
+        title: 'Pretty name',
+        workspacePath: 'reports/summary.html',
+      }),
+    ).toBe('summary.html');
+    expect(
+      artifactDisplayName({
+        title: 'Pretty name',
+        workspacePath: 'reports\\summary.html',
+      }),
+    ).toBe('reports\\summary.html');
+    expect(
+      artifactDisplayName({
+        title: 'Table details',
+      }),
+    ).toBe('Table details');
+    expect(
+      artifactDisplayName({
+        title: 'Fallback',
+        workspacePath: '',
+      }),
+    ).toBe('Fallback');
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });

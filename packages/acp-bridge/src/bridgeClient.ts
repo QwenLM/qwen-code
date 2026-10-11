@@ -39,7 +39,6 @@ import {
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
-  DAEMON_AGENT_RUN_META_KEY,
   MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -788,6 +787,40 @@ function ownsActivePrompt(
     entry.backgroundTurn?.turnId === promptId ||
     (entry.promptActive === true && entry.activePromptId === promptId)
   );
+}
+
+/**
+ * Puts the messages a failed drain took back where they were, ahead of
+ * anything queued while it was out.
+ */
+function requeueMidTurnMessages(
+  queue: MidTurnQueueEntry[],
+  queuedBefore: readonly MidTurnQueueEntry[],
+  drained: readonly MidTurnQueueEntry[],
+): void {
+  const restored = new Set([...drained, ...queue]);
+  const earlier = new Set(queuedBefore);
+  queue.splice(
+    0,
+    queue.length,
+    ...queuedBefore.filter((message) => restored.has(message)),
+    ...queue.filter((message) => !earlier.has(message)),
+  );
+}
+
+/** Removes and returns the queued messages that are not queue-only, in order. */
+function takeUserMidTurnMessages(
+  queue: MidTurnQueueEntry[],
+): MidTurnQueueEntry[] {
+  const taken = queue.filter((message) => !message.queueOnly);
+  if (taken.length > 0) {
+    queue.splice(
+      0,
+      queue.length,
+      ...queue.filter((message) => message.queueOnly),
+    );
+  }
+  return taken;
 }
 
 /**
@@ -1597,7 +1630,13 @@ export class BridgeClient implements Client {
     // The child knows which execution is draining during a prompt handoff.
     // Capture ownership before attachment I/O can yield to the next turn.
     const promptId = requestedPromptId ?? currentTurnMetadata(entry).promptId;
-    const drained = entry.midTurnMessageQueue.splice(0);
+    const queuedBefore = [...entry.midTurnMessageQueue];
+    // A send-now drain takes only the user's own messages: queue-only steering
+    // keeps its tool-boundary delivery and the settle path its caller drives.
+    const drained =
+      params['userInputOnly'] === true
+        ? takeUserMidTurnMessages(entry.midTurnMessageQueue)
+        : entry.midTurnMessageQueue.splice(0);
     if (drained.length > 0) {
       // Claim the ids before media I/O yields so retries and removals cannot
       // observe a drained message as neither queued nor settled.
@@ -1675,9 +1714,6 @@ export class BridgeClient implements Client {
           messageId: item.messageId,
           displayText: item.text,
           content,
-          ...(item.agentRun
-            ? { _meta: { [DAEMON_AGENT_RUN_META_KEY]: item.agentRun } }
-            : {}),
           ...(attachmentReferences.length > 0 ? { attachmentReferences } : {}),
         });
       }
@@ -1691,7 +1727,7 @@ export class BridgeClient implements Client {
       const ring = entry.settledMidTurnMessageIds;
       const kept = ring.filter((id) => !requeued.has(id));
       ring.splice(0, ring.length, ...kept);
-      entry.midTurnMessageQueue.unshift(...drained);
+      requeueMidTurnMessages(entry.midTurnMessageQueue, queuedBefore, drained);
       writeStderrLine(
         `[mid-turn] session=${JSON.stringify(entry.sessionId)} drain failed, requeued ${drained.length} message(s): ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
       );

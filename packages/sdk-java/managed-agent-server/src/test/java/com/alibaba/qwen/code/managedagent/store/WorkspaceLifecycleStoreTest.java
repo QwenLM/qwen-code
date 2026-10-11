@@ -79,7 +79,8 @@ class WorkspaceLifecycleStoreTest {
         }
         var operation = fixture.admit(OperationKind.DELETE);
         if (draining) fixture.jdbc.update("UPDATE qwen_runtime_harness_drain SET phase = 'DRAINING'");
-        fixture.jdbc.update("UPDATE managed_workspace_access SET can_create = ?", granted);
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role = ?",
+                granted ? "OPERATOR" : "READER");
         ObjectNode next = execution.deepCopy();
         hookState(next, after, registration.get("catalogRef"));
         if (replacement && !batch) next.withObject("/run/runtime").put("generation", "2");
@@ -402,10 +403,10 @@ class WorkspaceLifecycleStoreTest {
                 .hasMessageContaining("closed");
         var execution = new WorkspaceExecutionStore(fixture.jdbc, new DataSourceTransactionManager(fixture.jdbc.getDataSource()));
         execution.authorizeLegacyClose(fixture.store.requireSession("tenant", fixture.session));
-        fixture.jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE");
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role = 'READER'");
         assertThatThrownBy(() -> execution.authorizeLegacyClose(fixture.store.requireSession("tenant", fixture.session)))
                 .hasMessageContaining("unavailable");
-        fixture.jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE");
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'");
         execution.authorizeLegacyClose(fixture.store.requireSession("tenant", fixture.session));
         fixture.jdbc.update("UPDATE managed_agent_operation SET lease_until = 0");
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary("tenant", fixture.session,
@@ -554,8 +555,8 @@ class WorkspaceLifecycleStoreTest {
             jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                    + " VALUES ('tenant', 'workspace', ?, TRUE, TRUE)", "owner".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", "owner".getBytes(StandardCharsets.UTF_8));
             session = transactions.execute(ignored -> store.insertWorkspaceSessionCommand("tenant", "owner", "create", "digest", "qwen-code",
                     null, null, List.of(), null, new WorkspaceSelection("workspace", ".")).sessionId());
         }

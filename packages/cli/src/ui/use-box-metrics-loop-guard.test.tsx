@@ -487,6 +487,12 @@ describe('ink useBoxMetrics loop guard', () => {
     // the frame asserted below becomes the #185 error instead of the box.
     let renders = 0;
     const { stdout, lastFrame } = createTestStdout();
+    // Flushed unthrottled on purpose: this assertion samples an intermediate
+    // frame, but the cascade settles on the blank box, so under the 1ms
+    // render throttle a cascade that completes inside one window flushes only
+    // blank states and no `fallback` frame is ever written. Debug mode writes
+    // every commit synchronously, which keeps the last non-blank frame
+    // `fallback` however fast the machine is.
     await mount(
       <HasMeasuredGatedBox
         onRender={() => {
@@ -494,12 +500,6 @@ describe('ink useBoxMetrics loop guard', () => {
         }}
       />,
       stdout,
-      // Debug mode defeats the 1ms render throttle, so every cascade commit
-      // writes its own frame and the last non-blank frame is `fallback` under
-      // either freeze parity. On the throttled path the whole synchronous
-      // cascade coalesces into a leading and a trailing write, so a freeze on
-      // the detached-ref commit leaves only its blank frame written and the
-      // frame assertion below flakes (#12585 verification gate).
       { debug: true },
     );
 

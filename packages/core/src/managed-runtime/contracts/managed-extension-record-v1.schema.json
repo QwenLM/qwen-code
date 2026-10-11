@@ -967,7 +967,7 @@
             "type": "object",
             "properties": {
               "execution": {
-                "enum": ["outcome_unknown", "corrupt"]
+                "const": "corrupt"
               }
             },
             "required": ["execution"]
@@ -986,8 +986,53 @@
           "if": {
             "type": "object",
             "properties": {
+              "execution": {
+                "const": "outcome_unknown"
+              }
+            },
+            "required": ["execution"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
               "state": {
-                "enum": ["failed", "cancelled"]
+                "enum": ["recovery_blocked", "failed"]
+              }
+            },
+            "required": ["state"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "enum": [
+                  null,
+                  "settled",
+                  "not_started_proven",
+                  "outcome_unknown"
+                ]
+              }
+            },
+            "required": ["execution"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "cancelled"
               }
             },
             "required": ["state"]

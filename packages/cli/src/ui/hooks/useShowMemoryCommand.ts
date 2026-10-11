@@ -31,7 +31,11 @@ export function createShowMemoryAction(
 
     const contextMemory = config.getUserMemory();
     const autoMemoryPrompt = config.getAutoMemoryPrompt();
-    const currentMemory = [contextMemory, autoMemoryPrompt]
+    const currentMemory = [
+      contextMemory,
+      autoMemoryPrompt,
+      config.getAutoMemoryContext?.() ?? '',
+    ]
       .filter((section) => section.trim().length > 0)
       .join('\n\n---\n\n');
     const fileCount = config.getMemoryFileCount();

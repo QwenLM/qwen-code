@@ -574,9 +574,9 @@ describe('TrajectoryPanel', () => {
   it('renders an empty session without a grid', async () => {
     const container = await render(async () => page([]));
 
-    expect(text(container.querySelector('[role="status"]'))).toContain(
-      'No records',
-    );
+    expect(
+      text(container.querySelector(`.${styles.placeholder}[role="status"]`)),
+    ).toContain('No records');
     expect(container.querySelector('[role="grid"]')).toBeNull();
   });
 
@@ -1177,16 +1177,16 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).not.toContain('shell_output');
   });
 
-  it('says the page left history out, outside the scrolled rows', async () => {
+  it('explains a missing history cursor outside the scrolled rows', async () => {
     const container = await render(async () =>
       page(REAL_EVENTS, { hasMore: true }),
     );
     const scroll = container.querySelector('[role="grid"]') as HTMLElement;
     const notice = container.querySelector(
-      '[data-testid="trajectory-truncated"]',
+      '[data-testid="trajectory-older-failed"]',
     );
 
-    expect(text(notice)).toContain('most recent records');
+    expect(text(notice)).toContain('page cursor did not advance');
     // Inside the scrolled box its height would offset every virtual row from
     // the coordinates the virtualizer hands out.
     expect(scroll.contains(notice)).toBe(false);
@@ -1319,16 +1319,16 @@ describe('TrajectoryPanel', () => {
     });
 
     it('does not start a second walk while one is under way', async () => {
-      let releaseNewest: ((value: TrajectoryPageResult) => void) | undefined;
+      let releaseOlder: ((value: TrajectoryPageResult) => void) | undefined;
       let reads = 0;
       const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
         reads += 1;
-        if (cursor) throw new Error('down');
-        if (reads === 1) {
+        if (cursor && reads === 2) throw new Error('down');
+        if (!cursor) {
           return page(prompts('newer', 1), { hasMore: true, nextCursor: 'c1' });
         }
         return new Promise<TrajectoryPageResult>((resolve) => {
-          releaseNewest = resolve;
+          releaseOlder = resolve;
         });
       });
       const container = await render(loadPage);
@@ -1349,7 +1349,7 @@ describe('TrajectoryPanel', () => {
       expect(loadPage.mock.calls.length).toBe(during);
 
       await act(async () => {
-        releaseNewest?.(page(prompts('newer', 1)));
+        releaseOlder?.(page(prompts('newer', 1)));
       });
     });
   });
@@ -2137,3 +2137,51 @@ it('retains filters when overview reveals a context request hidden only by a col
     ),
   ).not.toBeNull();
 });
+
+it.each([false, true])(
+  'retries the failed cursor when the initial prefix has no visible rows (filtered=%s)',
+  async (filtered) => {
+    let olderFails = true;
+    const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+      if (!cursor) {
+        return page(filtered ? REAL_EVENTS : [], {
+          hasMore: true,
+          nextCursor: 'c1',
+        });
+      }
+      if (olderFails) throw new Error('socket hang up');
+      return page([userText('Recovered older row', 'recovered-row')]);
+    });
+    const container = await render(loadPage);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    if (filtered) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(input, 'no-such-trajectory-text');
+        input!.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }
+    expect(container.querySelector('[role="grid"]')).toBeNull();
+    const retry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-older-retry"]',
+    )!;
+    expect(retry).not.toBeNull();
+    expect(retry.getAttribute('aria-disabled')).toBe('false');
+    olderFails = false;
+    await act(async () => retry.click());
+    expect(loadPage.mock.calls.map(([request]) => request.cursor)).toEqual([
+      undefined,
+      'c1',
+      'c1',
+    ]);
+    expect(
+      container.querySelector('[data-testid="trajectory-older-retry"]'),
+    ).toBeNull();
+    if (filtered) expect(input!.value).toBe('no-such-trajectory-text');
+    else expect(container.querySelector('[role="grid"]')).not.toBeNull();
+  },
+);

@@ -176,7 +176,6 @@ import {
   sessionIdContext,
   resolveAgentPersona,
   buildRemoteSessionAgentSystemPrompt,
-  findAgentSessionBinding,
   resolveModelId,
   buildModelIdContext,
   registerSession,
@@ -278,6 +277,7 @@ import {
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
+import { isUnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 import {
   getConversationDirectoryName,
   hasVerifiableInode,
@@ -490,6 +490,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_SEND_NOW_METHOD,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
@@ -889,21 +890,6 @@ function managedQuarantineSummary(reason: Error): string {
     entries.push('a ledger it could not read held the unproven stop');
   }
   return entries.join('; ');
-}
-
-/**
- * The structural half of the serve side's LedgerSweepUnprovenError, which the
- * acp-integration boundary forbids importing here.
- */
-function isUnprovenSweepReport(
-  failure: unknown,
-): failure is { workFile: string; remaining: unknown[] } {
-  return (
-    typeof failure === 'object' &&
-    failure !== null &&
-    typeof (failure as { workFile?: unknown }).workFile === 'string' &&
-    Array.isArray((failure as { remaining?: unknown }).remaining)
-  );
 }
 
 function getSessionWriterError(error: unknown):
@@ -9654,6 +9640,7 @@ class QwenAgent implements Agent {
   private isSessionScopedExtMethod(method: string): boolean {
     return (
       method === PROMPT_CANCEL_METHOD ||
+      method === MID_TURN_SEND_NOW_METHOD ||
       method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD ||
       method.startsWith('qwen/control/session/') ||
       method.startsWith('qwen/status/session/') ||
@@ -9803,6 +9790,17 @@ class QwenAgent implements Agent {
         targetedCalls.forEach((call) => call.controller.abort());
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
+      }
+      case MID_TURN_SEND_NOW_METHOD: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        this.sessions.get(sessionId)?.sendMidTurnInputNow();
+        return {};
       }
       case TODO_STOP_GUARD_QUEUE_RELEASE_METHOD: {
         const sessionId = params['sessionId'];
@@ -15685,8 +15683,8 @@ class QwenAgent implements Agent {
       this.bindSessionSourceService(config);
     }
     // A hidden agent session the session-agents orchestrator planned. Looked
-    // up before `initialize()` because it decides whether the thread tools
-    // are registered (see Config.markSessionAgentSession). A plain read of
+    // up before `initialize()` so the session is marked before its tools are
+    // built (see Config.markSessionAgentSession). A plain read of
     // daemon-written state; the claim itself is still only `sourceType`.
     let sessionAgentBinding: SessionAgentNativeBinding | undefined;
     try {
@@ -15751,22 +15749,12 @@ class QwenAgent implements Agent {
         // Server binding. `sourceType` and `sourceId` both arrive from the
         // client, so on their own they are a claim, not a credential — without
         // this check any caller with daemon access could ask for an agent's
-        // persona and its thread tools. What makes the claim true is that this
-        // workspace's store holds a live run for that agent naming this very
-        // session. Deliberately not gated on the opt-in: with collaboration on
-        // is exactly when the check has to hold.
-        // Either collaboration surface may own the session while both exist:
-        // a live thread run (legacy dispatcher) or a live session-agents run
-        // whose binding planned this session id (looked up above).
-        // TODO(multi-agent): drop the thread lookup with the thread subsystem.
-        const binding =
-          sessionAgentBinding ??
-          (await findAgentSessionBinding(
-            cwd,
-            wiredSessionId,
-            sessionSource.sourceId,
-          ));
-        if (!binding) {
+        // persona. What makes the claim true is a session-agents binding,
+        // persisted by the orchestrator, that planned this very session id
+        // for a live run of that agent (looked up above). Deliberately not
+        // gated on the opt-in: with collaboration on is exactly when the
+        // check has to hold.
+        if (!sessionAgentBinding) {
           throw RequestError.invalidParams(
             undefined,
             'No dispatched run claims this session for that agent',
@@ -15787,7 +15775,6 @@ class QwenAgent implements Agent {
           const persona = await resolveAgentPersona(
             config,
             sessionSource.sourceId,
-            sessionAgentBinding ? { surface: 'session' } : {},
           );
           if (persona.status !== 'resolved') {
             throw RequestError.invalidParams(undefined, persona.error);

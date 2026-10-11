@@ -55,14 +55,13 @@ vi.mock(
       assertManagedSessionDomainEnabled: (
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
-        if (
-          domain === 'child_run'
-            ? !enablement.childRun
-            : domain === 'monitor_run'
-              ? !enablement.monitorRun
-              : true
-        ) {
+        if (domain === 'monitor_run' ? !enablement.monitorRun : true) {
           actual.assertManagedSessionDomainEnabled(domain);
+        }
+      },
+      assertManagedSessionChildRunKindEnabled: (kind: string) => {
+        if (!enablement.childRun) {
+          actual.assertManagedSessionChildRunKindEnabled(kind);
         }
       },
     };
