@@ -79,6 +79,7 @@ let reportSequence = 0;
  */
 interface MemoryChangeWindow {
   outside: Map<string, ReportedMemoryContent>;
+  unknownImports: Map<string, number>;
   pending: Array<{
     sequence: number;
     projectRoot: string;
@@ -263,15 +264,32 @@ const SCOPE_ORDER: readonly MemoryChangedScope[] = ['user', 'project', 'team'];
  * Content already reported while a coalesced window is open, per window.
  * `null` means the path was reported while absent.
  */
-const outsideWindowEmits = new Set<Map<string, ReportedMemoryContent>>();
+const outsideWindowEmits = new Set<MemoryChangeWindow>();
 const teamMemorySyncs = new Set<{ root: string; settled: Promise<void> }>();
 let teamMemorySyncSequence = 0;
+
+function reportedMemoryContent(
+  window: MemoryChangeWindow,
+  filePath: string,
+): ReportedMemoryContent | undefined {
+  let reported = window.outside.get(filePath);
+  for (const [root, sequence] of window.unknownImports) {
+    if (
+      relativeInside(root, filePath) !== undefined &&
+      (!reported || sequence > reported.sequence)
+    ) {
+      reported = { content: undefined, sequence };
+    }
+  }
+  return reported;
+}
 
 /** Keep imported Git changes out of agent-owned snapshot differences. */
 export async function withTeamMemorySync<T>(
   projectRoot: string,
   sync: (
     record: (filePath: string, content: string | null | undefined) => void,
+    markUnknown: () => void,
   ) => Promise<T>,
 ): Promise<T> {
   let finish!: () => void;
@@ -289,23 +307,31 @@ export async function withTeamMemorySync<T>(
   try {
     await Promise.all(predecessors.map((sync) => sync.settled));
     const startReportSequence = ++reportSequence;
-    return await sync((filePath, content) => {
-      const document = describeMemoryFileChange(filePath, projectRoot);
-      if (document?.scope !== 'team') return;
-      const reported = {
-        content,
-        // The import predates explicit writes made while its content read is
-        // pending; callback completion must not supersede those writes.
-        sequence: startReportSequence,
-      };
-      for (const bucket of outsideWindowEmits) {
-        if (
-          (bucket.get(document.filePath)?.sequence ?? 0) <= startReportSequence
-        ) {
-          bucket.set(document.filePath, reported);
+    return await sync(
+      (filePath, content) => {
+        const document = describeMemoryFileChange(filePath, projectRoot);
+        if (document?.scope !== 'team') return;
+        const reported = {
+          content,
+          // The import predates explicit writes made while its content read is
+          // pending; callback completion must not supersede those writes.
+          sequence: startReportSequence,
+        };
+        for (const bucket of outsideWindowEmits) {
+          if (
+            (reportedMemoryContent(bucket, document.filePath)?.sequence ?? 0) <=
+            startReportSequence
+          ) {
+            bucket.outside.set(document.filePath, reported);
+          }
         }
-      }
-    });
+      },
+      () => {
+        for (const window of outsideWindowEmits) {
+          window.unknownImports.set(pending.root, startReportSequence);
+        }
+      },
+    );
   } finally {
     teamMemorySyncs.delete(pending);
     teamMemorySyncSequence++;
@@ -352,7 +378,7 @@ async function rememberOutsideEmit(
   filePaths: readonly string[],
 ): Promise<void> {
   if (outsideWindowEmits.size === 0) return;
-  const ownBucket = suppressDelivery.getStore()?.outside;
+  const ownBucket = suppressDelivery.getStore();
   for (const filePath of filePaths) {
     const stat = await fs
       .lstat(filePath)
@@ -377,7 +403,7 @@ async function rememberOutsideEmit(
     const reported = { content, sequence: ++reportSequence };
     for (const bucket of outsideWindowEmits) {
       if (bucket !== ownBucket) {
-        bucket.set(filePath, reported);
+        bucket.outside.set(filePath, reported);
       }
     }
   }
@@ -496,11 +522,14 @@ export async function notifyMemoryFileChange(
     const invisible = new Set<string>();
     for (const change of changes) {
       for (const candidate of change.paths) {
-        const imported = window?.outside.get(candidate);
+        const imported = window && reportedMemoryContent(window, candidate);
         if (imported && imported.content === undefined) {
           // Unknown imported bytes cannot support a closing diff. Deliver the
           // explicit write and prevent an older sync from replacing its marker.
-          imported.sequence = ++reportSequence;
+          window!.outside.set(candidate, {
+            content: undefined,
+            sequence: ++reportSequence,
+          });
           invisible.add(candidate);
           continue;
         }
@@ -786,14 +815,18 @@ async function runMemoryChangeWindow<T>(
   deliveryId: symbol | undefined,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const outside = new Map<string, ReportedMemoryContent>();
-  outsideWindowEmits.add(outside);
+  const window: MemoryChangeWindow = {
+    outside: new Map(),
+    unknownImports: new Map(),
+    pending: [],
+  };
+  const { outside } = window;
+  outsideWindowEmits.add(window);
   try {
     const before = await readMemoryDocuments(projectRoot).catch(
       () => undefined,
     );
     if (!before?.complete) return await fn();
-    const window: MemoryChangeWindow = { outside, pending: [] };
     try {
       return await suppressDelivery.run(window, fn);
     } finally {
@@ -805,14 +838,14 @@ async function runMemoryChangeWindow<T>(
       for (const pending of window.pending) {
         const changes = pending.changes.flatMap((change) => {
           const kept = change.paths
-            .map((filePath, i) =>
-              (outside.get(filePath)?.sequence ?? 0) > pending.sequence ||
-              (after?.complete &&
-                (!outside.has(filePath) ||
-                  outside.get(filePath)!.content !== undefined))
+            .map((filePath, i) => {
+              const reported = reportedMemoryContent(window, filePath);
+              return (reported?.sequence ?? 0) > pending.sequence ||
+                (after?.complete &&
+                  (!reported || reported.content !== undefined))
                 ? -1
-                : i,
-            )
+                : i;
+            })
             .filter((i) => i >= 0);
           return kept.length === 0
             ? []
@@ -831,17 +864,22 @@ async function runMemoryChangeWindow<T>(
         const updated: string[] = [];
         const deleted: string[] = [];
         // An outside emit moves the baseline. It does not hide the path.
-        const baseline = (filePath: string) =>
-          outside.has(filePath)
-            ? (outside.get(filePath)!.content ?? undefined)
+        const baseline = (filePath: string) => {
+          const reported = reportedMemoryContent(window, filePath);
+          return reported
+            ? (reported.content ?? undefined)
             : before.documents.get(filePath)?.content;
+        };
         // A report newer than the read owns the change; comparing it with
         // stale snapshot bytes would invert a create into a delete or vice versa.
-        const cannotCompare = (filePath: string) =>
-          (outside.has(filePath) &&
-            outside.get(filePath)!.content === undefined) ||
-          (outside.get(filePath)?.sequence ?? 0) >
-            (after.documents.get(filePath)?.sequence ?? after.sequence);
+        const cannotCompare = (filePath: string) => {
+          const reported = reportedMemoryContent(window, filePath);
+          return (
+            (reported && reported.content === undefined) ||
+            (reported?.sequence ?? 0) >
+              (after.documents.get(filePath)?.sequence ?? after.sequence)
+          );
+        };
         for (const [filePath, { content }] of after.documents) {
           if (cannotCompare(filePath)) continue;
           const reported = baseline(filePath);
@@ -906,6 +944,6 @@ async function runMemoryChangeWindow<T>(
       }
     }
   } finally {
-    outsideWindowEmits.delete(outside);
+    outsideWindowEmits.delete(window);
   }
 }

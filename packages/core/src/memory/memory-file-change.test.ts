@@ -2772,17 +2772,22 @@ describe('memory notification snapshot boundaries', () => {
       }),
     ]);
   });
-  it.each(['create', 'update', 'delete'] as const)(
-    'delivers explicit %s after an unknown import without a delayed sync duplicating it',
-    async (operation) => {
+  it.each(
+    (['create', 'update', 'delete'] as const).flatMap((operation) =>
+      [false, true].map((wholeRoot) => ({ operation, wholeRoot })),
+    ),
+  )(
+    'delivers explicit $operation after an unknown import (wholeRoot=$wholeRoot)',
+    async ({ operation, wholeRoot }) => {
       const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');
       await fs.mkdir(path.dirname(file), { recursive: true });
       if (operation !== 'create') await fs.writeFile(file, 'original');
       const notices: MemoryChangedNotice[] = [];
       const owner = listen(notices);
       await withCoalescedMemoryChanges(workspace, owner, async () => {
-        await withTeamMemorySync(workspace, async (record) => {
-          record(file, undefined);
+        await withTeamMemorySync(workspace, async (record, markUnknown) => {
+          if (wholeRoot) markUnknown();
+          else record(file, undefined);
         });
         const entered = deferred();
         const release = deferred();
@@ -2820,7 +2825,11 @@ describe('memory notification snapshot boundaries', () => {
   it.each(
     (['create', 'update', 'delete'] as const).flatMap((operation) =>
       [true, false].flatMap((complete) =>
-        [true, false].map((unknown) => ({ operation, complete, unknown })),
+        [true, false, 'root' as const].map((unknown) => ({
+          operation,
+          complete,
+          unknown,
+        })),
       ),
     ),
   )(
@@ -2837,18 +2846,25 @@ describe('memory notification snapshot boundaries', () => {
       await withCoalescedMemoryChanges(workspace, owner, async () => {
         const entered = deferred();
         const release = deferred();
-        const sync = withTeamMemorySync(workspace, async (record) => {
-          entered.resolve();
-          await release.promise;
-          record(
-            file,
-            unknown
-              ? undefined
-              : operation === 'create'
-                ? null
-                : 'remote content',
-          );
-        });
+        const sync = withTeamMemorySync(
+          workspace,
+          async (record, markUnknown) => {
+            entered.resolve();
+            await release.promise;
+            if (unknown === 'root') {
+              markUnknown();
+              return;
+            }
+            record(
+              file,
+              unknown
+                ? undefined
+                : operation === 'create'
+                  ? null
+                  : 'remote content',
+            );
+          },
+        );
         try {
           await entered.promise;
           if (operation === 'delete') await fs.rm(file);
@@ -2884,6 +2900,150 @@ describe('memory notification snapshot boundaries', () => {
       else expect(await fs.readFile(file, 'utf8')).toBe('local content');
     },
   );
+
+  it('limits unknown imports to the affected team root and current window', async () => {
+    const teamRoot = getTeamAutoMemoryRoot(workspace);
+    const teamFile = path.join(teamRoot, 'shared.md');
+    const otherWorkspace = path.join(root, 'other-workspace');
+    await fs.mkdir(path.join(otherWorkspace, '.git'), { recursive: true });
+    const otherFile = path.join(
+      getTeamAutoMemoryRoot(otherWorkspace),
+      'other.md',
+    );
+    await fs.mkdir(path.dirname(otherFile), { recursive: true });
+    await fs.mkdir(teamRoot, { recursive: true });
+    const notices: MemoryChangedNotice[] = [];
+    const otherNotices: MemoryChangedNotice[] = [];
+    const owner = listen(notices);
+    const other = registerMemoryChangedListener(otherWorkspace, (notice) => {
+      otherNotices.push(notice);
+    });
+    try {
+      await withCoalescedMemoryChanges(workspace, owner, async () => {
+        await withTeamMemorySync(
+          otherWorkspace,
+          async (_record, markUnknown) => {
+            await fs.writeFile(otherFile, 'foreign import');
+            markUnknown();
+          },
+        );
+        await withTeamMemorySync(workspace, async (_record, markUnknown) => {
+          await fs.writeFile(teamFile, 'remote content');
+          markUnknown();
+        });
+        await fs.writeFile(
+          path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+          'user write',
+        );
+        const projectFile = path.join(getAutoMemoryRoot(workspace), 'local.md');
+        await fs.mkdir(path.dirname(projectFile), { recursive: true });
+        await fs.writeFile(projectFile, 'project write');
+      });
+      expect(notices).toEqual([
+        expect.objectContaining({
+          scope: 'user',
+          operation: 'create',
+          relativePaths: ['user/a.md'],
+        }),
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'create',
+          relativePaths: ['local.md'],
+        }),
+      ]);
+      expect(otherNotices).toEqual([]);
+      notices.length = 0;
+      await withCoalescedMemoryChanges(workspace, owner, async () => {
+        await fs.writeFile(teamFile, 'later local write');
+      });
+      expect(notices).toEqual([
+        expect.objectContaining({
+          scope: 'team',
+          operation: 'update',
+          relativePaths: ['shared.md'],
+        }),
+      ]);
+    } finally {
+      other();
+    }
+  });
+
+  it.each([false, true])(
+    'uses the newest import baseline when the root is unknown (%s)',
+    async (unknownLast) => {
+      const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      const notices: MemoryChangedNotice[] = [];
+      const owner = listen(notices);
+      await withCoalescedMemoryChanges(workspace, owner, async () => {
+        await withTeamMemorySync(workspace, async (record, markUnknown) => {
+          await fs.writeFile(file, 'first import');
+          if (unknownLast) record(file, 'first import');
+          else markUnknown();
+        });
+        await withTeamMemorySync(workspace, async (record, markUnknown) => {
+          await fs.writeFile(file, 'second import');
+          if (unknownLast) markUnknown();
+          else record(file, 'second import');
+        });
+        await fs.writeFile(file, 'local shell write');
+      });
+      expect(notices).toEqual(
+        unknownLast
+          ? []
+          : [
+              expect.objectContaining({
+                scope: 'team',
+                operation: 'update',
+                relativePaths: ['shared.md'],
+              }),
+            ],
+      );
+    },
+  );
+
+  it('keeps another pending explicit write after a direct write in an unknown root', async () => {
+    const teamRoot = getTeamAutoMemoryRoot(workspace);
+    await fs.mkdir(teamRoot, { recursive: true });
+    const first = path.join(teamRoot, 'first.md');
+    const second = path.join(teamRoot, 'second.md');
+    const notices: MemoryChangedNotice[] = [];
+    const owner = listen(notices);
+    await withCoalescedMemoryChanges(workspace, owner, async () => {
+      const entered = deferred();
+      const release = deferred();
+      const sync = withTeamMemorySync(
+        workspace,
+        async (_record, markUnknown) => {
+          entered.resolve();
+          await release.promise;
+          markUnknown();
+        },
+      );
+      try {
+        await entered.promise;
+        for (const file of [first, second]) {
+          await fs.writeFile(file, 'local create');
+          await notifyMemoryFileChange(file, workspace, 'create', owner);
+        }
+      } finally {
+        release.resolve();
+        await sync;
+      }
+      await fs.writeFile(first, 'local update');
+      await notifyMemoryFileChange(first, workspace, 'update', owner);
+    });
+    expect(notices).toEqual([
+      expect.objectContaining({
+        operation: 'update',
+        relativePaths: ['first.md'],
+      }),
+      expect.objectContaining({
+        operation: 'create',
+        relativePaths: ['second.md'],
+      }),
+    ]);
+  });
 
   it('does not replay a pending notice preceding an unknown sync that starts during baseline reading', async () => {
     const file = path.join(getTeamAutoMemoryRoot(workspace), 'shared.md');

@@ -199,82 +199,120 @@ export async function syncTeamMemory(
     // would diverge a two-writer branch and wedge `--ff-only`. SIGKILL: a hung
     // pull is hung in its network fetch phase (which holds no index.lock); the
     // ff ref-advance afterwards is fast and local, so a hard kill is safe.
-    result.pulled = await withTeamMemorySync(projectRoot, async (record) => {
-      let before = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
-      if (!before) {
-        const branchRef = await tryGit(gitRoot, [
-          'for-each-ref',
-          '--format=%(refname)',
-          `refs/heads/${branch.trim()}`,
-        ]);
-        if (
-          branchRef === null ||
-          branchRef.split('\n').includes(`refs/heads/${branch}`)
-        )
-          return false;
-        before = (
-          await tryGit(gitRoot, [
-            'hash-object',
-            '-w',
-            '-t',
-            'tree',
-            '/dev/null',
-          ])
-        )?.trim();
-        if (!before) return false;
-      }
-      const pulled =
-        (await tryGit(gitRoot, ['pull', '--ff-only'], 'SIGKILL')) !== null;
-      if (!pulled) return pulled;
-      const after = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
-      if (!after || after === before) return pulled;
-      const changes = await tryGit(
-        gitRoot,
-        [
-          'diff',
-          '--raw',
-          '-z',
-          '--no-abbrev',
-          '--no-renames',
-          before,
-          after,
-          '--',
-          relPath,
-        ],
-        'SIGKILL',
-        Infinity,
-      );
-      const entries = changes?.split('\0') ?? [];
-      for (let i = 0; i + 1 < entries.length; i += 2) {
-        const [, mode, , blob] = entries[i]!.split(' ');
-        const filePath = path.join(gitRoot, entries[i + 1]!);
-        if (!isMemoryDocumentFilename(path.basename(filePath))) continue;
-        if (mode === '000000') {
-          const leaf = await fs
-            .lstat(filePath)
-            .catch((error: unknown) =>
-              (error as NodeJS.ErrnoException).code === 'ENOENT'
-                ? null
-                : undefined,
-            );
-          record(filePath, leaf === null ? null : undefined);
-        } else if ((mode === '100644' || mode === '100755') && blob) {
-          const leaf = await fs.lstat(filePath).catch(() => undefined);
-          if (!leaf?.isFile()) {
-            record(filePath, undefined);
-            continue;
-          }
-          const content = await tryGit(
-            gitRoot,
-            ['cat-file', '--filters', `--path=${entries[i + 1]!}`, blob],
-            'SIGKILL',
-            Infinity,
-          );
-          record(filePath, content ?? undefined);
+    result.pulled = await withTeamMemorySync(
+      projectRoot,
+      async (record, markUnknown) => {
+        let before = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
+        if (!before) {
+          const branchRef = await tryGit(gitRoot, [
+            'for-each-ref',
+            '--format=%(refname)',
+            `refs/heads/${branch.trim()}`,
+          ]);
+          if (
+            branchRef === null ||
+            branchRef.split('\n').includes(`refs/heads/${branch}`)
+          )
+            return false;
+          before = (
+            await tryGit(gitRoot, [
+              'hash-object',
+              '-w',
+              '-t',
+              'tree',
+              '/dev/null',
+            ])
+          )?.trim();
+          if (!before) return false;
         }
-      }
-      return pulled;
-    });
+        const pulled =
+          (await tryGit(gitRoot, ['pull', '--ff-only'], 'SIGKILL')) !== null;
+        if (!pulled) return pulled;
+        const after = (await tryGit(gitRoot, ['rev-parse', 'HEAD']))?.trim();
+        if (after === before) return pulled;
+        const changes = after
+          ? await tryGit(
+              gitRoot,
+              [
+                'diff',
+                '--raw',
+                '-z',
+                '--no-abbrev',
+                '--no-renames',
+                before,
+                after,
+                '--',
+                relPath,
+              ],
+              'SIGKILL',
+              Infinity,
+            )
+          : null;
+        if (changes === null) {
+          const trees: Array<Map<string, string>> = [];
+          for (const revision of [before, after ?? 'HEAD']) {
+            const listing = await tryGit(
+              gitRoot,
+              ['ls-tree', '-r', '-z', revision, '--', relPath],
+              'SIGKILL',
+              Infinity,
+            );
+            if (listing === null) {
+              markUnknown();
+              return pulled;
+            }
+            const tree = new Map<string, string>();
+            for (const entry of listing.split('\0')) {
+              const separator = entry.indexOf('\t');
+              const relativePath = entry.slice(separator + 1);
+              if (isMemoryDocumentFilename(path.basename(relativePath))) {
+                tree.set(relativePath, entry.slice(0, separator));
+              }
+            }
+            trees.push(tree);
+          }
+          for (const relativePath of new Set([
+            ...trees[0]!.keys(),
+            ...trees[1]!.keys(),
+          ])) {
+            if (trees[0]!.get(relativePath) !== trees[1]!.get(relativePath)) {
+              record(path.join(gitRoot, relativePath), undefined);
+            }
+          }
+          return pulled;
+        }
+        const entries = changes.split('\0');
+        for (let i = 0; i + 1 < entries.length; i += 2) {
+          const [, mode, , blob] = entries[i]!.split(' ');
+          const filePath = path.join(gitRoot, entries[i + 1]!);
+          if (!isMemoryDocumentFilename(path.basename(filePath))) continue;
+          if (mode === '000000') {
+            const leaf = await fs
+              .lstat(filePath)
+              .catch((error: unknown) =>
+                (error as NodeJS.ErrnoException).code === 'ENOENT'
+                  ? null
+                  : undefined,
+              );
+            record(filePath, leaf === null ? null : undefined);
+          } else if ((mode === '100644' || mode === '100755') && blob) {
+            const leaf = await fs.lstat(filePath).catch(() => undefined);
+            if (!leaf?.isFile()) {
+              record(filePath, undefined);
+              continue;
+            }
+            const content = await tryGit(
+              gitRoot,
+              ['cat-file', '--filters', `--path=${entries[i + 1]!}`, blob],
+              'SIGKILL',
+              Infinity,
+            );
+            record(filePath, content ?? undefined);
+          }
+        }
+        return pulled;
+      },
+    );
     if (!result.pulled) {
       // ff refused (diverged) or a transient error — nothing can be shared this
       // cycle. Skip cleanly WITHOUT committing, leaving the working tree as-is.

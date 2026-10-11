@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { syncTeamMemory } from './team-memory-sync.js';
 import {
+  notifyMemoryFileChange,
   registerMemoryChangedListener,
   withCoalescedMemoryChanges,
   type MemoryChangedNotice,
@@ -390,28 +391,75 @@ describe('syncTeamMemory', () => {
     }
   }, 30_000);
 
-  it.skipIf(process.platform === 'win32')(
-    'does not attribute a pulled document whose Git content read fails',
-    async () => {
+  it
+    .skipIf(process.platform === 'win32')
+    .each([
+      'none',
+      'cat-file',
+      'diff',
+      'after-rev-parse',
+      'before-list',
+      'after-list',
+    ])(
+    'does not attribute imported documents when Git detection fails (%s)',
+    async (fault) => {
       const { bare, repo } = freshRemoteAndClone('alice');
       vi.stubEnv(
         'QWEN_CODE_MEMORY_BASE_DIR',
         path.join(path.dirname(repo), 'private-memory'),
       );
+      for (const name of ['mod', 'gone']) {
+        writeTeamMemory(repo, `reference/${name}.md`, 'original fact');
+      }
+      for (const name of ['update', 'delete']) {
+        writeTeamMemory(repo, `feedback/local-${name}.md`, 'local original');
+      }
+      git(repo, 'add', '--', '.qwen/team-memory');
+      git(repo, 'commit', '-m', 'seed reference');
+      git(repo, 'push');
+      const before = git(repo, 'rev-parse', 'HEAD').trim();
       const bob = makeWorkingClone(bare, 'bob');
       cleanup.push(path.dirname(bob));
-      writeTeamMemory(bob, 'reference/remote.md', 'collaborator fact');
+      writeTeamMemory(bob, 'reference/new.md', 'collaborator fact');
+      writeTeamMemory(bob, 'reference/mod.md', 'updated fact');
+      git(bob, 'rm', '--', '.qwen/team-memory/reference/gone.md');
       git(bob, 'add', '--', '.qwen/team-memory');
-      git(bob, 'commit', '-m', 'collaborator fact');
+      git(bob, 'commit', '-m', 'collaborator changes');
       git(bob, 'push');
+      const target = git(bob, 'rev-parse', 'HEAD').trim();
       const realGit = execFileSync('which', ['git'], {
         encoding: 'utf8',
       }).trim();
       const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-git-fault-'));
       cleanup.push(bin);
+      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      const pulled = quote(path.join(bin, 'pulled'));
+      const trace = path.join(bin, 'faults');
       fs.writeFileSync(
         path.join(bin, 'git'),
-        `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "cat-file" ]; then exit 70; fi\ndone\nexec '${realGit.replaceAll("'", "'\\''")}' "$@"\n`,
+        `#!/bin/sh
+fail() { echo "$1" >> ${quote(trace)}; exit 70; }
+for arg in "$@"; do
+  if [ "$arg" = "pull" ]; then
+    ${quote(realGit)} "$@" || exit $?
+    touch ${pulled}
+    exit 0
+  fi
+  if [ "$arg" = "cat-file" ] && [ '${fault}' = 'cat-file' ]; then fail cat-file; fi
+  if [ "$arg" = "diff" ]; then
+    case '${fault}' in diff|before-list|after-list) fail diff;; esac
+  fi
+  if [ "$arg" = "rev-parse" ] && [ '${fault}' = 'after-rev-parse' ] && [ -f ${pulled} ]; then
+    case " $* " in *" HEAD "*) fail after-rev-parse;; esac
+  fi
+  if [ "$arg" = "ls-tree" ]; then
+    case "${fault}: $* " in
+      before-list:*" ${before} "*|after-list:*" ${target} "*) fail "ls-tree:$*";;
+    esac
+  fi
+done
+exec ${quote(realGit)} "$@"
+`,
         { mode: 0o755 },
       );
       vi.stubEnv('PATH', bin + path.delimiter + process.env['PATH']);
@@ -421,24 +469,81 @@ describe('syncTeamMemory', () => {
       });
       try {
         await withCoalescedMemoryChanges(repo, registration.id, async () => {
-          expect(
-            (await syncTeamMemory(repo, { message: 'refresh' })).pulled,
-          ).toBe(true);
-          writeTeamMemory(repo, 'feedback/local.md', 'local shell write');
+          const result = await syncTeamMemory(repo, { message: 'refresh' });
+          expect(result).toEqual({
+            committed: false,
+            pulled: true,
+            pushed: false,
+          });
+          writeTeamMemory(repo, 'feedback/local-create.md', 'local create');
+          writeTeamMemory(repo, 'feedback/local-update.md', 'local update');
+          fs.unlinkSync(
+            path.join(getTeamAutoMemoryRoot(repo), 'feedback/local-delete.md'),
+          );
+          if (fault.endsWith('-list')) {
+            for (const operation of ['delete', 'update', 'create'] as const) {
+              await notifyMemoryFileChange(
+                path.join(
+                  getTeamAutoMemoryRoot(repo),
+                  `feedback/local-${operation}.md`,
+                ),
+                repo,
+                operation,
+                registration.id,
+              );
+            }
+          }
         });
         expect(
+          execFileSync(realGit, ['rev-parse', 'HEAD'], {
+            cwd: repo,
+            encoding: 'utf8',
+          }).trim(),
+        ).toBe(target);
+        expect(fs.existsSync(path.join(bin, 'pulled'))).toBe(true);
+        const faults = fs.existsSync(trace)
+          ? fs.readFileSync(trace, 'utf8').trim().split('\n')
+          : [];
+        if (fault.endsWith('-list')) {
+          expect(faults).toEqual([
+            'diff',
+            expect.stringContaining(fault === 'before-list' ? before : target),
+          ]);
+        } else {
+          expect(faults).toEqual(
+            fault === 'none'
+              ? []
+              : fault === 'cat-file'
+                ? [fault, fault]
+                : [fault],
+          );
+        }
+        expect(
           fs.readFileSync(
-            path.join(getTeamAutoMemoryRoot(repo), 'reference/remote.md'),
+            path.join(getTeamAutoMemoryRoot(repo), 'reference/new.md'),
             'utf8',
           ),
         ).toContain('collaborator fact');
-        expect(seen).toEqual([
-          expect.objectContaining({
-            scope: 'team',
-            operation: 'create',
-            relativePaths: ['feedback/local.md'],
-          }),
-        ]);
+        expect(
+          fs.readFileSync(
+            path.join(getTeamAutoMemoryRoot(repo), 'reference/mod.md'),
+            'utf8',
+          ),
+        ).toContain('updated fact');
+        expect(
+          fs.existsSync(
+            path.join(getTeamAutoMemoryRoot(repo), 'reference/gone.md'),
+          ),
+        ).toBe(false);
+        expect(seen).toEqual(
+          (['delete', 'update', 'create'] as const).map((operation) =>
+            expect.objectContaining({
+              scope: 'team',
+              operation,
+              relativePaths: [`feedback/local-${operation}.md`],
+            }),
+          ),
+        );
       } finally {
         registration();
       }
