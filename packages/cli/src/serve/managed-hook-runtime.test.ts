@@ -26,6 +26,22 @@ import {
   parseManagedHookControl,
   type ManagedHookDefinition,
 } from './managed-hook-runtime.js';
+
+// A synchronous pathToFileURL throw must not strand the runtime hold. The
+// flag wrapper survives restoreAllMocks, which would reset a vi.fn's base
+// implementation for the existing tests that want the real conversion.
+const urlMock = vi.hoisted(() => ({ throwOnPathToFileURL: false }));
+vi.mock('node:url', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:url')>();
+  return {
+    ...actual,
+    pathToFileURL: (path: string) => {
+      if (urlMock.throwOnPathToFileURL)
+        throw new TypeError('Missing UNC resource path');
+      return actual.pathToFileURL(path);
+    },
+  };
+});
 const key = {
   tenantId: 'tenant',
   workspaceId: 'workspace',
@@ -1132,6 +1148,36 @@ describe('ManagedHookRuntime', () => {
     });
     expect(instance.hasHolds('runtime-session')).toBe(false);
     expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('settles without a hold when pathToFileURL throws before evaluation starts', async () => {
+    const modulePath = path.join(directory, 'unc-handler.mjs');
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'unc',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    // Windows UNC shapes pass manifest validation and then throw here.
+    urlMock.throwOnPathToFileURL = true;
+    const call = request();
+    try {
+      await instance.control('runtime-session', call);
+      const receipt = await settled(instance);
+      expect(receipt).toMatchObject({
+        state: 'settled',
+        error: { code: 'managed_hook_handler_unavailable' },
+      });
+      expect(instance.hasHolds('runtime-session')).toBe(false);
+      expect(await instance.control('runtime-session', call)).toEqual(receipt);
+    } finally {
+      urlMock.throwOnPathToFileURL = false;
+    }
   });
   it('settles a handler module that rejects with a non-Error value', async () => {
     const modulePath = path.join(directory, 'null-reject-handler.mjs');

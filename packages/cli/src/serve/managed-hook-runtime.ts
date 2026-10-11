@@ -113,9 +113,19 @@ function importHookModule(
       onAbort();
       return;
     }
+    // Convert before arming the hold: pathToFileURL throws synchronously on
+    // paths that pass manifest validation (Windows UNC shapes), and only the
+    // derived promise's handlers clear moduleEvaluationPending.
+    let href: string;
+    try {
+      href = pathToFileURL(modulePath).href;
+    } catch (cause) {
+      finish(cause instanceof Error ? cause : new Error(String(cause)));
+      return;
+    }
     signal.addEventListener('abort', onAbort, { once: true });
     entry.moduleEvaluationPending = true;
-    import(pathToFileURL(modulePath).href)
+    import(href)
       .then(
         (module) => {
           entry.moduleEvaluationPending = false;

@@ -1136,14 +1136,22 @@ describe('Hosted Harness no-tool session', () => {
     }));
   });
   afterEach(async () => {
+    // Quiesce the wake pump before the Broker mocks come down: DELETE closes
+    // the wake scheduler, so a settle retry cannot outlive its test and log
+    // into whichever test runs next. A Session already gone answers 404. The
+    // wait itself is bounded: a Session fenced behind a never-answering
+    // Runtime poll holds the close until the reconcile budget, and such a
+    // Session is a plain Hook Session with no pump to quiesce.
+    await Promise.all(
+      [...listeners].map((listener) =>
+        Promise.race([
+          headers(supertest(listener).delete(`/session/${SESSION_ID}`)),
+          new Promise((resolve) => setTimeout(resolve, 5_000)),
+        ]),
+      ),
+    );
     vi.restoreAllMocks();
-    await rm(state.root, {
-      recursive: true,
-      force: true,
-      // A wake pump's final writes can still be in flight at teardown.
-      maxRetries: 5,
-      retryDelay: 100,
-    });
+    await rm(state.root, { recursive: true, force: true });
   });
 
   it.each(['close', 'delete'] as const)(
@@ -7634,11 +7642,7 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ ...operation, input: { ...operation.input, message: 'changed' } });
     expect(conflict.status).toBe(409);
     expect(conflict.body.code).toBe('hosted_hook_operation_conflict');
-    // An earlier test's wake pump can outlive its own teardown and log
-    // here: only a line about this test's own operation fails it.
-    expect(
-      log.mock.calls.filter((call) => String(call[0]).includes(operationId)),
-    ).toEqual([]);
+    expect(log).not.toHaveBeenCalled();
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
@@ -14181,11 +14185,7 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000 },
     );
-    // An earlier test's wake pump can outlive its own teardown and log
-    // here: only a line about this test's own turn fails it.
-    expect(
-      log.mock.calls.filter((call) => String(call[0]).includes(PROMPT_ID)),
-    ).toEqual([]);
+    expect(log).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
