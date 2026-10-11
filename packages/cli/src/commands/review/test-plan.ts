@@ -209,15 +209,20 @@ const PATH_RE = /^[\w.@-]+(?:\/[\w.@-]+)+\/?(?::\d+(?::\d+)?)?$/;
  * Deliberately anchored on a test word next to the number. A bare `(42)` in a
  * Test Plan is far more often a PR reference or a line number than a count, and
  * a wrong count claim produces a `differs` note nobody asked for.
+ *
+ * Humans group thousands (`2,239 passed`). `\b` sees a boundary between the
+ * comma and the digit after it, so `\b(\d+)` claimed the tail (`239`); the
+ * grouped class reads the whole number, and the lookbehind refuses to start a
+ * match mid-group.
  */
 const COUNT_RES = [
   // A Test Plan states its count in the future tense as often as the past:
   // "expect all four files and 471 tests **to pass**". Dropping the modal was
   // measured against this repo's own PR #8176, where the exact claim this
   // command exists to check went unextracted.
-  /\b(\d+)\s+(?:tests?|specs?|assertions?)\s+(?:(?:to|should|will|would|must)\s+)?(?:pass(?:ed|ing|es)?|green|ok)\b/gi,
-  /\btests?:?\s+(\d+)\s+pass(?:ed|ing)?\b/gi,
-  /\b(\d+)\s+pass(?:ed|ing)\b/gi,
+  /\b(?<![\d,])(\d{1,3}(?:,\d{3})+|\d+)\s+(?:tests?|specs?|assertions?)\s+(?:(?:to|should|will|would|must)\s+)?(?:pass(?:ed|ing|es)?|green|ok)\b/gi,
+  /\btests?:?\s+(\d{1,3}(?:,\d{3})+|\d+)\s+pass(?:ed|ing)?\b/gi,
+  /\b(?<![\d,])(\d{1,3}(?:,\d{3})+|\d+)\s+pass(?:ed|ing)\b/gi,
 ];
 
 /**
@@ -437,8 +442,11 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     let saw = false;
     // `Tests  472 passed (472)`, `Tests: 12 passed, 12 total`, and multi-
     // segment forms like `Tests  2 failed | 3 skipped | 40 passed (45)` —
-    // vitest separates with ` | `, jest with `, `.
-    const re = /^\s*Tests:?\s+(?:\d+\s+\w+\s*[,|]\s*)*(\d+)\s+passed/gim;
+    // vitest separates with ` | `, jest with `, `. The number class also
+    // admits comma-grouped thousands; there is no lookbehind here because
+    // a `,` before a segment count is jest's separator, not a grouping comma.
+    const re =
+      /^\s*Tests:?\s+(?:(?:\d{1,3}(?:,\d{3})+|\d+)\s+\w+\s*[,|]\s*)*(\d{1,3}(?:,\d{3})+|\d+)\s+passed/gim;
     // Strip ANSI SGR sequences first. A real runner writes its summary through
     // a color-enabled pipe, so the kept text reads
     // `Tests\x1b[2m  \x1b[22m\x1b[1m3 failed\x1b[22m…` — the codes sit BETWEEN
@@ -449,7 +457,7 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     const text = (cmd.output ?? '').replace(/\x1b\[[0-9;]*m/g, '');
     let m: RegExpExecArray | null;
     while ((m = re.exec(text))) {
-      total += Number(m[1]);
+      total += Number(m[1].replace(/,/g, ''));
       saw = true;
     }
     if (saw) counts.push(total);
@@ -722,7 +730,9 @@ function ruleCommand(
 }
 
 function ruleCount(text: string, observed: number[]): TestPlanClaim {
-  const claimed = Number(/(\d+)/.exec(text)?.[1]);
+  const claimed = Number(
+    /(\d{1,3}(?:,\d{3})+|\d+)/.exec(text)?.[1]?.replace(/,/g, ''),
+  );
   if (!observed.length || !Number.isFinite(claimed)) {
     return {
       kind: 'count',

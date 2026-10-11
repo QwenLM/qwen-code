@@ -241,6 +241,39 @@ describe('extractClaims', () => {
     expect(claims.map((c) => c.text)).toEqual(['471 tests to pass']);
   });
 
+  it('reads comma-grouped thousands as the full count', () => {
+    // "2,239 passed" is a claim of 2239 — `\b(\d+)` claimed the tail after the
+    // last comma and the review carried a false `239 passed` note (PR #12250).
+    const claims = extractClaims(
+      '2,239 passed\nexpect 1,234 tests to pass\nTests: 12,345 passed',
+    ).filter((c) => c.kind === 'count');
+    // Claim order is pattern order (future-tense, runner-summary, bare), not
+    // position order — the overlap claim keeps one statement to one claim.
+    expect(claims.map((c) => c.text)).toEqual([
+      '1,234 tests to pass',
+      'Tests: 12,345 passed',
+      '2,239 passed',
+    ]);
+  });
+
+  it('does not read a comma-grouped PR number as a count', () => {
+    const claims = extractClaims('See PR 1,234 for context.').filter(
+      (c) => c.kind === 'count',
+    );
+    expect(claims).toEqual([]);
+  });
+
+  it('does not claim the tail of a malformed grouped number', () => {
+    // The `(?<![\d,])` lookbehind is the guard: without it `1,23 passed`
+    // claims `23 passed` at the comma's word boundary.
+    expect(
+      extractClaims('1,23 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1,2345 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+  });
+
   it('pulls path arguments out of a repro command', () => {
     const claims = extractClaims(
       '```bash\nnpx vitest run src/a.test.ts src/b.test.ts\n```',
@@ -439,6 +472,27 @@ describe('observedTestCounts', () => {
     expect(
       observedTestCounts(report(['Tests  1 failed | 40 passed (41)'])),
     ).toEqual([40]);
+  });
+
+  it('reads comma-grouped thousands in a summary', () => {
+    expect(observedTestCounts(report(['Tests  2,239 passed (2,239)']))).toEqual(
+      [2239],
+    );
+    expect(
+      observedTestCounts(
+        report(['Tests:  1 failed, 2,239 passed, 2,240 total']),
+      ),
+    ).toEqual([2239]);
+  });
+
+  it('reads a grouped count in a non-passed summary segment', () => {
+    // The segment class is widened too: a grouped `failed` count must not make
+    // the whole line unparseable and silently drop the observed count.
+    expect(
+      observedTestCounts(
+        report(['Tests  1,234 failed | 2,345 passed (3,579)']),
+      ),
+    ).toEqual([2345]);
   });
 
   it('reads a three-segment summary (failed | skipped | passed)', () => {
@@ -1008,6 +1062,12 @@ describe('runTestPlan', () => {
     it('reproduces a count a suite in this review reported', () => {
       const r = run('## Test Plan\n\n471 tests passed', [], withCounts(471));
       expect(verdictOf(r.claims, '471 tests passed')).toBe('reproduces');
+    });
+
+    it('reproduces a comma-grouped claim against an ungrouped observed count', () => {
+      // Runners print `2239`; humans paste `2,239`. Same number, same verdict.
+      const r = run('## Test Plan\n\n2,239 passed', [], withCounts(2239));
+      expect(verdictOf(r.claims, '2,239 passed')).toBe('reproduces');
     });
 
     it('reports a mismatch as `differs`, NOT as a contradiction', () => {
