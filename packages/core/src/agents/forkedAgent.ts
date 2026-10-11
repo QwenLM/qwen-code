@@ -615,10 +615,12 @@ export async function runForkedAgent(
 
       for await (const event of stream) {
         if (event.type === StreamEventType.RETRY) {
+          // Every retry revokes pending function calls, including
+          // respond_in_schema; a continuation keeps only text and usage.
+          jsonResult = undefined;
           if (!event.isContinuation) {
             fullText = '';
             usage = { inputTokens: 0, outputTokens: 0, cacheHitTokens: 0 };
-            jsonResult = undefined;
           }
           continue;
         }

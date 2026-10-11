@@ -430,14 +430,23 @@ describe('runForkedAgent (cache path)', () => {
       expect(result.model).toBe('fallback-model');
     });
 
-    it('keeps the first payload across a continuation retry', async () => {
+    it('replaces a payload revoked by a continuation retry', async () => {
       const result = await runWithEvents([
         schemaChunk('first'),
         { type: StreamEventType.RETRY, isContinuation: true },
         schemaChunk('second'),
       ]);
 
-      expect(result.jsonResult).toEqual({ suggestion: 'first' });
+      expect(result.jsonResult).toEqual({ suggestion: 'second' });
+    });
+
+    it('returns no payload when a continuation retry revokes the only one', async () => {
+      const result = await runWithEvents([
+        schemaChunk('revoked'),
+        { type: StreamEventType.RETRY, isContinuation: true },
+      ]);
+
+      expect(result.jsonResult).toBeUndefined();
     });
   });
 
