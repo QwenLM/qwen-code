@@ -548,6 +548,134 @@ describe('managed email inbound', () => {
     expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
   });
 
+  it('stalls admission on consecutive workspace_not_found refusals instead of dropping every message (R5-1)', async () => {
+    // workspace_not_found is instance-scoped: every determinant of the
+    // verdict comes from the channel instance row, so each inbound meets
+    // it identically and no retry heals it. Dropping each as an
+    // independent poison claim destroys the whole inbound flow behind
+    // one routine log line while the channel keeps reporting connected.
+    // The first drop stays (R3-1); the second consecutive verdict holds
+    // its claim and stalls the search, so the mail stays re-searchable
+    // until the binding answers again.
+    const lines: string[] = [];
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await adapter.connect();
+    const submit = plane.submitInbound.bind(plane);
+    plane.submitInbound = async () => {
+      plane.submitAttempts += 1;
+      throw Object.assign(new Error('HTTP 404'), {
+        status: 404,
+        code: 'workspace_not_found',
+      });
+    };
+    append(raw('one', 'first'));
+    const held = append(raw('two', 'second'));
+    append(raw('three', 'third'));
+    await adapter.tick();
+    // The first poison claim dropped (R3-1); the second tripped the
+    // stall and is held, so the search stopped at it and the mail behind
+    // it was never admitted.
+    expect(state(adapter).pending).toEqual([
+      { uid: held, eventId: `1:${held}` },
+    ]);
+    expect(state(adapter).lastUid).toBe(held);
+    expect(plane.events).toEqual([]);
+    expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
+    append(raw('four', 'fourth'));
+    await adapter.tick();
+    // One probe re-drive per poll, and the mail that arrived under the
+    // stall is never admitted to its destruction.
+    expect(plane.submitAttempts).toBe(3);
+    expect(state(adapter).pending).toEqual([
+      { uid: held, eventId: `1:${held}` },
+    ]);
+    expect(state(adapter).lastUid).toBe(held);
+    expect(plane.events).toEqual([]);
+    const stalled = lines.filter((line) => line.includes('stopped admitting'));
+    expect(stalled).toHaveLength(1);
+    expect(stalled[0]).toContain('--workspace');
+    expect(lines.join('\n')).toContain('the message is skipped');
+    // The binding answers again: the held claim converges and the
+    // mailbox behind it flows in the same poll, no restart.
+    plane.submitInbound = submit;
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([]);
+    expect(plane.events.map((event) => event.text)).toEqual([
+      'second',
+      'third',
+      'fourth',
+    ]);
+  });
+
+  it('re-probes one held claim per poll while the workspace stall holds (R5-1)', async () => {
+    // The held claim's re-drive is the probe that lifts the stall, and
+    // one probe per poll is enough: the verdict cannot change within a
+    // tick, so re-driving the entries behind it would only spend a
+    // refused submit plus the retry delay each, stretching the tick
+    // toward the claim lease.
+    const adapter = make();
+    await adapter.connect();
+    plane.failSubmits = 3;
+    append(raw('a', 'lost a'));
+    append(raw('b', 'lost b'));
+    append(raw('c', 'lost c'));
+    await adapter.tick();
+    expect(state(adapter).pending).toHaveLength(3);
+    const submit = plane.submitInbound.bind(plane);
+    plane.submitInbound = async () => {
+      plane.submitAttempts += 1;
+      throw Object.assign(new Error('HTTP 404'), {
+        status: 404,
+        code: 'workspace_not_found',
+      });
+    };
+    await adapter.tick();
+    // The first verdict dropped the oldest claim as the poison message
+    // it may be (R3-1); the second held its claim and stalled the
+    // search, leaving the third entry behind them.
+    expect(state(adapter).pending.map((entry) => entry.uid)).toEqual([2, 3]);
+    const before = plane.submitAttempts;
+    await adapter.tick();
+    expect(plane.submitAttempts - before).toBe(1);
+    expect(state(adapter).pending.map((entry) => entry.uid)).toEqual([2, 3]);
+    // The binding answers again: the probe converges, the stall lifts,
+    // and the rest of the backlog re-drives in the same poll.
+    plane.submitInbound = submit;
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([]);
+    expect(plane.admitted.size).toBe(3);
+  });
+
+  it('starts the workspace streak clean after a mailbox epoch change (R5-1)', async () => {
+    // The epoch change drops the stall's held claim with the rest of the
+    // old generation's in-flight set: a stall that kept gating the new
+    // epoch's search would wedge the mailbox with nothing left to
+    // re-probe it, so the streak starts clean with the new generation.
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [
+      { status: 404, code: 'workspace_not_found' },
+      { status: 404, code: 'workspace_not_found' },
+    ];
+    append(raw('one', 'first'));
+    append(raw('two', 'second'));
+    await adapter.tick();
+    expect(state(adapter).pending).toHaveLength(1);
+    // The mailbox re-keys under the stall; the new epoch's mail must
+    // meet a fresh streak, not the old one's gate.
+    box.epoch = 2n;
+    box.messages.clear();
+    box.next = 1;
+    await adapter.tick();
+    expect(state(adapter)).toMatchObject({ uidValidity: '2', pending: [] });
+    const uid = append(raw('three', 'new epoch'));
+    await adapter.tick();
+    expect(plane.events.at(-1)).toMatchObject({
+      accountGeneration: 2,
+      platformEventId: `2:${uid}`,
+    });
+  });
+
   it('re-drives an unrecognized 404 as a lost answer, never dropping the mail (R3-1)', async () => {
     // A 404 whose code the contract never classified — an unmapped route
     // answering not_found while the adapter surface is down, a proxy's

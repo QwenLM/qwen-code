@@ -124,12 +124,23 @@ const SUBMIT_RETRY_MS = 5_000;
 // bare status.
 const CHANNEL_NOT_FOUND = 'channel_not_found';
 
-// The 404 codes that are a per-message verdict on the submitted event —
-// the workspace the route binds to is gone under a live instance. Any
-// other 404 (an unmapped route while the adapter surface is down, a
-// proxy's synthesized envelope) says nothing about the mail, so it is
-// re-driven, never dropped on the bare status.
-const PER_MESSAGE_NOT_FOUND = new Set(['workspace_not_found']);
+// The verdict for the workspace the route binds to being gone under a
+// live instance. Every determinant of it comes from the channel instance
+// row, not the message, so consecutive drops of it indict the instance's
+// binding rather than the mail: submit() bounds them with a poll stall
+// (R5-1).
+const WORKSPACE_NOT_FOUND = 'workspace_not_found';
+
+// The 404 codes a single occurrence of which is a verdict on the
+// submitted event, dropping it as a poison claim. Any other 404 (an
+// unmapped route while the adapter surface is down, a proxy's
+// synthesized envelope) says nothing about the mail, so it is re-driven,
+// never dropped on the bare status.
+const PER_MESSAGE_NOT_FOUND = new Set([WORKSPACE_NOT_FOUND]);
+
+// One drop is the poison message the verdict may be about (R3-1); a
+// second consecutive one proves the instance's binding itself is broken.
+const WORKSPACE_NOT_FOUND_DROP_LIMIT = 1;
 
 /**
  * The control plane carries an attachment as one base64 string bounded at
@@ -176,6 +187,19 @@ export class ManagedEmailAdapter {
    * claim — re-register, then re-drive — never a per-message drop.
    */
   private registeredGeneration?: number;
+  /**
+   * Consecutive 404 workspace_not_found verdicts. Every determinant of
+   * that verdict comes from the channel instance row, not the message,
+   * so a streak indicts the instance's workspace binding, not the mail:
+   * the first still drops as the poison message it may be (R3-1), and
+   * past the limit the claim is held and the poll stalls instead of
+   * destroying every inbound message behind one routine log line (R5-1).
+   * A successful admission is the one proof the binding answers again,
+   * and it resets the streak.
+   */
+  private workspaceNotFoundStreak = 0;
+  /** Set when the streak passes the limit; gates the search in poll(). */
+  private workspaceStalled = false;
 
   constructor(options: ManagedEmailAdapterOptions) {
     this.settings = emailSettings(options.config);
@@ -321,6 +345,11 @@ export class ManagedEmailAdapter {
         recent: [],
       };
       this.persist();
+      // The epoch change dropped every claim the stall held, so a stall
+      // that kept gating the new epoch's search would wedge the mailbox
+      // with nothing left to re-probe it: the streak starts clean.
+      this.workspaceNotFoundStreak = 0;
+      this.workspaceStalled = false;
       await this.ensureRegistered(this.state);
     }
   }
@@ -409,7 +438,14 @@ export class ManagedEmailAdapter {
     // re-driven before any new mail, so the journal sees them in order.
     await this.resubmitPending();
     const upper = mailbox.uidNext - 1;
-    if (upper <= state.lastUid || state.pending.length >= MANAGED_PENDING_LIMIT)
+    // A stalled workspace leaves the search at lastUid: the mail above
+    // it is re-searched once the held claim's re-drive proves the
+    // binding answers again, never admitted to its destruction meanwhile.
+    if (
+      upper <= state.lastUid ||
+      state.pending.length >= MANAGED_PENDING_LIMIT ||
+      this.workspaceStalled
+    )
       return;
     const found = await client.search(
       { uid: `${state.lastUid + 1}:${upper}` },
@@ -429,10 +465,11 @@ export class ManagedEmailAdapter {
         return;
       if (message.uid <= state.lastUid || message.uid > upper) continue;
       await this.admit(message.uid, message.size);
-      // A registration refusal reset the generation: no further submit
-      // converges this tick. Return — never break: lastUid must stay at
-      // the last admitted message so the next poll re-searches the rest.
-      if (this.registeredGeneration === 0) return;
+      // A registration refusal reset the generation, or the workspace
+      // stall engaged: no further submit converges this tick. Return —
+      // never break: lastUid must stay at the last admitted message so
+      // the next poll re-searches the rest.
+      if (this.registeredGeneration === 0 || this.workspaceStalled) return;
     }
     if (this.running) {
       state.lastUid = batchEnd;
@@ -639,6 +676,16 @@ export class ManagedEmailAdapter {
       const admitted = await this.controlPlane.submitInbound(event);
       state.pending = state.pending.filter((entry) => entry.uid !== uid);
       this.persist();
+      // A successful admission is the one proof the instance's workspace
+      // binding answers again: the drop streak resets and the stall
+      // lifts, so the next poll's search resumes above lastUid.
+      this.workspaceNotFoundStreak = 0;
+      if (this.workspaceStalled) {
+        this.workspaceStalled = false;
+        this.log(
+          `Managed email admission for ${this.settings.address} resumed; the instance's workspace answers again.`,
+        );
+      }
       if (admitted.replayed) {
         this.log(
           `Managed email event ${event.platformEventId} was already admitted as ${admitted.inputId}.`,
@@ -668,6 +715,26 @@ export class ManagedEmailAdapter {
           status === 409 ||
           (status === 404 && PER_MESSAGE_NOT_FOUND.has(String(code))))
       ) {
+        if (status === 404 && code === WORKSPACE_NOT_FOUND) {
+          this.workspaceNotFoundStreak += 1;
+          if (this.workspaceNotFoundStreak > WORKSPACE_NOT_FOUND_DROP_LIMIT) {
+            // Instance-scoped, so every message meets the verdict
+            // identically and no retry heals it: the claim is held and
+            // the poll stalls — the mail above lastUid stays
+            // re-searchable — instead of dropping every inbound message
+            // behind one routine log line while the channel reports
+            // connected. The held claim's re-drive is the probe that
+            // lifts the stall once the binding answers again.
+            this.pendingEvents.set(uid, event);
+            if (!this.workspaceStalled) {
+              this.workspaceStalled = true;
+              this.log(
+                `Managed email stopped admitting for ${this.settings.address}: every message is refused with 404 workspace_not_found, so the workspace this channel instance binds to is gone or unreadable; check the instance's --workspace and --actor flags. Held mail is kept and admission resumes once the workspace answers.`,
+              );
+            }
+            return;
+          }
+        }
         // A deterministic refusal (a failing body, a closed actor scope, a
         // dead route or generation, a route session or workspace gone
         // under a live instance): re-driving the identical event can
@@ -717,9 +784,11 @@ export class ManagedEmailAdapter {
         }
       }
       await this.submit(entry.uid, event);
-      // A registration refusal reset the generation: no further submit
-      // converges this tick — the next poll re-registers, then re-drives.
-      if (this.registeredGeneration === 0) return;
+      // A registration refusal reset the generation, or the workspace
+      // stall engaged: no further submit converges this tick — the next
+      // poll re-registers or re-probes, then re-drives. The stall also
+      // skips the retry delay: one probe per poll is what lifts it.
+      if (this.registeredGeneration === 0 || this.workspaceStalled) return;
       if (state.pending.some((pending) => pending.uid === entry.uid)) {
         await delay(SUBMIT_RETRY_MS, undefined, {
           signal: this.abort.signal,
