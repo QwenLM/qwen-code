@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.daemon;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -98,11 +99,37 @@ class JsonSupportTest {
         // double, so the integer rounds to its nearest representable value.
         assertEquals("9223372036854776000",
                 JsonSupport.encode(Long.MAX_VALUE));
+        // The same double the script side reads for in-range values: never
+        // a longValue() view of the low 64 bits. Long.MIN_VALUE defeats
+        // Math.abs, and a BigInteger at or past 2^63 sign-flips or
+        // truncates under longValue().
+        assertEquals("-9223372036854776000",
+                JsonSupport.encode(Long.MIN_VALUE));
+        assertEquals("9223372036854776000",
+                JsonSupport.encode(new BigInteger("9223372036854775808")));
+        assertEquals("18446744073709552000",
+                JsonSupport.encode(new BigInteger("18446744073709551616")));
         assertEquals("1.2345678901234568e+29",
                 JsonSupport.encode(
                         new BigInteger("123456789012345678901234567890")));
         assertEquals("100", JsonSupport.encode(100));
         assertEquals("-5", JsonSupport.encode(-5));
+    }
+
+    @Test
+    void encodeRendersBigDecimalsThroughTheDoubleTheScriptSideHolds() {
+        // The parser hands fractions over as BigDecimal; the script peer
+        // holds only the double, so exact digits beyond it never match
+        // JSON.stringify.
+        assertEquals("12345678901234567000",
+                JsonSupport.encode(new BigDecimal("12345678901234567890.5")));
+        assertEquals("0", JsonSupport.encode(new BigDecimal("1E-400")));
+        assertThrows(IllegalArgumentException.class,
+                () -> JsonSupport.encode(new BigDecimal("1E+400")));
+        // The subnormal band is the exception: the double's own short form
+        // is the ECMAScript digits, which the double path would corrupt.
+        assertEquals("5e-324",
+                JsonSupport.encode(new BigDecimal("5E-324")));
     }
 
     @Test

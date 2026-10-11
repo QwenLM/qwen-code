@@ -141,21 +141,30 @@ final class JsonSupport {
             out.append(value.longValue());
             return;
         }
-        if (value instanceof Long || value instanceof BigInteger) {
-            long asLong = value.longValue();
-            if (Math.abs(asLong) < 9_007_199_254_740_992L) {
-                out.append(asLong);
+        if (value instanceof BigDecimal) {
+            // The decimal the script side could hold is the double the
+            // parser read — an exact printout of more digits never matches
+            // `JSON.stringify` (12345678901234567890.5 prints as
+            // 12345678901234567000), and a past-range decimal renders as
+            // digits where every peer either refuses or prints 0. Render
+            // through that double, except in the subnormal band where the
+            // double's own rendering is the one Java cannot reproduce and
+            // the decimal's digits are the ECMAScript short form
+            // (`5e-324`), which the double path would corrupt to `4.9e-324`.
+            double asDouble = value.doubleValue();
+            if (!Double.isFinite(asDouble)) {
+                throw new IllegalArgumentException(
+                        "JSON numbers must be finite: " + value);
+            }
+            if (asDouble == 0
+                    || Math.abs(asDouble) >= 1.1125369292536007e-308) {
+                writeCanonicalDecimal(
+                        BigDecimal.valueOf(asDouble).stripTrailingZeros(),
+                        out);
             } else {
                 writeCanonicalDecimal(
-                        BigDecimal.valueOf(value.doubleValue())
-                                .stripTrailingZeros(),
-                        out);
+                        ((BigDecimal) value).stripTrailingZeros(), out);
             }
-            return;
-        }
-        if (value instanceof BigDecimal) {
-            writeCanonicalDecimal(
-                    ((BigDecimal) value).stripTrailingZeros(), out);
             return;
         }
         double number = value.doubleValue();
