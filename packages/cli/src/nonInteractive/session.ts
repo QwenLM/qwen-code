@@ -15,6 +15,7 @@ import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/service
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
+import { ModSession } from './mod-session.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlDispatcher } from './control/ControlDispatcher.js';
 import { ControlService } from './control/ControlService.js';
@@ -81,6 +82,7 @@ class Session {
   private promptIdCounter: number | null = null;
   private inputReader: StreamJsonInputReader;
   private outputAdapter: StreamJsonOutputAdapter;
+  private readonly modSession?: ModSession;
   private controlContext: ControlContext | null = null;
   private dispatcher: ControlDispatcher | null = null;
   private controlService: ControlService | null = null;
@@ -117,6 +119,7 @@ class Session {
       config,
       config.getIncludePartialMessages(),
     );
+    this.modSession = ModSession.create(config, settings, this.outputAdapter);
     this.unsubscribeRecordingFailure = subscribeToHeadlessChatRecordingFailures(
       config,
       this.outputAdapter,
@@ -510,6 +513,7 @@ class Session {
 
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
+        modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
@@ -604,6 +608,7 @@ class Session {
       const promptId = this.getNextPromptId();
       turnAbortController = this.startTurn();
       await runNonInteractive(this.config, this.settings, '', promptId, {
+        modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
@@ -675,6 +680,7 @@ class Session {
         combinedModelText,
         promptId,
         {
+          modSession: this.modSession,
           abortController: turnAbortController,
           adapter: this.outputAdapter,
           controlService: this.controlService ?? undefined,
@@ -950,7 +956,8 @@ class Session {
     }
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    await this.modSession?.close();
     this.unsubscribeRecordingFailure();
   }
 
@@ -1100,6 +1107,6 @@ export async function runNonInteractiveStreamJson(
     await manager.run();
   } finally {
     await settleChatRecording(config, { finalize: true });
-    manager.dispose();
+    await manager.dispose();
   }
 }

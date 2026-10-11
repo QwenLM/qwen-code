@@ -18,6 +18,7 @@ import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js'
 import {
   readManagedSessionTitleInfoSync,
   readManagedSessionSourceSync,
+  readSessionTitleInfoFromFileSync,
 } from '../utils/sessionStorageUtils.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
@@ -481,6 +482,41 @@ describe('managed session metadata', () => {
     });
   });
 
+  it('keeps the authority-composed envelope over colliding content keys', async () => {
+    const harness = await createHarness();
+    let recordRef!: ManagedSessionDurableRef;
+    await withAuthority(harness, async (authority) => {
+      recordRef = (
+        await authority.commitDomainRecord(
+          renameCommand('cmd-rename-collide'),
+          {
+            domain: 'session_metadata',
+            content: {
+              title: 'x',
+              revision: 999,
+              previousRecordRef: 'bogus',
+              operationId: 'caller-chosen',
+            },
+          },
+          { class: 'trusted_entry' },
+        )
+      ).recordRef;
+    });
+
+    const body = JSON.parse(
+      (await harness.store.read(recordRef)).toString('utf8'),
+    ) as {
+      operationId: string;
+      revision: number;
+      previousRecordRef: unknown;
+      title: string;
+    };
+    expect(body.operationId).toBe('cmd-rename-collide');
+    expect(body.revision).toBe(1);
+    expect(body.previousRecordRef).toBeNull();
+    expect(body.title).toBe('x');
+  });
+
   it.each([
     ['session_metadata', 'missing'],
     ['session_metadata', 'incomplete'],
@@ -501,6 +537,14 @@ describe('managed session metadata', () => {
                   ? { title: value, titleSource: 'manual' }
                   : {
                       record: {
+                        uuid: `rec-source-${value}`,
+                        parentUuid: null,
+                        sessionId,
+                        timestamp: '2026-09-01T10:00:00.000Z',
+                        type: 'system',
+                        subtype: 'session_source',
+                        cwd: '/workspace',
+                        version: 'test',
                         systemPayload: { sourceType: 'fork', sourceId: value },
                       },
                     },
@@ -680,6 +724,41 @@ describe('managed session metadata', () => {
         harness.runtimeBaseDir,
       ),
     ).toBeUndefined();
+  });
+
+  it('defers to the legacy reader when marker text is glued onto a legacy line', async () => {
+    const harness = await createHarness();
+    // A torn append can glue unparseable marker-looking text onto a valid
+    // legacy line; quoted marker text is not a Managed header record.
+    const customTitle = JSON.stringify({
+      uuid: 'legacy-1',
+      parentUuid: null,
+      sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'system',
+      subtype: 'custom_title',
+      customTitle: 'Legacy title',
+      titleSource: 'manual',
+    });
+    await fs.writeFile(
+      harness.transcriptPath,
+      `${customTitle} and the raw bytes "subtype":"managed_session_header_v1" landed here\n`,
+      'utf8',
+    );
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toBeUndefined();
+    // The callers compose managed ?? legacy, so the custom title survives.
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ) ?? readSessionTitleInfoFromFileSync(harness.transcriptPath),
+    ).toEqual({ title: 'Legacy title', source: 'manual' });
   });
 
   it('refuses a registered domain that is not enabled', async () => {
@@ -966,6 +1045,14 @@ describe('maintenance on a sealed managed session', () => {
         domain: 'session_source',
         content: {
           record: {
+            uuid: 'rec-source-channel',
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-09-01T10:00:00.000Z',
+            type: 'system',
+            subtype: 'session_source',
+            cwd: '/workspace',
+            version: 'test',
             systemPayload: { sourceType: 'channel', sourceId: 'managed' },
           },
         },

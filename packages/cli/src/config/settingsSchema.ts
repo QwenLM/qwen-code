@@ -4244,6 +4244,16 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
+      mods: {
+        type: 'boolean',
+        label: 'Claude-compatible Mod commands',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Run the experimental JavaScript Mod command subset from enabled extensions in trusted headless sessions.',
+        showInDialog: false,
+      },
       liveVoice: {
         type: 'object',
         label: 'Live Voice',

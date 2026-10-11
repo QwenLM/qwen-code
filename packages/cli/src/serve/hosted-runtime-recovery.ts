@@ -32,7 +32,12 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
-import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import {
+  childWorkspaceAnswerSuffix,
+  type HostedChildAgentSession,
+} from './hosted-child-agent-session.js';
+import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import {
   HOSTED_TEAM_TOOL_NAMES,
   type HostedTeamSession,
@@ -43,6 +48,9 @@ import {
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
   hostedAgentBackgroundStartedText,
   hostedChildRunIdFor,
+  hostedMessageContinuedText,
+  hostedMessageToChildText,
+  HOSTED_MESSAGE_TO_PARENT_TEXT,
   hostedTeamJoinedText,
   hostedRuntimeSessionId,
   journaledToolResultIds,
@@ -413,6 +421,7 @@ async function answerAbandonedTurnCalls(input: {
   uncommitted?: 'all' | 'hosted' | 'none';
   children?: HostedChildAgentSession;
   teams?: HostedTeamSession;
+  messages?: HostedSessionMessageSession;
 }): Promise<number> {
   const uncommitted = input.uncommitted ?? 'all';
   const records = (await input.session.sink.project()).filter(
@@ -440,8 +449,16 @@ async function answerAbandonedTurnCalls(input: {
     // call that never ran.
     const launched =
       call.name === 'agent' ? input.children?.record(callKey) : undefined;
+    const sent =
+      call.name === 'send_message'
+        ? sentMessageText(input, functionCallId, callKey)
+        : undefined;
     let parts: Part[];
-    if (launched?.completion === 'sent') {
+    if (sent !== undefined) {
+      parts = convertToFunctionResponse(call.name, functionCallId, [
+        { text: sent },
+      ]);
+    } else if (launched?.completion === 'sent') {
       const member = input.teams?.membership(callKey);
       parts = convertToFunctionResponse(call.name, functionCallId, [
         {
@@ -467,6 +484,7 @@ async function answerAbandonedTurnCalls(input: {
         (uncommitted === 'none' ||
           (uncommitted === 'hosted' &&
             !HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
+            call.name !== 'send_message' &&
             !(call.name === 'agent' && launched === undefined)))
       )
         continue;
@@ -502,6 +520,46 @@ async function answerAbandonedTurnCalls(input: {
   return answeredNow;
 }
 
+/**
+ * H4d-b: the answer a send_message call earned when it committed — its
+ * outbox entry, or the continuation it launched for a completed child —
+ * or undefined when it committed nothing.
+ */
+function sentMessageText(
+  input: {
+    session: ManagedSession;
+    promptId: string;
+    children?: HostedChildAgentSession;
+    messages?: HostedSessionMessageSession;
+  },
+  callId: string,
+  callKey: string,
+): string | undefined {
+  const message = input.messages?.message(
+    sessionMessageId({
+      senderSessionId:
+        input.session.authority.sessionHeader.sessionKey.sessionId,
+      turnId: input.promptId,
+      callId,
+    }),
+  );
+  if (message?.direction === 'outbound') {
+    return message.route === 'to_parent'
+      ? HOSTED_MESSAGE_TO_PARENT_TEXT
+      : hostedMessageToChildText(
+          input.children?.taskIdOf(message.childRunId) ?? message.childRunId,
+        );
+  }
+  const continued = input.children?.record(callKey);
+  if (continued?.predecessorChildRunId) {
+    return hostedMessageContinuedText(
+      input.children!.taskIdOf(continued.predecessorChildRunId),
+      input.children!.taskIdOf(continued.childRunId),
+    );
+  }
+  return undefined;
+}
+
 /** The interruption every settle or resume route below names. */
 const INTERRUPTED_HARNESS = 'the Harness that asked was interrupted';
 
@@ -521,6 +579,7 @@ export function answerCommittedTurnCalls(input: {
   promptId: string;
   children?: HostedChildAgentSession;
   teams?: HostedTeamSession;
+  messages?: HostedSessionMessageSession;
 }): Promise<number> {
   return answerAbandonedTurnCalls({
     ...input,
@@ -545,6 +604,7 @@ export function answerResumedTurnCalls(input: {
   promptId: string;
   children?: HostedChildAgentSession;
   teams?: HostedTeamSession;
+  messages?: HostedSessionMessageSession;
 }): Promise<number> {
   return answerAbandonedTurnCalls({
     ...input,
@@ -620,6 +680,9 @@ export async function fillParkedRoundAgentGaps(input: {
    * durable journal must not assert one that never happened. */
   gapText: string;
   children?: HostedChildAgentSession;
+  /** H4d-b: the message funnel, so a committed send_message keeps the
+   * answer it earned instead of the never-admitted one. */
+  messages?: HostedSessionMessageSession;
   signal?: AbortSignal;
   consume?: (childRunId: string) => void;
 }): Promise<number> {
@@ -707,6 +770,28 @@ export async function fillParkedRoundAgentGaps(input: {
     // both sibling arms in this diff document and follow the same rule.
     const foldOwed = !journaled.has(callId);
     const children = input.children;
+    const sent =
+      name === 'send_message'
+        ? sentMessageText(
+            {
+              session: input.managed,
+              promptId: input.promptId,
+              children,
+              messages: input.messages,
+            },
+            callId,
+            hostedChildRunIdFor(input.promptId, callId),
+          )
+        : undefined;
+    if (sent !== undefined) {
+      if (foldOwed) {
+        await writeFold(
+          convertToFunctionResponse(name, callId, [{ text: sent }]),
+        );
+        filled += 1;
+      }
+      continue;
+    }
     const admitted =
       children === undefined
         ? undefined
@@ -787,7 +872,16 @@ export async function fillParkedRoundAgentGaps(input: {
           // must land, folded to the inline bound with its marker instead
           // of erroring the recovered Turn — the full bytes stay on the
           // acceptance record, and the exact template measures the fold.
-          const fitted = fitChildResultInline(name, callId, text, fits);
+          // A worktree child's merge outcome follows, as on the live arm.
+          const fitted = fitChildResultInline(
+            name,
+            callId,
+            text,
+            fits,
+            await childWorkspaceAnswerSuffix(record, acceptance, (ref) =>
+              input.managed.resources.read(ref),
+            ),
+          );
           if (foldOwed) {
             await writeFold(fitted);
             filled += 1;
@@ -849,6 +943,8 @@ export async function settleInterruptedTurnRuntime(input: {
   consume?: (childRunId: string) => void;
   /** H4e-b1: the team funnel that tells which team calls committed. */
   teams?: HostedTeamSession;
+  /** H4d-b: the message funnel that tells which send_message committed. */
+  messages?: HostedSessionMessageSession;
 }): Promise<HostedInterruptedTurnRuntime> {
   const authorization = await input.session.authority.harnessRunAuthorization();
   // Only a committed, readable checkpoint — or the durable absence of any
@@ -948,6 +1044,7 @@ export async function settleInterruptedTurnRuntime(input: {
         cwd: input.cwd,
         gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
         children: input.children,
+        messages: input.messages,
         signal: settleFillAbort.signal,
         consume: input.consume,
       });
@@ -989,6 +1086,7 @@ export async function settleInterruptedTurnRuntime(input: {
           : 'the Harness that asked was interrupted',
       children: input.children,
       teams: input.teams,
+      messages: input.messages,
     });
   } else {
     // A Turn whose checkpoint never bound it — a batch of team calls and
@@ -1001,6 +1099,7 @@ export async function settleInterruptedTurnRuntime(input: {
       promptId: input.promptId,
       children: input.children,
       teams: input.teams,
+      messages: input.messages,
     });
   }
   // The handback owed for a taken Workspace survives a settlement split
