@@ -1,0 +1,100 @@
+/* Status, steps and token usage under a workspace agent's reply. Ships in the
+   exported transcript too, so it relies on no Tailwind utilities. */
+
+.details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.statusLabel {
+  font-weight: 600;
+}
+
+.details[data-agent-status='failed'] .statusLabel,
+.details[data-agent-status='offline'] .statusLabel {
+  color: var(--error-color);
+}
+
+.error {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.step {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.stepIcon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.stepIconRunning {
+  animation: agent-step-spin 1s linear infinite;
+}
+
+.stepIconDone {
+  color: var(--success-color);
+}
+
+.stepIconFailed {
+  color: var(--error-color);
+}
+
+/* A step that never finished because its run ended. */
+.stepIconStopped {
+  color: var(--muted-foreground);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stepIconRunning {
+    animation: none;
+  }
+}
+
+@keyframes agent-step-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.stepText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepText[data-running] {
+  color: var(--foreground);
+}
+
+.tokens {
+  font-variant-numeric: tabular-nums;
+}

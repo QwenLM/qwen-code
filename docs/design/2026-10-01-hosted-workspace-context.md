@@ -62,7 +62,11 @@ refusal leaves the Session without context and the turn unaffected; the
 failure is logged on the Harness's stderr. Cancellation stops waiting for the read immediately and never latches the
 slot, even if the underlying request finishes later. The slot records a completed
 fetch — including "the Workspace has no instruction files" — so the read
-happens at most once per attached Session.
+happens once per attached Session until something the Harness sees changes
+an instruction file: a native `write_file`/`edit` batch naming `QWEN.md` or
+`AGENTS.md` (invalidated before it runs, whatever its outcome), or a file
+rewind whose `filesChanged` names one. Either returns the slot to undefined,
+and the next native tool turn reads again (#13564).
 
 ## Assembly
 
@@ -120,6 +124,7 @@ The latch is directory-blind: a committed
 `POST /v1/agents/sessions/{id}/cwd` settles without Harness or worker
 involvement, so the attachment keeps injecting the previous directory's rules
 while its tools already run in the new one, and the new directory's files are
-never read. Invalidating it needs the resolved directory or the ContextBinding
+never read. A shell command that writes an instruction file is equally
+invisible: the Harness does not know which files a shell call touched. Invalidating these needs the resolved directory or the ContextBinding
 `contextRevision` on the `workspace-context` result, whose shape is closed —
 the same revisioning question as above, not a local fix.

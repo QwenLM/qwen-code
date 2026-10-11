@@ -289,6 +289,8 @@ Later H4 slices (not scheduled here): `independent_worktree` with its
 lifecycle and merge policy; `shared_serialized` with its generation/barrier;
 the `workflow` task kind; team domains and mailbox; cross-workspace children.
 
+**Scope settled (2026-10-09).** The delivered slicing follows the six-slice map of [H4a](2026-10-06-managed-child-agent-runtime.md). The H4c row above was absorbed by H4b (background notification, close cascade, depth and concurrency quotas), H4f (task cancel) and the Detach follow-up. H4c itself became the `workflow` kind and the child launch budget, and the isolation policies are their own later slice; see the [H4c design](2026-10-09-managed-workflow-child-kind.md).
+
 ## Validation plan
 
 - Fixture parity for both bodies, replayed by TypeScript and by Java, as
@@ -334,4 +336,7 @@ the `workflow` task kind; team domains and mailbox; cross-workspace children.
    task view may be required before H4c enables cancel at scale.
 4. **Detached-child ownership.** What durable owner a detached child takes
    (a tenant-level retention policy, or the root Session authority) is left
-   to H4c; the close path only enforces that one exists.
+   to the Detach follow-up of the [H4a map](2026-10-06-managed-child-agent-runtime.md),
+   since H4c was re-scoped (see Scope settled above) and the
+   [H4e-a design](2026-10-10-managed-agent-teams.md) keeps detach out of H4e;
+   the close path only enforces that one exists.

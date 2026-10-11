@@ -16,6 +16,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptSummary,
   DaemonRewindResult,
   DaemonSessionRecapResult,
@@ -1611,6 +1612,13 @@ export function createDaemonSessionActions({
           discardAttachments,
           options?.signal,
         );
+        // Only a cancelled upload has a payload that must not be submitted.
+        // Without uploads the prompt still goes through admission so the
+        // accepted id can be removed exactly by the aborted-signal path below.
+        if (options?.signal?.aborted && uploaded.references.length > 0) {
+          await removeUploadedAttachments(session, uploaded.references);
+          options.signal.throwIfAborted();
+        }
       } catch (error) {
         if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
           store.appendLocalUserMessage(
@@ -2899,6 +2907,23 @@ export function createDaemonSessionActions({
         );
       }
       return await session.removeMidTurnMessage(messageId);
+    },
+
+    async sendMidTurnMessagesNow(
+      opts,
+    ): Promise<DaemonSendMidTurnMessagesNowResult> {
+      const session = sessionRef.current;
+      if (!session) return { requested: false };
+      if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        // Authenticate against the target session, like removals of rows
+        // restored after a session switch.
+        const targetClientId =
+          getPersistedClientId(opts.sessionId) ?? session.clientId;
+        return await session.client.sendMidTurnMessagesNow(opts.sessionId, {
+          ...(targetClientId ? { clientId: targetClientId } : {}),
+        });
+      }
+      return await session.sendMidTurnMessagesNow();
     },
 
     async getMidTurnMessages(opts?: {

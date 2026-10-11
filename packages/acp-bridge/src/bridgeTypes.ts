@@ -19,11 +19,14 @@ import type {
   SessionSourceRemoveResult,
   TurnResultCode,
   TurnResultErrorPayload,
+  SessionExternalRecordRequest,
+  SessionExternalRecordResponse,
 } from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
   ContentBlock,
   LoadSessionResponse,
+  McpServer,
   PromptRequest,
   PromptResponse,
   RequestPermissionResponse,
@@ -331,6 +334,14 @@ export interface BridgeSpawnRequest {
   sessionId?: string;
   /** Trusted Hosted Harness route only; forwarded through private ACP metadata. */
   managedSessionStore?: BridgeManagedSessionStore;
+  /**
+   * Daemon-internal: session-level MCP servers for ACP `session/new`, used
+   * only when this call creates the session (an attach keeps the live
+   * session's servers). No HTTP route forwards a client value here; the
+   * session-agents orchestrator uses it to give a hidden agent session its
+   * `session_send` tool. Absent means none (the historical `[]`).
+   */
+  mcpServers?: McpServer[];
 }
 
 /** Internal daemon-only creation surface for a managed standalone session. */
@@ -492,12 +503,18 @@ export interface BridgeRestoreSessionRequest {
   suppressWorktreeContextRestore?: boolean;
   /** Delay ask_user_question recovery until daemon route validation finishes. */
   deferRestoreAskUserQuestionPrompt?: boolean;
+  /**
+   * Daemon-internal: session-level MCP servers for ACP `session/load` /
+   * `session/resume` (see `BridgeSpawnRequest.mcpServers`). Absent means
+   * none.
+   */
+  mcpServers?: McpServer[];
 }
 
 /** Internal daemon-only restore surface for a managed standalone session. */
 export type BridgeStandaloneRestoreSessionRequest = Omit<
   BridgeRestoreSessionRequest,
-  'sourceType' | 'sourceId'
+  'sourceType' | 'sourceId' | 'mcpServers'
 >;
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
@@ -1321,23 +1338,6 @@ export interface BridgeClientRequestContext {
     };
   };
   /**
-   * The workspace-agent run this prompt is a turn of. Trusted: injected by the
-   * daemon dispatcher, never populated from caller-controlled ACP metadata.
-   *
-   * Present on every prompt the dispatcher sends to an agent session, and on
-   * nothing else. The child re-establishes its run frame from this, which is
-   * what lets the thread tools know which thread they are acting on.
-   */
-  agentRun?: {
-    workspaceId: string;
-    agentId: string;
-    runId: string;
-    threadId: string;
-    rootThreadId: string;
-    attempt: number;
-    contextThroughSequence?: number;
-  };
-  /**
    * Internal: set ONLY by `continueSession` to re-arm the continuation meta
    * key that `sendPrompt` strips from untrusted callers. HTTP routes never
    * populate this from request input, so an external caller cannot use it to
@@ -1401,6 +1401,8 @@ export const DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY =
   'qwen.daemon.passiveManagedRuntimeRecovery';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
   'qwen.daemon.attachmentReferences';
+export const DAEMON_ATTACHMENT_CONTEXT_META_KEY =
+  'qwen.daemon.attachmentContext';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
 
 export function isValidTrustedModelPrompt(value: unknown): value is string {
@@ -1412,19 +1414,11 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
-/**
- * Which workspace-agent run a prompt is one turn of.
- *
- * Trusted like {@link DAEMON_CHANNEL_DELIVERY_META_KEY}: the bridge strips this
- * wire key from every caller and re-injects it only from the daemon-supplied
- * request context. An agent's thread tools act on whatever this names, so a
- * caller that could set it could make one agent post as another.
- */
-export const DAEMON_AGENT_RUN_META_KEY = 'qwen.daemon.agentRun';
 export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
 export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
+export const IMAGE_ONLY_PROMPT_TEXT = '[image]';
 // Bare (unprefixed) key by contract: the SDK wire type
 // (`sdk-typescript/src/daemon/ui/types.ts`) and already-written transcripts
 // pin the value, so it must stay `inputAnnotations`.
@@ -1472,6 +1466,19 @@ export interface BridgeHeartbeatState {
  * prompts; older clients can omit it.
  */
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+// A drain with `userInputOnly: true` (sent for send-now) takes only messages
+// that are not queue-only; hosts that ignore the flag drain everything.
+
+/**
+ * Parent-to-agent request asking the agent to deliver the session's queued
+ * mid-turn messages now (`{ sessionId }`), sent when the user chooses to send
+ * them now. An agent streaming a model response may drain the queue at once
+ * and cut that response short, so the messages reach the model now instead of
+ * after the response and its tool batch. Advisory only: agents that do not
+ * know the method answer `-32601`, and the queue is still drained at the next
+ * tool boundary.
+ */
+export const MID_TURN_SEND_NOW_METHOD = 'craft/midTurnSendNow';
 
 /**
  * Cap on each per-session mid-turn reconciliation ring.
@@ -1544,7 +1551,6 @@ export interface MidTurnQueueEntry {
   eventDetailMode?: LiveReplayMode;
   messageId: string;
   text: string;
-  agentRun?: BridgeClientRequestContext['agentRun'];
   /**
    * Image content blocks attached to the message. The drain
    * combines them with `text` into structured `items` for the ACP child;
@@ -1795,6 +1801,18 @@ export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
 >;
 
 /** A daemon-owned worker completion injected into its parent session. */
+/**
+ * `SessionExternalRecordRequest` without `sessionId` (the bridge method takes
+ * it separately). Distributive, so `kind` still discriminates `payload`; a
+ * plain `Omit` over the union would collapse it.
+ */
+export type BridgeSessionExternalRecordRequest =
+  SessionExternalRecordRequest extends infer T
+    ? T extends unknown
+      ? Omit<T, 'sessionId'>
+      : never
+    : never;
+
 export interface BridgeBackgroundNotification {
   displayText: string;
   modelText: string;
@@ -2828,6 +2846,23 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     options?: { assertCanCommit?: () => void },
   ): Promise<void>;
 
+  /**
+   * Ask the agent to deliver the session's queued mid-turn messages now: a
+   * model response that a foreground turn is streaming is cut short so they
+   * reach the model in this round trip, unless it has started a tool call;
+   * running tools still finish first. Otherwise, as in a channel, cron or
+   * background turn, the messages are delivered as without the request, at a
+   * tool boundary or by promotion when the turn ends; the protocol reference
+   * lists the narrow windows where neither happens. `requested` is true
+   * when user messages were waiting and the agent was asked, not that a
+   * response was cut; it is false when none were waiting. Authorized like
+   * the sibling mid-turn methods.
+   */
+  sendMidTurnMessagesNow(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): { requested: boolean };
+
   /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(
     sessionId: string,
@@ -2844,6 +2879,18 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     notification: BridgeBackgroundNotification,
   ): Promise<{ sessionId: string; accepted: boolean }>;
+
+  /**
+   * Session multi-agent: ask the session's ACP child to write an
+   * `agent_mention` / `agent_message` record (durable + main-model history)
+   * without starting a turn. Idempotent per `recordKey` within the child's
+   * lifetime. Rejects with `SessionNotFoundError` for unknown/dying sessions,
+   * and with the child's error otherwise (a Managed session refuses).
+   */
+  appendExternalRecord(
+    sessionId: string,
+    request: BridgeSessionExternalRecordRequest,
+  ): Promise<SessionExternalRecordResponse>;
 
   /**
    * Return the mid-turn reconciliation snapshot for a session: messages still

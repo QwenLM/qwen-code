@@ -346,7 +346,17 @@ function buildManagedSessionRestoreProjection(
     }
     turnState.addHint(getSessionTurnRecordHint(record, input.sessionId));
     apiHistory.add(record);
-    fileHistory.add(record);
+    try {
+      fileHistory.add(record);
+    } catch (error) {
+      // The sink admits any file_history_snapshot carrying a systemPayload
+      // and publishes it unvalidated, so a malformed batch does reach here;
+      // skip it as the Legacy dispatch path does rather than failing the
+      // whole restore.
+      debugLogger.warn(
+        `restore projection: skipping malformed file_history_snapshot: ${error}`,
+      );
+    }
     if (isResumeTokenCountsCandidate(record)) lastTokenCountsRecord = record;
     if (isGoalRecoveryCandidate(record)) {
       const normalized = normalizeGoalRecoveryRecord(record);
@@ -356,7 +366,13 @@ function buildManagedSessionRestoreProjection(
       const uiEvent = (
         record.systemPayload as UiTelemetryRecordPayload | undefined
       )?.uiEvent;
-      if (uiEvent) uiTelemetryEvents.push(uiEvent);
+      if (
+        uiEvent &&
+        uiEvent['event.name'] !== 'request_lifecycle' &&
+        uiEvent['event.name'] !== 'tool_lifecycle'
+      ) {
+        uiTelemetryEvents.push(uiEvent as UiEvent);
+      }
     }
     if (record.subtype === 'attribution_snapshot') {
       const snapshot = (
@@ -1170,7 +1186,9 @@ export function navigationKindForRecord(
   if (
     record.subtype === 'goal_runtime' ||
     record.subtype === 'notification' ||
-    record.subtype === 'mid_turn_user_message'
+    record.subtype === 'mid_turn_user_message' ||
+    record.subtype === 'agent_mention' ||
+    record.subtype === 'agent_message'
   ) {
     return undefined;
   }
@@ -1393,6 +1411,9 @@ const REPLAY_MID_TURN_USER_SUBTYPES: ReadonlySet<string> = new Set([
   'notification',
   'cron',
   'mid_turn_user_message',
+  // Session multi-agent records render inline and never open a turn.
+  'agent_mention',
+  'agent_message',
 ] satisfies ReadonlyArray<NonNullable<ChatRecord['subtype']>>);
 
 export function isReplayTurnStartType(
@@ -2730,6 +2751,9 @@ function managedNavigationTurns(
         turnId: record.uuid,
         replayPosition: position,
         kind: navigationKind,
+        ...(typeof record.daemonPromptId === 'string' && record.daemonPromptId
+          ? { promptId: record.daemonPromptId }
+          : {}),
       };
       turns.push(turn);
       if (navigationKind === 'realtime') {
@@ -2752,7 +2776,7 @@ function managedNavigationTurns(
       isTurnResultRecordPayload(record.systemPayload) &&
       currentPromptTurn
     ) {
-      currentPromptTurn.promptId = record.systemPayload.promptId;
+      currentPromptTurn.promptId ??= record.systemPayload.promptId;
       currentPromptTurn = undefined;
     }
   }
@@ -3252,7 +3276,13 @@ export class SessionTranscriptReader {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;
-        if (uiEvent) uiTelemetryEvents.push(uiEvent);
+        if (
+          uiEvent &&
+          uiEvent['event.name'] !== 'request_lifecycle' &&
+          uiEvent['event.name'] !== 'tool_lifecycle'
+        ) {
+          uiTelemetryEvents.push(uiEvent as UiEvent);
+        }
       }
       if (record.uuid === attributionUuid) {
         const snapshot = (

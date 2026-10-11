@@ -61,6 +61,29 @@ function invocationParams(params: unknown): Record<string, unknown> {
   return projected;
 }
 
+/**
+ * A prepared reference stays bound to its original arguments, so a hook
+ * replacement is refused rather than ignored. A deny or stop keeps its reason.
+ */
+function refuseUpdatedInput(
+  result: PreToolUseHookResult,
+): PreToolUseHookResult {
+  const { updatedInput, ...rest } = result;
+  if (
+    updatedInput === undefined ||
+    (!rest.shouldProceed && rest.blockType !== 'ask')
+  ) {
+    return rest;
+  }
+  return {
+    ...rest,
+    shouldProceed: false,
+    blockType: 'denied',
+    blockReason:
+      'PreToolUse updatedInput is not supported for managed tool invocations; the tool was not run.',
+  };
+}
+
 export class ManagedToolPreparationError extends Error {}
 
 export type ManagedToolConfirmationPhase = 'permission' | 'preflight';
@@ -611,8 +634,9 @@ export class ManagedToolRuntime {
         entry.hookOwner,
       );
       this.assertExecutable(entry);
-      entry.preflightResult = structuredClone(result);
-      return result;
+      const settled = refuseUpdatedInput(result);
+      entry.preflightResult = structuredClone(settled);
+      return settled;
     });
     return structuredClone(await entry.preflight);
   }

@@ -6,6 +6,8 @@ public interface RuntimeSessionRepository {
 
     RuntimeSessionRecord findById(RuntimeScope scope, String runtimeSessionId);
 
+    RuntimeSessionRecord findHistorical(String tenantId, String harnessSessionId, String runtimeSessionId);
+
     RuntimeSessionRecord compareAndSet(RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement);
 

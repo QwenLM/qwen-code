@@ -30,6 +30,9 @@ on:
       - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
       - 'scripts/check-flyway-migrations.js'
+      - 'scripts/flyway-migration-utils.js'
+      - 'scripts/check-contract-version.js'
+      - 'scripts/contract-version-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
   push:
@@ -60,6 +63,9 @@ on:
       - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
       - 'scripts/check-flyway-migrations.js'
+      - 'scripts/flyway-migration-utils.js'
+      - 'scripts/check-contract-version.js'
+      - 'scripts/contract-version-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
 
@@ -436,6 +442,30 @@ jobs:
       - name: 'Check Flyway migration versions are unique'
         run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
 
+      # Contract version monotonicity, #13804: every pull request that
+      # changes the OpenAPI document must move info.version strictly past
+      # the base ref's — consumers key capability detection on it, and a
+      # regressed or stalled number breaks nothing at runtime to be caught
+      # by. The default checkout is one commit deep and holds the
+      # prospective merge result, so the base branch's head is fetched at
+      # depth one for the comparison copy. Pull requests only: a push has
+      # no base to compare, and the races that remain after this ran are
+      # the re-check workflow's. Comparing contents, not a changed-paths
+      # list, is what lets a merge result that already advanced (another
+      # pull request landed) read as regressed-or-stalled instead of
+      # passing on a stale branch point.
+      - name: 'Check the API contract version advances'
+        if: "${{ github.event_name == 'pull_request' }}"
+        env:
+          BASE_REF: '${{ github.event.pull_request.base.ref }}'
+        run: |-
+          set -uo pipefail
+          DOCUMENT='packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
+          BASE_DOCUMENT="${RUNNER_TEMP}/contract-base.json"
+          git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"
+          git show "FETCH_HEAD:${DOCUMENT}" > "${BASE_DOCUMENT}" 2>/dev/null || : > "${BASE_DOCUMENT}"
+          node scripts/check-contract-version.js "${BASE_DOCUMENT}" "${DOCUMENT}"
+
   mysql-integration:
     name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
     runs-on: 'ubuntu-latest'
@@ -504,12 +534,12 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (25 + 8×10 + 12 = 117 — the Verify step's 25
-    # sits above its failsafe fork timeout) plus ~10 minutes for the
+    # The step ceilings (25 + 9×10 + 20 = 135 — the Verify and O4 steps
+    # sit above their failsafe fork timeouts) plus ~10 minutes for the
     # uncapped setup steps (Checkout..Install MySQL binaries, the report
-    # checks) need ~127; 130 keeps a thin margin, and each arm buys its
+    # checks) need ~145; 148 keeps a thin margin, and each arm buys its
     # own 10 instead of sharing an envelope.
-    timeout-minutes: 130
+    timeout-minutes: 148
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -553,6 +583,12 @@ jobs:
           # These steps only stage jars; the SpotBugs gate lives on the
           # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
+      # The drivers' proxy header filter only shows up in the gates below as
+      # an intermittent socket-reuse failure, so pin it directly first.
+      - name: 'Check Hosted proxy header relay'
+        run: |-
+          cd integration-tests
+          npx vitest run helpers/hosted-relay-headers.test.ts
       - name: 'Verify Hosted Java, Spring and MySQL processes'
         # Must outlive the hosted-harness-mysql failsafe fork timeout (900 s)
         # plus the wrapped compile/surefire/spotbugs/checkstyle work: a step
@@ -602,6 +638,10 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-failover
+      - name: 'Run long-answer persistence E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-big-output
       - name: 'Run Harness-restart session failover E2E'
         timeout-minutes: 10
         run: >-
@@ -631,7 +671,12 @@ jobs:
       - name: 'Verify O4 filesystem process and capacity gates'
         id: 'o4_mysql'
         if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
-        timeout-minutes: 12
+        # Must outlive the o4-mysql-gates failsafe fork timeout (600 s) plus
+        # the wrapped compile/surefire/spotbugs/checkstyle work — the same
+        # ordering the Hosted verify step needed at #13503: killed at 12
+        # minutes on a loaded runner, the step left no per-test failure
+        # lines (#13684). hosted-process-ci.test.js pins this ordering.
+        timeout-minutes: 20
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"

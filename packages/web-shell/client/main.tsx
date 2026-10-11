@@ -3,12 +3,18 @@ import './styles/globals.css';
 import React from 'react';
 import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
 import { StandaloneContext } from './config/standalone';
+import { WorkspaceHostsEnabled } from './config/workspace-hosts';
 import { isKnownDaemonTarget } from './config/daemon';
 import { isRemoteConnectionKnown } from './config/remote-connections';
 import { exchangePairingCode } from './config/pairing';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
 import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  DaemonTargetProvider,
+  useDaemonTarget,
+  useFanoutUrlSync,
+} from './config/daemon-target';
 import { BrowserTurnNotifications } from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
@@ -193,6 +199,40 @@ function getDevelopmentManagedAgentProvider():
   });
 }
 
+/**
+ * Interactive provider bound to the focused host (#13727): key-remount on a
+ * focused-host switch. Cheaper alternatives leak the old host's session
+ * context into the new one (a stale workspace cwd renders "workspace not
+ * found"); only a remount clears the whole connection surface today.
+ * Smooth in-context swapping is multi-provider phase 2 — the controller
+ * already rewrites `?daemon=` in place, so this shows a short connecting
+ * transition instead of a document flash. The boot token only applies to
+ * the boot origin; any other host must authenticate through its own
+ * per-origin token.
+ */
+function FocusedDaemonWorkspaceProvider({
+  bootToken,
+  children,
+}: {
+  bootToken?: string;
+  children: React.ReactNode;
+}) {
+  useFanoutUrlSync();
+  const { activeOrigin, activeToken } = useDaemonTarget();
+  const bootOrigin = DAEMON_BASE_URL || window.location.origin;
+  return (
+    <DaemonWorkspaceProvider
+      key={activeOrigin}
+      baseUrl={activeOrigin}
+      token={
+        activeToken ?? (activeOrigin === bootOrigin ? bootToken : undefined)
+      }
+    >
+      {children}
+    </DaemonWorkspaceProvider>
+  );
+}
+
 export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const macosOverlayTitlebar = hasMacOSOverlayTitlebar();
   // The entry's own opinion — an explicit URL param or a stored in-app
@@ -221,7 +261,6 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [managedAgentProvider] = useState(() =>
     getDevelopmentManagedAgentProvider(),
   );
-  const baseUrl = DAEMON_BASE_URL || window.location.origin;
   // One-shot ?theme=/?language=/?lang= params are consumed by the useState
   // initializers above; strip them once mounted so a bookmarked URL cannot
   // keep overriding stored preferences on later loads. (The reload retry
@@ -332,75 +371,79 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         options={{ defaultEnabled: true }}
       >
         <StandaloneContext.Provider value={true}>
-          <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
-            <WorkspaceSessionProvider
-              urlNavigation={{ basePath: navigationBasePath }}
-              chromeTheme={documentTheme}
-              chromeLanguage={documentLanguage}
-              webShellProps={{
-                theme,
-                onThemeChange: handleThemeChange,
-                onThemeResolved: handleThemeResolved,
-                language,
-                onLanguageChange: handleLanguageChange,
-                onLanguageResolved: handleLanguageResolved,
-                onBrandResolved: handleBrandResolved,
-                managedAgentProvider,
-                sidebar: {
-                  enabled: true,
-                  showLive: true,
-                  // Built from the sidebar's own defaults so a new entry
-                  // (e.g. Agents) cannot silently drop out of the standalone
-                  // shell.
-                  primaryNav: {
-                    items: DEFAULT_PRIMARY_NAV_ITEMS,
-                  },
-                  footer: {
-                    items: isDesktopShell()
-                      ? DESKTOP_DEFAULT_FOOTER_ITEMS
-                      : DEFAULT_FOOTER_ITEMS,
-                  },
-                },
-                showToolCalls: true,
-                className: macosOverlayTitlebar
-                  ? MACOS_TITLEBAR_CLASS
-                  : undefined,
-                header: {
-                  showMobileAccess: true,
-                  items: [
-                    'title',
-                    'environment',
-                    'rightPanel',
-                    'tokenUsage',
-                    'contextUsage',
-                  ],
-                },
-                rightPanel: {
-                  items: [
-                    'review',
-                    'sideTask',
-                    'terminal',
-                    'webPreview',
-                    'trajectory',
-                  ],
-                },
-                environmentPanel: {
-                  items: [
-                    'environment',
-                    'sources',
-                    'subagents',
-                    'backgroundTasks',
-                    'attachments',
-                    'artifacts',
-                  ],
-                },
-                compactThinking: true,
-                markdownTableMode: 'advanced',
-                composerToolbarAdditionalActions:
-                  STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
-              }}
-            />
-          </DaemonWorkspaceProvider>
+          <WorkspaceHostsEnabled.Provider value={true}>
+            <DaemonTargetProvider>
+              <FocusedDaemonWorkspaceProvider bootToken={daemonToken}>
+                <WorkspaceSessionProvider
+                  urlNavigation={{ basePath: navigationBasePath }}
+                  chromeTheme={documentTheme}
+                  chromeLanguage={documentLanguage}
+                  webShellProps={{
+                    theme,
+                    onThemeChange: handleThemeChange,
+                    onThemeResolved: handleThemeResolved,
+                    language,
+                    onLanguageChange: handleLanguageChange,
+                    onLanguageResolved: handleLanguageResolved,
+                    onBrandResolved: handleBrandResolved,
+                    managedAgentProvider,
+                    sidebar: {
+                      enabled: true,
+                      showLive: true,
+                      // Built from the sidebar's own defaults so a new entry
+                      // (e.g. Agents) cannot silently drop out of the standalone
+                      // shell.
+                      primaryNav: {
+                        items: DEFAULT_PRIMARY_NAV_ITEMS,
+                      },
+                      footer: {
+                        items: isDesktopShell()
+                          ? DESKTOP_DEFAULT_FOOTER_ITEMS
+                          : DEFAULT_FOOTER_ITEMS,
+                      },
+                    },
+                    showToolCalls: true,
+                    className: macosOverlayTitlebar
+                      ? MACOS_TITLEBAR_CLASS
+                      : undefined,
+                    header: {
+                      showMobileAccess: true,
+                      items: [
+                        'title',
+                        'environment',
+                        'rightPanel',
+                        'tokenUsage',
+                        'contextUsage',
+                      ],
+                    },
+                    rightPanel: {
+                      items: [
+                        'review',
+                        'sideTask',
+                        'terminal',
+                        'webPreview',
+                        'trajectory',
+                      ],
+                    },
+                    environmentPanel: {
+                      items: [
+                        'environment',
+                        'sources',
+                        'subagents',
+                        'backgroundTasks',
+                        'attachments',
+                        'artifacts',
+                      ],
+                    },
+                    compactThinking: true,
+                    markdownTableMode: 'advanced',
+                    composerToolbarAdditionalActions:
+                      STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
+                  }}
+                />
+              </FocusedDaemonWorkspaceProvider>
+            </DaemonTargetProvider>
+          </WorkspaceHostsEnabled.Provider>
         </StandaloneContext.Provider>
       </BrowserTurnNotifications>
     </ErrorBoundary>

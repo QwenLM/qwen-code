@@ -14,7 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 
-class ManagedHookRecordContractTest {
+public class ManagedHookRecordContractTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Test
@@ -50,7 +50,7 @@ class ManagedHookRecordContractTest {
         }
     }
 
-    static JsonNode fixtures() throws IOException {
+    public static JsonNode fixtures() throws IOException {
         Path directory = Path.of("").toAbsolutePath();
         while (directory != null) {
             Path path = directory.resolve("packages/core/src/managed-runtime/contracts/managed-hook-record-v1.fixtures.json");

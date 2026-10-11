@@ -32,7 +32,8 @@ export interface ModelCatalog {
 // 2: entries are also committed under the other spelling of their version
 //    (`qwen2-5-72b-instruct` <-> `qwen2.5-72b-instruct`), so a projection-1
 //    cache must not keep winning and silently drop the aliases (#13209).
-export const MODEL_CATALOG_PROJECTION_VERSION = 2;
+// 3: minor versions with a trailing vision `v` receive aliases too (#13414).
+export const MODEL_CATALOG_PROJECTION_VERSION = 3;
 
 /** `QWEN_CODE_MODELS_DEV=off` restores the regex-only model tables. */
 export const MODEL_CATALOG_ENV = 'QWEN_CODE_MODELS_DEV';
@@ -212,7 +213,7 @@ export function versionSpellingAlias(key: string): string | undefined {
   if (/-\d{4}-\d{1,2}-\d{1,2}$/.test(key)) {
     return undefined;
   }
-  const dotted = /^(.*\d)-(\d+)(?=-|$)/.exec(key);
+  const dotted = /^(.*\d)-(\d+)(?=v?(?:-|$))/.exec(key);
   if (dotted) {
     // A date run returns here instead of falling through to the dashed branch
     // below: that branch respells the *other* boundary of the same id, so
@@ -223,7 +224,7 @@ export function versionSpellingAlias(key: string): string | undefined {
       ? `${dotted[1]}.${dotted[2]}${key.slice(dotted[0].length)}`
       : undefined;
   }
-  const dashed = /^(.*\d)\.(\d+)(?=-|$)/.exec(key);
+  const dashed = /^(.*\d)\.(\d+)(?=v?(?:-|$))/.exec(key);
   return dashed && isMinorVersionRun(dashed[2])
     ? `${dashed[1]}-${dashed[2]}${key.slice(dashed[0].length)}`
     : undefined;

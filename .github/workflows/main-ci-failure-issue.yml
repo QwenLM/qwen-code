@@ -126,7 +126,7 @@ jobs:
           # test pins the equality. There the same annotation class auto-reruns
           # a PR's red check; here it suppresses the per-commit issue.
           # Full rationale → qwen-autofix.md#af-076
-          INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed'
+          INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired'
         run: |-
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
 

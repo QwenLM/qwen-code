@@ -61,6 +61,14 @@ public class HarnessCoordinator {
     // anyway, so an entry could never change an outcome.
     private static final Set<String> LEASE_BOUNDED_409_CODES =
             Set.of("managed_session_writer_conflict");
+    // `hosted_turn_recovery_in_progress` is the ONLY refusal the daemon
+    // provably clears under its own recovery channel: the wake pump
+    // settles the park the prompt route still sees. A user Turn arriving
+    // in that window must outlive the park, whatever the shared budget
+    // already bought on durable refusals — the durable meaning stays on
+    // `hosted_turn_recovery_required` and still meets the budget.
+    private static final Set<String> TRANSIENT_RECOVERY_WINDOW_409_CODES =
+            Set.of("hosted_turn_recovery_in_progress");
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
     private final AgentStateStore store;
@@ -79,6 +87,7 @@ public class HarnessCoordinator {
     private final int batchMaxBytes;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
+    private final Set<String> cancellations = ConcurrentHashMap.newKeySet();
     // See cancelAdmittedTurn: forced cancellation takeover loads are paced
     // per Turn, far below the ~500ms lease-renewal cadence that re-runs
     // the coded-refusal pair (the round-10 hot loop).
@@ -143,7 +152,7 @@ public class HarnessCoordinator {
     public void cancel(String tenantId, String sessionId, String turnId) {
         dispatch(tenantId, sessionId, turnId);
         executor.execute(() -> cancelAdmittedTurn(tenantId, sessionId,
-                turnId));
+                turnId, false));
     }
 
     @Scheduled(fixedDelayString =
@@ -179,7 +188,7 @@ public class HarnessCoordinator {
                             leaseLost.set(true);
                         } else if (!leaseLost.get()) {
                             executor.execute(() -> cancelAdmittedTurn(
-                                    tenantId, sessionId, turnId));
+                                    tenantId, sessionId, turnId, true));
                         }
                     } catch (RuntimeException error) {
                         leaseLost.set(true);
@@ -272,13 +281,18 @@ public class HarnessCoordinator {
                         submissionAttempted.get()
                                 && !"hosted_prompt_recovery_required"
                                         .equals(errorCode)
-                                && !("hosted_turn_recovery_required"
-                                                .equals(errorCode)
+                                && !(("hosted_turn_recovery_required"
+                                                        .equals(errorCode)
+                                                || "hosted_turn_recovery_in_progress"
+                                                        .equals(errorCode))
                                         && claimed.harnessEventEpoch()
                                                 == null),
                         error,
-                        recoveryPath.get() && errorCode != null
-                                && LEASE_BOUNDED_409_CODES.contains(errorCode));
+                        (recoveryPath.get() && errorCode != null
+                                && LEASE_BOUNDED_409_CODES.contains(
+                                        errorCode))
+                                || "hosted_turn_recovery_in_progress"
+                                        .equals(errorCode));
             }
         } catch (RuntimeBrokerException error) {
             terminal = !submissionAttempted.get() && !error.isRetryable()
@@ -856,7 +870,7 @@ public class HarnessCoordinator {
     }
 
     private void cancelAdmittedTurn(String tenantId, String sessionId,
-            String turnId) {
+            String turnId, boolean renewalDriven) {
         try {
             TurnRecord turn = store.findTurn(tenantId, sessionId, turnId)
                     .orElse(null);
@@ -874,54 +888,81 @@ public class HarnessCoordinator {
                     && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
-            // Reuse the admitted attachment: attaching would recheck grants
-            // needed for new work and could replace the running attachment.
+            // Reuse the admitted owner; a cold connector cache re-attaches
+            // only for the persisted cancellation, without requiring the
+            // authority that admits new work.
             if (session.harnessBootId() != null && store.bindHarness(tenantId,
                     sessionId, turnId, owner, session.harnessBootId())) {
-                try {
-                    harness.cancel(session.tenantId(), session.sessionId());
-                } catch (DaemonHttpException error) {
-                    if (error.getStatusCode() != 409
-                            || !"hosted_turn_recovery_required"
-                                    .equals(error.getErrorCode())) {
-                        throw error;
-                    }
-                    // The plain cancel route aborts only a live, in-memory
-                    // Turn: a parked Turn its dead generation owned answers
-                    // the coded refusal, and re-issuing that same cancel
-                    // settles nothing (the round-9 wedge). The cancellation
-                    // takeover load is the only route that pays it, so it
-                    // goes out inline over THIS attachment — the stream the
-                    // coordination already runs then lands the settle. A
-                    // load the daemon can only answer with a plain attach
-                    // pays nothing at that moment, and this method runs
-                    // once per lease-renewal tick (~500ms): pace the load
-                    // per Turn or every wedged wait costs ~4 requests/s of
-                    // daemon work against the same Session (the round-10
-                    // hot loop).
-                    String paceKey = tenantId + '/' + sessionId + '/'
-                            + turnId;
-                    long now = clock.millis();
-                    Long lastAttempt = takeoverPace.get(paceKey);
-                    if (lastAttempt != null
-                            && now - lastAttempt
-                                    < TAKEOVER_LOAD_MIN_INTERVAL_MS) {
-                        return;
-                    }
-                    takeoverPace.put(paceKey, now);
-                    Attachment takeover = harness.recoverManagedCancellation(
-                            tenantId, sessionId);
-                    HarnessRuntimeRecovery recovery =
-                            takeover.runtimeRecovery();
-                    if (recovery != null) {
-                        if (!recovery.isCancellationReady()) {
-                            throw new IllegalStateException("Hosted Harness"
-                                    + " reported a cancellation recovery"
-                                    + " that is not ready");
+                // Renewal requeues this poller while the Turn is still
+                // settling, so only one renewal-driven poller may send the
+                // cancel once per event epoch; a failed send releases the
+                // claim so the next renewal retries it. A public cancel()
+                // call always pays its own send: a takeover load re-armed
+                // after a transient failure must be settled by the send it
+                // re-requests, and the plain cancel is idempotent at the
+                // daemon under the same identities.
+                String cancelKey = key(tenantId, sessionId, turnId) + "\n"
+                        + turn.harnessEventEpoch();
+                if (!renewalDriven || cancellations.add(cancelKey)) {
+                    try {
+                        harness.cancel(session.tenantId(),
+                                session.sessionId());
+                    } catch (DaemonHttpException error) {
+                        if (error.getStatusCode() != 409
+                                || !"hosted_turn_recovery_required"
+                                        .equals(error.getErrorCode())) {
+                            throw error;
                         }
-                        harness.cancelManagedRuntime(tenantId, sessionId,
-                                turn.promptId(), recovery.getCheckpointId(),
-                                recovery.getActivationId());
+                        // The coded refusal is a failed plain send: release
+                        // the claim here and let the paced takeover below,
+                        // not the claim, gate re-sends of this path.
+                        if (renewalDriven) {
+                            cancellations.remove(cancelKey);
+                        }
+                        // The plain cancel route aborts only a live, in-memory
+                        // Turn: a parked Turn its dead generation owned answers
+                        // the coded refusal, and re-issuing that same cancel
+                        // settles nothing (the round-9 wedge). The cancellation
+                        // takeover load is the only route that pays it, so it
+                        // goes out inline over THIS attachment — the stream the
+                        // coordination already runs then lands the settle. A
+                        // load the daemon can only answer with a plain attach
+                        // pays nothing at that moment, and this method runs
+                        // once per lease-renewal tick (~500ms): pace the load
+                        // per Turn or every wedged wait costs ~4 requests/s of
+                        // daemon work against the same Session (the round-10
+                        // hot loop).
+                        String paceKey = tenantId + '/' + sessionId + '/'
+                                + turnId;
+                        long now = clock.millis();
+                        Long lastAttempt = takeoverPace.get(paceKey);
+                        if (lastAttempt != null
+                                && now - lastAttempt
+                                        < TAKEOVER_LOAD_MIN_INTERVAL_MS) {
+                            return;
+                        }
+                        takeoverPace.put(paceKey, now);
+                        Attachment takeover =
+                                harness.recoverManagedCancellation(
+                                        tenantId, sessionId);
+                        HarnessRuntimeRecovery recovery =
+                                takeover.runtimeRecovery();
+                        if (recovery != null) {
+                            if (!recovery.isCancellationReady()) {
+                                throw new IllegalStateException("Hosted Harness"
+                                        + " reported a cancellation recovery"
+                                        + " that is not ready");
+                            }
+                            harness.cancelManagedRuntime(tenantId,
+                                    sessionId, turn.promptId(),
+                                    recovery.getCheckpointId(),
+                                    recovery.getActivationId());
+                        }
+                    } catch (RuntimeException error) {
+                        if (renewalDriven) {
+                            cancellations.remove(cancelKey);
+                        }
+                        throw error;
                     }
                 }
             }

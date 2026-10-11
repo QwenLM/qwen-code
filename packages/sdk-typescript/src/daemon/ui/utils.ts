@@ -67,6 +67,9 @@ export function extractTranscriptTiming(
     kind,
     durationMs,
     ...carriedStrings,
+    ...(kind === 'request' && getString(timing, 'executionId')?.trim()
+      ? { executionId: getString(timing, 'executionId') }
+      : {}),
     ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
     ...(kind === 'request' && ttftMs !== undefined && ttftMs >= 0
       ? { ttftMs }

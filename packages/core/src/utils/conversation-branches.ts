@@ -12,6 +12,12 @@ const SYNTHETIC_USER_SUBTYPES = new Set([
   'notification',
   'cron',
   'mid_turn_user_message',
+  // Session multi-agent records: their `message` is the model envelope, not
+  // text the user typed as a prompt to the main model.
+  // TODO(multi-agent): an `agent_mention` IS user-typed; consider labelling
+  // branches with its `systemPayload.displayText` instead of skipping it.
+  'agent_mention',
+  'agent_message',
 ]);
 const NEUTRAL_TAIL_SUBTYPES = new Set([
   'custom_title',

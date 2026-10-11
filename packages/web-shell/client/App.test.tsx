@@ -659,6 +659,8 @@ const {
       streamingTailMessages: undefined as unknown[] | undefined,
       queuedPromptHoldHistory: [] as boolean[],
       queuedPrompts: [] as Array<{ id: number; text: string }>,
+      queuedPromptSendNow: (async () => {}) as (id: number) => Promise<void>,
+      latestQueuedPromptDisplayProps: null as Record<string, unknown> | null,
       transcriptHasMore: false,
       promptSettledListeners: new Set<
         (
@@ -1103,6 +1105,7 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
       queuedPrompts: testState.queuedPrompts,
       queuedTexts,
       enqueuePrompt: rawEnqueuePrompt,
+      sendQueuedPromptNow: testState.queuedPromptSendNow,
       removeQueuedPrompt: vi.fn(),
       editQueuedPrompt: vi.fn(),
       editLastQueuedPrompt,
@@ -2608,24 +2611,27 @@ vi.doMock('./components/terminal/TerminalPanel', async () => {
       }),
   };
 });
-vi.doMock(
-  './components/workspace-agents/ThreadsRoute',
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import('./components/workspace-agents/ThreadsRoute')
-      >();
-    const React = await import('react');
-    return {
-      ...actual,
-      ThreadsRoute: () =>
-        React.createElement('div', {
-          'data-testid': 'workspace-agent-thread-route',
-        }),
-    };
-  },
-);
-mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
+vi.doMock('./components/QueuedPromptDisplay', async () => {
+  const React = await import('react');
+  return {
+    QueuedPromptDisplay: (props: Record<string, unknown>) => {
+      testState.latestQueuedPromptDisplayProps = props;
+      return React.createElement('div');
+    },
+  };
+});
+// Agents' live runs read the daemon over fetch + SSE; inert here so a test
+// that turns collaboration on opens no real connection.
+vi.doMock('./components/workspace-agents/session-agents-api', () => ({
+  createSessionAgentsHttpApi: () => ({
+    listRuns: () => Promise.resolve({ frames: [] }),
+    mention: () => Promise.resolve({ recordId: '', runs: [] }),
+    cancelRun: () => Promise.resolve({}),
+    stopAll: () => Promise.resolve({}),
+    respondToPermission: () => Promise.resolve({}),
+    subscribe: () => () => {},
+  }),
+}));
 
 const {
   App,
@@ -11631,6 +11637,7 @@ beforeEach(() => {
   testState.streamingTailMessages = undefined;
   testState.queuedPromptHoldHistory = [];
   testState.queuedPrompts = [];
+  testState.latestQueuedPromptDisplayProps = null;
   testState.transcriptHasMore = false;
   testState.promptSettledListeners.clear();
   testState.queuedPromptStreamingState = 'idle';
@@ -13302,6 +13309,31 @@ describe('App conversation indicator keep-alive (#9487)', () => {
     pressEscape(); // arm the two-press cancel
     pressEscape(); // confirm it
     expect(mockSessionActions.cancel).toHaveBeenCalled();
+  });
+});
+
+describe('App queued prompt send-now', () => {
+  it('offers send-now on queued rows only when the daemon advertises it', async () => {
+    const features = mockConnection.capabilities.features;
+    testState.queuedPrompts = [{ id: 1, text: 'follow up' }];
+    try {
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      expect(testState.latestQueuedPromptDisplayProps).toMatchObject({
+        canSendMidTurnNow: false,
+        onSendNow: testState.queuedPromptSendNow,
+      });
+
+      mockConnection.capabilities.features = ['session_mid_turn_send_now'];
+      rerender({ language: 'en' });
+      await flush();
+      expect(testState.latestQueuedPromptDisplayProps).toMatchObject({
+        canSendMidTurnNow: true,
+        onSendNow: testState.queuedPromptSendNow,
+      });
+    } finally {
+      mockConnection.capabilities.features = features;
+    }
   });
 });
 
@@ -45063,27 +45095,15 @@ it('runtime-stop does not leak shell drain lock', async () => {
   );
 });
 
-it('does not restore a workspace-agent thread when collaboration is disabled', async () => {
-  sessionStorage.setItem(
-    'qwen:team-conversation',
-    JSON.stringify({
-      id: 'thread-1',
-      cwd: '/tmp/project',
-      server: mockWorkspace.baseUrl,
-    }),
-  );
-
+it('offers the Agents entry only where collaboration is enabled', async () => {
   const { container, rerender } = renderApp();
   await flush();
-
-  expect(
-    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
-  ).toBeNull();
-  expect(
+  const hasAgents = () =>
     container
       .querySelector('[data-testid="sidebar"]')
-      ?.getAttribute('data-has-open-agents'),
-  ).toBe('false');
+      ?.getAttribute('data-has-open-agents');
+
+  expect(hasAgents()).toBe('false');
 
   mockWorkspace.capabilities = {
     ...mockWorkspace.capabilities,
@@ -45101,15 +45121,8 @@ it('does not restore a workspace-agent thread when collaboration is disabled', a
   };
   rerender();
   await flush();
-
-  expect(
-    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
-  ).toBeNull();
-  expect(
-    container
-      .querySelector('[data-testid="sidebar"]')
-      ?.getAttribute('data-has-open-agents'),
-  ).toBe('false');
+  // Another workspace opting in does not open it here.
+  expect(hasAgents()).toBe('false');
 
   mockWorkspace.capabilities = {
     ...mockWorkspace.capabilities,
@@ -45120,18 +45133,8 @@ it('does not restore a workspace-agent thread when collaboration is disabled', a
     ),
   };
   rerender();
-  await act(async () => {
-    await vi.dynamicImportSettled();
-  });
-
-  expect(
-    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
-  ).not.toBeNull();
-  expect(
-    container
-      .querySelector('[data-testid="sidebar"]')
-      ?.getAttribute('data-has-open-agents'),
-  ).toBe('true');
+  await flush();
+  expect(hasAgents()).toBe('true');
 });
 
 function mockRuntimeStopChoice() {

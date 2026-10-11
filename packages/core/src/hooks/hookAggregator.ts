@@ -15,6 +15,7 @@ import {
   StopHookOutput,
   PermissionRequestHookOutput,
   isToolArtifactLike,
+  toUpdatedToolInput,
 } from './types.js';
 import type { HookOutput, HookExecutionResult } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -166,6 +167,7 @@ export class HookAggregator {
     let winningPermissionDecision: 'allow' | 'ask' | 'deny' | undefined;
     let winningPermissionRank = 0;
     const winningPermissionReasons: string[] = [];
+    let updatedInputInvalid = false;
 
     for (const output of outputs) {
       // Check for blocking decisions
@@ -233,6 +235,13 @@ export class HookAggregator {
             (key === 'permissionDecision' || key === 'permissionDecisionReason')
           ) {
             // Handled by the ranking logic above, not last-wins.
+          } else if (isPreToolUse && key === 'updatedInput') {
+            // Last replacement in hook order wins, but never over an invalid
+            // one, which must still reject the call.
+            if (value !== undefined && !updatedInputInvalid) {
+              otherHookSpecificFields[key] = value;
+              updatedInputInvalid = toUpdatedToolInput(value) === null;
+            }
           } else if (key !== 'additionalContext' && key !== 'artifacts') {
             otherHookSpecificFields[key] = value;
           }
@@ -302,7 +311,7 @@ export class HookAggregator {
    * Rules:
    * - behavior: deny wins over allow (security priority)
    * - message: concatenated with newlines
-   * - updatedInput: later values win
+   * - updatedInput: later values win, except over an invalid one
    * - updatedPermissions: concatenated
    * - interrupt: true wins over false
    */
@@ -312,7 +321,8 @@ export class HookAggregator {
     let hasDeny = false;
     let hasAllow = false;
     let interrupt = false;
-    let updatedInput: Record<string, unknown> | undefined;
+    let updatedInput: unknown;
+    let updatedInputInvalid = false;
     const allUpdatedPermissions: Array<{ type: string; tool?: string }> = [];
 
     for (const output of outputs) {
@@ -348,9 +358,11 @@ export class HookAggregator {
         interrupt = true;
       }
 
-      // Collect updatedInput - use last non-empty
-      if (decision['updatedInput']) {
-        updatedInput = decision['updatedInput'] as Record<string, unknown>;
+      // Collect updatedInput - the last one wins, but never over an invalid
+      // one, which must still reject the call.
+      if (decision['updatedInput'] !== undefined && !updatedInputInvalid) {
+        updatedInput = decision['updatedInput'];
+        updatedInputInvalid = toUpdatedToolInput(updatedInput) === null;
       }
 
       // Collect updatedPermissions
@@ -389,7 +401,7 @@ export class HookAggregator {
       mergedDecision['interrupt'] = true;
     }
 
-    if (updatedInput) {
+    if (updatedInput !== undefined) {
       mergedDecision['updatedInput'] = updatedInput;
     }
 

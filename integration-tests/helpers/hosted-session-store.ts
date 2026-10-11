@@ -40,6 +40,7 @@ export async function startHostedSessionStore(sessionId: string) {
   const pending = new Set<Promise<void>>();
   let handle: ManagedSessionJournalHandle | undefined;
   let writerToken: string | undefined;
+  let writerId: string | undefined;
   let writerGeneration = 0;
   let seals = 0;
   const scan = () =>
@@ -77,6 +78,7 @@ export async function startHostedSessionStore(sessionId: string) {
           return;
         }
         writerToken = String(req.headers['x-qwen-managed-writer-token']);
+        writerId = String(body.writerId);
         handle = await journal.open({ sessionKey });
         writerGeneration++;
       } else {
@@ -98,6 +100,12 @@ export async function startHostedSessionStore(sessionId: string) {
       };
       if (route === '/writers:acquire' || route === '/writers:renew') {
         json({ ...head, leaseUntil: Date.now() + Number(body.leaseMillis) });
+      } else if (route === '/execution:authorize') {
+        assert.equal(req.method, 'POST');
+        assert(handle);
+        assert.equal(body.writerId, writerId);
+        assert.equal(body.writerGeneration, writerGeneration);
+        json({ authorized: true });
       } else if (route === '/restore') {
         json({
           ...head,

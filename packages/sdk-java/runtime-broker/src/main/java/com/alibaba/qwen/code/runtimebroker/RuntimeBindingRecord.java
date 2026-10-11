@@ -238,6 +238,15 @@ public final class RuntimeBindingRecord {
         return request;
     }
 
+    RuntimeBindingRecord withLifecycleAuthority(RuntimeLifecycleAuthority authority) {
+        RuntimeProvisionRequest scoped = new RuntimeProvisionRequest(request.getScope().withLifecycleAuthority(authority),
+                request.getIsolationKey(), request.getProvisionerKind(), request.getStorageId());
+        return new RuntimeBindingRecord(bindingId, scoped, provisionSeed, generation, state, lease,
+                resourceHandle, attestationGeneration, drainRequested, operationOwner, operationLeaseUntil,
+                operationGeneration, version, lastHealthAt, lastReconciledAt, lastActiveAt,
+                lossEvidence, stopEvidence, drainReceipt);
+    }
+
     public RuntimeProvisionSeed getProvisionSeed() {
         return provisionSeed;
     }

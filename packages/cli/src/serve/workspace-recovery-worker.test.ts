@@ -19,7 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   recoveryDigest,
   recoveryJson,
@@ -33,6 +33,7 @@ import type { RecoverySessionSource } from './workspace-recovery-session.js';
 
 const temporary: string[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const root of temporary.splice(0))
     await rm(root, { recursive: true, force: true });
 });
@@ -186,6 +187,109 @@ async function fixture() {
 }
 
 describe('workspace recovery private worker', () => {
+  it.each(['canonical', 'trailing-slash', 'doubled-slash'])(
+    'accepts %s QWEN_HOME at the migration environment gate',
+    async (kind) => {
+      const f = await fixture();
+      const home = join(f.root, 'home');
+      const history = join(home, 'file-history');
+      await mkdir(history, { recursive: true });
+      for (const path of [
+        'workspace',
+        'file-history',
+        'authority/objects',
+        '.w1-recovery',
+      ])
+        await mkdir(join(f.context.request.bundleRoot, path), {
+          recursive: true,
+        });
+      vi.stubEnv(
+        'QWEN_HOME',
+        kind === 'trailing-slash'
+          ? `${home}/`
+          : kind === 'doubled-slash'
+            ? `${home.replace('/home', '//home')}//`
+            : home,
+      );
+      const rpc: RecoveryRpc = async (method, params) =>
+        method === 'context'
+          ? {
+              ...f.context,
+              mode: 'verify',
+              request: { ...f.context.request, fileHistoryRoot: history },
+              migration: {
+                targetRoot: join(f.root, 'target'),
+                targetMarker: {
+                  digest: recoveryDigest('marker'),
+                  byteLength: 6,
+                },
+              },
+            }
+          : f.rpc(method, params);
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow(
+        'capture_not_sealed',
+      );
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
+  it.each([
+    'unset',
+    'relative',
+    'symlink',
+    'different-history',
+    'dot',
+    'parent',
+  ])(
+    'refuses the migration before completion with %s QWEN_HOME',
+    async (kind) => {
+      const f = await fixture();
+      const home = join(f.root, 'home');
+      const history = join(home, 'file-history');
+      await mkdir(history, { recursive: true });
+      await mkdir(join(home, 'child'));
+      if (kind === 'symlink') await symlink(home, join(f.root, 'alias'));
+      vi.stubEnv(
+        'QWEN_HOME',
+        kind === 'unset'
+          ? undefined
+          : kind === 'relative'
+            ? '.'
+            : kind === 'symlink'
+              ? join(f.root, 'alias')
+              : kind === 'dot'
+                ? `${home}/.`
+                : kind === 'parent'
+                  ? `${home}/child/..`
+                  : home,
+      );
+      const rpc: RecoveryRpc = async (method, params) =>
+        method === 'context'
+          ? {
+              ...f.context,
+              request: {
+                ...f.context.request,
+                fileHistoryRoot:
+                  kind === 'different-history'
+                    ? f.context.request.fileHistoryRoot
+                    : history,
+              },
+              migration: {
+                targetRoot: join(f.root, 'target'),
+                targetMarker: {
+                  digest: recoveryDigest('marker'),
+                  byteLength: 6,
+                },
+              },
+            }
+          : f.rpc(method, params);
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow(
+        'migration_history_environment_mismatch',
+      );
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
   it.each(['absolute', 'dangling', 'not-directory', 'hardlink'])(
     'invalidates a fresh unsupported %s entry with its own code and private path',
     async (kind) => {

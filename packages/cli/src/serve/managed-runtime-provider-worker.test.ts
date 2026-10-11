@@ -680,6 +680,66 @@ describe('Managed Runtime provider worker', () => {
     expect((await post({ kind: 'manifest' })).status).toBe(409);
   });
 
+  it('refuses a PreToolUse replacement over HTTP without running either input', async () => {
+    const original = path.join(workspace, 'original.txt');
+    const replaced = path.join(workspace, 'replaced.txt');
+    // A test MessageBus stands in for a deployed command hook.
+    const request = vi.fn(async (hookRequest: { eventName: string }) => ({
+      success: true,
+      output:
+        hookRequest.eventName === 'PreToolUse'
+          ? {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                updatedInput: { file_path: replaced, content: 'B' },
+              },
+            }
+          : {},
+    }));
+    vi.spyOn(Config.prototype, 'getDisableAllHooks').mockReturnValue(false);
+    vi.spyOn(Config.prototype, 'getMessageBus').mockReturnValue({
+      request,
+    } as unknown as ReturnType<Config['getMessageBus']>);
+    await begin();
+    const ref = reference(
+      await prepare('write_file', { file_path: original, content: 'A' }),
+    );
+    await control({ kind: 'confirmation', reference: ref });
+    await control({
+      kind: 'confirm',
+      reference: ref,
+      outcome: ToolConfirmationOutcome.ProceedOnce,
+    });
+
+    const refused = await control({ kind: 'preflight', reference: ref });
+    expect(refused).toEqual({
+      shouldProceed: false,
+      blockType: 'denied',
+      blockReason: expect.stringContaining('not supported'),
+    });
+    expect(await control({ kind: 'preflight', reference: ref })).toEqual(
+      refused,
+    );
+    expect(
+      (
+        await post({
+          kind: 'confirm',
+          reference: ref,
+          outcome: ToolConfirmationOutcome.ProceedOnce,
+          phase: 'preflight',
+        })
+      ).status,
+    ).toBe(409);
+    expect((await post({ kind: 'execute', reference: ref })).status).toBe(409);
+    expect(
+      request.mock.calls.filter(
+        ([hookRequest]) => hookRequest.eventName === 'PreToolUse',
+      ),
+    ).toHaveLength(1);
+    expect(fs.existsSync(original)).toBe(false);
+    expect(fs.existsSync(replaced)).toBe(false);
+  });
+
   it('fences Session identity, changed prepared input and legacy raw execution', async () => {
     await begin();
     expect(await control({ kind: 'acquire' })).toBe(true);

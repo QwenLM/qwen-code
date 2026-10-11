@@ -94,6 +94,11 @@ public final class LocalProcessRuntimeProvisioner
                 new LocalRuntimeStore(stateDirectory, LocalRuntimeStore.HostIdentity.linux()), trustedRebootRecovery);
     }
 
+    /** Checks an existing private state directory without initializing or changing it. */
+    public static void validateStateDirectory(Path stateDirectory) throws IOException {
+        LocalRuntimeStore.validateDirectory(stateDirectory);
+    }
+
     LocalProcessRuntimeProvisioner(List<String> command, Path workingDirectory,
             HttpRuntimeTransport transport, Function<RuntimeScope, String> storageResolver, LocalRuntimeStore store) {
         this(command, workingDirectory, transport, storageResolver, store, false);

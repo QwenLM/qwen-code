@@ -176,6 +176,8 @@ const SNAPSHOT_SUMMARY: [string, object] = [
   usage(1000, 500),
 ];
 
+const REQUEST_ONLY_CATALOG = 'request-only managed-memory catalog';
+
 describe('ChatCompressionService', () => {
   let service: ChatCompressionService;
   let mockChat: LlmChat;
@@ -195,6 +197,7 @@ describe('ChatCompressionService', () => {
     mockGetHookSystem = vi.fn().mockReturnValue({ isManaged: () => false });
     mockConfig = {
       getChatCompression: vi.fn(),
+      getAutoMemoryContext: () => REQUEST_ONLY_CATALOG,
       getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
@@ -591,6 +594,18 @@ describe('ChatCompressionService', () => {
     const generateText = arrangeForced();
     await run({ force: true });
     expect(generateText).toHaveBeenCalled();
+  });
+
+  it('keeps the request-only memory catalog out of the compaction side query', async () => {
+    const generateText = arrangeForced();
+
+    await run({ force: true });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
+    expect(JSON.stringify(request.contents)).not.toContain(
+      REQUEST_ONLY_CATALOG,
+    );
   });
 
   it('passes abort signal to summary generation', async () => {
@@ -1310,6 +1325,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     } as unknown as LlmChat;
     const config = {
       getChatCompression: vi.fn(),
+      getAutoMemoryContext: () => REQUEST_ONLY_CATALOG,
       getAutoCompactThreshold: vi.fn(),
       getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -1401,6 +1417,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
     );
     expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
     expect(request.contents.slice(0, -1)).toEqual(history);
+    expect(JSON.stringify(request.contents)).not.toContain(
+      REQUEST_ONLY_CATALOG,
+    );
     expect(request.contents).toHaveLength(43);
     expect(request.contents.at(-1)?.parts?.[0]?.text).toContain(
       'Keep the exact command output.',

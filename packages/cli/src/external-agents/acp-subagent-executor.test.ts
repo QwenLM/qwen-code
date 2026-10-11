@@ -110,6 +110,7 @@ connection = new AgentSideConnection(() => ({
     }
     await send({sessionUpdate:'agent_thought_chunk',content:{type:'text',text:'thinking'}});
     await send({sessionUpdate:'agent_message_chunk',content:{type:'text',text:params.prompt.map(p=>p.text).join('|')}});
+    await send({sessionUpdate:'tool_call_update',toolCallId:'lifecycle-orphan',_meta:{toolLifecycle:{v:1,phase:'started'}}});
     await send({sessionUpdate:'tool_call',toolCallId:'tool-'+prompts,title:'Shell',kind:'execute',status:'in_progress',rawInput:{}});
     await send({sessionUpdate:'tool_call_update',toolCallId:'tool-'+prompts,rawInput:{command:'printf hello'},_meta:{claudeCode:{toolName:'Bash'}},content:[{type:'content',content:{type:'text',text:'hello'}}]});
     await send({sessionUpdate:'tool_call_update',toolCallId:'tool-'+prompts,status:'completed'});
@@ -741,6 +742,39 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
     expect(payloads[0][0]).toContain('SYSTEM PROMPT SENTINEL');
     expect(payloads[0][1]).toBe('first');
     expect(payloads[1]).toEqual(['second']);
+  });
+  it('delivers the memory catalog after the task on the first turn only when a system prompt is sent', async () => {
+    const withSystem = params();
+    withSystem.promptConfig.systemPrompt = 'SYSTEM PROMPT SENTINEL';
+    vi.spyOn(withSystem.runtimeContext, 'getAutoMemoryContext').mockReturnValue(
+      'CATALOG SENTINEL',
+    );
+    const withoutSystem = params();
+    vi.spyOn(
+      withoutSystem.runtimeContext,
+      'getAutoMemoryContext',
+    ).mockReturnValue('CATALOG SENTINEL');
+    const payloads: string[][] = [];
+    const prompt = vi
+      .fn()
+      .mockImplementation((p: { prompt: Array<{ text: string }> }) => {
+        payloads.push(p.prompt.map((block) => block.text));
+        return Promise.resolve({ stopReason: 'end_turn' });
+      });
+    for (const options of [withSystem, withoutSystem]) {
+      const executor = await create(options);
+      (
+        executor as unknown as {
+          connection: { prompt: typeof prompt; cancel: () => Promise<void> };
+        }
+      ).connection = { prompt, cancel: async () => {} };
+      await executor.execute(context('first'));
+      if (options === withSystem) await executor.execute(context('second'));
+    }
+    expect(payloads.length).toBe(3);
+    expect(payloads[0].slice(1)).toEqual(['first', 'CATALOG SENTINEL']);
+    expect(payloads[1]).toEqual(['second']);
+    expect(payloads[2]).toEqual(['first']);
   });
   it('does not record entry inputs as delivered when the budget guard breaks a continuation (R12-2)', async () => {
     const options = params();

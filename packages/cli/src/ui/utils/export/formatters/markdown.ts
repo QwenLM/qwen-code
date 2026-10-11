@@ -93,10 +93,10 @@ export function toMarkdown(sessionData: ExportSessionData): string {
   for (const message of sessionData.messages) {
     if (message.type === 'user') {
       lines.push('## User\n');
-      lines.push(formatMessageContent(message));
+      lines.push(formatAuthoredContent(message));
     } else if (message.type === 'assistant') {
       lines.push('## Assistant\n');
-      lines.push(formatMessageContent(message));
+      lines.push(formatAuthoredContent(message));
     } else if (message.type === 'tool_call') {
       lines.push(formatToolCall(message));
     } else if (message.type === 'system') {
@@ -110,6 +110,20 @@ export function toMarkdown(sessionData: ExportSessionData): string {
   }
 
   return lines.join('\n');
+}
+
+/**
+ * A message's content, led by the workspace agent that wrote it
+ * (`**claude-B**:`) so an agent's reply is not read as the assistant's.
+ */
+function formatAuthoredContent(message: ExportMessage): string {
+  const content = formatMessageContent(message);
+  const name = message.author?.name;
+  if (!name) return content;
+  // The name is plain text: no Markdown emphasis or HTML may break out of it.
+  const safeName = sanitizeText(name).replace(/[*_`[\]\\]/g, '\\$&');
+  // On its own line: the content may open with a heading or a code fence.
+  return `**${safeName}**:\n\n${content}`;
 }
 
 function formatMessageContent(message: ExportMessage): string {

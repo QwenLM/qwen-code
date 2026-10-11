@@ -396,16 +396,26 @@ describe('build artifact — transcript entry (#11031)', () => {
     // docblock in client/transcript.ts and #11100).
     //
     // What the entry does deliver is a bounded payload, so bound it. The JS
-    // remainder measured 1,298,657 bytes on main at fa4a4c92 and 1,300,341
-    // here after adding author attribution for multi-agent transcripts. O3
-    // result summaries bring the remainder to 1,306,052 bytes. The ceiling
-    // leaves a small margin around that intentional transcript UI;
-    // re-measure and lower it if the entry gets leaner.
+    // remainder measured 1,298,657 UTF-16 code units on main at fa4a4c92 and
+    // 1,300,341 here after adding author attribution for multi-agent
+    // transcripts. O3 result summaries bring it to 1,306,052, and
+    // session-agent replies (status, steps, token usage, squad labels) to
+    // 1,315,297 at e951f96; that rendering is intentional transcript UI.
+    // main grew the same entry in parallel — 1,309,207 at 1aba19c878, plus
+    // 3,033 for table fullscreen and Shadow DOM keyboard handling, reaching
+    // 1,312,240. Merging the two measures 1,320,366 in CI at d4304811. The W2
+    // managed cwd slice (#13760) adds its strings to the shared i18n table
+    // every entry ships — no interactive cwd code enters this graph — and
+    // measured 1,323,120 before main's host-status copy. After rebasing onto
+    // c34b8423, main measures 1,321,586 and this branch 1,324,022; substituting
+    // main's i18n table yields an identical JS remainder. The ceiling leaves
+    // a small margin around that intentional UI; re-measure and lower it if
+    // the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_310_000);
+    expect(js.length).toBeLessThan(1_325_000);
   });
 
   it('carries no Live Voice strings and looks none up', () => {
@@ -453,6 +463,17 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js).not.toMatch(/["'`]settings\./);
+  });
+
+  it('keeps trajectory filter strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]trajectory\.(filter|window)\./);
+    expect(readPackageJavascript()).toContain('trajectory.window.older');
+    expect(readPackageJavascript()).toContain('trajectory.filter.search');
+    expect(readPackageJavascript()).toContain('Search loaded records');
   });
 
   it('still carries what a transcript actually renders', () => {

@@ -24,7 +24,7 @@ import java.util.function.UnaryOperator;
  * Commits journal transactions to the Session store in the record format the
  * Session authority writes, each carrying one Stage H record revision.
  */
-final class ExtensionRecordJournal {
+public final class ExtensionRecordJournal {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String WRITER = "writer-extension";
     private static final String TOKEN = "extension-writer-token-0123456789";
@@ -39,7 +39,7 @@ final class ExtensionRecordJournal {
     private String lastCommitDigest;
     private int domainEvents;
 
-    ExtensionRecordJournal(ManagedSessionStore store, String tenantId,
+    public ExtensionRecordJournal(ManagedSessionStore store, String tenantId,
             String workspaceId, String sessionId) {
         this.store = store;
         this.tenantId = tenantId;
@@ -48,7 +48,7 @@ final class ExtensionRecordJournal {
     }
 
     /** Acquires the writer and commits the Session's genesis. */
-    ExtensionRecordJournal open() {
+    public ExtensionRecordJournal open() {
         acquire().commit(genesis(
                 "{\"subtype\":\"session_execution_engine\"}\n"
                         + "{\"subtype\":\"managed_session_header_v1\"}\n",
@@ -84,7 +84,7 @@ final class ExtensionRecordJournal {
         return receipt;
     }
 
-    CommitReceipt commit(CommitTransactionRequest request) {
+    public CommitReceipt commit(CommitTransactionRequest request) {
         return store.commit(tenantId, sessionId, TOKEN, request);
     }
 
@@ -122,10 +122,81 @@ final class ExtensionRecordJournal {
                 editRecords, extraEvents, "monitor_run", List.of());
     }
 
-    CommitTransactionRequest requestDomain(String commandId, String domain,
+    public CommitTransactionRequest requestDomain(String commandId, String domain,
             JsonNode body, List<CommitResource> resources, long occurredAt) {
         return request("commitMcpRecord", commandId, bytes(body), occurredAt,
                 event -> { }, records -> records, 0, domain, resources);
+    }
+
+    /**
+     * A Stage H commit that carries an input and its generated wake after
+     * the record's event, as the authority bundles them. Its content and
+     * admission refs name {@code input}, which the transaction holds.
+     */
+    public CommitTransactionRequest requestDomainWithInput(String commandId,
+            String domain, JsonNode body, List<CommitResource> resources,
+            String inputId, CommitResource input) {
+        return requestDomainWithInputs(commandId, domain, body, resources,
+                List.of(inputId), input);
+    }
+
+    /**
+     * The same commit carrying one input and wake per id, as a writer that
+     * does not follow the contract might bundle more than one. A repeated
+     * id still gets its own event and turn.
+     */
+    CommitTransactionRequest requestDomainWithInputs(String commandId,
+            String domain, JsonNode body, List<CommitResource> resources,
+            List<String> inputIds, CommitResource input) {
+        ObjectNode ref = JSON.createObjectNode()
+                .put("resourceId", input.resourceId())
+                .put("kind", input.kind())
+                .put("schemaVersion", input.schemaVersion())
+                .put("byteLength", input.byteLength())
+                .put("digest", input.digest());
+        StringBuilder lines = new StringBuilder();
+        long accepted = sequence + 2;
+        for (int index = 0; index < inputIds.size(); index++) {
+            String inputId = inputIds.get(index);
+            String turn = inputIds.indexOf(inputId) == index ? inputId
+                    : inputId + ":" + index;
+            ObjectNode inputEvent = event(accepted, turn + ":accepted",
+                    "input.accepted");
+            inputEvent.putObject("payload").put("inputId", inputId)
+                    .put("turnId", turn).put("source", "session_message")
+                    .<ObjectNode>set("contentRef", ref.deepCopy())
+                    .putNull("deadline")
+                    .set("admissionRef", ref.deepCopy());
+            ObjectNode wake = event(accepted + 1, turn + ":wake",
+                    "wake.requested");
+            ObjectNode payload = wake.putObject("payload")
+                    .put("wakeId", turn + ":wake").put("reason", "input");
+            payload.putObject("subject").put("type", "turn")
+                    .put("turnId", turn);
+            payload.put("sourceEventId", turn + ":accepted")
+                    .put("requiredSequence", accepted);
+            lines.append(line(sessionId, "managed_session_event_v1",
+                    inputEvent)).append(line(sessionId,
+                            "managed_session_event_v1", wake));
+            accepted += 2;
+        }
+        List<CommitResource> closure = new ArrayList<>(resources);
+        closure.add(input);
+        return request("commitMcpRecord", commandId, bytes(body), 1_000,
+                event -> { }, records -> {
+                    int cut = records.indexOf('\n') + 1;
+                    return records.substring(0, cut) + lines
+                            + records.substring(cut);
+                }, 2 * inputIds.size(), domain, closure);
+    }
+
+    private ObjectNode event(long at, String eventId, String kind) {
+        ObjectNode event = JSON.createObjectNode().put("v", 1)
+                .put("sequence", at).put("eventId", eventId);
+        event.putObject("sessionKey").put("tenantId", tenantId)
+                .put("workspaceId", workspaceId).put("sessionId", sessionId);
+        event.put("kind", kind).put("occurredAt", 1_000);
+        return event;
     }
 
     /**
@@ -222,7 +293,7 @@ final class ExtensionRecordJournal {
     }
 
     /** Advances past a request the store committed. */
-    void committed(CommitTransactionRequest request) {
+    public void committed(CommitTransactionRequest request) {
         journalRevision++;
         sequence = request.lastSequence();
         lastCommitDigest = request.commitDigest();

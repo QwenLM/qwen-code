@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  clipToWidth,
+  getCachedStringWidth,
+  toCodePoints,
+} from '../utils/textUtils.js';
+
 /**
  * Pure dialog machinery for the OpenTUI dialog family (PR1 slice 3).
  *
@@ -83,6 +89,83 @@ export function followScrollOffset(
   return scrollOffset;
 }
 
+/**
+ * Rows a run paints once the terminal word-wraps it at `width` columns. A
+ * budget that charges a wrapped run a flat row under-pays, so every chrome
+ * text run is measured here instead of hand-counted: the budget pays for the
+ * rows the run actually occupies.
+ *
+ * Two renderer rules the count has to share: a newline always starts a new
+ * row, and a word wider than the row is broken by cell width without splitting
+ * a double-width glyph — so a spaceless CJK run packs nine characters into a
+ * nineteen-column row, not the ten a whole-width division predicts.
+ */
+export function wrappedRows(text: string, width: number): number {
+  if (width <= 0) {
+    return 1;
+  }
+  let rows = 0;
+  for (const line of text.split('\n')) {
+    let lineRows = 1;
+    let used = 0;
+    const words = line.split(' ');
+    // The separator is charged by position, not by whether the row already
+    // holds something: a run of leading spaces occupies columns the renderer
+    // paints, and a `used > 0` test charges none of them.
+    for (let i = 0; i < words.length; i += 1) {
+      const wordWidth = renderWidth(words[i]);
+      if (i > 0) {
+        if (used + 1 + wordWidth > width) {
+          lineRows += 1;
+          used = 0;
+        } else {
+          used += 1;
+        }
+      }
+      if (wordWidth <= width - used) {
+        used += wordWidth;
+        continue;
+      }
+      // A word wider than the space left to it is broken across rows, cell by
+      // cell; a two-cell glyph that would straddle the boundary moves whole.
+      for (const char of toCodePoints(words[i])) {
+        const charWidth = renderWidth(char);
+        if (used > 0 && used + charWidth > width) {
+          lineRows += 1;
+          used = 0;
+        }
+        used += charWidth;
+      }
+    }
+    rows += lineRows;
+  }
+  return rows;
+}
+
+/**
+ * The longest prefix of `text` whose word wrap at `width` columns pays at
+ * most `rows` rows. A column clip alone under-pays: greedy word wrap leaves
+ * the row a long token starts on partly empty, so `width * rows` columns can
+ * wrap into `rows + 1` rows. The column budget walks down until the measured
+ * rows fit; at zero the empty string still costs the one row an emptied
+ * value pays, so callers must not ask for zero rows.
+ */
+export function clipToRows(text: string, width: number, rows: number): string {
+  let budget = width * rows;
+  let clipped = clipToWidth(text, budget);
+  while (budget > 0 && wrappedRows(clipped, width) > rows) {
+    budget -= 1;
+    clipped = clipToWidth(text, budget);
+  }
+  return clipped;
+}
+
+// The renderer's own width table paints the warning sign in one column where
+// string-width counts two, so the row charge is measured with it painted as
+// one — otherwise the shipped warning is overcharged a row at narrow widths.
+const renderWidth = (text: string): number =>
+  getCachedStringWidth(text.replaceAll('\u26A0', ' '));
+
 export interface SelectionWindow {
   start: number;
   end: number;
@@ -100,12 +183,79 @@ export function selectionWindow(
   itemCount: number,
   maxItemsToShow: number,
 ): SelectionWindow {
-  const start = Math.max(0, scrollOffset);
+  // The offset can outlive the window it was derived for: the follow rule
+  // leaves it alone while the highlight stays inside, so a region grow (a
+  // larger maxItemsToShow) would otherwise paint fewer rows than the budget
+  // allows. Clamp to the same bound getSelectionScrollOffset derives.
+  const start = Math.max(
+    0,
+    Math.min(scrollOffset, Math.max(0, itemCount - maxItemsToShow)),
+  );
   return {
     start,
     end: Math.min(itemCount, start + maxItemsToShow),
     showUp: start > 0,
     showDown: start + maxItemsToShow < itemCount,
+  };
+}
+
+/**
+ * The chrome a region-mounted dialog pays out of the region before its list
+ * windows from what is left. `fixed` counts only rows no text run can wrap
+ * into — the frame's border and padding, margins and spacers. Every chrome
+ * text run goes in `runs` and is charged the rows the renderer's own word
+ * wrap gives it at the width it paints at: a run charged a flat row that
+ * wraps under-pays the frame, and the unshrinkable frame grows past the
+ * region by the difference. `measuredRows` carries what a dialog-level
+ * measurement already derived from `wrappedRows` (e.g. a two-run title
+ * row's), so no part of the charge is a hand count of what a run paints.
+ */
+export interface DialogChrome {
+  readonly fixed: number;
+  readonly runs?: ReadonlyArray<{
+    readonly text: string;
+    readonly width: number;
+  }>;
+  readonly measuredRows?: number;
+}
+
+/** The rows a dialog's chrome pays out of its region budget. */
+export function chromeRows(chrome: DialogChrome): number {
+  let rows = chrome.fixed + (chrome.measuredRows ?? 0);
+  for (const run of chrome.runs ?? []) {
+    rows += wrappedRows(run.text, run.width);
+  }
+  return rows;
+}
+
+/**
+ * The window a region-mounted dialog's list pays for itself: the region rows
+ * left after the dialog's own chrome, capped the way ink's selection lists
+ * cap, with the scroll arrows paid out of the window itself — ink's rule,
+ * which the mode-list budget also ports: arrows exist only when the window
+ * is a strict subset with more than two rows to spare, so a tighter window
+ * spends its rows on items. The floor is zero, not one: a region that cannot
+ * pay the chrome shows no row at all, and the list hook's zero-row refusals
+ * keep Enter, the digits and the arrows off a row nothing painted.
+ */
+export function regionListWindow(
+  regionHeight: number | undefined,
+  chrome: DialogChrome,
+  itemCount: number,
+  cap: number,
+): { maxItemsToShow: number; showScrollArrows: boolean } {
+  if (regionHeight === undefined) {
+    const maxItemsToShow = Math.min(cap, itemCount);
+    return { maxItemsToShow, showScrollArrows: maxItemsToShow < itemCount };
+  }
+  const rows = regionHeight - chromeRows(chrome);
+  if (rows <= 0) {
+    return { maxItemsToShow: 0, showScrollArrows: false };
+  }
+  const showScrollArrows = rows > 2 && Math.min(cap, rows) < itemCount;
+  return {
+    maxItemsToShow: Math.min(cap, itemCount, rows - (showScrollArrows ? 2 : 0)),
+    showScrollArrows,
   };
 }
 

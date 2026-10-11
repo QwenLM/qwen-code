@@ -14,6 +14,9 @@ public final class ManagedSessionStoreModels {
     public static final String WRITER_TOKEN_HEADER =
             "X-Qwen-Managed-Writer-Token";
     public static final int MAX_INLINE_RESOURCE_BYTES = 64 * 1024;
+    /** The agent-instructions bound the publisher and both verifiers
+     * must agree on (admission, publish, verify, recovery read). */
+    public static final int MAX_AGENT_INSTRUCTIONS_BYTES = 64 * 1024;
     public static final int MAX_RESOURCES_PER_TRANSACTION = 1024;
     public static final int MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
     public static final int MAX_TRANSACTION_EVENTS = 256;
@@ -58,6 +61,16 @@ public final class ManagedSessionStoreModels {
     private static final String DIGEST_PATTERN = "^[0-9a-f]{64}$";
 
     private ManagedSessionStoreModels() {
+    }
+
+    public record AuthorizeLifecycleRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            String kind) {
+        public AuthorizeLifecycleRequest(String workspaceId, String writerId, long writerGeneration) {
+            this(workspaceId, writerId, writerGeneration, null);
+        }
     }
 
     public record AcquireWriterRequest(

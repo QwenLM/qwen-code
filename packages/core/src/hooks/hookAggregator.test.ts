@@ -111,6 +111,27 @@ describe('HookAggregator', () => {
       expect(result.finalOutput?.stopReason).toBe('second stop');
     });
 
+    it('keeps the last updatedInput in hook order as a whole object', () => {
+      const result = aggregate(HookEventName.PreToolUse, [
+        { hookSpecificOutput: { updatedInput: { path: 'a', extra: 1 } } },
+        { hookSpecificOutput: { additionalContext: 'no rewrite' } },
+        { hookSpecificOutput: { updatedInput: { path: 'b' } } },
+      ]);
+      expect(result.finalOutput?.hookSpecificOutput?.['updatedInput']).toEqual({
+        path: 'b',
+      });
+    });
+
+    it('keeps an invalid updatedInput over a later valid one', () => {
+      const result = aggregate(HookEventName.PreToolUse, [
+        { hookSpecificOutput: { updatedInput: ['not', 'an', 'object'] } },
+        { hookSpecificOutput: { updatedInput: { path: 'b' } } },
+      ]);
+      expect(
+        (result.finalOutput as PreToolUseHookOutput).getUpdatedInput(),
+      ).toBeNull();
+    });
+
     it('should concatenate additionalContext', () => {
       const result = aggregate(HookEventName.PreToolUse, [
         { hookSpecificOutput: { additionalContext: 'context 1' } },
@@ -254,6 +275,31 @@ describe('HookAggregator', () => {
       expect(hookOutput.getUpdatedToolInput()).toEqual({ arg: '2' });
       expect(hookOutput.getDenyMessage()).toBe('first msg\nsecond msg');
     });
+  });
+
+  describe('mergePermissionRequestOutputs updatedInput', () => {
+    const decisionOf = (...updatedInputs: unknown[]) =>
+      (
+        aggregate(
+          HookEventName.PermissionRequest,
+          updatedInputs.map((updatedInput) => ({
+            hookSpecificOutput: {
+              decision: { behavior: 'allow', updatedInput },
+            },
+          })),
+        ).finalOutput as PermissionRequestHookOutput
+      ).getUpdatedToolInput();
+
+    it('keeps the last replacement, including an empty one', () => {
+      expect(decisionOf({ a: 1 }, {})).toEqual({});
+    });
+
+    it.each([null, false, 0, ''])(
+      'keeps an invalid replacement %j over a later valid one',
+      (invalid) => {
+        expect(decisionOf(invalid, { a: 1 })).toBeNull();
+      },
+    );
   });
 
   describe('mergeSimple (default case)', () => {

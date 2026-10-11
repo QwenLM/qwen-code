@@ -636,6 +636,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_attachment_list',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
+  'session_mid_turn_send_now',
   'session_cancel',
   'session_events',
   'session_artifacts',
@@ -965,6 +966,7 @@ interface FakeBridgeOpts {
     messageId: string,
     context?: BridgeClientRequestContext,
   ) => { removed: boolean };
+  sendMidTurnNowImpl?: (sessionId: string) => { requested: boolean };
   /** Drives `GET /session/:id/mid-turn-messages`. Default: empty snapshot. */
   getMidTurnMessagesImpl?: (sessionId: string) => {
     messages: Array<{
@@ -1344,6 +1346,10 @@ interface FakeBridge extends AcpSessionBridge {
     messageId: string;
     context?: BridgeClientRequestContext;
   }>;
+  sendMidTurnNowCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   getMidTurnMessagesCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
@@ -1601,6 +1607,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const removeMidTurnCalls: FakeBridge['removeMidTurnCalls'] = [];
   const removeMidTurnImpl =
     opts.removeMidTurnImpl ?? (() => ({ removed: true }));
+  const sendMidTurnNowCalls: FakeBridge['sendMidTurnNowCalls'] = [];
+  const sendMidTurnNowImpl =
+    opts.sendMidTurnNowImpl ?? (() => ({ requested: true }));
   const getMidTurnMessagesCalls: FakeBridge['getMidTurnMessagesCalls'] = [];
   const getMidTurnMessagesImpl =
     opts.getMidTurnMessagesImpl ??
@@ -2336,6 +2345,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     discardDeferredRestoreAskUserQuestionPromptCalls,
     enqueueMidTurnCalls,
     removeMidTurnCalls,
+    sendMidTurnNowCalls,
     getMidTurnMessagesCalls,
     permissionVotes,
     sessionPermissionVotes,
@@ -2925,6 +2935,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return removeMidTurnImpl(sessionId, messageId, context);
+    },
+    sendMidTurnMessagesNow(sessionId, context) {
+      sendMidTurnNowCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return sendMidTurnNowImpl(sessionId);
     },
     getMidTurnMessages(sessionId, context) {
       getMidTurnMessagesCalls.push({
@@ -5327,7 +5344,7 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
-    it('does not mount collaboration routes or recovery when the opt-in is off', async () => {
+    it('does not mount collaboration routes when the opt-in is off', async () => {
       const app = createServeApp(baseOpts, undefined, { bridge: fakeBridge() });
       const capabilities = await request(app)
         .get('/capabilities')
@@ -5336,7 +5353,7 @@ describe('createServeApp', () => {
       expect(capabilities.body.features).not.toContain(
         'agent_collaboration_v1',
       );
-      expect(app.locals['stopWorkspaceAgentRecovery']).toBeUndefined();
+      expect(app.locals['stopSessionAgentOrchestrators']).toBeUndefined();
 
       const primary = capabilities.body.workspaces.find(
         (workspace: { primary?: boolean }) => workspace.primary,
@@ -5412,7 +5429,9 @@ describe('createServeApp', () => {
         );
       } finally {
         (
-          app?.locals['stopWorkspaceAgentRecovery'] as (() => void) | undefined
+          app?.locals['stopSessionAgentOrchestrators'] as
+            | (() => void)
+            | undefined
         )?.();
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
@@ -13368,6 +13387,50 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ removed: false });
+    });
+  });
+
+  describe('POST /session/:id/mid-turn-messages/send-now', () => {
+    it('asks the bridge to deliver the queue now with client identity', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/mid-turn-messages/send-now')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-9')
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ requested: true });
+      expect(bridge.sendMidTurnNowCalls).toEqual([
+        { sessionId: 's-1', context: { clientId: 'client-9' } },
+      ]);
+    });
+
+    it('returns requested:false when nothing waits', async () => {
+      const bridge = fakeBridge({
+        sendMidTurnNowImpl: () => ({ requested: false }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/mid-turn-messages/send-now')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ requested: false });
     });
   });
 

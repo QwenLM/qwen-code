@@ -2,7 +2,7 @@
 
 [English](2026-10-04-managed-channels.md) | [简体中文](2026-10-04-managed-channels.zh-CN.md)
 
-状态：H5a 切片（两个 domain 的记录契约）已实现；H5b 与 H5c 切片仍为设计提案，文中提到的 domain 均未开放提交。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H5 切片设计，属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。它建立在 H0a 的任务契约（[设计](2026-09-27-managed-agent-task-contract.zh-CN.md)）、H0b 的记录契约（[设计](2026-09-27-managed-extension-record-contract.zh-CN.md)）和 H0c 的 authority（[设计](2026-09-27-managed-extension-authority.zh-CN.md)）之上。下文的“参考设计”指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 1、3、6、11、12、13、14 节；其序言把 Channels 的字段级契约留给[自动化设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-automation.md)，均以 #12827 固定的提交为准。
+状态：H5a 切片（两个 domain 的记录契约）、H5b 与 H5c 切片（email 入站与出站垂直切片，见[运行时设计](2026-10-07-managed-channel-runtime.zh-CN.md)）均已实现；两个 domain 仅对 email 适配器开放提交。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H5 切片设计，属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。它建立在 H0a 的任务契约（[设计](2026-09-27-managed-agent-task-contract.zh-CN.md)）、H0b 的记录契约（[设计](2026-09-27-managed-extension-record-contract.zh-CN.md)）和 H0c 的 authority（[设计](2026-09-27-managed-extension-authority.zh-CN.md)）之上。下文的“参考设计”指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 1、3、6、11、12、13、14 节；其序言把 Channels 的字段级契约留给[自动化设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-automation.md)，均以 #12827 固定的提交为准。
 
 ## 问题
 
@@ -52,7 +52,7 @@ Legacy channel（`packages/channels/*`）的适配器运行在 daemon 或 CLI �
 
 1. **两个 domain。** `channel_route` 是持久路由绑定：哪个认证后的（instance、account、sender、chat、thread）映射到哪个 Session，及其修订。`channel_delivery` 是一份正式结果的一次交付，以 `deliveryId` 为链身份，在其修订中携带分段计划与逐段回执。两者都不是 Session 任务，因此在 `MANAGED_EXTENSION_RECORD_BODIES` 中取 `taskKind: null`，与 MCP、Hook 正文一致；交付经 `/v1/agent-channels/{channelId}/deliveries` 资源展示，不进任务列表。
 2. **入站身份由四部分组成。** 入站事件按四元组（channel instance、账号 generation、平台 event ID、语义 revision）去重。账号 generation 使 provider 侧重新配键之后的身份与之前的不可比，而不是错误地相等——email 适配器的 `uidValidity` 重置正是如此：代数变化重启游标与去重窗口，而不是跨窗口去重。语义 revision 区分同一平台事件被重新解析或编辑后的另一次出现；对 email 固定为 `1`，因为 RFC 822 存储不可变。两条文本相同的真实消息有不同的平台 event ID，保留为两个 input（参考设计第 14 节第 5 条）；provider 重投携带相同四元组，是一个 input。
-3. **附件先于准入成为 Artifact。** 入站字节先转存为受控 Artifact，准入的 input 引用它们——Legacy 的临时附件目录是适配器的暂存空间，不是记录。准入不确定（提交结果未知）时，按参考设计第 6 节保留 staged bytes，并在再次准入任何东西之前查询原 `inputId`。
+3. **附件先于准入内联转存。** ≤ 64 KiB 的入站附件转存为 `managed-channel-attachment` Session 资源并由信封引用；更大的以 `omitted: 'too_large'` 列出、不入记录——Legacy 的临时附件目录是适配器的暂存空间，不是记录。准入不确定（提交结果未知）时，staged 资源经信封自身闭包保留，并在再次准入任何东西之前查询原 `inputId`。
 4. **交付分段并逐段回执。** 回复的交付计划拆成稳定的 `segmentId`/`ordinal`；`channel_delivery` 记录的每条修订记录 provider 已证实接受的段。恢复后的派发器只补发被证明未发送的段；`partial` 提交已证实的子集，其余保持未结。模型回合完成与外部送达完成是两个独立事实，分别展示——交付状态线绝不顶替运行线（参考设计第 3.2 与 6 节）。
 5. **unknown 就是 unknown。** 当 provider 没有查询 API、也没有幂等键时——没有送达回执的 SMTP 就是 email 的情形——发送后断线进入 `delivery_unknown`（交付状态线上的 `unknown`）：记录表明 provider 可能已持有该消息，并禁止自动重发。用户显式重发创建新的 `deliveryId`，并提示可能重复（参考设计第 6 节）。email 适配器当前面对不确定在途状态时的拒绝启动正是这条规则的人工形态；Managed 路径提交 `unknown`，保持任务可对账，且不阻塞无关工作。
 6. **账号换代是一次路由修订。** provider 重新配键（email：`uidValidity` 变化）时，`channel_route` 记录以新修订固定新代数；旧代数的在途交付继续按它对账，但不能创建新副作用——与 H0b/H0c 对 Runtime binding 应用的旧代数规则一致。
@@ -61,7 +61,7 @@ Legacy channel（`packages/channels/*`）的适配器运行在 daemon 或 CLI �
 
 ## 记录正文（H5a）
 
-两个正文都原样嵌入 H0b 运行块，都以 `taskKind: null` 注册进 `MANAGED_EXTENSION_RECORD_BODIES`——Channel 的 route 与 delivery 不是 Session 任务——并继续缺席 `MANAGED_SESSION_ENABLED_DOMAINS`。字节级契约位于 `packages/core/src/managed-runtime/managed-channel-record.ts`，由 `packages/sdk-java/managed-agent-server` 的 `ManagedChannelRecords` 镜像，并由共用语料 `contracts/managed-channel-record-v1.fixtures.json`（92 个形态用例与 57 个后继用例）固定，TypeScript 与 Java 回放完全一致。
+两个正文都原样嵌入 H0b 运行块，都以 `taskKind: null` 注册进 `MANAGED_EXTENSION_RECORD_BODIES`——Channel 的 route 与 delivery 不是 Session 任务——并在本切片继续缺席 `MANAGED_SESSION_ENABLED_DOMAINS`；H5b 允许两个 domain 经 email 适配器门控提交。字节级契约位于 `packages/core/src/managed-runtime/managed-channel-record.ts`，由 `packages/sdk-java/managed-agent-server` 的 `ManagedChannelRecords` 镜像，并由共用语料 `contracts/managed-channel-record-v1.fixtures.json`（92 个形态用例与 57 个后继用例）固定，TypeScript 与 Java 回放完全一致。
 
 - `managed-channel_route`（链身份 `routeId`）：封闭键 `routeId`、`channelInstanceId`、`accountId`、`accountGeneration`、`routeRevision`、`rootSessionId`、`sessionId`、`scope`、`policyRef`、`run`。scope 按 kind 携带 Legacy 路由键实际派生的身份：`user` 以 chat 内的发送者为键（`senderId` 与 `chatId` 必填，`threadId` 为 null）；`thread` 以 thread 为键并回退到 chat（`threadId`/`chatId` 恰填其一，`senderId` 为 null）；`chat_thread` 以 chat 为键、仅可细化到其一个 thread（`chatId` 必填，`threadId` 可填，`senderId` 为 null）；`single` 仅以实例为键（三者全 null）。运行只钉 `effectId: routeId`：无 definition、execution、Runtime、dispatch 或 delivery——绑定的生命周期是唯一状态。
 - route 后继：身份（`routeId`、`channelInstanceId`、`accountId`、`scope`）不变。`routeRevision` 相同时重绑定集合——`accountGeneration`、`rootSessionId`、`sessionId`、`policyRef`——逐字节相同；重绑定或换代把 `routeRevision` 恰好加一，并且此时才能改动集合，但 `accountGeneration` 绝不后退（决策 6）。运行终态冻结整条记录。
@@ -72,13 +72,13 @@ Legacy channel（`packages/channels/*`）的适配器运行在 daemon 或 CLI �
 
 ## 切片计划
 
-| 切片          | 范围                                                                                                                                                                                           | 通过门槛                                                                                                                                                                                                                                                                |
-| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H5a（已完成） | 记录契约：两个正文、验证器、固定字段规则与迁移见证，独立成 `managed-channel-record-v1` fixture 语料；`MANAGED_EXTENSION_RECORD_BODIES` 条目；Java 回放。                                       | TypeScript 与 Java 对 fixture 给出并拒绝完全相同的链。两个 domain 继续缺席 `MANAGED_SESSION_ENABLED_DOMAINS`；`commitExtensionRecord` 仍然拒绝它们。Java 存储先于任何写入者提交，携带这两个正文（H0c 未决问题 7）。没有生产调用方构造任一正文。                         |
-| H5b           | email 入站垂直切片：`channel_route` 提交、按四元组身份的入站去重、附件 → Artifact 转存、带唤醒的路由输入准入。两个 domain 仅对该适配器开放提交。                                               | provider 重投只提交一个 input；两条文本相同的消息提交两个。准入崩溃保留 staged bytes 且原 `inputId` 可查；没有事件被准入两次，也没有事件被静默丢弃。`uidValidity` 换代产生路由修订，旧代数不再准入新内容。email 适配器在 Managed 路径上通过其现有行为套件。             |
-| H5c           | email 外发垂直切片：`channel_delivery` 提交、outbox 派发器、逐次发送回执、`partial`/`unknown` 恢复、以新 `deliveryId` 的显式用户重发。公开 `/v1/agent-channels` 与 `.../deliveries` 形状提供。 | 发送中断的回复只补被证明未发送的部分；发送后断线记录 `delivery_unknown` 且绝不自动重发；显式重发提示可能重复。模型完成与外部送达分别投影，Channel 发送失败绝不重跑模型（参考设计第 14 节第 6 条）。两个 planned 路由随其 H5 形状转为 `partial`，并由 API 契约测试覆盖。 |
+| 切片          | 范围                                                                                                                                                                                                                                                  | 通过门槛                                                                                                                                                                                                                                                                |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H5a（已完成） | 记录契约：两个正文、验证器、固定字段规则与迁移见证，独立成 `managed-channel-record-v1` fixture 语料；`MANAGED_EXTENSION_RECORD_BODIES` 条目；Java 回放。                                                                                              | TypeScript 与 Java 对 fixture 给出并拒绝完全相同的链。两个 domain 继续缺席 `MANAGED_SESSION_ENABLED_DOMAINS`；`commitExtensionRecord` 仍然拒绝它们。Java 存储先于任何写入者提交，携带这两个正文（H0c 未决问题 7）。没有生产调用方构造任一正文。                         |
+| H5b（已完成） | email 入站垂直切片：`channel_route` 提交、按四元组身份的入站去重、≤ 64 KiB 入站附件以 `managed-channel-attachment` Session 资源内联转存并由信封引用（更大者以 `omitted: 'too_large'` 列出）、带唤醒的路由输入准入。两个 domain 仅对该适配器开放提交。 | provider 重投只提交一个 input；两条文本相同的消息提交两个。准入崩溃保留信封的 staged 资源且原 `inputId` 可查；没有事件被准入两次，也没有事件被静默丢弃。`uidValidity` 换代产生路由修订，旧代数不再准入新内容。email 适配器在 Managed 路径上通过其现有行为套件。         |
+| H5c（已完成） | email 外发垂直切片：`channel_delivery` 提交、outbox 派发器、逐次发送回执、`partial`/`unknown` 恢复、以新 `deliveryId` 的显式用户重发。公开 `/v1/agent-channels` 与 `.../deliveries` 形状提供。                                                        | 发送中断的回复只补被证明未发送的部分；发送后断线记录 `delivery_unknown` 且绝不自动重发；显式重发提示可能重复。模型完成与外部送达分别投影，Channel 发送失败绝不重跑模型（参考设计第 14 节第 6 条）。两个 planned 路由随其 H5 形状转为 `partial`，并由 API 契约测试覆盖。 |
 
-后续 H5 切片（本文不排期）：第二个适配器（按产品优先级选择）；provider 支持时的卡片式分段界面；超出 email 切片所用 O2/O3 转存的附件种类。
+后续 H5 切片（本文不排期）：第二个适配器（按产品优先级选择）；provider 支持时的卡片式分段界面；超出目前 email 切片内联 `managed-channel-attachment` 转存的附件种类——O2/O3 Artifact 提升按运行时设计的「未决问题」与「Media」行跟进。
 
 ## 验证计划
 
@@ -99,6 +99,6 @@ Legacy channel（`packages/channels/*`）的适配器运行在 daemon 或 CLI �
 ## 未决问题
 
 1. **去重索引的保留。** 入站去重索引的窗口与压实（Legacy：1,024 条摘要）与 Session 历史保留的关系；由 H5b 随 email 切片固定。
-2. **staged 字节配额。** 附件转存复用 O2 配额，但每条路由的转存积压上界及其拒绝行为是 H5b 的决策。
+2. **staged 字节配额。** 内联附件的单条上界 64 KiB（复用 hosted store 的 inline 上限），每条路由的转存积压上界及其拒绝行为是 H5b 的决策。
 3. **带凭据的配置。** 路由配置按句柄引用 secret；email 的 IMAP/SMTP 凭据句柄在哪里签发与轮换是部署决策，不属于这批切片。
 4. **交付预算。** 外发派发是否需要 H0b `rate_limit` 之外的交付速率配额，还是依赖 Session 现有预算，留给 H5c。

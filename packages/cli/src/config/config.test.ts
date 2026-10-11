@@ -3342,6 +3342,26 @@ describe('loadCliConfig', () => {
     },
   );
 
+  it('passes the Managed engine quarantine sink to the session Config', async () => {
+    const onManagedEngineQuarantine = vi.fn();
+    await loadCliConfig(
+      {},
+      {} as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { onManagedEngineQuarantine },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({ onManagedEngineQuarantine }),
+    );
+  });
+
   it('should explain when --fork-session fails to copy the source session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {

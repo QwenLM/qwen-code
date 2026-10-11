@@ -34,7 +34,11 @@ import type {
   WebShellComposerTag,
   WebShellComposerTagIconMap,
 } from '../../customization';
-import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
+import type {
+  AttachmentPreviewRequest,
+  DaemonMessageAuthor,
+} from '../../adapters/messageTypes';
+import { AuthorAvatar } from './AuthorAvatar';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
@@ -74,6 +78,8 @@ interface UserMessageProps {
   /** Click an uploaded image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  /** Set when a workspace agent, not the user, posted this message. */
+  author?: DaemonMessageAuthor;
 }
 
 interface ScheduledTaskRunContent {
@@ -238,6 +244,7 @@ export const UserMessage = memo(function UserMessage({
   onEditCancel,
   onImagePreview,
   onAttachmentPreview,
+  author,
 }: UserMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
@@ -397,6 +404,12 @@ export const UserMessage = memo(function UserMessage({
             : ''
         }`}
       >
+        {author && (
+          <div className={styles.author}>
+            <AuthorAvatar name={author.name} color={author.color} />
+            <span className={styles.authorName}>{author.name}</span>
+          </div>
+        )}
         {images && images.length > 0 && (
           <div className={styles.chatImages} data-web-shell-user-images>
             {images.map((img, index) => {

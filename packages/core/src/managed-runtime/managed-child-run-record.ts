@@ -25,12 +25,14 @@ import { MANAGED_TOOL_RESULT_KINDS } from './managed-tool-result.js';
 // The `managed-child_run` record bodies under recordRef `managed-child_run`
 // schema version 1: one closed shape per `kind`, dispatched by the body's
 // own `kind` field. H3 of #12827 defined `kind: "shell"` (one background
-// Shell per record); H4 of #12827 adds `kind: "child_agent"` (one child
-// Session per record). The shared fixtures in
-// contracts/managed-child-run-record-v1.fixtures.json pin both shapes, and
+// Shell per record); H4 of #12827 adds the two child Session kinds,
+// `kind: "child_agent"` (H4a) and `kind: "workflow"` (H4c), one child
+// Session per record under one shared shape. The shared fixtures in
+// contracts/managed-child-run-record-v1.fixtures.json pin every shape, and
 // ManagedExtensionRecords in packages/sdk-java/managed-agent-server replays
-// the same cases. See docs/design/2026-10-03-managed-shell-monitor-runtime.md
-// and docs/design/2026-10-06-managed-child-agent-runtime.md.
+// the same cases. See docs/design/2026-10-03-managed-shell-monitor-runtime.md,
+// docs/design/2026-10-06-managed-child-agent-runtime.md and
+// docs/design/2026-10-09-managed-workflow-child-kind.md.
 
 /** Why a background Shell ended, by the state its run ended in. */
 export const CHILD_RUN_STOP_REASONS = Object.freeze({
@@ -46,7 +48,7 @@ export const CHILD_RUN_STOP_REASONS = Object.freeze({
 export type ChildRunStopReason =
   (typeof CHILD_RUN_STOP_REASONS)[keyof typeof CHILD_RUN_STOP_REASONS][number];
 
-/** Why a child agent ended, by the state its run ended in. */
+/** Why a child Session run ended, by the state its run ended in. */
 export const CHILD_AGENT_STOP_REASONS = Object.freeze({
   settled: Object.freeze(['completed'] as const),
   failed: Object.freeze([
@@ -85,9 +87,8 @@ export type ChildCompletion = 'tool' | 'sent';
 /** The Workspace isolation policy fixed at launch. */
 export type ChildWorkspaceMode = 'shared' | 'snapshot' | 'worktree';
 
-/** The body of a `managed-child_run` schema version 1 (`kind: "child_agent"`). */
-export interface ChildAgentRun {
-  readonly kind: 'child_agent';
+/** The fields of a child Session run, shared by both child Session kinds. */
+interface ChildSessionRunFields {
   readonly childRunId: string;
   /** The parent activation scope that owns the child and receives its result. */
   readonly ownerScopeId: string;
@@ -116,12 +117,53 @@ export interface ChildAgentRun {
   readonly run: ExtensionRun;
 }
 
+/** The body of a `managed-child_run` schema version 1 (`kind: "child_agent"`). */
+export interface ChildAgentRun extends ChildSessionRunFields {
+  readonly kind: 'child_agent';
+}
+
+/**
+ * The body of a `managed-child_run` schema version 1 (`kind: "workflow"`):
+ * a child Session that runs one workflow, whose definition pin names that
+ * workflow's revision from the launch on.
+ */
+export interface WorkflowRun extends ChildSessionRunFields {
+  readonly kind: 'workflow';
+}
+
+/** A child run executed by a child Session of its own, of either kind. */
+export type ChildSessionRun = ChildAgentRun | WorkflowRun;
+
 /**
  * The body of any `managed-child_run` schema version 1 record. `ChildRun`
  * keeps the meaning H3 shipped — a background Shell — and the dispatching
  * parse returns it for `kind: "shell"`.
  */
-export type AnyChildRun = ChildRun | ChildAgentRun;
+export type AnyChildRun = ChildRun | ChildSessionRun;
+
+/**
+ * Whether a child Session of its own executes `record`. Every rule that
+ * holds for both child Session kinds asks this rather than "not a Shell":
+ * the switch names each kind, so a kind added to `AnyChildRun` fails to
+ * compile here until it is classified, and none joins the child Session
+ * rules by default.
+ */
+export function isChildSessionRun(
+  record: AnyChildRun,
+): record is ChildSessionRun {
+  switch (record.kind) {
+    case 'child_agent':
+    case 'workflow':
+      return true;
+    case 'shell':
+      return false;
+    default: {
+      const unclassified: never = record;
+      void unclassified;
+      return false;
+    }
+  }
+}
 
 const SHELL_KEYS = [
   'commandRef',
@@ -143,6 +185,8 @@ const SHELL_FIXED_KEYS = [
   'ownerScopeId',
   'shellId',
 ] as const;
+// The closed keys of both child Session kinds: a workflow child rides the
+// child agent's lifecycle field for field.
 const CHILD_AGENT_KEYS = [
   'childRunId',
   'childSessionId',
@@ -162,9 +206,10 @@ const CHILD_AGENT_KEYS = [
   'workspaceMode',
   'workingDirectory',
 ] as const;
-// The fields that no revision of a child agent may change. `resultVersion`
-// is not here on purpose: the parser forces it to 1, so no two revisions
-// can ever differ on it, and a fixed-key entry for it could never refuse.
+// The fields that no revision of a child Session run may change.
+// `resultVersion` is not here on purpose: the parser forces it to 1, so no
+// two revisions can ever differ on it, and a fixed-key entry for it could
+// never refuse.
 const CHILD_AGENT_FIXED_KEYS = [
   'childRunId',
   'completion',
@@ -303,8 +348,12 @@ export function parseChildRun(value: unknown): AnyChildRun {
       ? (value as Record<string, unknown>)['kind']
       : undefined;
   if (kind === 'shell') return parseChildShellRecord(value);
-  if (kind === 'child_agent') return parseChildAgentRun(value);
-  fail('Child run kind must be one of shell, child_agent in schema version 1.');
+  if (kind === 'child_agent' || kind === 'workflow') {
+    return parseChildSessionRun(value, kind);
+  }
+  fail(
+    'Child run kind must be one of shell, child_agent, workflow in schema version 1.',
+  );
 }
 
 /** Parses a `kind: "shell"` child run and refuses any other kind. */
@@ -445,12 +494,15 @@ function parseChildShellRecord(value: unknown): ChildRun {
   });
 }
 
-function parseChildAgentRun(value: unknown): ChildAgentRun {
+function parseChildSessionRun(
+  value: unknown,
+  kind: ChildSessionRun['kind'],
+): ChildSessionRun {
   const body = closed(value, CHILD_AGENT_KEYS);
   const run = parseExtensionRun(body.run);
-  // A child agent is started by one tool call; its result travels the
-  // session delivery line its relay scans, never an effect identity or an
-  // external delivery.
+  // A child Session run is started by one tool call; its result travels
+  // the session delivery line its relay scans, never an effect identity or
+  // an external delivery.
   if (
     run.executionCallId === null ||
     run.effectId !== null ||
@@ -463,6 +515,12 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   const delivery = run.delivery;
   if (delivery === null || delivery.target !== 'session') {
     fail('Child run delivery must target the parent session.');
+  }
+  // A workflow run exists to run one workflow revision, so the launch
+  // itself names it: the pin is required from the opening revision on,
+  // never merely by the dispatch.
+  if (kind === 'workflow' && run.definition === null) {
+    fail('Workflow run must pin its workflow definition from launch.');
   }
   // The launched definition is pinned no later than the dispatch that
   // admits the creation; the shared successor rule makes it unaddable
@@ -507,9 +565,13 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   const childSessionId = nullable(body.childSessionId, (each) =>
     id(each, 'childSessionId'),
   );
-  // The Session exists only once the control plane admitted its creation.
+  // The Session exists once the control plane admitted its creation, and
+  // the mint alone never dispatches: a never-started proof may name the
+  // Session it minted (the mint is exactly what survives the create→
+  // attach window), everything before that proof may not.
   if (
     childSessionId !== null &&
+    run.execution !== 'not_started_proven' &&
     UNSTARTED_EXECUTION_STATES.includes(run.execution)
   ) {
     fail('Child run childSessionId needs its admitted creation dispatch.');
@@ -522,7 +584,13 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   }
   // The Session the child runs in is hosted by a Runtime binding, set with
   // the dispatch and unaddable once dispatched, like the definition pin.
-  if (childSessionId !== null && run.runtime === null) {
+  // The never-started proof is the one terminal that has no dispatch to
+  // host from: minted, never dispatched, so never bound.
+  if (
+    childSessionId !== null &&
+    run.runtime === null &&
+    run.execution !== 'not_started_proven'
+  ) {
     fail('Child run childSessionId needs the Runtime binding that hosts it.');
   }
   // A dispatch that never started (not_started_proven) may carry no
@@ -597,7 +665,7 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   }
   if (
     stopReason === 'creation_failed' &&
-    (run.execution !== 'not_started_proven' || childSessionId !== null)
+    run.execution !== 'not_started_proven'
   ) {
     fail('Child run creation_failed needs a creation that never started.');
   }
@@ -605,7 +673,7 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
     fail('Child run child_failed needs its settled execution.');
   }
   return Object.freeze({
-    kind: 'child_agent',
+    kind,
     childRunId: id(body.childRunId, 'childRunId'),
     ownerScopeId: id(body.ownerScopeId, 'ownerScopeId'),
     rootSessionId: id(body.rootSessionId, 'rootSessionId'),
@@ -656,8 +724,8 @@ function isRelativeDirectory(value: string): boolean {
 
 /**
  * Whether `value` may open its chain: a Shell's run opens with no stop
- * request and no output; a child agent's run opens with the delivery planned,
- * no Session created, no result and no stop request.
+ * request and no output; a child Session run (either kind) opens with the
+ * delivery planned, no Session created, no result and no stop request.
  */
 export function isChildRunStart(value: unknown): boolean {
   return accepts(() => {
@@ -665,6 +733,7 @@ export function isChildRunStart(value: unknown): boolean {
     if (!isExtensionRunStart(record.run) || record.stopRequested) return false;
     if (record.kind === 'shell') return record.outputRef === null;
     return (
+      isChildSessionRun(record) &&
       record.run.delivery !== null &&
       record.run.delivery.state === 'planned' &&
       record.childSessionId === null &&
@@ -678,9 +747,9 @@ export function isChildRunStart(value: unknown): boolean {
  * Whether `next` may follow `previous` as a later revision of the same
  * record, per kind: the identity is fixed, the run moves forward, a Shell's
  * start receipt is set once and never changes while its output may only
- * grow, a child agent's Session is created once, either kind's stop
+ * grow, a child Session run's Session is created once, every kind's stop
  * request is set but never cleared, and once the run is terminal the
- * remaining rules freeze everything but the child agent's delivery line.
+ * remaining rules freeze everything but a child Session run's delivery line.
  * The result and its receipt need no set-once rule here: they appear
  * exactly at the settling revision, and the terminal freeze forbids any
  * restatement from then on.
@@ -705,9 +774,7 @@ export function isChildRunSuccessor(previous: unknown, next: unknown): boolean {
       }
       return true;
     }
-    if (before.kind !== 'child_agent' || after.kind !== 'child_agent') {
-      return false;
-    }
+    if (!isChildSessionRun(before) || !isChildSessionRun(after)) return false;
     // Once the run is terminal the record changes only its delivery line:
     // the run's own freeze confines movement to the delivery, and nothing
     // outside the run may change at all.

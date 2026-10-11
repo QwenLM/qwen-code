@@ -35,6 +35,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
@@ -1835,10 +1836,18 @@ class ManagedAgentServerIntegrationTest {
         private volatile String closeAnswer = BOOT_ID;
         private final Map<String, HarnessRuntimeRecovery>
                 tenantRecoveries = new ConcurrentHashMap<>();
+        /** H6b: the automation funnel this fixture answers for. */
+        final AutomationHarnessFake automations = new AutomationHarnessFake();
 
         @Override
         public boolean isAvailable() {
             return available;
+        }
+
+        @Override
+        public Map<String, Object> runAutomationOperation(String tenantId,
+                String sessionId, Map<String, Object> body) {
+            return automations.run(sessionId, body);
         }
 
         @Override
@@ -1951,11 +1960,22 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
+        public boolean supportsFencedTitles() {
+            return true;
+        }
+
+        @Override
+        public void rename(String tenantId, String sessionId, String title, long revision) {
+            rename(tenantId, sessionId, title);
+        }
+
+        @Override
         public void rename(String tenantId, String sessionId, String title) {
             renames.incrementAndGet();
             if (renameFailures.getAndUpdate(value -> Math.max(0,
                     value - 1)) > 0) {
-                throw new IllegalStateException("fixture rename failure");
+                throw new RuntimeBrokerException(503, "fixture_rename_unavailable",
+                        "fixture rename failure", true);
             }
             titles.put(sessionId, title);
         }

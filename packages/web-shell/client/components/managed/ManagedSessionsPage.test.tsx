@@ -198,6 +198,96 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('changes cwd without optimistic directory updates or losing the editable draft', async () => {
+    let committed = false;
+    const bound = () =>
+      summary('s1', {
+        workspace: {
+          workspaceId: 'ws',
+          cwdRelative: committed ? 'B' : 'A',
+          contextRevision: committed ? 2 : 1,
+          state: 'ready',
+        },
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          cwdChange: true,
+          workspaceTurns: true,
+        },
+      });
+    mocks.client.getSession.mockImplementation(async () => bound());
+    let finish!: (value: unknown) => void;
+    const submit = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    provider = { ...provider, cwdChange: { submit, query: vi.fn() } };
+    await render('s1');
+    const button = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Change directory',
+    );
+    expect(button).toBeDefined();
+    await act(async () => {
+      button!.click();
+    });
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Directory relative to Workspace root"]',
+    )!;
+    expect(input.value).toBe('A');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'B');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    expect(submit).toHaveBeenCalledWith(
+      's1',
+      { cwdRelative: 'B', expectedContextRevision: 1 },
+      expect.anything(),
+    );
+    const composer = container.querySelector('textarea')!;
+    expect(composer.disabled).toBe(false);
+    const send = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Send',
+    )!;
+    expect(send.disabled).toBe(true);
+    expect(container.textContent).toContain('A');
+    committed = true;
+    await act(async () => {
+      finish({
+        sessionId: 's1',
+        operationId: 'op',
+        type: 'cwd_change',
+        status: 'completed',
+        expectedContextRevision: 1,
+        targetCwdRelative: 'B',
+        resultContextRevision: 2,
+        replayed: false,
+      });
+      await flush();
+    });
+    expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('B');
+  });
+
+  it('hides the cwd entry from old providers and capability-less sessions', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { workspace: { workspaceId: 'ws', cwdRelative: '.' } }),
+    );
+    await render('s1');
+    expect(container.textContent).not.toContain('Change directory');
+  });
+
   it('keeps the shown approval while a reload has not returned the Session yet', async () => {
     let hold = false;
     let release: (() => void) | undefined;
@@ -507,7 +597,7 @@ describe('ManagedSessionsPage', () => {
     expect(alert).not.toContain('could not be loaded');
   });
 
-  it('explains that a reader cannot answer a creator-only approval', async () => {
+  it('explains that a reader cannot answer a role-based approval', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         capabilities: { canSend: false, canCancel: false, actions: true },
@@ -535,7 +625,7 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Only the Session creator can answer this approval.',
+      "Only the Session's owner or a Workspace operator can answer this approval.",
     );
     // The refusal is final for this viewer, so the card stops offering the
     // answer instead of sending one 403 per click.
@@ -547,7 +637,57 @@ describe('ManagedSessionsPage', () => {
     expect(respond).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the next approval of the same Session unanswerable after a creator-only refusal', async () => {
+  it('re-probes a role-based refusal through the check-again affordance', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = {
+      ...provider,
+      actions: {
+        listPending: vi.fn().mockResolvedValue([pendingAction]),
+        respond,
+      },
+    };
+    await render('s1');
+    const allow = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(allow().disabled).toBe(true);
+    const alert = container.querySelector('[role="alert"]') as HTMLElement;
+    expect(alert?.textContent).toContain(
+      "Only the Session's owner or a Workspace operator can answer this approval.",
+    );
+    // The latched refusal got its own re-probe affordance, rendered with no
+    // `loadError` in play, so a grant raised while the page is open can stick.
+    const again = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Retry loading approvals'),
+    ) as HTMLButtonElement;
+    expect(again).toBeTruthy();
+    await act(async () => {
+      again.click();
+      await flush();
+    });
+    expect(allow().disabled).toBe(false);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the next approval of the same Session unanswerable after a role-based refusal', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         capabilities: { canSend: false, canCancel: false, actions: true },
@@ -594,7 +734,7 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'Only the Session creator can answer this approval.',
+      "Only the Session's owner or a Workspace operator can answer this approval.",
     );
     expect(allow().disabled).toBe(true);
 
@@ -626,7 +766,9 @@ describe('ManagedSessionsPage', () => {
       Array.from(container.querySelectorAll('[role="status"]')).map(
         (node) => node.textContent,
       ),
-    ).toContain('Only the Session creator can answer this approval.');
+    ).toContain(
+      "Only the Session's owner or a Workspace operator can answer this approval.",
+    );
     // On screen is not enough: the reason is a sibling of the dialog, and a
     // polite region that mounts with its text already in place announces
     // nothing, so the dialog's own description is what carries the cause to a
@@ -642,12 +784,12 @@ describe('ManagedSessionsPage', () => {
       .map((id) => document.getElementById(id)?.textContent ?? '')
       .join(' | ');
     expect(described).toContain(
-      'Only the Session creator can answer this approval.',
+      "Only the Session's owner or a Workspace operator can answer this approval.",
     );
     expect(described).toContain('Tool arguments are unavailable');
   });
 
-  it('stops explaining a creator-only refusal once the Session has no approval left', async () => {
+  it('stops explaining a role-based refusal once the Session has no approval left', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         capabilities: { canSend: false, canCancel: false, actions: true },
@@ -674,7 +816,8 @@ describe('ManagedSessionsPage', () => {
         new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
       );
     provider = { ...provider, actions: { listPending, respond } };
-    const refusal = 'Only the Session creator can answer this approval.';
+    const refusal =
+      "Only the Session's owner or a Workspace operator can answer this approval.";
 
     await render('s1');
     await act(async () => flush());
@@ -712,7 +855,7 @@ describe('ManagedSessionsPage', () => {
     );
     // Every HTTP failure the Managed client builds carries a string code, so
     // carrying a code is not what marks a refusal final: only the
-    // creator-only refusal is.
+    // role-based refusal is.
     const respond = vi
       .fn()
       .mockRejectedValueOnce(
@@ -900,6 +1043,34 @@ describe('ManagedSessionsPage', () => {
       expect.objectContaining({ idempotencyKey: expect.any(String) }),
     );
   });
+
+  it.each([true, false])(
+    'lets the creator cancel a running bound Turn when workspaceTurns is %s',
+    async (workspaceTurns) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('bound', {
+          phase: 'tool_running',
+          workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+          capabilities: {
+            canSend: false,
+            canCancel: true,
+            ...(workspaceTurns ? { workspaceTurns: true } : {}),
+          },
+        }),
+      );
+      await render('bound');
+
+      // Without workspaceTurns the composer stays hidden, but Cancel does not.
+      expect(container.querySelector('textarea') !== null).toBe(workspaceTurns);
+      await click('Cancel turn');
+
+      expect(mocks.client.cancel).toHaveBeenCalledWith(
+        'bound',
+        'p1',
+        expect.objectContaining({ clientId: expect.any(String) }),
+      );
+    },
+  );
 
   async function click(label: string) {
     const button = [...container.querySelectorAll('button')].find(
@@ -1700,6 +1871,245 @@ describe('ManagedSessionsPage', () => {
     });
     expect(container.textContent).toContain('Restored history');
     expect(mocks.client.getTranscript).toHaveBeenCalledTimes(3);
+  });
+
+  it('prefers the terminal stop reason over a later transient error and keeps it after the transient clears', async () => {
+    // Pin the poller's first-rung failure delay to its maximum so the
+    // recovering read lands after both positional alert checks.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+    vi.useFakeTimers();
+    try {
+      mocks.client.getSession
+        .mockResolvedValueOnce(summary('s1'))
+        .mockRejectedValueOnce(
+          new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+        )
+        .mockResolvedValue(summary('s1'));
+      mocks.client.subscribeEvents
+        .mockImplementationOnce(async function* () {
+          yield event(3, 'still streaming');
+          await new Promise((resolve) => setTimeout(resolve, 3_500));
+          throw new JavaManagedAgentHttpError(
+            502,
+            'bad_gateway',
+            'Bad gateway',
+          );
+        })
+        .mockImplementationOnce(async function* (
+          _id: string,
+          opts: { signal: AbortSignal },
+        ) {
+          yield event(4, 'resumed after the stop');
+          await new Promise<void>((resolve) => {
+            if (opts.signal.aborted) resolve();
+            else
+              opts.signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+          });
+        });
+      await render('s1');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_500);
+        await flush();
+      });
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        'Not found',
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_500);
+        await flush();
+      });
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        'Not found',
+      );
+      expect(
+        container.querySelector('[data-testid="messages"]')?.textContent,
+      ).toContain('resumed after the stop');
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it('shows a fresh action error alongside a sticky terminal stop', async () => {
+    vi.useFakeTimers();
+    mocks.client.getSession
+      .mockResolvedValueOnce(summary('s1'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      )
+      .mockResolvedValue(summary('s1'));
+    await render('s1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(409, 'turn_active', 'Turn already active'),
+    );
+    await input('Is anything there?');
+    await click('Send');
+    await act(async () => {
+      await flush();
+    });
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toEqual(['Not found', 'Turn already active']);
+    const actionAlert = container.querySelectorAll('[role="alert"]')[1];
+    // The session leg heals on the next poll rung: the sticky stop leaves,
+    // and the still-standing action error must keep its node — index
+    // reconciliation would keep node 0 and rewrite its text, re-announcing
+    // an already-announced alert.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+      await flush();
+    });
+    expect(
+      [...container.querySelectorAll('[role="alert"]')].map(
+        (el) => el.textContent,
+      ),
+    ).toEqual(['Turn already active']);
+    expect(container.querySelector('[role="alert"]')).toBe(actionAlert);
+  });
+
+  it('shows a failed older-page fetch alongside a sticky terminal stop', async () => {
+    vi.useFakeTimers();
+    mocks.client.getSession
+      .mockResolvedValueOnce(summary('s1'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      )
+      .mockResolvedValue(summary('s1'));
+    mocks.client.getTranscript
+      .mockResolvedValueOnce({
+        events: [event(1, 'Persisted answer')],
+        olderCursor: '1',
+        lastEventId: 1,
+      })
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(500, 'internal', 'History unavailable'),
+      );
+    await render('s1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    await click('Older history');
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toContain('Not found');
+    expect(alerts).toContain('History unavailable');
+  });
+
+  it('renders one alert when the action error repeats the standing verdict', async () => {
+    vi.useFakeTimers();
+    mocks.client.getSession
+      .mockResolvedValueOnce(summary('s1'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      )
+      .mockResolvedValue(summary('s1'));
+    await render('s1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    // The same server condition fails the page action: the message must
+    // not be announced twice.
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+    );
+    await input('Is anything there?');
+    await click('Send');
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toEqual(['Not found']);
+    // When the poller's next read heals the session leg, the suppressed
+    // duplicate is not re-mounted as a brand-new assertive region: the
+    // message already on screen keeps its DOM node. The recovery read
+    // lands at one poll rung (at most 3000+5999ms) after the 404.
+    const standingAlert = container.querySelector('[role="alert"]');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+      await flush();
+    });
+    const healed = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(healed).toEqual(['Not found']);
+    expect(container.querySelector('[role="alert"]')).toBe(standingAlert);
+  });
+
+  it('renders one alert when the failed older-page fetch repeats the standing verdict', async () => {
+    vi.useFakeTimers();
+    mocks.client.getSession
+      .mockResolvedValueOnce(summary('s1'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      )
+      .mockResolvedValue(summary('s1'));
+    mocks.client.getTranscript
+      .mockResolvedValueOnce({
+        events: [event(1, 'Persisted answer')],
+        olderCursor: '1',
+        lastEventId: 1,
+      })
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      );
+    await render('s1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    // The failed page fetch carries the same message the verdict already
+    // shows: it must not be announced twice.
+    await click('Older history');
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toEqual(['Not found']);
+  });
+
+  it('renders one alert when the action error repeats the standing stream failure', async () => {
+    vi.useFakeTimers();
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      yield event(3, 'still streaming');
+      throw new JavaManagedAgentHttpError(502, 'bad_gateway', 'Bad gateway');
+    });
+    await render('s1');
+    await act(async () => {
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Bad gateway',
+    );
+    // The user's Send fails with the same message the stream leg already
+    // shows: it must not be announced twice.
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(502, 'bad_gateway', 'Bad gateway'),
+    );
+    await input('Is anything there?');
+    await click('Send');
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toEqual(['Bad gateway']);
   });
 
   it('merges a gapped stream with a durable snapshot and keeps paged history', async () => {

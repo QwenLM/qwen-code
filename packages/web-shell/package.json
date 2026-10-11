@@ -91,6 +91,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
+    "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@tailwindcss/vite": "^4.3.2",
     "@types/hast": "^3.0.5",
