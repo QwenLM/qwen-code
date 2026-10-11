@@ -17,6 +17,7 @@ import { ApprovalMode, type Config } from '../config/config.js';
 import type { CacheSafeParams } from '../agents/forkedAgent.js';
 import type { LlmClient } from '../core/client.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { getToolOutputProvenance } from '../tools/tool-output-size.js';
 import {
   content,
   fnCall,
@@ -550,6 +551,66 @@ describe('startSpeculation', () => {
       error: 'Command timed out.\npartial output',
     });
     expect(response?.response).not.toHaveProperty('output');
+
+    await abortSpeculation(state);
+  });
+
+  it('reports no raw size for the error body it replaces', async () => {
+    // A producer that declares a size and then fails: the converter drops the
+    // measured body and submits `error` instead, so the parts must not carry a
+    // raw size or a truncation verdict about that body (#13652 R4-1).
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [{ inlineData: { mimeType: 'image/png', data: 'BASE64' } }],
+      returnDisplay: 'image',
+      error: { message: 'image read failed', type: 'execution_failed' },
+      rawOutputSize: { chars: 0, estimatedTokens: 800 },
+    });
+    const toolRegistry = {
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    fnCall('read_file', { path: 'a.ts' }, 'call_error_raw'),
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+
+    const part = state.messages[2].parts?.[0];
+    expect(part?.functionResponse?.response).toMatchObject({
+      error: expect.stringContaining('image read failed'),
+    });
+    const provenance = getToolOutputProvenance(part!);
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
 
     await abortSpeculation(state);
   });

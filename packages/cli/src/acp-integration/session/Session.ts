@@ -16283,7 +16283,6 @@ export class Session implements SessionContext {
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
-                  toolResult,
                   this.config,
                 )
               : convertToFunctionResponse(

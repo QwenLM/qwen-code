@@ -472,7 +472,6 @@ async function runSpeculativeLoop(
                 id ?? '',
                 result.llmContent,
                 result.error.message,
-                result,
                 config,
               )
             : convertToFunctionResponse(

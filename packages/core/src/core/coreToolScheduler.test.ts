@@ -3769,6 +3769,47 @@ describe('CoreToolScheduler', () => {
     expect(outputOfTool(calls, 'defaultTool')).toBe('a'.repeat(8000));
   });
 
+  it('does not measure a self-bounded producer body as its own raw size', async () => {
+    // grep/ripGrep shorten their own render and then declare the raw size
+    // unknown: the pre-reduction size is no longer recoverable, and the
+    // scheduler must not certify the already-bounded body as the raw size
+    // (#13652 R2-5).
+    const boundedBody = 'm'.repeat(19_000) + '\n[12 lines truncated] ...';
+    const { calls } = await runLoneTool(
+      toolReturning(
+        'grep',
+        {
+          llmContent: boundedBody,
+          returnDisplay: 'Found 1500 matches (truncated)',
+          rawOutputSize: null,
+        },
+        { maxOutputChars: 20_000 },
+      ),
+      'call-grep-unknown',
+      'prompt-grep-unknown',
+      { waitForCompletion: true },
+    );
+
+    const call = calls[0];
+    const provenance = getToolOutputProvenance(call.response.responseParts[0]);
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+    expect(new ToolCallEvent(call).raw_content_length).toBeUndefined();
+
+    // Control: an ordinary producer that declares nothing is still measured
+    // from its own body, so the assertions above are not "never measured".
+    const { calls: plainCalls } = await runLoneTool(
+      toolReturning('plainTool', modelResult('plain body', 'plain body')),
+      'call-plain-raw',
+      'prompt-plain-raw',
+      { waitForCompletion: true },
+    );
+    expect(new ToolCallEvent(plainCalls[0]).raw_content_length).toBe(
+      'plain body'.length,
+    );
+  });
+
   /** Asserts lone tool `name` (Infinity budget) delivers `content` whole. */
   async function expectDeliveredWhole(name: string, content: string) {
     const { calls } = await runLoneTool(
@@ -7363,6 +7404,33 @@ describe('convertToFunctionErrorResponse', () => {
       });
     },
   );
+
+  it('reports no raw size for the body the error path replaces', () => {
+    const content = [
+      { inlineData: { mimeType: 'image/png', data: 'base64...' } },
+    ] satisfies PartListUnion;
+    const cfg = {
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+
+    const [part] = convertToFunctionErrorResponse(
+      toolName,
+      callId,
+      content,
+      'image read failed',
+      cfg,
+    );
+
+    expect(part.functionResponse?.response).toEqual({
+      error: 'image read failed',
+    });
+    // The measured body was replaced by `error`, so its size must not travel
+    // as this response's pre-reduction raw size (#13652 R4-1).
+    const provenance = getToolOutputProvenance(part);
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+  });
 
   it('prefers an existing error and preserves media and response fields', () => {
     const content = {

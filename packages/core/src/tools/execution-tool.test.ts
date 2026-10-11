@@ -415,6 +415,28 @@ describe('execution tool facade', () => {
     });
   });
 
+  it.each([
+    ['a declared size', { chars: 120_000, estimatedTokens: 30_000 }],
+    ['an explicit unknown', null],
+  ])(
+    'carries %s through the wrapper unchanged',
+    async (_title, rawOutputSize) => {
+      const file = await writeWorkspaceFile('file.txt', 'content');
+      vi.spyOn(environment, 'execute').mockResolvedValueOnce({
+        llmContent: 'bounded body',
+        returnDisplay: 'bounded body',
+        outputBudgetApplied: true,
+        rawOutputSize,
+      });
+
+      const result = await run(wrap(), file);
+
+      // Byte-for-byte, including `null`: the wrapper must not coalesce the
+      // producer's declared pre-reduction size (#13652 R4-4).
+      expect(result.rawOutputSize).toEqual(rawOutputSize);
+    },
+  );
+
   it.each([false, true])(
     'scopes cloned notebook edits to their call (abandoned=%s)',
     async (abandoned) => {

@@ -283,6 +283,14 @@ class GrepToolInvocation extends BaseToolInvocation<
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
         resultFilePaths,
+        // This render is already bounded, so the scheduler must not measure
+        // its own body and report it as the raw size. The pre-reduction size
+        // existed only inside the append loop that skipped it, and rebuilding
+        // the full render to count it is the allocation the limit avoids;
+        // declare it unknown instead (#13652 R2-5).
+        ...(truncatedByLineLimit || truncatedByCharLimit
+          ? { rawOutputSize: null }
+          : {}),
       };
     } catch (error) {
       debugLogger.error(`Error during GrepLogic execution: ${error}`);

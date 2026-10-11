@@ -1110,14 +1110,17 @@ export function convertToFunctionErrorResponse(
   callId: string,
   llmContent: PartListUnion,
   fallbackError: string,
-  producerResult?: Pick<ToolResult, 'rawOutputSize'>,
   config?: Pick<Config, 'getChatCompression'>,
 ): Part[] {
+  // No producerResult: the body those parts are built from is replaced by
+  // `error` below, so a size measured on it would describe a body that was
+  // never submitted (#13652 R4-1). The error path reports an unknown raw size,
+  // matching observeProducerOutput's settled-error path.
   return convertToFunctionResponse(
     toolName,
     callId,
     llmContent,
-    producerResult,
+    undefined,
     config,
   ).map((part) => {
     const functionResponse = part.functionResponse;
