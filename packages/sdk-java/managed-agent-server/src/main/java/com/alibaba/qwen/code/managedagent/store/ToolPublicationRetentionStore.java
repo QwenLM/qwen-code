@@ -43,9 +43,14 @@ public final class ToolPublicationRetentionStore {
     }
 
     static void lockSession(JdbcTemplate jdbc, String tenant, String session) {
+        lockSessionHead(jdbc, tenant, session);
+    }
+
+    static Map<String, Object> lockSessionHead(JdbcTemplate jdbc, String tenant, String session) {
         lockTenant(jdbc, tenant);
-        jdbc.queryForList("SELECT state FROM qwen_managed_session_journal_head"
+        var heads = jdbc.queryForList("SELECT state FROM qwen_managed_session_journal_head"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenant, session);
+        return heads.isEmpty() ? null : heads.getFirst();
     }
 
     static void requireLive(JdbcTemplate jdbc, String tenant, String session) {
