@@ -17,7 +17,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
@@ -202,7 +204,8 @@ public final class HostedHarnessClient implements AutoCloseable {
                 ? loadTimeout : requestTimeout;
         HttpSupport.Response response;
         try {
-            response = sendMutation(path, request.toJson(), null,
+            response = sendMutation(path, request.toJson(),
+                    request.getHarnessSessionId(), null,
                     "POST /session/:id/load", timeout);
         } catch (MutationOutcomeUnknownException error) {
             throw namedLoadRefusal(error);
@@ -244,6 +247,7 @@ public final class HostedHarnessClient implements AutoCloseable {
                                 inputRevision,
                                 "policyRevision",
                                 policyRevision),
+                        ref.getHarnessSessionId(),
                         ref.getHarnessClientId(),
                         "POST /session/:id/actions/:id/resolve");
         DaemonClient.requireStatus(response, 200, "POST /session/:id/actions/:id/resolve");
@@ -280,192 +284,276 @@ public final class HostedHarnessClient implements AutoCloseable {
                 });
         boolean ownsActivePrompt = registered == candidate;
         AtomicBoolean dispatched = new AtomicBoolean();
-        HttpResponse<HttpSupport.Body> raw;
+        // Set by a non-owning attempt whose conclusion was a definitive
+        // refusal: an owed release is discharged on it once this attempt's
+        // own send window closes in the finally below.
+        boolean definitiveRefusal = false;
         try {
-            raw = send(sessionPath(session.getHarnessSessionId()) + "/prompt",
-                    "POST", request.toJson(), session.getHarnessClientId(),
-                    requestTimeout, dispatched);
-        } catch (DaemonTransportException e) {
-            // A locally rejected send proves this submission never reached
-            // the server, so a marker owned by it cannot be a running turn;
-            // a same-identity retry keeps the original entry instead.
-            registered.endSend();
-            if (ownsActivePrompt) {
-                releaseOwnedMarker(session.getHarnessSessionId(),
-                        registered);
-            }
-            throw e;
-        } catch (IOException | InterruptedException e) {
-            // A dropped send may still land server-side, but its admission
-            // window closes with the attempt — the same rule as the owning
-            // call's concluded send. A non-owning retry's dropped send must
-            // not un-settle the owner's entry past every later status read:
-            // no path would ever re-settle it.
-            registered.endSend();
-            restoreInterrupt(e);
-            throw new PromptAdmissionUnknownException(e);
-        } catch (RuntimeException | Error e) {
-            // An unchecked escape before dispatch (a header value the
-            // request builder rejects, a failing executor state probe)
-            // proves this submission never reached the server, so a marker
-            // this call owns is released like a locally rejected send; a
-            // same-identity retry keeps the original entry.
-            registered.endSend();
-            if (ownsActivePrompt && !dispatched.get()) {
-                releaseOwnedMarker(session.getHarnessSessionId(),
-                        registered);
-            }
-            throw e;
-        }
-        // This call's send attempt concluded, so a status answer received
-        // from here on no longer predates this submission's admission
-        // window. A non-owning retry additionally publishes a fresh entry
-        // on the 202 path below.
-        registered.endSend();
-        try {
-            validateGeneration(raw.headers(), raw.statusCode());
-        } catch (DaemonTransportException e) {
-            // A boot-headerless 404 is answered by the serve delegating
-            // app while the runtime is still starting, so this submission
-            // provably never reached the Harness: release a marker this
-            // call owns, the same rule as a locally rejected send.
-            if (ownsActivePrompt) {
-                releaseOwnedMarker(session.getHarnessSessionId(),
-                        registered);
-            }
-            throw e;
-        } catch (DaemonProtocolException | HostedHarnessGenerationException e) {
-            // A proven generation change means every local record for that
-            // peer is dead, the admission ledger included: retire it
-            // instead of leaving a veto no live turn can ever clear.
-            if (e instanceof HostedHarnessGenerationException) {
-                activePrompts.remove(session.getHarnessSessionId());
+            HttpResponse<HttpSupport.Body> raw;
+            try {
+                raw = send(sessionPath(session.getHarnessSessionId()) + "/prompt",
+                        "POST", request.toJson(), session.getHarnessClientId(),
+                        requestTimeout, dispatched);
+            } catch (DaemonTransportException e) {
+                // A locally rejected send proves this submission never reached
+                // the server, so a marker owned by it cannot be a running turn;
+                // a same-identity retry keeps the original entry instead.
+                if (ownsActivePrompt) {
+                    registered.endSend();
+                    releaseOwnedMarker(session.getHarnessSessionId(),
+                            registered);
+                } else {
+                    definitiveRefusal = true;
+                }
+                throw e;
+            } catch (IOException | InterruptedException e) {
+                // A dropped send may still land server-side, but its admission
+                // window closes with the attempt — the same rule as the owning
+                // call's concluded send. A non-owning retry's dropped send must
+                // not un-settle the owner's entry past every later status read:
+                // no path would ever re-settle it.
+                if (!ownsActivePrompt) {
+                    registered.blockRelease();
+                } else {
+                    registered.endSend();
+                }
+                restoreInterrupt(e);
+                throw new PromptAdmissionUnknownException(e);
+            } catch (RuntimeException | Error e) {
+                // An unchecked escape before dispatch (a header value the
+                // request builder rejects, a failing executor state probe)
+                // proves this submission never reached the server, so a marker
+                // this call owns is released like a locally rejected send; a
+                // same-identity retry keeps the original entry.
+                if (ownsActivePrompt) {
+                    registered.endSend();
+                    if (!dispatched.get()) {
+                        releaseOwnedMarker(session.getHarnessSessionId(),
+                                registered);
+                    }
+                } else if (dispatched.get()) {
+                    registered.blockRelease();
+                } else {
+                    definitiveRefusal = true;
+                }
                 throw e;
             }
-            // An unfenced 408/5xx (for example a gateway error page) cannot
-            // prove the prompt was not admitted, and neither can an
-            // unfenced 2xx or 3xx — the header-stripping intermediary may
-            // have forwarded a real admission — so both are
-            // outcome-unknown. A definitive unfenced 4xx was produced
-            // before the route's promptId lookup: it refuses this
-            // submission, so a marker this call owns is released, while an
-            // earlier same-identity entry stays — the refusal says nothing
-            // about it. The exception carries the peer's buffered body, so
-            // a refusal code in it stays readable. submitTurn is the one
-            // path whose unfenced 4xx still surfaces as DaemonHttpException:
-            // the marker release keys on the refusal's definitiveness, and
-            // the turn consumer's terminal classification of a refused
-            // submission is bounded (hosted_harness_rejected).
-            if (DaemonClient.isAmbiguousMutationStatus(raw.statusCode())
-                    || raw.statusCode() < 400) {
-                throw new PromptAdmissionUnknownException(e);
-            }
+            // An owning call's send attempt concluded here, so a status answer
+            // received from here on no longer predates this submission's
+            // admission window. A non-owning retry's window stays open until
+            // its ledger decision lands — the 202 republish below or a
+            // concluded refusal in the finally — so an owning release can
+            // never strand the republish.
             if (ownsActivePrompt) {
-                releaseOwnedMarker(session.getHarnessSessionId(),
-                        candidate);
+                registered.endSend();
             }
-            throw new DaemonHttpException("POST /session/:id/prompt",
-                    raw.statusCode(),
-                    HttpSupport.consume(raw, "POST /session/:id/prompt")
-                            .getBody());
-        }
-        HttpSupport.Response response;
-        try {
-            response = HttpSupport.consume(raw,
-                    "POST /session/:id/prompt");
-        } catch (DaemonProtocolException e) {
-            throw new PromptAdmissionUnknownException(e);
-        }
-        if (response.getStatusCode() != 202) {
-            if (DaemonClient.isAmbiguousMutationStatus(
-                    response.getStatusCode())) {
-                throw new PromptAdmissionUnknownException(
-                        new DaemonHttpException(
-                                "POST /session/:id/prompt",
-                                response.getStatusCode(), response.getBody()));
-            }
-            if (response.isSuccess()) {
-                throw new PromptAdmissionUnknownException(
-                        "Expected 202 admission watermark but received HTTP "
-                                + response.getStatusCode());
-            }
-            if (response.getStatusCode() == 409) {
-                // Narrow the release by refusal code, not by status class.
-                // hosted_prompt_recovery_required is answered from the
-                // route's hasAcceptedInput gate, so this promptId already
-                // sits in the durable input log and the expected recovery
-                // is its same-identity replay. The retention is a hint,
-                // not a lock: the gate cannot distinguish an owed terminal
-                // event from an already-settled replay, and a status read
-                // answering hasActivePrompt:false still clears the marker.
-                // Every other 409 code is
-                // produced without admitting this submission
-                // (hosted_turn_active only after the same-identity replay
-                // branch already returned 202, the busy and closing codes
-                // above the route's promptId lookup), so a marker this
-                // call owns is released. On a same-identity retry the
-                // earlier entry stays either way: several 409 reasons say
-                // nothing about whether the original admission reached
-                // the server at all.
-                String code = refusalCode(response.getBody());
-                if (ownsActivePrompt
-                        && !"hosted_prompt_recovery_required".equals(code)) {
+            try {
+                validateGeneration(raw.headers(), raw.statusCode());
+            } catch (DaemonTransportException e) {
+                // A boot-headerless 404 is answered by the serve delegating
+                // app while the runtime is still starting, so this submission
+                // provably never reached the Harness: release a marker this
+                // call owns, the same rule as a locally rejected send.
+                if (ownsActivePrompt) {
+                    releaseOwnedMarker(session.getHarnessSessionId(),
+                            registered);
+                } else {
+                    definitiveRefusal = true;
+                }
+                throw e;
+            } catch (DaemonProtocolException | HostedHarnessGenerationException e) {
+                // A proven generation change means every local record for that
+                // peer is dead, the admission ledger included: retire it
+                // instead of leaving a veto no live turn can ever clear.
+                if (e instanceof HostedHarnessGenerationException) {
+                    activePrompts.remove(session.getHarnessSessionId());
+                    throw e;
+                }
+                // An unfenced 408/5xx (for example a gateway error page) cannot
+                // prove the prompt was not admitted, and neither can an
+                // unfenced 2xx or 3xx — the header-stripping intermediary may
+                // have forwarded a real admission — so both are
+                // outcome-unknown. A definitive unfenced 4xx was produced
+                // before the route's promptId lookup: it refuses this
+                // submission, so a marker this call owns is released, while an
+                // earlier same-identity entry stays — the refusal says nothing
+                // about it. The exception carries the peer's buffered body, so
+                // a refusal code in it stays readable. submitTurn is the one
+                // path whose unfenced 4xx still surfaces as DaemonHttpException:
+                // the marker release keys on the refusal's definitiveness, and
+                // the turn consumer's terminal classification of a refused
+                // submission is bounded (hosted_harness_rejected).
+                if (DaemonClient.isAmbiguousMutationStatus(raw.statusCode())
+                        || raw.statusCode() < 400) {
+                    if (!ownsActivePrompt) {
+                        registered.blockRelease();
+                    }
+                    throw new PromptAdmissionUnknownException(e);
+                }
+                // The body may be consumed only once, so the refusal-code
+                // check below reuses this same consumed body.
+                String refusalBody = HttpSupport.consume(raw,
+                        "POST /session/:id/prompt").getBody();
+                if (raw.statusCode() == 409) {
+                    // An unfenced 409 carries the same refusal vocabulary as
+                    // the fenced arm below, so it is narrowed by code exactly
+                    // the same way: a boot-header-stripped
+                    // hosted_prompt_recovery_required retains the marker and
+                    // surfaces with its code intact instead of reading as a
+                    // plain definitive refusal.
+                    String code = refusalCode(refusalBody);
+                    if ("hosted_prompt_recovery_required".equals(code)) {
+                        registered.blockRelease();
+                        throw new PromptAlreadyActiveException(
+                                "POST /session/:id/prompt", raw.statusCode(),
+                                refusalBody, code);
+                    }
+                }
+                if (ownsActivePrompt) {
                     releaseOwnedMarker(session.getHarnessSessionId(),
                             candidate);
+                } else {
+                    definitiveRefusal = true;
                 }
-                throw new PromptAlreadyActiveException(
-                        "POST /session/:id/prompt", response.getStatusCode(),
-                        response.getBody(), code);
+                throw new DaemonHttpException("POST /session/:id/prompt",
+                        raw.statusCode(), refusalBody);
             }
-            // A definitive non-409 refusal releases only the marker this
-            // call owns: refusals produced before the route's promptId
-            // lookup (auth, rate limiting, body parsing) say nothing about
-            // an earlier same-identity submission, whose entry stays.
-            if (ownsActivePrompt) {
-                releaseOwnedMarker(session.getHarnessSessionId(),
-                        candidate);
+            HttpSupport.Response response;
+            try {
+                response = HttpSupport.consume(raw,
+                        "POST /session/:id/prompt");
+            } catch (DaemonProtocolException e) {
+                if (!ownsActivePrompt) {
+                    registered.blockRelease();
+                }
+                throw new PromptAdmissionUnknownException(e);
             }
-            throw new DaemonHttpException("POST /session/:id/prompt",
-                    response.getStatusCode(), response.getBody());
-        }
-        try {
-            Map<String, Object> json = JsonSupport.parseObject(
-                    response.getBody(), "prompt admission response");
-            String responsePromptId = parseWireUuid(
-                    JsonSupport.requiredString(json, "promptId",
-                            "prompt admission"), "prompt admission.promptId");
-            if (!candidate.promptId.equals(responsePromptId)) {
-                throw new PromptAdmissionUnknownException(
-                        "Hosted Harness returned a different promptId");
+            if (response.getStatusCode() != 202) {
+                if (DaemonClient.isAmbiguousMutationStatus(
+                        response.getStatusCode())) {
+                    if (!ownsActivePrompt) {
+                        registered.blockRelease();
+                    }
+                    throw new PromptAdmissionUnknownException(
+                            new DaemonHttpException(
+                                    "POST /session/:id/prompt",
+                                    response.getStatusCode(), response.getBody()));
+                }
+                if (response.isSuccess()) {
+                    if (!ownsActivePrompt) {
+                        registered.blockRelease();
+                    }
+                    throw new PromptAdmissionUnknownException(
+                            "Expected 202 admission watermark but received HTTP "
+                                    + response.getStatusCode());
+                }
+                if (response.getStatusCode() == 409) {
+                    // Narrow the release by refusal code, not by status class.
+                    // hosted_prompt_recovery_required is answered from the
+                    // route's hasAcceptedInput gate, so this promptId already
+                    // sits in the durable input log and the expected recovery
+                    // is its same-identity replay. The retention is a hint,
+                    // not a lock: the gate cannot distinguish an owed terminal
+                    // event from an already-settled replay, and a status read
+                    // answering hasActivePrompt:false still clears the marker.
+                    // Every other 409 code is
+                    // produced without admitting this submission
+                    // (hosted_turn_active only after the same-identity replay
+                    // branch already returned 202, the busy and closing codes
+                    // above the route's promptId lookup), so a marker this
+                    // call owns is released. On a same-identity retry the
+                    // earlier entry stays either way: several 409 reasons say
+                    // nothing about whether the original admission reached
+                    // the server at all.
+                    String code = refusalCode(response.getBody());
+                    if ("hosted_prompt_recovery_required".equals(code)) {
+                        if (!ownsActivePrompt) {
+                            registered.blockRelease();
+                        }
+                    } else if (ownsActivePrompt) {
+                        releaseOwnedMarker(session.getHarnessSessionId(),
+                                candidate);
+                    } else {
+                        definitiveRefusal = true;
+                    }
+                    throw new PromptAlreadyActiveException(
+                            "POST /session/:id/prompt", response.getStatusCode(),
+                            response.getBody(), code);
+                }
+                // A definitive non-409 refusal releases only the marker this
+                // call owns: refusals produced before the route's promptId
+                // lookup (auth, rate limiting, body parsing) say nothing about
+                // an earlier same-identity submission, whose entry stays.
+                if (ownsActivePrompt) {
+                    releaseOwnedMarker(session.getHarnessSessionId(),
+                            candidate);
+                } else {
+                    definitiveRefusal = true;
+                }
+                throw new DaemonHttpException("POST /session/:id/prompt",
+                        response.getStatusCode(), response.getBody());
             }
+            try {
+                Map<String, Object> json = JsonSupport.parseObject(
+                        response.getBody(), "prompt admission response");
+                String responsePromptId = parseWireUuid(
+                        JsonSupport.requiredString(json, "promptId",
+                                "prompt admission"), "prompt admission.promptId");
+                if (!candidate.promptId.equals(responsePromptId)) {
+                    throw new PromptAdmissionUnknownException(
+                            "Hosted Harness returned a different promptId");
+                }
+                if (!ownsActivePrompt) {
+                    // A same-identity retry's 202 re-admitted the submission:
+                    // publish a fresh, settled entry so a status read that
+                    // snapshotted the earlier instance cannot clear the marker
+                    // that is live now — its two-arg remove keys on the
+                    // observed instance. When the earlier entry is already
+                    // gone, its turn's terminal event was consumed (the route
+                    // answers a same-identity replay from its admission log
+                    // without emitting another event) or a lifecycle teardown
+                    // retired it, so this 202 owes no future terminal event
+                    // the ledger tracks and no marker may be planted for it —
+                    // a replanted marker could never be cleared and would
+                    // veto every later identity for this client's lifetime. The
+                    // candidate carries no in-flight send: this call's attempt
+                    // opened against the earlier registration and closes in
+                    // the finally below, after this republish.
+                    activePrompts.replace(session.getHarnessSessionId(),
+                            registered, candidate);
+                }
+                return new PromptReceipt(responsePromptId,
+                        JsonSupport.requiredNonNegativeLong(json, "lastEventId",
+                                "prompt admission"),
+                        requireEventEpoch(
+                                JsonSupport.requiredString(json, "eventEpoch",
+                                        "prompt admission"), false));
+            } catch (PromptAdmissionUnknownException e) {
+                if (!ownsActivePrompt) {
+                    registered.blockRelease();
+                }
+                throw e;
+            } catch (DaemonProtocolException e) {
+                if (!ownsActivePrompt) {
+                    registered.blockRelease();
+                }
+                throw new PromptAdmissionUnknownException(e);
+            }
+        } finally {
             if (!ownsActivePrompt) {
-                // A same-identity retry's 202 re-admitted the submission:
-                // publish a fresh, settled entry so a status read that
-                // snapshotted the earlier instance cannot clear the marker
-                // that is live now — its two-arg remove keys on the
-                // observed instance. When the earlier entry is already
-                // gone, its turn's terminal event was consumed (the route
-                // answers a same-identity replay from its admission log
-                // without emitting another event) or a lifecycle teardown
-                // retired it, so this 202 owes no future terminal event
-                // the ledger tracks and no marker may be planted for it —
-                // a replanted marker could never be cleared and would
-                // veto every later identity for this client's lifetime. The
-                // candidate carries no in-flight send: this call's attempt
-                // opened and closed against the earlier registration.
-                activePrompts.replace(session.getHarnessSessionId(),
-                        registered, candidate);
+                // The non-owning attempt's window closes only once its ledger
+                // decision has landed — the 202 republish above or a concluded
+                // refusal — so an owning release can never drop the joined
+                // entry out from under the republish. A definitive refusal
+                // then discharges the release an owning arm owed: every
+                // concluded attempt proved the prompt was never admitted, so
+                // the settled marker must not veto later identities.
+                registered.endSend();
+                if (definitiveRefusal) {
+                    dischargeOwedRelease(session.getHarnessSessionId(),
+                            registered);
+                }
             }
-            return new PromptReceipt(responsePromptId,
-                    JsonSupport.requiredNonNegativeLong(json, "lastEventId",
-                            "prompt admission"),
-                    requireEventEpoch(
-                            JsonSupport.requiredString(json, "eventEpoch",
-                                    "prompt admission"), false));
-        } catch (PromptAdmissionUnknownException e) {
-            throw e;
-        } catch (DaemonProtocolException e) {
-            throw new PromptAdmissionUnknownException(e);
         }
     }
 
@@ -484,7 +572,8 @@ public final class HostedHarnessClient implements AutoCloseable {
                 Map.of("promptId", stablePromptId,
                         "checkpointId", checkpoint,
                         "activationId", activation),
-                ref.getHarnessClientId(), operation);
+                ref.getHarnessSessionId(), ref.getHarnessClientId(),
+                operation);
         return parseManagedRuntimeAdmission(response, stablePromptId,
                 operation, "continuation");
     }
@@ -503,7 +592,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         HttpSupport.Response response = sendMutation(
                 sessionPath(ref.getHarnessSessionId())
                         + "/automations/operations",
-                body, ref.getHarnessClientId(), operation);
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(),
+                operation);
         DaemonClient.requireStatus(response, 202, operation);
         try {
             Map<String, Object> json = JsonSupport.parseObject(
@@ -539,7 +629,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         HttpSupport.Response response = sendMutation(
                 sessionPath(ref.getHarnessSessionId())
                         + "/children/operations",
-                body, ref.getHarnessClientId(), operation);
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(),
+                operation);
         try {
             DaemonClient.requireStatus(response, 202, operation);
             Map<String, Object> json = JsonSupport.parseObject(
@@ -575,7 +666,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         HttpSupport.Response response = sendMutation(
                 sessionPath(ref.getHarnessSessionId())
                         + "/messages/operations",
-                body, ref.getHarnessClientId(), operation);
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(),
+                operation);
         try {
             DaemonClient.requireStatus(response, 202, operation);
             Map<String, Object> json = JsonSupport.parseObject(
@@ -611,7 +703,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         HttpSupport.Response response = sendMutation(
                 sessionPath(ref.getHarnessSessionId())
                         + "/channels/operations",
-                body, ref.getHarnessClientId(), operation);
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(),
+                operation);
         DaemonClient.requireStatus(response, 202, operation);
         try {
             Map<String, Object> json = JsonSupport.parseObject(
@@ -643,7 +736,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         HttpSupport.Response response = sendMutation(
                 sessionPath(ref.getHarnessSessionId())
                         + "/managed-runtime/cancel",
-                request.toJson(), ref.getHarnessClientId(), operation);
+                request.toJson(), ref.getHarnessSessionId(),
+                ref.getHarnessClientId(), operation);
         return parseManagedRuntimeAdmission(response, request.getPromptId(),
                 operation, "cancellation");
     }
@@ -728,6 +822,13 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         try {
             validateGeneration(response.headers(), response.statusCode());
+        } catch (HostedHarnessGenerationException e) {
+            // A proven generation change means every local record for that
+            // peer is dead, the admission ledger included — the same rule
+            // the shared mutation channel follows.
+            closeQuietly(response.body());
+            discardLocalSessionState(session.getHarnessSessionId());
+            throw e;
         } catch (RuntimeException e) {
             closeQuietly(response.body());
             throw e;
@@ -771,7 +872,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         HarnessSessionRef ref = requireSessionRef(session);
         HttpSupport.Response response = sendMutation(
                 sessionPath(ref.getHarnessSessionId()) + "/cancel",
-                Collections.emptyMap(), ref.getHarnessClientId(),
+                Collections.emptyMap(), ref.getHarnessSessionId(),
+                ref.getHarnessClientId(),
                 "POST /session/:id/cancel");
         requireMutationStatus(response, 204,
                 "POST /session/:id/cancel");
@@ -893,7 +995,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         String operation = "POST /session/:id/lifecycle";
         HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/lifecycle",
-                request, ref.getHarnessClientId(), operation);
+                request, ref.getHarnessSessionId(), ref.getHarnessClientId(),
+                operation);
         requireMutationStatus(response, 200, operation);
         Map<String, Object> receipt = JsonSupport.parseObject(response.getBody(), operation);
         if (!java.util.Objects.equals(request.get("sessionKey"), receipt.get("sessionKey"))
@@ -906,9 +1009,9 @@ public final class HostedHarnessClient implements AutoCloseable {
     public void detachLifecycle(HarnessSessionRef session, Map<String, Object> authority) {
         HarnessSessionRef ref = requireSessionRef(session);
         AttachmentState state = attachments.get(ref.getHarnessSessionId());
-        ActivePrompt prompt = activePrompts.get(ref.getHarnessSessionId());
         HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/detach",
-                Map.of("authority", authority), ref.getHarnessClientId(), "POST /session/:id/detach");
+                Map.of("authority", authority), ref.getHarnessSessionId(),
+                ref.getHarnessClientId(), "POST /session/:id/detach");
         if (response.getStatusCode() != 404) {
             requireMutationStatus(response, 204, "POST /session/:id/detach");
         }
@@ -918,12 +1021,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         // The ledger retirement stays out of the attachment gate: a close
         // refused hosted_turn_active already dropped the attachment while
         // keeping the marker, and a detach whose 204 deleted the session
-        // is the last retirement chance for that orphan. The two-arg
-        // remove keeps the observed-snapshot discipline, so a marker a
-        // concurrent replacement planted survives.
-        if (prompt != null) {
-            activePrompts.remove(ref.getHarnessSessionId(), prompt);
-        }
+        // is the last retirement chance for that orphan. It goes through
+        // the same identity-matched retireLedger detachSession uses: a
+        // tolerated 404 collapses an absent session and a client-id
+        // mismatch into the same answer, so a stale ref must not wipe the
+        // marker the session's current owner planted — and retireLedger's
+        // re-read also retires a marker this same identity replanted while
+        // the detach was in flight.
+        retireLedger(ref.getHarnessSessionId(), ref.getHarnessClientId());
     }
 
     public void detachLifecycle(String harnessSessionId, Map<String, Object> authority) {
@@ -932,7 +1037,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         AttachmentState state = attachments.get(sessionId);
         ActivePrompt prompt = activePrompts.get(sessionId);
         HttpSupport.Response response = sendMutation(sessionPath(sessionId) + "/detach",
-                Map.of("authority", authority), null, "POST /session/:id/detach");
+                Map.of("authority", authority), sessionId, null,
+                "POST /session/:id/detach");
         if (response.getStatusCode() != 404) {
             requireMutationStatus(response, 204, "POST /session/:id/detach");
         }
@@ -940,7 +1046,9 @@ public final class HostedHarnessClient implements AutoCloseable {
             state.cancel();
         }
         // Same rule as the ref overload: the ledger retirement does not
-        // depend on an attachment being present.
+        // depend on an attachment being present. This overload holds no
+        // client id, so it cannot identity-match the retirement the way
+        // the ref overload does; it keeps the observed-snapshot remove.
         if (prompt != null) {
             activePrompts.remove(sessionId, prompt);
         }
@@ -959,24 +1067,26 @@ public final class HostedHarnessClient implements AutoCloseable {
         try {
             HttpSupport.Response response = sendMutation(
                     sessionPath(ref.getHarnessSessionId()) + "/detach",
-                    Collections.emptyMap(), ref.getHarnessClientId(),
+                    Collections.emptyMap(), ref.getHarnessSessionId(),
+                    ref.getHarnessClientId(),
                     "POST /session/:id/detach");
-            if (response.getStatusCode() != 404) {
+            boolean deleted = response.getStatusCode() != 404;
+            if (deleted) {
                 requireMutationStatus(response, 204,
                         "POST /session/:id/detach");
             }
             removeAttachment(ref);
-            // The 204 (or tolerated 404) proves the session is gone
-            // server-side, so a retained admission marker of this identity
-            // is provably stale: nothing can clear it for a session that no
-            // longer exists, and it would veto every later identity after
-            // the supported load recovery re-opens this id. The retirement
-            // is identity-matched: identity() answers an absent session and
-            // a client-id mismatch with the same 404, so a stale ref's
-            // tolerated 404 must not wipe the marker the session's current
-            // owner planted.
+            // A 204 proves the session record is gone server-side, so
+            // every marker for the id is stale regardless of the planting
+            // identity: nothing can clear it for a session that no longer
+            // exists, and it would veto every later identity after the
+            // supported load recovery re-opens this id. A tolerated 404
+            // instead collapses an absent session and a client-id mismatch
+            // into the same answer, so it stays identity-matched: a stale
+            // ref's tolerated 404 must not wipe the marker the session's
+            // current owner planted.
             retireLedger(ref.getHarnessSessionId(),
-                    ref.getHarnessClientId());
+                    deleted ? null : ref.getHarnessClientId());
         } catch (DaemonHttpException | HostedHarnessGenerationException e) {
             // A definitive refusal retires the attachment but says nothing
             // about a turn detach leaves running server-side, so the
@@ -1001,7 +1111,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         String operation = "POST /session/:id/title";
         HttpSupport.Response response = sendMutation(
                 sessionPath(ref.getHarnessSessionId()) + "/title",
-                Map.of("title", value), ref.getHarnessClientId(), operation);
+                Map.of("title", value), ref.getHarnessSessionId(),
+                ref.getHarnessClientId(), operation);
         DaemonClient.requireStatus(response, 200, operation);
         Map<String, Object> json = JsonSupport.parseObject(
                 response.getBody(), "Hosted Harness title response");
@@ -1052,7 +1163,13 @@ public final class HostedHarnessClient implements AutoCloseable {
             // record, or the local one-turn veto fails open against a
             // running turn.
             removeAttachment(ref);
-            if (!provesLiveTurn(e)) {
+            if (e instanceof HostedHarnessGenerationException) {
+                // A proven generation change means every local record for
+                // that peer is dead — including a marker published while
+                // the DELETE was in flight, which the observed snapshot
+                // cannot see. Same rule as detachSession above.
+                activePrompts.remove(ref.getHarnessSessionId());
+            } else if (!provesLiveTurn(e)) {
                 removeObservedLedger(ref.getHarnessSessionId(),
                         observedLedger);
             }
@@ -1083,8 +1200,15 @@ public final class HostedHarnessClient implements AutoCloseable {
             // submitting identity.
             retireLedger(sessionId, null);
         } catch (DaemonHttpException | HostedHarnessGenerationException e) {
-            discardLocalSessionState(sessionId, observedAttachment,
-                    observedLedger, provesLiveTurn(e));
+            if (e instanceof HostedHarnessGenerationException) {
+                // Same proven-restart rule as the ref overload: retire
+                // unconditionally, including a marker or attachment
+                // registered while the DELETE was in flight.
+                discardLocalSessionState(sessionId);
+            } else {
+                discardLocalSessionState(sessionId, observedAttachment,
+                        observedLedger, provesLiveTurn(e));
+            }
             throw e;
         }
     }
@@ -1156,8 +1280,33 @@ public final class HostedHarnessClient implements AutoCloseable {
     // after this call's own endSend(), so isSettled() is false exactly
     // while another attempt is open.
     private void releaseOwnedMarker(String sessionId, ActivePrompt marker) {
+        activePrompts.compute(sessionId, (id, active) -> {
+            if (active != marker) {
+                return active;
+            }
+            if (active.isSettled()) {
+                return null;
+            }
+            // A sibling attempt still holds the entry open: record the owed
+            // release for the last concluded attempt to discharge instead of
+            // dropping it — a marker every concluded attempt proved was
+            // never admitted must not veto later identities.
+            active.releaseOwed = true;
+            return active;
+        });
+    }
+
+    // Discharge the release an owning arm owed, at the conclusion of a
+    // non-owning attempt that was itself definitively refused: retire the
+    // entry once no send is open on it and no conclusion was
+    // outcome-unknown or a durable admission. Runs after this call's own
+    // endSend(), so isSettled() is false exactly while another attempt is
+    // still open.
+    private void dischargeOwedRelease(String sessionId,
+            ActivePrompt marker) {
         activePrompts.compute(sessionId,
                 (id, active) -> active == marker && active.isSettled()
+                        && active.releaseOwed && !active.releaseBlocked
                         ? null : active);
     }
 
@@ -1550,13 +1699,15 @@ public final class HostedHarnessClient implements AutoCloseable {
     }
 
     private HttpSupport.Response sendMutation(String path,
-            Map<String, Object> body, String clientId, String operation) {
-        return sendMutation(path, body, clientId, operation, requestTimeout);
+            Map<String, Object> body, String sessionId, String clientId,
+            String operation) {
+        return sendMutation(path, body, sessionId, clientId, operation,
+                requestTimeout);
     }
 
     private HttpSupport.Response sendMutation(String path,
-            Map<String, Object> body, String clientId, String operation,
-            Duration timeout) {
+            Map<String, Object> body, String sessionId, String clientId,
+            String operation, Duration timeout) {
         HttpResponse<HttpSupport.Body> raw;
         try {
             raw = send(path, "POST", body, clientId, timeout);
@@ -1566,6 +1717,15 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         try {
             validateGeneration(raw.headers(), raw.statusCode());
+        } catch (HostedHarnessGenerationException e) {
+            // A proven generation change means every local record for that
+            // peer is dead, the admission ledger included: retire it at
+            // the channel every mutation shares, or the ledger's veto
+            // wedges the session for this client's life. Stays narrower
+            // than DaemonException — outcome-unknown surfaces keep both
+            // records.
+            discardLocalSessionState(sessionId);
+            throw e;
         } catch (DaemonProtocolException e) {
             // A response that never passed the fencing middleware cannot
             // prove the mutation did not reach the Harness when its status
@@ -1676,47 +1836,40 @@ public final class HostedHarnessClient implements AutoCloseable {
                             JsonSupport.encode(body),
                             StandardCharsets.UTF_8));
         }
-        // Snapshot the executor state ahead of dispatch: a termination
-        // already in effect proves the request never left the JVM, while
-        // one that lands mid-flight (close() racing an in-flight send)
-        // must keep its outcome-unknown classification.
-        boolean terminatedBeforeSend = httpExecutor.isShutdown();
-        // Everything above is pre-dispatch construction; the flag lets the
-        // caller tell an escape from it (provably never on the wire) apart
-        // from one out of httpClient.send itself (outcome unknown).
-        dispatched.set(true);
+        HttpRequest request = builder.build();
+        CompletableFuture<HttpResponse<HttpSupport.Body>> pending;
         try {
-            return httpClient.send(builder.build(),
-                    HttpSupport.bodyHandler());
+            pending = httpClient.sendAsync(request, HttpSupport.bodyHandler());
         } catch (RejectedExecutionException e) {
-            // A bare rejection surfaces at submit, so the request provably
-            // never left the JVM; its outcome is known, not unknown.
+            // sendAsync surfaces a submit-time rejection synchronously —
+            // for a saturated-but-running pool and a terminated one alike —
+            // so the request provably never left the JVM and its outcome is
+            // known, not unknown. The caller-supplied executor also runs
+            // response delivery, so a rejection reported through the future
+            // below proves nothing about dispatch and keeps its
+            // outcome-unknown classification.
             throw new DaemonTransportException(
                     "Hosted Harness HTTP executor is saturated", e);
-        } catch (IOException e) {
-            // java.net.http wraps a pool rejection into an IOException, and
-            // the caller-supplied executor runs response delivery tasks too
-            // — so this shape alone cannot tell a rejection at dispatch
-            // from one after the request was already on the wire. Only the
-            // already-terminated executor case proves non-dispatch;
-            // everything else keeps its mid-flight outcome-unknown
-            // classification.
-            if (terminatedBeforeSend && isExecutorRejection(e)) {
-                throw new DaemonTransportException(
-                        "Hosted Harness HTTP executor is saturated", e);
-            }
+        }
+        // The future exists: the request was accepted for dispatch, so any
+        // failure from here on is mid-flight.
+        dispatched.set(true);
+        try {
+            return pending.get();
+        } catch (InterruptedException e) {
+            pending.cancel(true);
             throw e;
-        }
-    }
-
-    private static boolean isExecutorRejection(Throwable failure) {
-        for (Throwable current = failure; current != null;
-                current = current.getCause()) {
-            if (current instanceof RejectedExecutionException) {
-                return true;
+        } catch (ExecutionException e) {
+            // Mirror HttpClient.send(): an IOException cause surfaces as
+            // itself; anything else — including a rejection that lands
+            // after dispatch — is an outcome-unknown IOException, never a
+            // dispatch refusal.
+            Throwable cause = e.getCause();
+            if (cause instanceof IOException) {
+                throw (IOException) cause;
             }
+            throw new IOException(cause);
         }
-        return false;
     }
 
     private HttpRequest.Builder sessionRequestBuilder(String path,
@@ -1764,8 +1917,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         String operation = "POST /session/:id/heartbeat";
         HttpSupport.Response response = sendMutation(
                 sessionPath(session.getHarnessSessionId()) + "/heartbeat",
-                Collections.emptyMap(), session.getHarnessClientId(),
-                operation);
+                Collections.emptyMap(), session.getHarnessSessionId(),
+                session.getHarnessClientId(), operation);
         try {
             DaemonClient.requireStatus(response, 200, operation);
             Map<String, Object> json = JsonSupport.parseObject(
@@ -2005,6 +2158,15 @@ public final class HostedHarnessClient implements AutoCloseable {
         // read can prove its snapshot is untouched by any attempt since.
         private final AtomicInteger inFlightSends = new AtomicInteger();
         private final AtomicLong sendClock = new AtomicLong();
+        // Owed-release bookkeeping for overlapping same-identity attempts:
+        // an owning release refused while a sibling send is open is owed,
+        // and the last attempt to conclude discharges it — unless a
+        // conclusion was outcome-unknown or a durable admission (a 202, or
+        // a hosted_prompt_recovery_required refusal), which blocks it.
+        // Written under the activePrompts bin lock or ahead of the
+        // attempt's own endSend, and read the same way.
+        private volatile boolean releaseOwed;
+        private volatile boolean releaseBlocked;
 
         ActivePrompt(String promptId, String payloadDigest,
                 String clientId) {
@@ -2016,6 +2178,13 @@ public final class HostedHarnessClient implements AutoCloseable {
         void beginSend() {
             inFlightSends.incrementAndGet();
             sendClock.incrementAndGet();
+        }
+
+        // Mark an outcome-unknown or durably admitted conclusion: it
+        // blocks the owed release this entry may carry. Called ahead of the
+        // attempt's own endSend so the discharge observes it.
+        void blockRelease() {
+            releaseBlocked = true;
         }
 
         void endSend() {
