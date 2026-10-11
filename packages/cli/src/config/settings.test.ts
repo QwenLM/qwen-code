@@ -4233,6 +4233,41 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  it.each([true, false])(
+    'excludes workspace pluginConfigs when trusted=%s',
+    (isTrusted) => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              pluginConfigs: { example: { options: { greeting: 'user' } } },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              pluginConfigs: {
+                example: { options: { greeting: 'workspace', injected: true } },
+              },
+            });
+          return '{}';
+        },
+      );
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.pluginConfigs).toEqual({
+        example: { options: { greeting: 'user' } },
+      });
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('pluginConfigs'),
+        ),
+      ).toBe(true);
+    },
+  );
+
   describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
     it.each([undefined, 0, 25])(
       'ignores workspace memory budget zero while preserving user budget %s',

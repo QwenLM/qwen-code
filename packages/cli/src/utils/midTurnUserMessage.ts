@@ -10,13 +10,22 @@ import { normalizePartList } from './normalize-part-list.js';
 export const MID_TURN_USER_MESSAGE_PREFIX =
   '\n[User message received during tool execution]: ';
 
+/** For a message that cut the model's streaming response short. */
+export const MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX =
+  '\n[User message received while you were responding; your response was interrupted]: ';
+
+/** For a message taken while the model responded, without cutting it short. */
+export const MID_TURN_RESPONSE_USER_MESSAGE_PREFIX =
+  '\n[User message received while you were responding]: ';
+
 export function prefixMidTurnUserMessageParts(
   parts: PartListUnion,
   displayText: string,
+  prefix = MID_TURN_USER_MESSAGE_PREFIX,
 ): Part[] {
   const partArray = normalizePartList(parts);
   if (partArray.length === 0) {
-    return [{ text: `${MID_TURN_USER_MESSAGE_PREFIX}${displayText}` }];
+    return [{ text: `${prefix}${displayText}` }];
   }
 
   const [firstPart, ...rest] = partArray;
@@ -24,14 +33,11 @@ export function prefixMidTurnUserMessageParts(
     return [
       {
         ...firstPart,
-        text: `${MID_TURN_USER_MESSAGE_PREFIX}${firstPart.text}`,
+        text: `${prefix}${firstPart.text}`,
       },
       ...rest,
     ];
   }
 
-  return [
-    { text: `${MID_TURN_USER_MESSAGE_PREFIX}${displayText}` },
-    ...partArray,
-  ];
+  return [{ text: `${prefix}${displayText}` }, ...partArray];
 }
