@@ -197,13 +197,20 @@ function spawnGroupLeader(command = 'sleep', args: string[] = ['300']) {
 async function settledGroupTable(pgid: number): Promise<void> {
   // A fresh pgid can collide with a leaderless stranger group still dying on
   // a busy host; an old stranger member would read the young leader's record
-  // as 'ours'. Wait until the table shows this group alone before an age
-  // judgement runs against it.
+  // as 'ours'. And a just-forked leader's etime can still read as procps's
+  // negative wraparound, which parsePsElapsed leaves undatable — an
+  // undatable leader judges every identity 'unknown', and an unwitnessed
+  // sweep holds instead of signalling. Wait until the table shows this group
+  // alone with a datable leader before an age judgement runs against it.
   await waitFor(() => {
     const members = [...queryProcessTable().values()].filter(
       (row) => row.pgid === pgid,
     );
-    return members.length === 1 && members[0]!.pid === pgid ? true : undefined;
+    return members.length === 1 &&
+      members[0]!.pid === pgid &&
+      members[0]!.runningMs !== undefined
+      ? true
+      : undefined;
   });
 }
 
@@ -972,6 +979,7 @@ describe('Managed Runtime ledger', () => {
         if (!ours.pid) throw new Error('spawn failed');
         strays.add(ours);
         const oursPid = ours.pid;
+        await settledGroupTable(oursPid);
         const ourFile = path.join(root, 'ours.json');
         makeLedgerFile(ourFile, { pid: oursPid });
         await sweepWorkerLedger(ourFile, {});
@@ -1088,6 +1096,7 @@ describe('Managed Runtime ledger', () => {
         worker.on('exit', () => undefined);
         if (!worker.pid) throw new Error('spawn failed');
         strays.add(worker);
+        await settledGroupTable(worker.pid);
         const workFile = path.join(root, 'ledger.json');
         testInternals.writeLedgerDocument(
           workFile,
@@ -2755,6 +2764,7 @@ describe('Managed Runtime ledger', () => {
         const proc = spawnGroupLeader();
         strays.add(proc);
         const shell = proc.pid!;
+        await settledGroupTable(shell);
         makeLedgerFile(path.join(directory, 'good.json'), { pid: 42424241 }, [
           { pgid: shell, startedAt: Date.now() },
         ]);
@@ -2800,6 +2810,7 @@ describe('Managed Runtime ledger', () => {
         const proc = spawnGroupLeader();
         strays.add(proc);
         const shell = proc.pid!;
+        await settledGroupTable(shell);
         makeLedgerFile(
           path.join(directory, 'remaining.json'),
           { pid: 42424242 },
@@ -2937,6 +2948,7 @@ describe('Managed Runtime ledger', () => {
         const proc = spawnGroupLeader();
         strays.add(proc);
         const live = proc.pid!;
+        await settledGroupTable(live);
         const workFile = path.join(directory, 'own.json');
         makeLedgerFile(workFile, { pid: 42424244 }, [
           { pgid: live, startedAt: Date.now() },
