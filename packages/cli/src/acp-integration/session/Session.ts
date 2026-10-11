@@ -7118,6 +7118,10 @@ export class Session implements SessionContext {
                   // Explicit user cancellation and session disposal are
                   // controlled aborts. Other AbortErrors still surface so
                   // infrastructure failures are not hidden as cancellations.
+                  // A response cut short by queued input gets here only when
+                  // the turn itself is stopped meanwhile, and the turn's
+                  // abort reason then decides; otherwise `watch` absorbs
+                  // whatever it throws once cut.
                   const isControlledCancellation =
                     pendingSend.signal.aborted &&
                     (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
