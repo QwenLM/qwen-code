@@ -55,7 +55,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * <p>Run with the pristine bundle and -Dqwen.wedge.control=true for the
  * no-fault control run.
  */
-class HostedRecoveryBlockedWedgeIT {
+class HostedRecoveryWedgeGate {
 
     @TempDir
     private Path temporary;

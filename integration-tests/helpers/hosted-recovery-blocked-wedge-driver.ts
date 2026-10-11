@@ -10,7 +10,7 @@
 // agent server + MariaDB, then start session β's first turn on the SAME
 // hosted harness daemon and record whether it wedges after the
 // `hostedModelAttempt` journal commit with the model never called. The Java
-// side (HostedRecoveryBlockedWedgeIT) owns server/DB evidence and clears
+// side (HostedRecoveryWedgeGate) owns server/DB evidence and clears
 // session α's store rows; this driver then verifies β's turn completes.
 
 import { createHash, randomUUID } from 'node:crypto';

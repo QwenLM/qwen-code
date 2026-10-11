@@ -26,8 +26,8 @@ import org.springframework.transaction.PlatformTransactionManager;
  * Object bytes are never touched by the probe ITs' reserve/close arms, so
  * the store can be a stable in-memory stub.
  *
- * <p>Shared by {@code HostedBackgroundPublicationIT} and
- * {@code HostedRecoveryBlockedWedgeIT}. It deliberately contains no request
+ * <p>Shared by {@code HostedBackgroundPublicationGate} and
+ * {@code HostedRecoveryWedgeGate}. It deliberately contains no request
  * advice: the refusal-diagnosis advice (which changes the 400 envelope) must
  * exist only in the publication witness's context, since the wedge witness
  * observes the production envelope as it is.

@@ -72,7 +72,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * reasons in the 400 envelope and the test log (production's handler is
  * deliberately generic).
  */
-class HostedBackgroundPublicationIT {
+class HostedBackgroundPublicationGate {
 
     @TempDir
     private Path temporary;
