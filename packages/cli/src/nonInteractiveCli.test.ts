@@ -3514,93 +3514,149 @@ describe('runNonInteractive', () => {
     expect(finalize).not.toHaveBeenCalled();
   });
 
-  it('emits the terminal result before managed memory settles but waits before returning', async () => {
-    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
-      OutputFormat.STREAM_JSON,
-    );
-    vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
-    setupMetricsMock();
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents([
-        { type: LlmEventType.Content, value: 'Answer' },
-        {
-          type: LlmEventType.Finished,
-          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'emits the terminal result before managed memory settles but waits before returning (%s)',
+    async (outputFormat) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(outputFormat);
+      vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
+      const memoryMetrics = {
+        api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 50 },
+        tokens: { prompt: 3, candidates: 2, total: 5, cached: 0, thoughts: 0 },
+        bySource: {},
+      };
+      setupMetricsMock({
+        models: {
+          'test-model': {
+            api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+            tokens: {
+              prompt: 11,
+              candidates: 5,
+              total: 16,
+              cached: 3,
+              thoughts: 0,
+            },
+            bySource: {},
+          },
+          'memory-model': memoryMetrics,
         },
-      ]),
-    );
-    let finishExtraction!: (count: number) => void;
-    let finishDream!: (count: number) => void;
-    let rejectDream!: (error: Error) => void;
-    const extraction = new Promise<number>((resolve) => {
-      finishExtraction = resolve;
-    });
-    const dream = new Promise<number>((resolve, reject) => {
-      finishDream = resolve;
-      rejectDream = reject;
-    });
-    mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValueOnce([
-      extraction,
-      dream,
-    ]);
-    const onResultEmitted = vi.fn();
-    let returned = false;
-    const run = runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Test input',
-      'prompt-memory-order',
-      { onResultEmitted },
-    ).then((code) => {
-      returned = true;
-      return code;
-    });
-    const messages = (): CLIMessage[] =>
-      processStdoutSpy.mock.calls.map(
-        ([chunk]) => JSON.parse(String(chunk)) as CLIMessage,
-      );
-
-    try {
-      await vi.waitFor(() =>
-        expect(
-          mockLlmClient.consumePendingMemoryTaskPromises,
-        ).toHaveBeenCalled(),
-      );
-      expect(messages()).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ type: 'assistant' }),
-          expect.objectContaining({
-            type: 'stream_event',
-            event: expect.objectContaining({ type: 'message_stop' }),
-          }),
+      });
+      const metricsAtResult = structuredClone(uiTelemetryService.getMetrics());
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Answer' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
         ]),
       );
-      await vi.waitFor(() =>
+      let finishExtraction!: (count: number) => void;
+      let finishDream!: (count: number) => void;
+      let rejectDream!: (error: Error) => void;
+      const extraction = new Promise<number>((resolve) => {
+        finishExtraction = resolve;
+      }).then((count) => {
+        memoryMetrics.api.totalRequests += 1;
+        memoryMetrics.api.totalLatencyMs += 200;
+        memoryMetrics.tokens.prompt += 7;
+        memoryMetrics.tokens.candidates += 4;
+        memoryMetrics.tokens.total += 11;
+        return count;
+      });
+      const dream = new Promise<number>((resolve, reject) => {
+        finishDream = resolve;
+        rejectDream = reject;
+      });
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValueOnce([
+        extraction,
+        dream,
+      ]);
+      const onResultEmitted = vi.fn();
+      let returned = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-memory-order',
+        { onResultEmitted },
+      ).then((code) => {
+        returned = true;
+        return code;
+      });
+      const messages = (): CLIMessage[] =>
+        processStdoutSpy.mock.calls.flatMap(
+          ([chunk]) => JSON.parse(String(chunk)) as CLIMessage | CLIMessage[],
+        );
+
+      try {
+        await vi.waitFor(() =>
+          expect(
+            mockLlmClient.consumePendingMemoryTaskPromises,
+          ).toHaveBeenCalled(),
+        );
+        expect(messages()).toContainEqual(
+          expect.objectContaining({ type: 'assistant' }),
+        );
+        if (outputFormat === OutputFormat.STREAM_JSON) {
+          expect(messages()).toContainEqual(
+            expect.objectContaining({
+              type: 'stream_event',
+              event: expect.objectContaining({ type: 'message_stop' }),
+            }),
+          );
+        }
+        await vi.waitFor(() =>
+          expect(
+            messages().filter((message) => message.type === 'result'),
+          ).toEqual([
+            expect.objectContaining({
+              is_error: false,
+              result: 'Answer',
+              usage: {
+                input_tokens: 14,
+                output_tokens: 7,
+                total_tokens: 21,
+                cache_read_input_tokens: 3,
+              },
+            }),
+          ]),
+        );
+        const result = messages().find((message) => message.type === 'result');
+        expect(result).toBeDefined();
+        if (result?.type === 'result' && !result.is_error) {
+          expect(result.stats).toEqual(
+            outputFormat === OutputFormat.JSON ? metricsAtResult : undefined,
+          );
+        }
+        const outputAtResult = processStdoutSpy.mock.calls.map(([chunk]) =>
+          String(chunk),
+        );
+        expect(onResultEmitted).toHaveBeenCalledOnce();
+        expect(returned).toBe(false);
+
+        finishExtraction(1);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(returned).toBe(false);
+
+        rejectDream(new Error('Memory task failed'));
+        await expect(run).resolves.toBe(0);
+        expect(
+          uiTelemetryService.getMetrics().models['memory-model'].tokens.total,
+        ).toBe(16);
+        expect(
+          processStdoutSpy.mock.calls.map(([chunk]) => String(chunk)),
+        ).toEqual(outputAtResult);
+        expect(onResultEmitted).toHaveBeenCalledOnce();
         expect(
           messages().filter((message) => message.type === 'result'),
-        ).toEqual([
-          expect.objectContaining({ is_error: false, result: 'Answer' }),
-        ]),
-      );
-      expect(onResultEmitted).toHaveBeenCalledOnce();
-      expect(returned).toBe(false);
-
-      finishExtraction(1);
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(returned).toBe(false);
-
-      rejectDream(new Error('Memory task failed'));
-      await expect(run).resolves.toBe(0);
-      expect(onResultEmitted).toHaveBeenCalledOnce();
-      expect(
-        messages().filter((message) => message.type === 'result'),
-      ).toHaveLength(1);
-    } finally {
-      finishExtraction(0);
-      finishDream(0);
-      await run;
-    }
-  });
+        ).toHaveLength(1);
+      } finally {
+        finishExtraction(0);
+        finishDream(0);
+        await run;
+      }
+    },
+  );
 
   describe('managed memory settlement on terminal paths', () => {
     let finishMemory: (count: number) => void;

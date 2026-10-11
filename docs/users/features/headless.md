@@ -159,7 +159,7 @@ The capital of France is Paris.
 
 ### JSON Output
 
-Returns structured data as a JSON array. All messages are buffered and output together when the session completes. This format is ideal for programmatic processing and automation scripts.
+Returns structured data as a JSON array. All messages are buffered and output together with the terminal result. This format is ideal for programmatic processing and automation scripts.
 
 The JSON output is an array of message objects. The output includes multiple message types: system messages (session initialization), assistant messages (AI responses), and result messages (execution summary).
 
@@ -169,7 +169,7 @@ The JSON output is an array of message objects. The output includes multiple mes
 qwen -p "What is the capital of France?" --output-format json
 ```
 
-Output (at end of execution):
+Output (with the terminal result):
 
 ```json
 [
@@ -231,7 +231,9 @@ Output (streaming as events occur):
 
 When combined with `--include-partial-messages`, additional stream events are emitted in real-time (message_start, content_block_delta, etc.) for real-time UI updates.
 
-Pending managed auto-memory work does not delay the terminal `result` message in JSON or stream-JSON output. The CLI still waits for that work before finishing the invocation, so a one-shot process may remain running after the result is written.
+Pending managed auto-memory work does not delay the terminal `result` message in JSON or stream-JSON output. The CLI still waits for that work before finishing the invocation, so a one-shot process may remain running after the result is written. In a reusable stream-JSON session, the next serialized turn and normal stdin EOF shutdown can also wait for pending memory work. Receiving a result does not mean that memory has finished, and this wait has no separate drain timeout.
+
+The result's `usage` in both JSON formats, and `stats` in successful JSON output, capture telemetry while the result is prepared and emitted. They can include managed-memory usage already recorded, but omit usage recorded afterward. Finishing pending memory work does not update the emitted result. These totals therefore do not guarantee complete token or API accounting for the invocation; an earlier result does not reduce actual model usage or cost.
 
 For JSON and stream-JSON output, textual `tool_result.content` values are
 bounded to 65,536 UTF-8 bytes after JSON string serialization. Oversized
