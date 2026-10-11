@@ -39,7 +39,11 @@ export interface MonitorWatchExecutor {
      * promise carrying the exit's flush and settle in order; an owner
      * that awaits it never settles ahead of the last observation.
      */
-    onExit: (failed: boolean) => Promise<void> | void,
+    onExit: (
+      failed: boolean,
+      /** #13856 A8: the end followed a platform-requested stop. */
+      stopRequested?: boolean,
+    ) => Promise<void> | void,
     identity?: {
       readonly unitName: string;
       readonly cwd?: string;
@@ -144,7 +148,7 @@ export class HostedMonitorLoop {
       handle = await this.executor.start(
         params.args,
         (line) => this.onLine(line),
-        (failed) => this.onExit(failed),
+        (failed, stopRequested) => this.onExit(failed, stopRequested),
       );
     } catch (error) {
       await this.monitors.settleFailed(this.monitorId, {
@@ -184,7 +188,7 @@ export class HostedMonitorLoop {
     this.handle = await this.executor.start(
       params.args,
       (line) => this.onLine(line),
-      (failed) => this.onExit(failed),
+      (failed, stopRequested) => this.onExit(failed, stopRequested),
       { unitName: this.monitorId },
     );
     this.armWindow();
@@ -196,9 +200,11 @@ export class HostedMonitorLoop {
    * flush and settle in order, so an owner that awaits it settles nothing
    * ahead of the last observation's commit — a caller that settles first
    * (and lets the successor rule reject the late observe) is exactly how
-   * a final window once died silently between two async hops.
+   * a final window once died silently between two async hops. A platform
+   * stop arrives with stopRequested set and projects as the requested
+   * stop, never as a bare exit (#13856 A8).
    */
-  private onExit(failed: boolean): Promise<void> {
+  private onExit(failed: boolean, stopRequested = false): Promise<void> {
     if (this.ended && !failed) return Promise.resolve();
     return this.enqueue(async () => {
       if (failed) {
@@ -213,6 +219,13 @@ export class HostedMonitorLoop {
       }
       if (this.ended) return;
       await this.flush();
+      if (this.ended) return;
+      if (stopRequested) {
+        this.ended = true;
+        this.disarm();
+        await this.monitors.settleStopRequested(this.monitorId);
+        return;
+      }
       await this.settle('exited', false);
     });
   }

@@ -108,6 +108,7 @@ function doubles() {
     async write() {},
     setStarted() {},
     setProcessResult() {},
+    setStopRequested() {},
     failCapture() {},
     async finish() {},
     async finalize(

@@ -41,7 +41,14 @@ interface Entry {
   readonly sink: ManagedShellCaptureSink;
   readonly publisher: ManagedShellCapturePublisher;
   readonly identity: ToolResultExpectedIdentity;
-  readonly completion: Promise<BackgroundShellReceipt>;
+  /**
+   * Set once any stop path (terminate/stopSession/stopAll) asks for the
+   * process's end: the finalize then carries the platform-stop marker, so
+   * the record can project `stop_requested` instead of a bare exit
+   * (#13856 A8). A natural exit never sets it.
+   */
+  stopRequested: boolean;
+  completion: Promise<BackgroundShellReceipt>;
 }
 
 export class ManagedBackgroundShellRegistry {
@@ -103,10 +110,14 @@ export class ManagedBackgroundShellRegistry {
     publisher: ManagedShellCapturePublisher;
     identity: ToolResultExpectedIdentity;
   }): Promise<BackgroundShellReceipt> {
-    const completion = this.complete(params);
-    const entry: Entry = { ...params, completion };
+    const entry: Entry = {
+      ...params,
+      stopRequested: false,
+      completion: undefined as unknown as Promise<BackgroundShellReceipt>,
+    };
+    entry.completion = this.complete(entry);
     this.entries.set(params.unitName, entry);
-    return completion;
+    return entry.completion;
   }
 
   receipt(unitName: string): Promise<BackgroundShellReceipt> | undefined {
@@ -124,6 +135,10 @@ export class ManagedBackgroundShellRegistry {
   ): Promise<BackgroundShellReceipt | undefined> {
     const entry = this.entries.get(unitName);
     if (!entry) return undefined;
+    // The platform asked for this end: mark it before the stop so the
+    // completion's finalize projects a requested stop, not a bare exit —
+    // even when the process happened to exit on its own in the same window.
+    entry.stopRequested = true;
     const evidence = await entry.process.terminate(graceMs);
     if (evidence === null) {
       return { unitName, evidence: null, captureError: null };
@@ -156,15 +171,8 @@ export class ManagedBackgroundShellRegistry {
     );
   }
 
-  private async complete(params: {
-    unitName: string;
-    sessionId: string;
-    process: ManagedChildRunProcess;
-    sink: ManagedShellCaptureSink;
-    publisher: ManagedShellCapturePublisher;
-    identity: ToolResultExpectedIdentity;
-  }): Promise<BackgroundShellReceipt> {
-    const { unitName, process, sink, publisher, identity } = params;
+  private async complete(entry: Entry): Promise<BackgroundShellReceipt> {
+    const { unitName, process, sink, publisher, identity } = entry;
     let evidence: ChildRunExitEvidence | null = null;
     let captureError: string | null = null;
     try {
@@ -219,6 +227,7 @@ export class ManagedBackgroundShellRegistry {
         pid: process.child.pid,
         executionMethod: 'child_process',
       });
+      if (entry.stopRequested) sink.setStopRequested();
       await sink.finish('stdout', eof.stdout && evidence !== null);
       await sink.finish('stderr', eof.stderr && evidence !== null);
       const envelope = await sink.finalize(
@@ -256,8 +265,8 @@ export class ManagedBackgroundShellRegistry {
     const receipt = { unitName, evidence, captureError };
     // The hold drops here; the receipt itself stays answerable for the
     // maintenance route until the worker ends.
-    this.finished.set(params.unitName, {
-      sessionId: params.sessionId,
+    this.finished.set(entry.unitName, {
+      sessionId: entry.sessionId,
       receipt,
     });
     return receipt;

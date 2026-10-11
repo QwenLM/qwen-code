@@ -79,8 +79,9 @@ const broker = vi.hoisted(() => ({
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
 }));
-// child_run is enabled by the H3 enablement slice; background tests flip
-// this per case, per the same harness the core suites use.
+// child_run's shell kind and monitor_run are enabled by the H3 enablement
+// slice (#13856); a case that needs a gate shut closes it here, per test,
+// per the same harness the core suites use.
 const enablement = vi.hoisted(() => ({
   childRun: false,
   monitorRun: false,
@@ -114,19 +115,28 @@ vi.mock(
       >();
     return {
       ...actual,
+      // #13856: the production gates admit monitor_run and the shell kind;
+      // a test that needs either shut closes it per test, never the other
+      // way around.
       assertManagedSessionDomainEnabled: (
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
-        if (domain === 'child_run' && enablement.childRun) return;
-        if (domain === 'monitor_run' && enablement.monitorRun) return;
+        if (domain === 'monitor_run' && !enablement.monitorRun) {
+          throw new actual.ManagedSessionRecordError(
+            'domain monitor_run is registered but not enabled for submission.',
+          );
+        }
         actual.assertManagedSessionDomainEnabled(domain);
       },
       // H4b: record commits gate per kind; the admission mock above keeps
       // its plain-domain meaning, this one carries the commit side.
       assertManagedSessionChildRunKindEnabled: (kind: string) => {
-        if (!enablement.childRun) {
-          actual.assertManagedSessionChildRunKindEnabled(kind);
+        if (kind === 'shell' && !enablement.childRun) {
+          throw new actual.ManagedSessionRecordError(
+            'domain child_run kind shell is registered but not enabled for submission.',
+          );
         }
+        actual.assertManagedSessionChildRunKindEnabled(kind);
       },
     };
   },
@@ -315,6 +325,33 @@ it('commits the whole batch before the first dispatch and each receipt before re
   await turn.consumeResults();
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('settles the turn over a held Runtime and owes it to the close (#13856)', async () => {
+  // The broker refuses the routine release with the designed hold: a live
+  // background run keeps its Runtime, the turn settles clean, and the
+  // Session's close owes the drain.
+  broker.release.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+  );
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  await turn.consumeResults();
+  await expect(turn.finish()).resolves.toBeUndefined();
+  expect(turn.runtimeHeld).toBe(true);
+});
+
+it('keeps the honesty contract for a busy refusal (#13856)', async () => {
+  // The unproven busy refusal keeps its exact old meaning: the turn cannot
+  // prove its outcome, so the Session parks — only the held arm is soft.
+  broker.release.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+  );
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  await turn.consumeResults();
+  await expect(turn.finish()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  expect(turn.runtimeHeld).toBe(false);
 });
 
 async function shellReceiptScenario(

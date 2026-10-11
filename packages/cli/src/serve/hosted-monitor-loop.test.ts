@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
@@ -19,30 +19,8 @@ import {
   type MonitorWatchHandle,
 } from './hosted-monitor-loop.js';
 
-// monitor_run is enabled by the H3 enablement slice; this suite drives the
-// hosted orchestrator ahead of it, like the core authority suite does.
-const enablement = vi.hoisted(() => ({ monitorRun: true }));
-
-vi.mock(
-  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
-      >();
-    return {
-      ...actual,
-      assertManagedSessionDomainEnabled: (
-        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-      ) => {
-        if (domain !== 'monitor_run' || !enablement.monitorRun) {
-          actual.assertManagedSessionDomainEnabled(domain);
-        }
-      },
-    };
-  },
-);
-
+// monitor_run is enabled by the H3 enablement slice (#13856): this suite
+// drives the hosted loop through the real gate, with no lift.
 const sessionId = '550e8400-e29b-41d4-a716-446655440000';
 const sessionKey = {
   tenantId: 'tenant-1',
@@ -54,7 +32,6 @@ const BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
-  enablement.monitorRun = true;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -101,7 +78,9 @@ class ManualClock implements MonitorLoopClock {
 
 class FakeExecutor {
   onLine: ((line: string) => void) | undefined;
-  private onExit: ((failed: boolean) => Promise<void> | void) | undefined;
+  private onExit:
+    | ((failed: boolean, stopRequested?: boolean) => Promise<void> | void)
+    | undefined;
   terminateCalls = 0;
   commands: Array<Readonly<Record<string, unknown>>> = [];
   failStart: Error | undefined;
@@ -109,7 +88,7 @@ class FakeExecutor {
   start(
     command: Readonly<Record<string, unknown>>,
     onLine: (line: string) => void,
-    onExit: (failed: boolean) => Promise<void> | void,
+    onExit: (failed: boolean, stopRequested?: boolean) => Promise<void> | void,
   ): Promise<MonitorWatchHandle> {
     this.commands.push(command);
     if (this.failStart !== undefined) return Promise.reject(this.failStart);
@@ -127,6 +106,13 @@ class FakeExecutor {
   exitNaturally(): Promise<void> {
     return (
       (this.onExit?.(false) as Promise<void> | undefined) ?? Promise.resolve()
+    );
+  }
+
+  exitStopped(): Promise<void> {
+    return (
+      (this.onExit?.(false, true) as Promise<void> | undefined) ??
+      Promise.resolve()
     );
   }
 
@@ -372,6 +358,25 @@ describe('HostedMonitorLoop', () => {
       stopReason: 'exited',
       run: { state: 'settled', execution: 'settled' },
     });
+    expect(rig.executor.terminateCalls).toBe(0);
+    await closeLoop(rig);
+  });
+
+  it('settles stop_requested when a platform stop ends the watch', async () => {
+    // #13856 A8: the drain's stop arrives marked; the loop flushes the
+    // buffered lines, then settles the requested stop — never a bare exit.
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    await rig.loop.start(params({}));
+
+    rig.executor.onLine?.('tail line');
+    await rig.executor.exitStopped();
+    expect(committed(rig.authority)).toMatchObject({
+      observationSequence: 1,
+      stopReason: 'stop_requested',
+      run: { state: 'cancelled', execution: 'settled' },
+    });
+    // The physical stop already happened; the loop terminates nothing more.
     expect(rig.executor.terminateCalls).toBe(0);
     await closeLoop(rig);
   });
