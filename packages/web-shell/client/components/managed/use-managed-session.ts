@@ -80,6 +80,42 @@ function pause(signal: AbortSignal, ms: number): Promise<void> {
   });
 }
 
+// AbortSignal.any needs Chrome 116 / Safari 17.4, above the package floor
+// (Chrome 111 / Safari 16.4); mirrors composeAbortSignals in
+// packages/sdk-typescript/src/daemon/acpTransportUtils.ts.
+function composeSignals(signals: AbortSignal[]): AbortSignal {
+  const anyFn = (
+    AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }
+  ).any;
+  if (typeof anyFn === 'function') return anyFn.call(AbortSignal, signals);
+  const ctrl = new AbortController();
+  const cleanups: Array<() => void> = [];
+  const detachAll = () => {
+    while (cleanups.length > 0) {
+      try {
+        cleanups.pop()?.();
+      } catch {
+        /* swallow */
+      }
+    }
+  };
+  for (const s of signals) {
+    if (s.aborted) {
+      ctrl.abort(s.reason);
+      detachAll();
+      return ctrl.signal;
+    }
+    const onAbort = () => {
+      ctrl.abort(s.reason);
+      detachAll();
+    };
+    s.addEventListener('abort', onAbort, { once: true });
+    cleanups.push(() => s.removeEventListener('abort', onAbort));
+  }
+  ctrl.signal.addEventListener('abort', detachAll, { once: true });
+  return ctrl.signal;
+}
+
 interface ManagedSessionState {
   sessionId?: string;
   summary?: ManagedAgentSessionSummary;
@@ -106,6 +142,36 @@ export function useManagedSession(
   });
   const [loadingOlder, setLoadingOlder] = useState(false);
   const lifetime = useRef<AbortController | undefined>(undefined);
+  const summaryRef = useRef<ManagedAgentSessionSummary | undefined>(undefined);
+  const retainSummary = useCallback((incoming: ManagedAgentSessionSummary) => {
+    const previous = summaryRef.current;
+    const workspace = previous?.workspace;
+    const next =
+      previous?.sessionId === incoming.sessionId &&
+      workspace &&
+      incoming.workspace?.workspaceId === workspace.workspaceId &&
+      (workspace.contextRevision ?? 0) >
+        (incoming.workspace.contextRevision ?? 0)
+        ? { ...incoming, workspace }
+        : incoming;
+    summaryRef.current = next;
+    return next;
+  }, []);
+  const refreshSummary = useCallback(
+    async (signal?: AbortSignal) => {
+      const abort = lifetime.current;
+      if (!sessionId || !abort || abort.signal.aborted) return undefined;
+      const read = await provider.getSession(sessionId, {
+        clientId,
+        signal: signal ? composeSignals([signal, abort.signal]) : abort.signal,
+      });
+      if (abort.signal.aborted || signal?.aborted) return undefined;
+      const summary = retainSummary(read);
+      setState((current) => ({ ...current, summary }));
+      return summary;
+    },
+    [provider, clientId, sessionId, retainSummary],
+  );
   const cursorRef = useRef<string | undefined>(undefined);
   // Whether any loop ended terminally on a session-leg answer; a later
   // session-leg success re-arms the whole effect instead of leaving a
@@ -132,6 +198,7 @@ export function useManagedSession(
   useEffect(() => {
     const abort = new AbortController();
     lifetime.current = abort;
+    summaryRef.current = undefined;
     cursorRef.current = undefined;
     pagedRef.current = false;
     pagedHeadRef.current = undefined;
@@ -148,8 +215,11 @@ export function useManagedSession(
     if (!sessionId) return () => abort.abort();
     const opts = { clientId, signal: abort.signal };
     const update = (change: Partial<ManagedSessionState>) => {
-      if (!abort.signal.aborted)
-        setState((current) => ({ ...current, ...change }));
+      if (abort.signal.aborted) return;
+      const next = change.summary
+        ? { ...change, summary: retainSummary(change.summary) }
+        : change;
+      setState((current) => ({ ...current, ...next }));
     };
     const record = (leg: SignalLeg, error: unknown, final: boolean) => {
       if (abort.signal.aborted) return;
@@ -296,7 +366,7 @@ export function useManagedSession(
         retire('session');
         throw new SnapshotLegError('transcript', transcriptRead.reason);
       }
-      const summary = sessionRead.value;
+      const summary = retainSummary(sessionRead.value);
       const transcript = transcriptRead.value;
       if (abort.signal.aborted) return transcript.lastEventId;
       if (preserveLoadedPages) {
@@ -505,6 +575,11 @@ export function useManagedSession(
               ...current,
               events: mergeManagedEvents(current.events, [event]),
             }));
+            if (event.type === 'context_changed') {
+              void refreshSummary().catch((error: unknown) =>
+                failed(error, 'session'),
+              );
+            }
           }
           if (gap) {
             try {
@@ -556,7 +631,11 @@ export function useManagedSession(
             // that is otherwise healthy; its success retires session-leg
             // verdicts.
             try {
-              update({ summary: await provider.getSession(sessionId, opts) });
+              update({
+                summary: retainSummary(
+                  await provider.getSession(sessionId, opts),
+                ),
+              });
               retire('session');
             } catch (error) {
               failed(error, 'session');
@@ -595,7 +674,9 @@ export function useManagedSession(
         await pause(abort.signal, failureRetryDelayMs(failures));
         if (abort.signal.aborted) return;
         try {
-          update({ summary: await provider.getSession(sessionId, opts) });
+          update({
+            summary: retainSummary(await provider.getSession(sessionId, opts)),
+          });
           retire('session');
           failures = 0;
         } catch (error) {
@@ -609,7 +690,7 @@ export function useManagedSession(
       }
     })();
     return () => abort.abort();
-  }, [provider, clientId, sessionId, revision]);
+  }, [provider, clientId, sessionId, revision, retainSummary, refreshSummary]);
 
   const loadOlder = useCallback(async () => {
     const abort = lifetime.current;
@@ -732,5 +813,6 @@ export function useManagedSession(
     loadingOlder,
     loadOlder,
     reload,
+    refreshSummary,
   };
 }

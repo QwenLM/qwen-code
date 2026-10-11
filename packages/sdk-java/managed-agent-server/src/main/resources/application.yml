@@ -33,6 +33,8 @@ management:
 qwen:
   managed-agent:
     agent-revision: '${QWEN_MANAGED_AGENT_REVISION:1}'
+    definition-models: '${QWEN_MANAGED_AGENT_DEFINITION_MODELS:}'
+    definition-tool-profiles: '${QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:hosted-workspace-files/1}'
     trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'
     auth:
       mode: '${QWEN_MANAGED_AGENT_AUTH_MODE:auto}'
@@ -57,6 +59,7 @@ qwen:
     harness:
       enabled: '${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}'
       workspace-files-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED:false}'
+      workspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'
       base-url: '${QWEN_MANAGED_AGENT_HARNESS_BASE_URL:http://127.0.0.1:4170}'
       token: '${QWEN_MANAGED_AGENT_HARNESS_TOKEN:}'
       capability-digest: '${QWEN_MANAGED_AGENT_CAPABILITY_DIGEST:}'

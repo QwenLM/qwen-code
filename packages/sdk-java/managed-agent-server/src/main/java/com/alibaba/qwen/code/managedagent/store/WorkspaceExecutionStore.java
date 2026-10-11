@@ -136,7 +136,7 @@ public class WorkspaceExecutionStore {
         String expectedStatus = authority == null && !legacyClose ? "ACTIVE" : session.status();
         if (binding == null || !(legacyClose ? "CLOSING".equals(session.status()) : authority == null ? "ACTIVE".equals(session.status())
                 : java.util.List.of("CLOSING", "DELETING").contains(session.status()))
-                || session.deletedAt() != null || !"qwen-code".equals(session.agentId())
+                || session.deletedAt() != null || !executableAgent(session.agentId(), session.agentDefinitionDigest())
                 || !session.tenantId().equals(binding.getTenantId())
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         binding.getContextConfigRef())) {
@@ -146,7 +146,9 @@ public class WorkspaceExecutionStore {
         // Verdicts per matched row: 0 structural mismatch, 1 refused only by
         // operator-mutable grant or registry state, 2 authorized.
         List<Integer> grants = jdbc.query("SELECT s.tenant_id, s.session_id,"
-                + " s.agent_id AS session_agent, s.status AS session_status,"
+                + " s.agent_id AS session_agent,"
+                + " s.agent_definition_digest AS session_definition_digest,"
+                + " s.status AS session_status,"
                 + " s.deleted_at AS session_deleted_at,"
                 + " s.workspace_id AS session_workspace,"
                 + " s.workspace_generation AS session_generation,"
@@ -180,7 +182,8 @@ public class WorkspaceExecutionStore {
                 (row, index) -> {
                     boolean structural = session.tenantId().equals(row.getString("tenant_id"))
                             && session.sessionId().equals(row.getString("session_id"))
-                            && "qwen-code".equals(row.getString("session_agent"))
+                            && executableAgent(row.getString("session_agent"),
+                                    row.getString("session_definition_digest"))
                             && expectedStatus.equals(row.getString("session_status"))
                             && row.getObject("session_deleted_at") == null
                             && binding.getWorkspaceId().equals(row.getString("session_workspace"))
@@ -441,6 +444,51 @@ public class WorkspaceExecutionStore {
         return count != null && count > 0;
     }
 
+    public boolean canStopDrained(RuntimeBindingRecord saved) {
+        if ((saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST)
+                || !saved.isDrainRequested() || !saved.getRequest().isManagedContext() || saved.getOperationOwner() == null
+                || !"local-process".equals(saved.getRequest().getProvisionerKind())
+                || !"session".equals(saved.getRequest().getScope().getIsolationClass())) {
+            return false;
+        }
+        var claims = jdbc.query("SELECT binding_state, drain_requested, operation_owner, operation_generation,"
+                + " operation_lease_until, tenant_id, storage_id, UNIX_TIMESTAMP() AS db_seconds,"
+                + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) AS db_micros FROM qwen_runtime_binding"
+                + " WHERE binding_id = ? AND runtime_generation = ?", (row, index) ->
+                        saved.getState().name().equals(row.getString("binding_state")) && row.getBoolean("drain_requested")
+                        && saved.getOperationOwner().equals(row.getString("operation_owner"))
+                        && saved.getOperationGeneration() == row.getLong("operation_generation")
+                        && row.getTimestamp("operation_lease_until") != null
+                        && row.getTimestamp("operation_lease_until", java.util.Calendar.getInstance(
+                                java.util.TimeZone.getTimeZone("UTC"))).toInstant().isAfter(java.time.Instant.ofEpochSecond(
+                                        row.getLong("db_seconds"), row.getLong("db_micros") * 1000))
+                        && saved.getRequest().getScope().getTenantId().equals(row.getString("tenant_id"))
+                        && saved.getRequest().getStorageId().equals(row.getString("storage_id")),
+                saved.getBindingId(), saved.getGeneration());
+        if (claims.size() != 1 || !claims.getFirst()
+                || jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE binding_id = ?"
+                        + " AND runtime_generation = ? AND execution_state NOT IN ('SETTLED', 'ABANDONED')",
+                        Long.class, saved.getBindingId(), saved.getGeneration()) != 0) {
+            return false;
+        }
+        var holders = jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
+                + " FROM managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL'", (row, index) -> {
+                    String holder = row.getString("holder_key");
+                    String binding = row.getString("binding_id");
+                    String session = row.getString("runtime_session_id");
+                    long generation = row.getLong("runtime_generation");
+                    if (holder == null) {
+                        return binding == null && session == null && row.getObject("runtime_generation") == null;
+                    }
+                    return saved.getBindingId().equals(binding) && saved.getGeneration() == generation && session != null
+                            && holder.equals(digest(binding + "\u0000" + generation + "\u0000" + session))
+                            && jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_session WHERE binding_id = ?"
+                                    + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?",
+                                    Long.class, binding, generation, session, saved.getRequest().getIsolationKey()) == 1;
+                }, digest(saved.getRequest().getScope().getTenantId() + "\u0000" + saved.getRequest().getStorageId()));
+        return holders.isEmpty() || holders.size() == 1 && holders.getFirst();
+    }
+
     public void releaseLost(RuntimeBindingRecord saved) {
         if (!saved.getRequest().isManagedContext() || saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.hasStoppedWriters() || saved.getOperationOwner() == null) {
@@ -516,6 +564,12 @@ public class WorkspaceExecutionStore {
                         }
                     }, key);
         });
+    }
+
+    // qwen-code, or a Session that pinned a compiled definition (D8c-1).
+    private static boolean executableAgent(String agentId,
+            String agentDefinitionDigest) {
+        return "qwen-code".equals(agentId) || agentDefinitionDigest != null;
     }
 
     public static RuntimeBrokerException unavailable() {

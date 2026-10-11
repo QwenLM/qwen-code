@@ -1102,6 +1102,20 @@ public final class HostedHarnessClient implements AutoCloseable {
     }
 
     public void updateSessionTitle(HarnessSessionRef session, String title) {
+        updateSessionTitle(session, title, null);
+    }
+
+    public void updateSessionTitle(HarnessSessionRef session, String title, long revision) {
+        if (revision < 1) {
+            throw new IllegalArgumentException("title revision must be positive");
+        }
+        if (capabilities().getTitleProtocolVersion() != 1) {
+            throw new DaemonProtocolException("Hosted Harness title protocol version 1 is required");
+        }
+        updateSessionTitle(session, title, Long.valueOf(revision));
+    }
+
+    private void updateSessionTitle(HarnessSessionRef session, String title, Long revision) {
         HarnessSessionRef ref = requireSessionRef(session);
         String value = requireNonBlank(title, "title");
         if (value.length() > 256) {
@@ -1111,7 +1125,9 @@ public final class HostedHarnessClient implements AutoCloseable {
         String operation = "POST /session/:id/title";
         HttpSupport.Response response = sendMutation(
                 sessionPath(ref.getHarnessSessionId()) + "/title",
-                Map.of("title", value), ref.getHarnessSessionId(),
+                revision == null ? Map.of("title", value)
+                        : Map.of("title", value, "managedRenameRevision", revision.toString()),
+                ref.getHarnessSessionId(),
                 ref.getHarnessClientId(), operation);
         DaemonClient.requireStatus(response, 200, operation);
         Map<String, Object> json = JsonSupport.parseObject(
@@ -1122,6 +1138,10 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (!ref.getHarnessSessionId().equals(responseSessionId)) {
             throw new DaemonProtocolException(
                     "Hosted Harness title response sessionId does not match");
+        }
+        if (revision != null && !revision.toString().equals(
+                JsonSupport.requiredString(json, "managedRenameRevision", "title"))) {
+            throw new DaemonProtocolException("Hosted Harness title revision does not match");
         }
         if (!JsonSupport.requiredBoolean(json, "persisted", "title")) {
             throw new DaemonProtocolException(
@@ -1531,7 +1551,9 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         return new HostedHarnessCapabilities(current, supported, bootId,
                 digest, hosted.containsKey("lifecycleProtocolVersion")
-                        ? JsonSupport.requiredInt(hosted, "lifecycleProtocolVersion", "capabilities.hostedHarness") : 0);
+                        ? JsonSupport.requiredInt(hosted, "lifecycleProtocolVersion", "capabilities.hostedHarness") : 0,
+                hosted.containsKey("titleProtocolVersion")
+                        ? JsonSupport.requiredInt(hosted, "titleProtocolVersion", "capabilities.hostedHarness") : 0);
     }
 
     private HarnessSessionRef parseSession(String body,

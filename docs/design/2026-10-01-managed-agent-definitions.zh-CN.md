@@ -97,6 +97,9 @@ v1.29.0。该版本号假定 #13112 先以 v1.28 合入。
 3. `tools` 与 `permission_policy` 如何映射到冻结的 Hosted 工具 profile，以及
    会话当前固定的审批模式？
 
+[AgentDefinition 生效（D8b 与 D8c）](2026-10-07-managed-agent-definition-execution.zh-CN.md)
+给出了这些问题的建议答案。
+
 ## 6. 验证
 
 - `ManagedAgentDefinitionTest`：创建与回放、内容不变与变化的更新、revision 读取、

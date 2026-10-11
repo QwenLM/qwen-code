@@ -31,6 +31,7 @@ import {
   ManagedSessionAlreadyExistsError,
   ManagedSessionConflictError,
   ManagedSessionNotFoundError,
+  ManagedSessionTitleSupersededError,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
   createHttpManagedSessionStores,
@@ -77,6 +78,13 @@ import {
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import {
+  HostedModelUnavailableError,
+  parseHostedAgentDefinition,
+  sameHostedAgentDefinition,
+  readHostedAgentInstructions,
+  type HostedAgentDefinition,
+} from './hosted-agent-definition.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
   HostedHookSession,
@@ -169,6 +177,7 @@ import {
   type HostedRuntimeRecoveryReport,
 } from './hosted-runtime-recovery.js';
 import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
+import { hostedShellLaneAttachesChildAgents } from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
@@ -213,6 +222,7 @@ const RESTORE_READ_BATCH = 32;
  * what they reference is verified too; the rest are not read again.
  */
 const RESTORE_CONTAINER_KINDS = new Set([
+  'managed-definition',
   'managed-session_metadata',
   'managed-file_history',
   'managed-tool-outcome',
@@ -250,6 +260,7 @@ interface HostedSession {
   managed: ManagedSession;
   storeBaseUrl: string;
   definition: Record<string, unknown> | null;
+  agentDefinition?: HostedAgentDefinition;
   clientId: string;
   cwd: string;
   streams: Set<() => void>;
@@ -1644,6 +1655,14 @@ async function verifyWorkspaceRestore(
           metadata['previousRecordRef'] as unknown as ManagedSessionDurableRef,
         );
     }
+    if (ref.kind === 'managed-definition') {
+      const definition = object(JSON.parse(bytes.toString('utf8')));
+      const pin = parseHostedAgentDefinition(definition?.['agentDefinition']);
+      if (pin?.instructionsRef) {
+        await readRef(pin.instructionsRef);
+        await readHostedAgentInstructions(pin, resources);
+      }
+    }
     if (ref.kind === 'managed-tool-outcome') {
       const outcome = object(JSON.parse(bytes.toString('utf8')));
       if (outcome?.['manifestRef'])
@@ -2194,6 +2213,8 @@ async function eventEnvelope(
     // projection stays distinguishable from both a cancellation and an
     // unattributed failure.
     const expired = event.payload['stopReason'] === 'deadline_exceeded';
+    const modelUnavailable =
+      event.payload['stopReason'] === 'model_unavailable';
     return {
       v: 1,
       id: event.sequence,
@@ -2202,7 +2223,11 @@ async function eventEnvelope(
       data: {
         sessionId,
         promptId,
-        code: expired ? 'hosted_turn_deadline_exceeded' : 'hosted_turn_failed',
+        code: expired
+          ? 'hosted_turn_deadline_exceeded'
+          : modelUnavailable
+            ? 'model_unavailable'
+            : 'hosted_turn_failed',
         message: expired
           ? 'The Hosted Harness Turn exceeded its deadline.'
           : 'Hosted Harness turn failed.',
@@ -2367,6 +2392,11 @@ async function executeHostedTurn(
             signal: abort.signal,
             modelScope,
             workspaceContext,
+            agentDefinition: session.agentDefinition,
+            agentInstructions: await readHostedAgentInstructions(
+              session.agentDefinition,
+              session.managed.resources,
+            ),
             ...(session.hooks ? { hooks: session.hooks } : {}),
             ...(toolTurn ? { toolTurn } : {}),
             ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
@@ -2387,6 +2417,13 @@ async function executeHostedTurn(
           const outcome = settledTurnOutcome(abort);
           state = outcome.state;
           stopReason = outcome.stopReason;
+          // A deadline expiry must keep naming the deadline: only a generic
+          // error outcome may be reclassified as a model-route failure.
+          if (
+            stopReason === 'error' &&
+            cause instanceof HostedModelUnavailableError
+          )
+            stopReason = 'model_unavailable';
           if (state === 'error') {
             // The model layer surfaces any abort as a cancellation, so a
             // deadline expiry names the deadline, not the thrown cause.
@@ -2543,6 +2580,16 @@ export function registerHostedHarnessSessionRoutes(
   ): Promise<void> => {
     const body = object(req.body);
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
+    let agentDefinition: HostedAgentDefinition | undefined;
+    try {
+      agentDefinition = parseHostedAgentDefinition(
+        body?.['agentDefinition'],
+        create,
+      );
+    } catch {
+      error(res, 400, 'invalid_hosted_agent_definition');
+      return;
+    }
     let toolProfile = body?.['toolProfile'];
     let captureBytes = body?.['captureBytes'];
     if (
@@ -2644,6 +2691,14 @@ export function registerHostedHarnessSessionRoutes(
     // pass this load kicks before the stop itself arrives.
     const stopMessages = body?.['stopMessages'] === true;
     const childWorkspaces = body?.['childWorkspaces'] === true;
+    if (
+      resident &&
+      !create &&
+      !sameHostedAgentDefinition(resident.agentDefinition, agentDefinition)
+    ) {
+      error(res, 409, 'hosted_agent_definition_conflict');
+      return;
+    }
     const passiveRecovery = body?.['passiveManagedRuntimeRecovery'] === true;
     const driveRecovery = body?.['driveRuntimeRecovery'] === true;
     const takeoverFlags = passiveRecovery || driveRecovery;
@@ -3072,6 +3127,7 @@ export function registerHostedHarnessSessionRoutes(
                 JSON.stringify({
                   engine: 'managed',
                   sessionId,
+                  ...(agentDefinition ? { agentDefinition } : {}),
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
                   ...(hookCatalog ? { hookCatalog } : {}),
@@ -3120,6 +3176,22 @@ export function registerHostedHarnessSessionRoutes(
           ).toString('utf8'),
         ),
       );
+      let savedAgentDefinition: HostedAgentDefinition | undefined;
+      try {
+        savedAgentDefinition = parseHostedAgentDefinition(
+          definition?.['agentDefinition'],
+        );
+        if (!sameHostedAgentDefinition(savedAgentDefinition, agentDefinition))
+          throw new Error('Agent definition identity changed.');
+        await readHostedAgentInstructions(
+          savedAgentDefinition,
+          managed.resources,
+        );
+      } catch {
+        await managed.close();
+        error(res, 409, 'hosted_agent_definition_conflict');
+        return;
+      }
       const savedProfile = definition?.['toolProfile'];
       if (
         !create &&
@@ -3169,6 +3241,7 @@ export function registerHostedHarnessSessionRoutes(
         managed,
         storeBaseUrl: store.baseUrl,
         definition,
+        agentDefinition: savedAgentDefinition,
         clientId: randomUUID(),
         cwd,
         streams: new Set(),
@@ -3251,14 +3324,22 @@ export function registerHostedHarnessSessionRoutes(
         // H4b: the Session's own child orchestrator, on the Shell lanes
         // the notification wake is proven over — files profiles keep their
         // exact current surface (their child admission is its own gate).
+        // Public Shell admission suppresses the child agent tool; a private
+        // Shell lane that omits the flag keeps it. Team attachment stays.
         if (session.shell || session.backgroundLane) {
-          session.childAgents = new HostedChildAgentSession(
-            {
-              authority: session.managed.authority,
-              resources: session.managed.resources,
-            },
-            session.managed.authority.sessionHeader.sessionKey,
-          );
+          if (
+            hostedShellLaneAttachesChildAgents(
+              true,
+              body?.['suppressChildAgents'] === true,
+            )
+          )
+            session.childAgents = new HostedChildAgentSession(
+              {
+                authority: session.managed.authority,
+                resources: session.managed.resources,
+              },
+              session.managed.authority.sessionHeader.sessionKey,
+            );
           session.teams = new HostedTeamSession(
             {
               authority: session.managed.authority,
@@ -3266,24 +3347,26 @@ export function registerHostedHarnessSessionRoutes(
             },
             session.managed.authority.sessionHeader.sessionKey,
           );
-          // H4d-b: the Session messages along its lineage on the same
-          // writes chain; a child names its parent from its definition.
-          session.messages = new HostedSessionMessageSession(
-            {
-              authority: session.managed.authority,
-              resources: session.managed.resources,
-            },
-            session.managed.authority.sessionHeader.sessionKey,
-            session.childAgents,
-            session.childDepth !== undefined &&
-            typeof savedLineage?.['parentSessionId'] === 'string' &&
-            typeof savedLineage['parentChildRunId'] === 'string'
-              ? {
-                  parentSessionId: savedLineage['parentSessionId'],
-                  parentChildRunId: savedLineage['parentChildRunId'],
-                }
-              : undefined,
-          );
+          // H4d-b: messages share the child orchestrator's write chain, so
+          // a Shell lane that suppressed the agent tool has no funnel.
+          if (session.childAgents) {
+            session.messages = new HostedSessionMessageSession(
+              {
+                authority: session.managed.authority,
+                resources: session.managed.resources,
+              },
+              session.managed.authority.sessionHeader.sessionKey,
+              session.childAgents,
+              session.childDepth !== undefined &&
+              typeof savedLineage?.['parentSessionId'] === 'string' &&
+              typeof savedLineage['parentChildRunId'] === 'string'
+                ? {
+                    parentSessionId: savedLineage['parentSessionId'],
+                    parentChildRunId: savedLineage['parentChildRunId'],
+                  }
+                : undefined,
+            );
+          }
         }
       }
       if (
@@ -5897,13 +5980,19 @@ export function registerHostedHarnessSessionRoutes(
     const sessionId = req.params['id'];
     void (async () => {
       let toolTurn: HostedWorkspaceToolTurn | undefined;
+      let failureReason = 'error';
       const turnResultRecord = (state: 'cancelled' | 'error' | 'completed') =>
         record(session, sessionId, 'system', null, {
           subtype: 'turn_result',
           systemPayload: {
             promptId,
             state,
-            stopReason: state === 'completed' ? 'end_turn' : state,
+            stopReason:
+              state === 'completed'
+                ? 'end_turn'
+                : state === 'error'
+                  ? failureReason
+                  : state,
             endedAt: Date.now(),
           },
         });
@@ -6154,6 +6243,11 @@ export function registerHostedHarnessSessionRoutes(
             promptId,
             signal: abort.signal,
             workspaceContext,
+            agentDefinition: session.agentDefinition,
+            agentInstructions: await readHostedAgentInstructions(
+              session.agentDefinition,
+              session.managed.resources,
+            ),
             toolTurn,
             resumeFromToolResults: resumeParts,
             textDeltas: deltas,
@@ -6166,6 +6260,8 @@ export function registerHostedHarnessSessionRoutes(
         } catch (cause) {
           if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
           state = abort.signal.aborted ? 'cancelled' : 'error';
+          if (state === 'error' && cause instanceof HostedModelUnavailableError)
+            failureReason = 'model_unavailable';
           if (state === 'error') {
             writeStderrLineSafe(
               `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
@@ -6839,17 +6935,63 @@ export function registerHostedHarnessSessionRoutes(
     const title = object(req.body)?.['title'];
     if (typeof title !== 'string' || !title.trim() || title.length > 256)
       return error(res, 400, 'invalid_session_title');
-    void session.managed.sink
-      .write(
-        record(session, req.params['id'], 'system', null, {
-          subtype: 'custom_title',
-          systemPayload: { customTitle: title, titleSource: 'manual' },
+    const revision = object(req.body)?.['managedRenameRevision'];
+    if (
+      revision !== undefined &&
+      (typeof revision !== 'string' ||
+        !/^[1-9][0-9]{0,18}$/u.test(revision) ||
+        BigInt(revision) > 9223372036854775807n)
+    ) {
+      error(res, 400, 'invalid_session_title_revision');
+      return;
+    }
+    const write =
+      revision === undefined
+        ? session.managed.sink.write(
+            record(session, req.params['id']!, 'system', null, {
+              subtype: 'custom_title',
+              systemPayload: { customTitle: title, titleSource: 'manual' },
+            }),
+          )
+        : session.managed.authority.commitDomainRecord(
+            {
+              operation: 'renameSession',
+              commandId: `hosted-title:${revision}`,
+              sessionKey: session.managed.authority.sessionHeader.sessionKey,
+              contentDigest: createHash('sha256').update(title).digest('hex'),
+            },
+            {
+              domain: 'session_metadata',
+              content: {
+                title,
+                titleSource: 'manual',
+                managedRenameRevision: revision,
+              },
+            },
+            { class: 'trusted_entry' },
+          );
+    void write.then(
+      () =>
+        res.json({
+          sessionId: req.params['id'],
+          persisted: true,
+          ...(revision === undefined
+            ? {}
+            : { managedRenameRevision: revision }),
         }),
-      )
-      .then(
-        () => res.json({ sessionId: req.params['id'], persisted: true }),
-        () => error(res, 503, 'managed_session_title_failed'),
-      );
+      (failure: unknown) =>
+        error(
+          res,
+          failure instanceof ManagedSessionTitleSupersededError ||
+            failure instanceof ManagedSessionConflictError
+            ? 409
+            : 503,
+          failure instanceof ManagedSessionTitleSupersededError ||
+            failure instanceof ManagedSessionConflictError
+            ? 'session_mutation_superseded'
+            : 'managed_session_title_failed',
+        ),
+    );
   });
   const close = async (
     req: Request,

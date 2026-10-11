@@ -10817,7 +10817,67 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
-  it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
+  it('fences an accepted delayed title and deduplicates a completed delivery', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const send = (title: string, managedRenameRevision: string) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/title`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({ title, managedRenameRevision });
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = LocalManagedSessionAuthority.prototype.commitDomainRecord;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'commitDomainRecord',
+    ).mockImplementation(function (
+      this: LocalManagedSessionAuthority,
+      command,
+      request,
+      actor,
+    ) {
+      if (request.content['managedRenameRevision'] === '1') {
+        entered();
+        return held.then(() => original.call(this, command, request, actor));
+      }
+      return original.call(this, command, request, actor);
+    });
+    const older = send('A', '1').then((response) => response);
+    await waiting;
+    await send('B', '2')
+      .expect(200)
+      .expect((response) =>
+        expect(response.body.managedRenameRevision).toBe('2'),
+      );
+    release();
+    expect((await older).status).toBe(409);
+    const before = await readFile(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      'utf8',
+    );
+    await send('B', '2').expect(200);
+    expect(
+      await readFile(path.join(state.root, `${SESSION_ID}.jsonl`), 'utf8'),
+    ).toBe(before);
+    await send('A', '3').expect(200);
+  });
+
+  it.each([
+    'hosted-workspace-files/1',
+    'hosted-workspace-shell/1',
+    'hosted-workspace-team-lead/1',
+  ])(
     'loads a renamed %s Session and verifies its retained title resources',
     async (toolProfile) => {
       const server = await app(true);
@@ -10866,7 +10926,7 @@ describe('Hosted Harness no-tool session', () => {
       damaged.mockRestore();
       const retry = await headers(
         supertest(server).post(`/session/${SESSION_ID}/load`),
-      ).send({ managedSessionStore: store() });
+      ).send({ managedSessionStore: store(), toolProfile });
       expect(retry.status).toBe(200);
       await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
         'X-Qwen-Client-Id',
@@ -19952,4 +20012,71 @@ describe('Hosted Harness Runtime turn takeover', () => {
     },
     30_000,
   );
+});
+
+it('pins stored definitions across resident and cold loads and delivers instructions to the Turn', async () => {
+  const server = await app();
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: state.root,
+    sessionKey: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    },
+  });
+  const instructionsRef = await resources.publish(
+    'managed-agent-instructions',
+    Buffer.from('D8_PINNED_INSTRUCTIONS'),
+  );
+  const identity = {
+    agentId: `agent_${'a'.repeat(32)}`,
+    revision: '1',
+    digest: 'b'.repeat(64),
+  };
+  const definition = {
+    ...identity,
+    model: { id: 'configured' },
+    instructionsRef,
+  };
+  const created = await headers(supertest(server).post('/session')).send({
+    sessionId: SESSION_ID,
+    sessionScope: 'thread',
+    managedSessionStore: store(),
+    agentDefinition: definition,
+  });
+  expect(created.status).toBe(200);
+  const load = (agentDefinition?: typeof identity) =>
+    headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+      managedSessionStore: store(),
+      agentDefinition,
+      driveRuntimeRecovery: true,
+    });
+  expect((await load()).body.error).toBe('hosted_agent_definition_conflict');
+  expect((await load({ ...identity, digest: 'c'.repeat(64) })).body.error).toBe(
+    'hosted_agent_definition_conflict',
+  );
+  expect((await load(identity)).status).toBe(200);
+  await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(204);
+  const loaded = await load(identity);
+  expect(loaded.status).toBe(200);
+  const prompt = [{ type: 'text', text: 'hello' }];
+  await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+    .set('X-Qwen-Client-Id', loaded.body.clientId)
+    .send({
+      prompt,
+      promptId: PROMPT_ID,
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+    })
+    .expect(202);
+  await vi.waitFor(() => expect(state.model).toHaveBeenCalled());
+  expect(state.model.mock.calls.at(-1)?.[0]).toMatchObject({
+    agentDefinition: definition,
+    agentInstructions: 'D8_PINNED_INSTRUCTIONS',
+  });
+  await vi.waitFor(async () => {
+    const response = await headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(response.status).toBe(204);
+  });
 });
