@@ -858,11 +858,7 @@ export async function settleCrashedWakeTurnAftermath(params: {
                 });
                 broker = stopped.broker;
               } finally {
-                if (carried.size > 0)
-                  (session.recoveryUnobserved ??= new Map()).set(
-                    turnId,
-                    carried,
-                  );
+                persistRecoveryUnobserved(session, turnId, carried);
               }
             }
           } catch (cause) {
@@ -1068,6 +1064,20 @@ function unsettledInputs(session: HostedSession): Set<string> {
 function unsettledPromptId(session: HostedSession): string | undefined {
   const unsettled = unsettledInputs(session);
   return unsettled.size === 1 ? [...unsettled][0] : undefined;
+}
+
+// A pruned-to-empty carry must persist as a delete, not as no write at
+// all: an upsert-only write leaves the previous pass's stale set behind,
+// and the next pass would journal a positively witnessed stop as
+// unobservable.
+function persistRecoveryUnobserved(
+  session: HostedSession,
+  turnId: string,
+  carried: Set<string>,
+): void {
+  if (carried.size > 0)
+    (session.recoveryUnobserved ??= new Map()).set(turnId, carried);
+  else session.recoveryUnobserved?.delete(turnId);
 }
 
 async function recoverCancelledPreToolHook(
@@ -3643,11 +3653,7 @@ export function registerHostedHarnessSessionRoutes(
                   );
                   return false;
                 } finally {
-                  if (carried.size > 0)
-                    (session.recoveryUnobserved ??= new Map()).set(
-                      turn.turnId,
-                      carried,
-                    );
+                  persistRecoveryUnobserved(session, turn.turnId, carried);
                 }
                 if (runtime.kind === 'held') return 'held';
                 // The settle journaled durably, so retries re-derive the
@@ -6731,8 +6737,7 @@ export function registerHostedHarnessSessionRoutes(
               carryUnobservedInto: carried,
             });
           } finally {
-            if (carried.size > 0)
-              (session.recoveryUnobserved ??= new Map()).set(promptId, carried);
+            persistRecoveryUnobserved(session, promptId, carried);
           }
           broker = stopped.broker;
           unobserved = carried;
@@ -6898,6 +6903,20 @@ export function registerHostedHarnessSessionRoutes(
           } else {
             let landed = false;
             try {
+              // The happy path runs the sibling-answer fold between the
+              // settle and the terminal record; the compensating path owes
+              // it too — the kept admission replays a retried cancel
+              // without re-driving, so a call left unpaired here would
+              // stay unpaired forever.
+              await answerCommittedTurnCalls({
+                session: session.managed,
+                sessionId,
+                cwd: session.cwd,
+                promptId,
+                children: session.childAgents,
+                teams: session.teams,
+                messages: session.messages,
+              });
               await session.managed.sink.write(
                 record(session, sessionId, 'system', null, {
                   subtype: 'turn_result',

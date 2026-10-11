@@ -2971,6 +2971,124 @@ describe('Hosted Harness no-tool session', () => {
     }
   });
 
+  it('forgets a carried id a later pass positively witnesses settled', async () => {
+    // R10-1 (round 12): the carry write-back must delete a pruned-to-empty
+    // entry — an upsert-only write leaves the previous pass's stale set
+    // behind, and the next pass journals a positively witnessed stop as
+    // unobservable.
+    const inputId = await prewriteAutomationParkedWakeSession();
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      }),
+    });
+    try {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'binding',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        },
+      );
+      // Pass 1 faults the pre-cancel read, counting the id; pass 2
+      // positively witnesses the stop (pruning the carry empty) but its
+      // settle cannot verify the park; pass 3 reads the reclaimed record.
+      let blockSettleReads = false;
+      const reads: Array<() => Promise<{ state: string } | undefined>> = [
+        () =>
+          Promise.reject(new TypeError('Runtime Broker status lost to a 503')),
+        () => {
+          blockSettleReads = true;
+          return Promise.resolve({ state: 'settled' });
+        },
+        () => Promise.resolve(undefined),
+      ];
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+        () => (reads.shift() ?? (() => Promise.resolve(undefined)))() as never,
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      const original =
+        LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'harnessRunAuthorization',
+      ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+        if (blockSettleReads)
+          return {
+            status: 'blocked',
+            reason: 'missing_state',
+            message: 'Session Store answered 503',
+          } as never;
+        return original.call(this);
+      });
+      const session = {
+        managed,
+        automations: new HostedAutomationSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          key,
+        ),
+      } as never;
+      const drive = () =>
+        settleCrashedWakeTurnAftermath({
+          session,
+          sessionId: SESSION_ID,
+          cwd: state.root,
+          brokerOptions: { token: 'test', baseUrl: 'http://127.0.0.1:1' },
+          turnId: inputId,
+        });
+      const carry = () =>
+        (
+          session as unknown as {
+            recoveryUnobserved?: Map<string, Set<string>>;
+          }
+        ).recoveryUnobserved;
+      expect(await drive()).toBe('pending');
+      expect([...(carry()?.get(inputId) ?? [])]).toEqual(['ex-wake-1']);
+      expect(await drive()).toBe('pending');
+      // The positive witness pruned the carry; the session entry must be
+      // gone with it — an upsert-only write-back keeps the stale id.
+      expect(carry()?.has(inputId) ?? false).toBe(false);
+      blockSettleReads = false;
+      expect(await drive()).toBe('settled');
+      const toolResults = (await managed.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === inputId && entry.type === 'tool_result',
+      );
+      expect(toolResults).toHaveLength(1);
+      const response = toolResults[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('cancelled');
+      expect(String(response?.['error'])).toContain('cancelled with its owner');
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  });
+
   it('refuses a prompt retriably when the wake park probe read nothing', async () => {
     await prewriteAutomationParkedWakeSession();
     const repair = mockRepairBroker();
@@ -23147,6 +23265,193 @@ describe('Hosted Harness Runtime turn takeover', () => {
     },
     30_000,
   );
+
+  it('answers the committed sibling when the cancel drive compensates a lost fold', async () => {
+    // R12-1: the settle landed but the happy-path fold's sibling answer
+    // write failed, so the catch's compensating arm must re-run the fold
+    // before its terminal record — the kept admission replays a retried
+    // cancel without re-driving, so a call left unpaired there would stay
+    // unpaired forever.
+    domainEnablement.childRun = true;
+    domainEnablement.teams = true;
+    try {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      acquireSpy = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+        .mockImplementation(async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'binding',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+        '66666666-6666-4666-8666-666666666666',
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-shell/1',
+          captureBytes: 1024 * 1024,
+        })
+        .expect(200);
+      const clientId = created.body.clientId as string;
+      const originalWrite = ManagedSessionRecordSink.prototype.write;
+      let killed = false;
+      vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+        async function (this: ManagedSessionRecordSink, item) {
+          if (
+            !killed &&
+            item.type === 'tool_result' &&
+            JSON.stringify(item.message).includes('"team_create"')
+          ) {
+            killed = true;
+            throw new Error('Harness killed');
+          }
+          return originalWrite.call(this, item);
+        },
+      );
+      // A team call after the crash point never runs: it commits nothing.
+      const later = {
+        name: 'task_create',
+        callId: 'call-2',
+        args: { subject: 'Audit', description: 'a' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      const team = {
+        name: 'team_create',
+        callId: 'call-0',
+        args: { team_name: 'review' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      state.model.mockImplementationOnce(
+        async ({ toolTurn, signal }) =>
+          toolTurn!.execute(
+            [team, CALL, later],
+            [team, CALL, later].map((call) => ({
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            })),
+            'test-model',
+            signal,
+          ) as never,
+      );
+      const prompt = [{ type: 'text', text: 'team and a file' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: 10_000 },
+      );
+      vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
+      expect(
+        (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+          .status,
+      ).toBe(204);
+      // The stop proves quickly; the fold's sibling answer write fails
+      // once, so the first cancel reaches its compensating arm.
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+        state: 'settled',
+      });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+      const { server: replacement, loaded } = await loadReplacement(
+        true,
+        'hosted-workspace-shell/1',
+      );
+      expect(loaded.status).toBe(200);
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as { checkpointId: string; activationId: string };
+      let foldRefused = false;
+      vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+        async function (this: ManagedSessionRecordSink, item) {
+          if (
+            !foldRefused &&
+            item.type === 'tool_result' &&
+            JSON.stringify(item.message).includes('"team_create"')
+          ) {
+            foldRefused = true;
+            throw new Error('store refused the sibling answer');
+          }
+          return originalWrite.call(this, item);
+        },
+      );
+      const send = () =>
+        replacementHeaders(
+          supertest(replacement).post(
+            `/session/${SESSION_ID}/managed-runtime/cancel`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+          .send({
+            promptId: PROMPT_ID,
+            checkpointId: recovery.checkpointId,
+            activationId: recovery.activationId,
+          });
+      const cancelled = await send();
+      expect(cancelled.status).toBe(503);
+      expect(cancelled.body.code).toBe('managed_runtime_cancel_failed');
+      const retried = await send();
+      expect(retried.status).toBe(200);
+      expect(retried.body.accepted).toBe(true);
+      const transcript = await replacementHeaders(
+        supertest(replacement).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+      const sibling = (
+        transcript.body.events as Array<{
+          type: string;
+          data?: {
+            record?: {
+              type?: string;
+              message?: {
+                parts?: Array<{
+                  functionResponse?: { id?: string; response?: unknown };
+                }>;
+              };
+            };
+          };
+        }>
+      )
+        .filter(
+          (event) =>
+            event.type === 'managed_journal_event' &&
+            event.data?.record?.type === 'tool_result',
+        )
+        .flatMap((event) => event.data?.record?.message?.parts ?? [])
+        .find((part) => part.functionResponse?.id === 'call-0');
+      expect(sibling).toBeDefined();
+      expect(JSON.stringify(sibling?.functionResponse?.response)).toContain(
+        'committed its team change',
+      );
+      await replacementHeaders(
+        supertest(replacement).delete(`/session/${SESSION_ID}`),
+      );
+    } finally {
+      domainEnablement.teams = false;
+      domainEnablement.childRun = false;
+    }
+  }, 30_000);
 
   // H4e-b1: the bare load's resume reads only the round's journaled results.
   // A sibling the Runtime does not own that committed before the Harness
