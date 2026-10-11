@@ -7091,6 +7091,16 @@ export class Session implements SessionContext {
                       nextMessage,
                       preserveFullMessage,
                     );
+                    // A pre-send user cancel never moves the push counter,
+                    // so bindCancelledHistory's guard alone cannot see it.
+                    // The re-preserved prompt is user content that landed:
+                    // mark after addHistory so the basis snapshots it.
+                    if (
+                      preserveFullMessage &&
+                      this.#isUserPromptCancellation(pendingSend.signal)
+                    ) {
+                      this.#getCurrentChat().markLastTurnCancelled?.();
+                    }
                     if (
                       preserveFullMessage &&
                       restorePostAnswerNoticesAttached

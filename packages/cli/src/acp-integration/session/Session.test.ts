@@ -6447,6 +6447,32 @@ describe('Session', () => {
       expect(mockChat.markLastTurnCancelled).toHaveBeenCalledOnce();
     });
 
+    it('marks a cancelled pre-send preserve when the abort lands mid-preparation', async () => {
+      // The abort fires after the loop's entry guard (so the in-loop mark
+      // is skipped) but before the model request: the wrapper returns a
+      // null stream and the preserve path re-adds the user content.
+      mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
+      mockLlmClient.tryCompressChat.mockImplementationOnce(async () => {
+        await session.cancelPendingPrompt();
+        return {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+      });
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'cancel during preparation' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'cancelled' });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({ role: 'user' }),
+      );
+      expect(mockChat.markLastTurnCancelled).toHaveBeenCalledOnce();
+    });
+
     it.each([false, true])(
       'marks a pre-send admission cancel only with user intent (upgraded=%s)',
       async (upgraded) => {

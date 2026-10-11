@@ -3333,11 +3333,19 @@ export class LlmChat {
           // guard can compare the compressed prompt size. If the compressed
           // prompt is still too large to send, restore the pre-compression
           // state. The JSONL compression checkpoint is intentionally not
-          // written because the send is about to be rejected.
+          // written because the send is about to be rejected. The rollback
+          // setHistory clears the per-instance cancellation basis on the
+          // very "changed nothing" path this throw describes; carry it
+          // across like the compression rewrites above.
+          const cancellationReason = this.getLastTurnCancellationReason();
+          const confirmationId = this.getLastTurnCancellationConfirmationId();
           this.setHistory(
             historyBeforeHardRescue,
             completedToolCallIdsBeforeHardRescue,
           );
+          if (cancellationReason) {
+            this.markLastTurnCancelled(cancellationReason, confirmationId);
+          }
           // setHistory conservatively cleared loaded-skill tracking; the
           // restored bodies re-arm it on their next invoke.
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;

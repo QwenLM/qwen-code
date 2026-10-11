@@ -4123,6 +4123,29 @@ describe('LlmChat', async () => {
       expect(target.getHistoryForRecovery()).toEqual([]);
     });
 
+    it('keeps the cancellation mark when the hard-rescue rollback restores history', async () => {
+      const originalHistory: Content[] = [userText('x'.repeat(720_000))];
+      const { target } = recordingChat();
+      target.setHistory(originalHistory);
+      target.setLastPromptTokenCount(176_999);
+      target.markLastTurnCancelled();
+
+      mockCompressOnce(
+        compressed(180_000, 177_000, [
+          userText('still large summary'),
+          modelText('ack'),
+        ]),
+      );
+
+      await expect(
+        send('continue', 'prompt-id-rollback-keeps-cancel-mark', target),
+      ).rejects.toThrow(/compression status: COMPRESSED/i);
+
+      // The rolled-back array is a copy, so the basis must have been
+      // re-taken against it, not inherited from the pre-rescue history.
+      expect(target.isLastTurnCancelled()).toBe(true);
+    });
+
     it('rejects when compressed history is below hard but the pending user message pushes it over', async () => {
       const originalHistory = oversizedHistory();
       const { target, recordChatCompression } = recordingChat();
