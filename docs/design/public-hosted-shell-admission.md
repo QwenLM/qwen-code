@@ -17,13 +17,23 @@ The deployment flag `qwen.managed-agent.harness.workspace-shell-enabled`
 requires Workspace files and all their existing trusted local-process,
 Session-isolated Broker, mount, Session Store and Harness prerequisites.
 Approval mode must be `default` or `auto-edit`; `yolo`, missing, blank and
-unknown modes fail startup. The same mandatory mode is persisted per Session.
+unknown modes fail startup. This deployment mode is persisted for built-in
+`qwen-code` Workspace Sessions.
 
-New Workspace-bound Sessions, including empty creation and creation with input,
-pin `hosted-workspace-shell/1` when enabled, otherwise files/1. Unbound Sessions
+New Workspace-bound Sessions of the built-in `qwen-code` agent, including empty
+creation and creation with input, pin `hosted-workspace-shell/1` when enabled,
+otherwise files/1. Unbound Sessions
 and existing files Sessions retain their behavior. No caller profile selector,
 metadata override, schema migration, public /2 search profile, background Shell,
 Monitor or new credential mechanism is added.
+
+Stored AgentDefinition Sessions retain the profile and approval mode compiled
+from their pinned revision and the deployment allowlist. The Shell flag changes
+only the built-in agent's default profile selection; it does not override a
+stored definition. Every Shell Session still requires the Shell flag and valid
+asking approval for fresh execution. Harness load requests retain both the
+AgentDefinition identity and `suppressChildAgents` through child-Workspace,
+lifecycle and stopped-message copies.
 
 The inherited Shell/1 declaration includes Monitor, but public creation does
 not configure capture bytes or the H3 publication lane. Existing admission

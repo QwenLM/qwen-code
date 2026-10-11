@@ -79,6 +79,15 @@ function toError(error: unknown): Error {
 }
 
 /**
+ * First headroom poll of a memory-blocked episode; it doubles per blocked
+ * tick up to {@link MEMORY_BLOCKED_POLL_MAX_MS} and resets when a pump clears
+ * the blocked flag, so a minutes-long memory-pressure episode does not poll
+ * the store at a fixed 1 Hz.
+ */
+const MEMORY_BLOCKED_POLL_MS = 1_000;
+const MEMORY_BLOCKED_POLL_MAX_MS = 30_000;
+
+/**
  * Bounded asynchronous Harness scheduler for one long-lived service process.
  * It intentionally creates neither child processes nor Worker threads.
  */
@@ -92,6 +101,7 @@ export class EmbeddedHarnessScheduler {
   private started = false;
   private disposed = false;
   private memoryBlocked = false;
+  private memoryBlockedPollMs = MEMORY_BLOCKED_POLL_MS;
   private fatalError: Error | undefined;
 
   constructor(options: EmbeddedHarnessSchedulerOptions) {
@@ -143,14 +153,22 @@ export class EmbeddedHarnessScheduler {
       throw error;
     }
     if (this.started) {
-      void this.requestPump().catch(() => undefined);
+      // A genuinely new queued activation restarts the blocked poll cadence;
+      // an idempotent re-submit must not spend the backoff it did not cause.
+      void this.requestPump({ restartBlockedCadence: result.created }).catch(
+        () => undefined,
+      );
     }
     return result;
   }
 
   notifyCapacityChanged(): void {
     if (!this.started || this.disposed || this.fatalError) return;
-    void this.requestPump().catch(() => undefined);
+    // External triggers restart the blocked poll cadence: the backoff belongs
+    // to timer-driven polls, and a burst of submissions must not spend it.
+    void this.requestPump({ restartBlockedCadence: true }).catch(
+      () => undefined,
+    );
   }
 
   dispose(): void {
@@ -168,10 +186,12 @@ export class EmbeddedHarnessScheduler {
     }
   }
 
-  private requestPump(): Promise<void> {
+  private requestPump(options?: {
+    restartBlockedCadence?: boolean;
+  }): Promise<void> {
     const result = this.pumpTail.then(async () => {
       this.assertUsable();
-      await this.pump();
+      await this.pump(options);
     });
     this.pumpTail = result.catch((error: unknown) => {
       this.halt(toError(error));
@@ -179,7 +199,9 @@ export class EmbeddedHarnessScheduler {
     return result;
   }
 
-  private async pump(): Promise<void> {
+  private async pump(options?: {
+    restartBlockedCadence?: boolean;
+  }): Promise<void> {
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
 
@@ -190,15 +212,26 @@ export class EmbeddedHarnessScheduler {
           (candidate) => !this.active.has(activationKey(candidate.descriptor)),
         );
       if (candidates.length === 0) {
-        this.memoryBlocked = false;
+        this.clearMemoryBlocked();
         this.scheduleRecoveryWake();
         return;
       }
       if (!this.options.hasMemoryHeadroom()) {
         this.memoryBlocked = true;
+        // The restart is consumed here, inside the pump it was carried into:
+        // written ahead of the queue it would be spent by a pump that was
+        // already waiting.
+        if (options?.restartBlockedCadence === true) {
+          this.memoryBlockedPollMs = MEMORY_BLOCKED_POLL_MS;
+        }
+        // Entries of the pump cleared the armed recovery wake above, and no
+        // execute() completion is coming to re-arm it (zero or idle active
+        // runs) — queued work and reclaimable leases would otherwise wait
+        // forever.
+        this.armBlockedWake();
         return;
       }
-      this.memoryBlocked = false;
+      this.clearMemoryBlocked();
       const candidate = this.selectTenantFair(candidates)!;
       const lease = await this.store.claim(
         candidate.descriptor,
@@ -322,7 +355,39 @@ export class EmbeddedHarnessScheduler {
     }
   }
 
-  private scheduleRecoveryWake(): void {
+  private clearMemoryBlocked(): void {
+    this.memoryBlocked = false;
+    this.memoryBlockedPollMs = MEMORY_BLOCKED_POLL_MS;
+  }
+
+  /** Arms the wake a memory-blocked pump still needs and steps the backoff. */
+  private armBlockedWake(): void {
+    const wake = this.scheduleRecoveryWake(this.memoryBlockedPollMs);
+    this.memoryBlockedPollMs =
+      wake === 'lease'
+        ? MEMORY_BLOCKED_POLL_MS
+        : Math.min(this.memoryBlockedPollMs * 2, MEMORY_BLOCKED_POLL_MAX_MS);
+  }
+
+  private armRecoveryTimer(delay: number): void {
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      void this.requestPump().catch(() => undefined);
+    }, delay);
+    this.recoveryTimer.unref();
+  }
+
+  /**
+   * Arms the recovery wake for the next reclaimable lease expiry. A blocked
+   * pump passes its headroom poll cadence and takes the sooner lease wake
+   * only when the lease expires inside the base poll interval: reclaiming
+   * waits on headroom either way, so a later expiry is covered by the
+   * cadence. Returns what was armed — 'lease' restarts the blocked backoff,
+   * since a lease transition is a fresh chance to claim.
+   */
+  private scheduleRecoveryWake(
+    blockedPollMs?: number,
+  ): 'lease' | 'poll' | 'none' {
     const activeKeys = new Set(this.active.keys());
     const seenSessions = new Set<string>();
     let expiry: number | undefined;
@@ -341,16 +406,27 @@ export class EmbeddedHarnessScheduler {
           ? activation.lease!.expiresAt
           : Math.min(expiry, activation.lease!.expiresAt);
     }
-    if (expiry === undefined) return;
-    const delay = Math.min(
-      Math.max(0, expiry - this.store.getCurrentTime()),
-      2_147_483_647,
+    if (expiry === undefined) {
+      // No reclaimable lease; a blocked pump with queued work still polls
+      // for headroom, since nothing else re-runs it.
+      if (blockedPollMs === undefined) return 'none';
+      this.armRecoveryTimer(blockedPollMs);
+      return 'poll';
+    }
+    const remaining = expiry - this.store.getCurrentTime();
+    if (
+      blockedPollMs !== undefined &&
+      (remaining <= 0 || remaining > MEMORY_BLOCKED_POLL_MS)
+    ) {
+      this.armRecoveryTimer(blockedPollMs);
+      return 'poll';
+    }
+    // An already-expired lease is reclaimable now, but a zero delay would
+    // spin the pump while the worker stays memory-blocked — poll instead.
+    this.armRecoveryTimer(
+      Math.min(remaining <= 0 ? 1_000 : remaining, 2_147_483_647),
     );
-    this.recoveryTimer = setTimeout(() => {
-      this.recoveryTimer = undefined;
-      void this.requestPump().catch(() => undefined);
-    }, delay);
-    this.recoveryTimer.unref();
+    return 'lease';
   }
 
   private halt(error: Error): void {

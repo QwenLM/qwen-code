@@ -15,12 +15,19 @@
 （`QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED`）默认 false。启用时要求
 Workspace files 已开启，并满足其已有可信 local-process、Session 隔离 Broker、
 挂载、Session Store 与 Harness 条件。审批模式必须为 `default` 或 `auto-edit`；
-`yolo`、缺失、空白及未知模式在启动时拒绝。每个 Session 持久化同一强制审批模式。
+`yolo`、缺失、空白及未知模式在启动时拒绝。内置 `qwen-code` 的 Workspace Session
+持久化这个部署审批模式。
 
-开关开启时，新的 Workspace Session（空创建和带输入创建）固定使用
+开关开启时，内置 `qwen-code` agent 的新 Workspace Session（空创建和带输入创建）固定使用
 `hosted-workspace-shell/1`，否则使用 files/1。非绑定 Session 与既有 files
 Session 行为不变。不添加调用者 profile 选择、metadata 覆盖、数据库迁移、公开
 /2 搜索 profile、后台 Shell、Monitor 或新凭证机制。
+
+绑定已存储 AgentDefinition 的 Session 保留其固定 revision 和部署 allowlist 编译出的
+profile 与审批模式。Shell 开关只改变内置 agent 的默认 profile 选择，不覆盖已存储
+定义。所有 Shell Session 的新执行仍要求 Shell 开关开启和有效的询问审批模式。
+Harness load 在 child-Workspace、生命周期和停止消息的复制路径中，同时保留
+AgentDefinition identity 与 `suppressChildAgents`。
 
 已有 Shell/1 工具声明含 Monitor，但公开创建不配置 capture bytes 或 H3 publication
 通道。既有准入在审批和 Broker 执行前拒绝 Monitor 与后台命令。真实公开测试主动

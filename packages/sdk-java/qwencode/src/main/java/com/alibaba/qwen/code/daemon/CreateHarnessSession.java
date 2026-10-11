@@ -10,6 +10,7 @@ public final class CreateHarnessSession {
     private final ManagedSessionStoreConnection managedSessionStore;
     private final String toolProfile;
     private final Long approvalTimeoutMs;
+    private final Map<String, Object> agentDefinition;
     private final Map<String, Object> lineage;
     private final boolean suppressChildAgents;
     private final boolean childWorkspaces;
@@ -21,6 +22,7 @@ public final class CreateHarnessSession {
         this.managedSessionStore = builder.managedSessionStore;
         this.toolProfile = builder.toolProfile;
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
+        this.agentDefinition = builder.agentDefinition;
         this.lineage = builder.lineage;
         this.suppressChildAgents = builder.suppressChildAgents;
         this.childWorkspaces = builder.childWorkspaces;
@@ -53,6 +55,9 @@ public final class CreateHarnessSession {
         if (approvalTimeoutMs != null) {
             result.put("approvalTimeoutMs", approvalTimeoutMs);
         }
+        if (agentDefinition != null) {
+            result.put("agentDefinition", agentDefinition);
+        }
         if (lineage != null) {
             result.put("lineage", lineage);
         }
@@ -68,6 +73,7 @@ public final class CreateHarnessSession {
         private ManagedSessionStoreConnection managedSessionStore;
         private String toolProfile;
         private Long approvalTimeoutMs;
+        private Map<String, Object> agentDefinition;
         private Map<String, Object> lineage;
         private boolean suppressChildAgents;
         private boolean childWorkspaces;
@@ -80,6 +86,11 @@ public final class CreateHarnessSession {
          */
         public Builder childWorkspaces(boolean value) {
             this.childWorkspaces = value;
+            return this;
+        }
+
+        public Builder agentDefinition(Map<String, Object> value) {
+            this.agentDefinition = Map.copyOf(value);
             return this;
         }
 

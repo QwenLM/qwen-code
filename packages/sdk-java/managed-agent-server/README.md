@@ -37,10 +37,13 @@ The test-tree `SurfaceRegistry` names every mounted route, internal ones
 included, with its admission rule class; `SurfaceRegistryGateTest` fails any
 mounted route the registry lacks, so a new public or WebShell route needs both
 a spec operation and a registry entry ([actor-roles design](../../../docs/design/2026-10-07-managed-agent-actor-roles.md), D5).
-Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
-`1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
+Sessions created for the built-in `qwen-code` agent record the agent revision
+from `QWEN_MANAGED_AGENT_REVISION` (default `1`); a Session pinned to a stored
+definition records the revision it resolved at admission. `POST /v1/agents`,
+`GET /v1/agents/{id}` and
 `POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
-revisions; Sessions do not use them yet. Every response carries `X-Request-Id`, which error
+revisions; a Session pinned to one executes that stored revision (see "Stored
+agent execution" below). Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
 projection versions they were accepted with. They keep their Item and Part
 identity too, except after Harness recovery retracts output: the retracted
@@ -276,7 +279,19 @@ while its operations stay readable. Completed deletion permanently marks an exis
 private journal `DELETED`, clears its writer and recovery references, and fences
 new writes and recovery. Close and archive keep output pinned. Deletion does
 not physically erase the journal, events or resources; output collection stays
-disabled by default and requires the retention deployment gates.
+disabled by default and requires the retention deployment gates. With both
+`qwen.managed-agent.tool-publication.enabled` and
+`qwen.managed-agent.tool-publication.gc-enabled` true, collection also frees
+stream-capture bytes (background Shell and foreground leftovers): eligible
+`PUBLISHED` `MYSQL_INLINE` rows of the `managed-tool-result-{content,page,manifest}`
+kinds with no journal reference on a permanently retired Session are
+byte-dropped after the same deletion grace under a per-Session claim ledger
+(`qwen_managed_session_resource_collection`), keeping their identities with
+state `COLLECTED`. Reads of the retired Session stay fenced with
+`tool_output_session_retired` exactly as before; a workspace-recovery read
+that physically reaches a collected byte copy fails the named check
+`resource_collected` instead of the generic `resource_layout_unsupported` or
+`resource_corrupt` verdict a pre-V65 broker produces.
 
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this
@@ -496,8 +511,14 @@ Harness or Runtime Broker credentials.
 
 ### Public foreground Shell admission
 
+Stored AgentDefinition Sessions keep their compiled profile and approval mode;
+the Shell switch changes only the built-in agent's default profile selection.
+Every Shell Session still requires the switch and valid asking approval for
+fresh execution. Harness load copies retain the definition identity alongside
+`suppressChildAgents`.
+
 `QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED=true` selects the server-owned
-`hosted-workspace-shell/1` profile for newly created Workspace Sessions on both
+`hosted-workspace-shell/1` profile for newly created built-in `qwen-code` Workspace Sessions on both
 public REST and WebShell, including empty creation. It defaults to false and
 requires Workspace files plus its deployment prerequisites. Set
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` to `default` or `auto-edit`; Shell opt-in with
@@ -1113,3 +1134,11 @@ Do not recreate or move the directory, change `QWEN_HOME`, or modify retained ba
 Promotion increments mount revision once. Successful `prepare` and `promote` commits clear the migration's previous error code. Update the deployment's Workspace root and restart Broker/Harness with the original QWEN_HOME before opening admission. An old deployment mapping fails closed. New file Turns and undo use fresh Runtime identities. Source rows, messages, journal, keys and backup names remain unchanged. Failure preserves the fence; missing stop proof, unsupported profiles or drift require diagnosis. Reverse migration is a new verified operation at a higher revision.
 
 The target marker is the sole manifest exception and must match the copied source marker or the exact operation-pinned target marker. Do not hand-edit it. No online drain, directory copying, public migration route, Shell/MCP/Hook migration or source-lost recovery is provided. Uninitialized retained members without a verifiable frozen private definition are refused. Production Linux/MySQL acceptance evidence must be recorded separately from injected-identity tests.
+
+### Stored agent execution
+
+Sessions pin a stored AgentDefinition revision and digest at admission. `permission_policy` and `tools` select the Session's immutable approval mode and hosted tool profile. `model` accepts `{}` or `{ "id": "configured-model" }`; `instructions` accepts UTF-8 text up to 64 KiB. Skills, MCP servers, environment templates and per-definition approval timeouts remain unsupported and are refused explicitly.
+
+Set `QWEN_MANAGED_AGENT_DEFINITION_MODELS` to comma-separated IDs configured in the Harness's deployment `modelProviders`; it defaults to empty. Each ID must resolve to one configured provider route with deployment credentials. An absent or ambiguous route or unresolved credentials fails the Turn with `model_unavailable` before inference. Credentials never belong in definitions. Enable and configure the Managed Session Store for stored-definition execution; instructions are delivered as digest-addressed resource references and verified on load.
+
+`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` defaults to `hosted-workspace-files/1`. Before opting into `hosted-workspace-files/2`, drain old workers and upgrade every provisioner according to #13166. Empty permission policies inherit the deployment approval mode (default `yolo`); use `default` for deployments that require approval.
