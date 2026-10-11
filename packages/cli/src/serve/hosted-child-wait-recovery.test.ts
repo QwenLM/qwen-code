@@ -79,26 +79,6 @@ const broker = vi.hoisted(() => ({
   registerPublisher: vi.fn().mockResolvedValue('1'),
   fileHistory: vi.fn(),
 }));
-// H4e-b1: the team domains are not enabled for submission yet; the
-// interrupted-team-call cases commit team records ahead of enablement.
-vi.mock(
-  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
-      >();
-    return {
-      ...actual,
-      assertManagedSessionDomainEnabled: (
-        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-      ) => {
-        if (domain === 'team_state' || domain === 'team_task') return;
-        actual.assertManagedSessionDomainEnabled(domain);
-      },
-    };
-  },
-);
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {

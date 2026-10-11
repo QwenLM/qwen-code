@@ -175,6 +175,68 @@ describe('Managed transcript projection', () => {
     expect(new Set(messages.map((message) => message.id)).size).toBe(4);
   });
 
+  it('appends a strictly-newer tail while preserving existing event identity', () => {
+    const base = [
+      event(1, 'accepted'),
+      event(2, 'assistant_delta'),
+      event(3, 'assistant_delta'),
+    ];
+    const merged = mergeManagedEvents(base, [
+      event(4, 'assistant_delta'),
+      event(5, 'completed'),
+    ]);
+    expect(merged.map((item) => item.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(
+      merged.slice(0, 3).every((item, index) => item === base[index]),
+    ).toBe(true);
+  });
+
+  it('still reorders and deduplicates an overlapping or disordered tail', () => {
+    const merged = mergeManagedEvents(
+      [event(1, 'accepted'), event(3, 'assistant_delta')],
+      [
+        event(3, 'assistant_delta', { text: 'newer' }),
+        event(2, 'assistant_delta'),
+        event(4, 'completed'),
+      ],
+    );
+    expect(merged.map((item) => item.id)).toEqual([1, 2, 3, 4]);
+    expect(merged[2]?.data).toEqual({ text: 'newer' });
+  });
+
+  it('returns the current events unchanged for an empty incoming page', () => {
+    expect(
+      mergeManagedEvents([event(1, 'accepted'), event(2, 'completed')], []).map(
+        (item) => item.id,
+      ),
+    ).toEqual([1, 2]);
+    expect(mergeManagedEvents([], []).map((item) => item.id)).toEqual([]);
+  });
+
+  it('appends the first stream event onto an empty current list', () => {
+    expect(
+      mergeManagedEvents([], [event(1, 'accepted')]).map((item) => item.id),
+    ).toEqual([1]);
+  });
+
+  it('sorts an incoming page that is newer but internally disordered', () => {
+    expect(
+      mergeManagedEvents(
+        [event(1, 'accepted')],
+        [event(5, 'assistant_delta'), event(3, 'assistant_delta')],
+      ).map((item) => item.id),
+    ).toEqual([1, 3, 5]);
+  });
+
+  it('deduplicates an equal boundary id in favour of the incoming event', () => {
+    const merged = mergeManagedEvents(
+      [event(1, 'accepted'), event(3, 'assistant_delta')],
+      [event(3, 'assistant_delta', { text: 'newer' }), event(4, 'completed')],
+    );
+    expect(merged.map((item) => item.id)).toEqual([1, 3, 4]);
+    expect(merged[1]?.data).toEqual({ text: 'newer' });
+  });
+
   it('keeps approval updates out of the Turn being streamed', () => {
     const messages = managedEventsToMessages(
       [
