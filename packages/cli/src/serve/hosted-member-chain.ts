@@ -10,6 +10,7 @@ import {
   parseChildRun,
   type ChildSessionRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   parseSessionMessage,
   type SessionMessage,
@@ -355,6 +356,17 @@ export interface HostedRouteDetails {
   /** The continuation taken just before the one the send launched, which
    * never started. */
   readonly previousNeverStarted?: HostedNeverStarted;
+  /**
+   * The message's own delivery ended, or must end, with no receipt —
+   * cancelled before its handover, or rejected by its target — so it did
+   * not arrive, though its run did not prove it never started. `chain`
+   * says what a resend would meet: a chain that takes messages, one that
+   * has ended, or one stopping a continuation that has not started yet.
+   */
+  readonly deliveryFailed?: {
+    readonly state: 'cancelled' | 'rejected';
+    readonly chain: 'open' | 'ended' | 'settling';
+  };
 }
 
 export function hostedRouteDetails(
@@ -367,6 +379,8 @@ export function hostedRouteDetails(
     readonly kind: 'message' | 'continuation';
     readonly childRunId: string;
   },
+  /** The id a message route was committed under: its delivery is read. */
+  messageId?: string,
 ): HostedRouteDetails {
   const chains = new HostedChildChains(
     authority.extensionRecordsInDomain('child_run'),
@@ -384,6 +398,28 @@ export function hostedRouteDetails(
     route.kind === 'continuation'
       ? chains.previousContinuation(route.childRunId)
       : undefined;
+  // A run that never started says more than the cancel H4d-b gives its
+  // messages, so that note takes precedence. A message never handed over
+  // to a run that ended or is being stopped is one the relay cancels
+  // (H4d-b), so an answer written before that step already reads it so.
+  const sentState =
+    route.kind === 'message' &&
+    messageId !== undefined &&
+    reached !== undefined &&
+    reached.run.execution !== 'not_started_proven'
+      ? messages.find((message) => message.messageId === messageId)?.run
+          .delivery?.state
+      : undefined;
+  const delivery =
+    sentState === 'planned' &&
+    reached !== undefined &&
+    (isTerminalRunState(reached.run.state) || reached.stopRequested)
+      ? 'cancelled'
+      : sentState;
+  const view =
+    delivery === 'cancelled' || delivery === 'rejected'
+      ? hostedMemberView(chains, chains.root(route.childRunId))
+      : undefined;
   return {
     ...(member === undefined
       ? {}
@@ -393,6 +429,19 @@ export function hostedRouteDetails(
       : {}),
     ...(previous?.run.execution === 'not_started_proven'
       ? { previousNeverStarted: hostedNeverStarted(previous, messages) }
+      : {}),
+    ...((delivery === 'cancelled' || delivery === 'rejected') &&
+    view !== undefined
+      ? {
+          deliveryFailed: {
+            state: delivery,
+            chain: view.stoppingBeforeStart
+              ? ('settling' as const)
+              : isEndedMember(view)
+                ? ('ended' as const)
+                : ('open' as const),
+          },
+        }
       : {}),
   };
 }

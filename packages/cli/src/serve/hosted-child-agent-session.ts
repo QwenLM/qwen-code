@@ -568,7 +568,10 @@ export class HostedChildAgentSession {
             `Session message ${params.messageId} was sent with different evidence.`,
           );
         }
-        return this.routed({ kind: 'message', childRunId: message.childRunId });
+        return this.routed(
+          { kind: 'message', childRunId: message.childRunId },
+          params.messageId,
+        );
       }
       const continued = this.record(params.continuationRunId);
       if (continued !== undefined) {
@@ -722,7 +725,10 @@ export class HostedChildAgentSession {
           { domain: 'session_message', record: body },
           TRUSTED,
         );
-        return this.routed({ kind: 'message', childRunId: head.childRunId });
+        return this.routed(
+          { kind: 'message', childRunId: head.childRunId },
+          params.messageId,
+        );
       }
       if (head.stopReason !== 'completed' || head.stopRequested) {
         // A member is relaunched under a new name: a plain agent launch
@@ -801,8 +807,11 @@ export class HostedChildAgentSession {
       readonly kind: 'message' | 'continuation';
       readonly childRunId: string;
     },
-  >(route: Route): Route & HostedRouteDetails {
-    return { ...route, ...hostedRouteDetails(this.store.authority, route) };
+  >(route: Route, messageId?: string): Route & HostedRouteDetails {
+    return {
+      ...route,
+      ...hostedRouteDetails(this.store.authority, route, messageId),
+    };
   }
 
   /**

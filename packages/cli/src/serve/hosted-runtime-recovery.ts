@@ -554,7 +554,7 @@ function sentMessageText(
     const sent = { kind: 'message', childRunId: message.childRunId } as const;
     return hostedRouteAnswer(input.children, {
       ...sent,
-      ...hostedRouteDetails(input.session.authority, sent),
+      ...hostedRouteDetails(input.session.authority, sent, message.messageId),
     });
   }
   const continued = input.children?.record(callKey);

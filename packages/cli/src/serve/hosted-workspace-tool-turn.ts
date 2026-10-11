@@ -584,6 +584,21 @@ export function hostedRouteAnswer(
           : ` Member "${member.name}" has ended; ${own.cancelled ? 'if this work is still wanted, launch a new member under a new name for it' : 'for more work, launch a new member under a new name'}.`;
     return told + resend + previousNote(route);
   }
+  // A message whose delivery ended with no receipt did not arrive; what a
+  // resend meets depends on the chain now.
+  if (route.deliveryFailed !== undefined) {
+    const { state, chain } = route.deliveryFailed;
+    const told = `Message was queued for ${member === undefined ? `child agent ${task}` : `member "${member.name}" (task ${task})`}, but its delivery was ${state}, so it did not arrive.`;
+    const address =
+      member === undefined ? `task_id "${task}"` : `"${member.name}"`;
+    if (chain === 'open')
+      return `${told} Send it again with send_message to ${address} if it is still needed.`;
+    if (chain === 'settling')
+      return `${told} Its latest continuation is being stopped before it started; if that continuation ends without starting, send it again with send_message to ${address} if it is still needed.`;
+    return member === undefined
+      ? `${told} That child agent has ended; launch a new agent for this work if it is still needed.`
+      : `${told} Member "${member.name}" has ended; for more work, launch a new member under a new name.`;
+  }
   if (route.kind === 'message')
     return member === undefined
       ? hostedMessageToChildText(task)
@@ -599,6 +614,13 @@ export function hostedRouteAnswer(
   );
 }
 
+/** Whether a committed send reached its recipient as far as is known. */
+function hostedRouteArrived(route: HostedSentRoute): boolean {
+  return (
+    route.ownNeverStarted === undefined && route.deliveryFailed === undefined
+  );
+}
+
 /** H4e-b2: one broadcast recipient's line in the call's answer. */
 function hostedRouteLine(
   children: HostedChildAgentSession,
@@ -608,9 +630,11 @@ function hostedRouteLine(
   const task = children.taskIdOf(route.childRunId);
   const own = route.ownNeverStarted;
   if (route.kind === 'message')
-    return own === undefined
-      ? `queued for its running task ${task}.`
-      : `queued for task ${task}, which ${neverStartedPhrase(own)}, so the message did not arrive.`;
+    return own !== undefined
+      ? `queued for task ${task}, which ${neverStartedPhrase(own)}, so the message did not arrive.`
+      : route.deliveryFailed !== undefined
+        ? `queued for task ${task}, but its delivery was ${route.deliveryFailed.state}, so the message did not arrive.${route.deliveryFailed.chain === 'ended' ? ' It has ended and takes no messages.' : ''}`
+        : `queued for its running task ${task}.`;
   return (
     (own === undefined
       ? `had completed; continued as task ${task}.`
@@ -626,7 +650,8 @@ export interface HostedBroadcastRecipient {
   readonly name: string | undefined;
   /** The roster entry's run the recipient's chain started from. */
   readonly rootChildRunId: string;
-  /** False when the run it reached proved it never started. */
+  /** False when the run it reached proved it never started, or the
+   * message's delivery ended with no receipt. */
   readonly arrived: boolean;
   readonly text: string;
 }
@@ -667,14 +692,18 @@ export function hostedBroadcastCommitted(input: {
       broadcastRunId(input.promptId, input.callId, position),
     );
     let sent:
-      | { kind: 'message'; childRunId: string }
+      | { kind: 'message'; childRunId: string; messageId: string }
       | {
           kind: 'continuation';
           childRunId: string;
           predecessorChildRunId: string;
         };
     if (message?.direction === 'outbound')
-      sent = { kind: 'message', childRunId: message.childRunId };
+      sent = {
+        kind: 'message',
+        childRunId: message.childRunId,
+        messageId: message.messageId,
+      };
     else if (continued?.predecessorChildRunId)
       sent = {
         kind: 'continuation',
@@ -684,14 +713,18 @@ export function hostedBroadcastCommitted(input: {
     else continue;
     const route = {
       ...sent,
-      ...hostedRouteDetails(input.authority, sent),
+      ...hostedRouteDetails(
+        input.authority,
+        sent,
+        sent.kind === 'message' ? sent.messageId : undefined,
+      ),
     };
     const rootChildRunId = chains.root(route.childRunId);
     found.push({
       position,
       name: hostedTeamMembership(teams, rootChildRunId)?.name,
       rootChildRunId,
-      arrived: route.ownNeverStarted === undefined,
+      arrived: hostedRouteArrived(route),
       text: hostedRouteLine(input.children, route),
     });
   }
@@ -3663,8 +3696,8 @@ export class HostedWorkspaceToolTurn {
         return answer(`Team "${team.name}" has no members yet.`, true);
       const lines: string[] = [];
       // Sent: the call committed a send to the member. Arrived: that send
-      // did not reach a run that proved it never started, which only a
-      // replay can find.
+      // did not reach a run that proved it never started, nor did its
+      // delivery fail, which only a replay can find.
       let sent = 0;
       let arrived = 0;
       // A cancelled Turn sends to no further member: each send may launch
@@ -3689,7 +3722,7 @@ export class HostedWorkspaceToolTurn {
         );
         if (route.kind !== 'refused') {
           sent += 1;
-          if (route.ownNeverStarted === undefined) arrived += 1;
+          if (hostedRouteArrived(route)) arrived += 1;
         }
         lines.push(`- ${member.name}: ${hostedRouteLine(children, route)}`);
       }
@@ -3702,7 +3735,7 @@ export class HostedWorkspaceToolTurn {
       return answer(
         arrived === team.members.length
           ? `Message sent to every member of team "${team.name}". There is no inline reply: each member answers through its result notification or a message to you.\n${lines.join('\n')}`
-          : `Message sent to ${sent} of ${team.members.length} members of team "${team.name}"${arrived < sent ? `, and ${sent - arrived} of those runs never started, so it did not arrive there` : ''}${cancelled ? `; the turn was cancelled before the rest` : ''}. Send it by name to any member below that did not get it and still needs it.\n${lines.join('\n')}`,
+          : `Message sent to ${sent} of ${team.members.length} members of team "${team.name}"${arrived < sent ? `, but it did not arrive at ${sent - arrived} of them` : ''}${cancelled ? `; the turn was cancelled before the rest` : ''}. Send it by name to any member below that did not get it and still needs it.\n${lines.join('\n')}`,
         false,
       );
     }

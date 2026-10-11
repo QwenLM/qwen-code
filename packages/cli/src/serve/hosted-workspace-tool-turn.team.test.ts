@@ -1997,7 +1997,7 @@ it('replays a broadcast whose recipients never started as not reached', async ()
     call('send_message', { to: '*', message: 'all' }, 'call-all'),
   ]);
   expect(replayed).toContain(
-    'Message sent to 2 of 2 members of team \\"review\\", and 2 of those runs never started, so it did not arrive there. Send it by name to any member below that did not get it and still needs it.',
+    'Message sent to 2 of 2 members of team \\"review\\", but it did not arrive at 2 of them. Send it by name to any member below that did not get it and still needs it.',
   );
   expect(replayed).toContain(
     `- alice: queued for task ${children.taskIdOf('prompt:call-a')}, which never started (creation_failed), so the message did not arrive.`,
@@ -2207,5 +2207,247 @@ it('answers a replayed message to a member that never started as ended', async (
     ]),
   ).toContain(
     `Message was queued for member \\"alice\\" as task ${children.taskIdOf('prompt:call-alice')}, which never started (creation_failed), so this message did not arrive. Member \\"alice\\" has ended; for more work, launch a new member under a new name.`,
+  );
+});
+
+/** A member that took a message and then was stopped, as H4f does it. */
+async function stopAttached(childRunId: string): Promise<void> {
+  await children.dispatchStarted(childRunId, {
+    dispatchId: `dispatch-${childRunId}`,
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach(childRunId, `session-${childRunId}`);
+  await children.requestStop(childRunId);
+  await children.settleCancelled(childRunId, {
+    started: true,
+    childSessionId: `session-${childRunId}`,
+  });
+}
+
+const relay = () =>
+  new HostedSessionMessageSession(
+    { authority: session.authority, resources: session.resources },
+    sessionKey,
+    children,
+    undefined,
+  );
+
+for (const outcome of ['cancelled', 'rejected'] as const)
+  it(`recovers a broadcast whose message to a started member was ${outcome} as not reached`, async () => {
+    const turn = createTurn({ messages: true });
+    await execute(turn, [
+      call('team_create', { team_name: 'review' }, 'call-team'),
+    ]);
+    await execute(turn, [member('alice', 'call-alice')]);
+    await execute(turn, [member('bob', 'call-bob')]);
+    await journalCall('call-all', { to: '*', message: 'wrap up' });
+    // The broadcast queued its message for running alice, then the Harness
+    // died before bob and before the answer.
+    const messageId = broadcastMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-all',
+      position: 1,
+    });
+    await children.sendToChild({
+      taskId: children.taskIdOf('prompt:call-alice'),
+      text: 'wrap up',
+      messageId,
+      continuationRunId: broadcastRunId('prompt', 'call-all', 1),
+      executionCallId: 'prompt:call-all',
+      closing: false,
+    });
+    // alice was stopped before the message was read, so the relay ended
+    // its delivery with no receipt.
+    if (outcome === 'rejected') {
+      await children.dispatchStarted('prompt:call-alice', {
+        dispatchId: 'dispatch-prompt:call-alice',
+        runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+      });
+      await children.attach('prompt:call-alice', 'session-prompt:call-alice');
+      await relay().handover(messageId, 'session-prompt:call-alice');
+      await relay().settle(messageId, 'rejected');
+      await children.requestStop('prompt:call-alice');
+      await children.settleCancelled('prompt:call-alice', {
+        started: true,
+        childSessionId: 'session-prompt:call-alice',
+      });
+    } else {
+      await relay().settle(messageId, 'cancelled');
+      await stopAttached('prompt:call-alice');
+    }
+    const answer = await recoveredAnswer('call-all');
+    expect(answer).toContain(
+      `The broadcast was interrupted after it was sent to 1 member.\\n- alice: queued for task ${children.taskIdOf('prompt:call-alice')}, but its delivery was ${outcome}, so the message did not arrive.`,
+    );
+    expect(answer).not.toContain('do not send it again');
+    expect(answer).toContain(
+      'It did not reach: bob. Send to those members by name if they still need it.',
+    );
+    expect(answer).toContain(
+      'It did not reach alice, which has ended and cannot take it.',
+    );
+  });
+
+it('answers a replayed send by name whose message was cancelled', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'hi' }, 'call-hi'),
+  ]);
+  await relay().settle(
+    sessionMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-hi',
+    }),
+    'cancelled',
+  );
+  await stopAttached('prompt:call-alice');
+  expect(
+    await execute(createTurn({ messages: true }), [
+      call('send_message', { to: 'alice', message: 'hi' }, 'call-hi'),
+    ]),
+  ).toContain(
+    `Message was queued for member \\"alice\\" (task ${children.taskIdOf('prompt:call-alice')}), but its delivery was cancelled, so it did not arrive. Member \\"alice\\" has ended; for more work, launch a new member under a new name.`,
+  );
+});
+
+it('recovers a send by task id to a plain child whose message was cancelled', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call(
+      'agent',
+      { description: 'plain task', prompt: 'review the change' },
+      'call-plain',
+    ),
+  ]);
+  await journalCall('call-hi', {
+    task_id: children.taskIdOf('prompt:call-plain'),
+    message: 'hi',
+  });
+  const messageId = sessionMessageId({
+    senderSessionId: sessionKey.sessionId,
+    turnId: 'prompt',
+    callId: 'call-hi',
+  });
+  await children.sendToChild({
+    taskId: children.taskIdOf('prompt:call-plain'),
+    text: 'hi',
+    messageId,
+    continuationRunId: 'prompt:call-hi',
+    executionCallId: 'prompt:call-hi',
+    closing: false,
+  });
+  await relay().settle(messageId, 'cancelled');
+  await stopAttached('prompt:call-plain');
+  expect(await recoveredAnswer('call-hi')).toContain(
+    `Message was queued for child agent ${children.taskIdOf('prompt:call-plain')}, but its delivery was cancelled, so it did not arrive. That child agent has ended; launch a new agent for this work if it is still needed.`,
+  );
+});
+
+const sendToKey = (callId: string) =>
+  sessionMessageId({
+    senderSessionId: sessionKey.sessionId,
+    turnId: 'prompt',
+    callId,
+  });
+
+it('answers a replayed send whose message failed by what a resend would meet', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  const replay = (callId: string, to: string, message: string) =>
+    execute(createTurn({ messages: true }), [
+      call('send_message', { to, message }, callId),
+    ]);
+  // alice still runs: her message's delivery failed, so it is sent again.
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'one' }, 'call-a'),
+  ]);
+  await relay().settle(sendToKey('call-a'), 'cancelled');
+  expect(await replay('call-a', 'alice', 'one')).toContain(
+    'but its delivery was cancelled, so it did not arrive. Send it again with send_message to \\"alice\\" if it is still needed.',
+  );
+  // bob failed while his message was still waiting for its handover: the
+  // relay will cancel it, so the answer already reads it so.
+  await execute(turn, [
+    call('send_message', { to: 'bob', message: 'two' }, 'call-b'),
+  ]);
+  await children.dispatchStarted('prompt:call-bob', {
+    dispatchId: 'dispatch-prompt:call-bob',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach('prompt:call-bob', 'session-prompt:call-bob');
+  await children.settleFailed('prompt:call-bob', {
+    stopReason: 'child_failed',
+    reason: null,
+    started: true,
+  });
+  expect(await replay('call-b', 'bob', 'two')).toContain(
+    'but its delivery was cancelled, so it did not arrive. Member \\"bob\\" has ended; for more work, launch a new member under a new name.',
+  );
+});
+
+it('answers a message to a continuation stopped before it started as settling', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'work' }, 'call-1'),
+  ]);
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'more' }, 'call-2'),
+  ]);
+  await children.requestStop('prompt:call-1');
+  expect(
+    await execute(createTurn({ messages: true }), [
+      call('send_message', { to: 'alice', message: 'more' }, 'call-2'),
+    ]),
+  ).toContain(
+    'but its delivery was cancelled, so it did not arrive. Its latest continuation is being stopped before it started; if that continuation ends without starting, send it again with send_message to \\"alice\\" if it is still needed.',
+  );
+});
+
+it('replays a broadcast whose message to a member failed as not arrived there', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  await execute(turn, [
+    call('send_message', { to: '*', message: 'all' }, 'call-all'),
+  ]);
+  await relay().settle(
+    broadcastMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-all',
+      position: 1,
+    }),
+    'cancelled',
+  );
+  await stopAttached('prompt:call-alice');
+  const replayed = await execute(createTurn({ messages: true }), [
+    call('send_message', { to: '*', message: 'all' }, 'call-all'),
+  ]);
+  expect(replayed).toContain(
+    'Message sent to 2 of 2 members of team \\"review\\", but it did not arrive at 1 of them.',
+  );
+  expect(replayed).toContain(
+    `- alice: queued for task ${children.taskIdOf('prompt:call-alice')}, but its delivery was cancelled, so the message did not arrive. It has ended and takes no messages.`,
+  );
+  expect(replayed).toContain(
+    `- bob: queued for its running task ${children.taskIdOf('prompt:call-bob')}.`,
   );
 });
