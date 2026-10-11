@@ -6872,6 +6872,67 @@ describe('Session', () => {
       );
     });
 
+    it('keeps a fresh turn rewindable when it is cancelled before the send', async () => {
+      // A fresh turn's mark used to be delegated to the send
+      // (llm-chat.ts markApiHistoryPrompt), so a cancellation arriving
+      // before the send left the pushed history entry unmarked — the turn
+      // stayed unrewindable for the rest of the session (R1-3).
+      let releaseCompression!: () => void;
+      const compressionGate = new Promise<void>((resolve) => {
+        releaseCompression = resolve;
+      });
+      mockLlmClient.tryCompressChat.mockImplementation(async () => {
+        await compressionGate;
+        return {
+          originalTokenCount: 1,
+          newTokenCount: 1,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+      });
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await vi.waitFor(() =>
+        expect(mockLlmClient.tryCompressChat).toHaveBeenCalled(),
+      );
+      // Cancel while the turn is still in pre-send compression: the send is
+      // never reached, so the send-path mark never runs either.
+      await session.cancelPendingPrompt();
+      releaseCompression();
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+
+      expect(mockChat.addHistory).toHaveBeenCalled();
+      const [pushedEntry] = vi.mocked(mockChat.addHistory).mock.calls[0]!;
+      const promptId = getApiHistoryPromptId(pushedEntry);
+      expect(promptId).toMatch(/^test-session-id########\d+$/);
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'hello',
+        undefined,
+        undefined,
+        promptId,
+        undefined,
+      );
+
+      // The recorder boundary and the file snapshot exist for this turn;
+      // with the entry marked at push time, the cut point resolves instead
+      // of refusing for the rest of the session.
+      mockChatRecordingService.getRewindTurnIndex.mockImplementation(
+        (id: string) => (id === promptId ? 0 : -1),
+      );
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([pushedEntry]);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue([
+        {
+          promptId,
+          timestamp: new Date('2026-10-11T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      expect(session.getRewindCutPoint(promptId!)).toBe(0);
+    });
+
     it('rejects (accepted:false) when a prompt is already in flight', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue([
         { role: 'user', parts: [{ text: 'unanswered' }] },
@@ -23289,10 +23350,9 @@ describe('Session', () => {
           stopReason: 'cancelled',
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-        expect(mockChat.addHistory).toHaveBeenCalledWith({
-          role: 'user',
-          parts: expect.any(Array),
-        });
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({ role: 'user' }),
+        );
         expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -23376,10 +23436,9 @@ describe('Session', () => {
         // The send never went out; the cancelled user turn was restored to
         // history and no token-limit diagnostic was emitted.
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-        expect(mockChat.addHistory).toHaveBeenCalledWith({
-          role: 'user',
-          parts: expect.any(Array),
-        });
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({ role: 'user' }),
+        );
         expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -30027,10 +30086,12 @@ describe('Session', () => {
           }),
         ).resolves.toEqual({ stopReason: 'cancelled' });
 
-        expect(mockChat.addHistory).toHaveBeenCalledWith({
-          role: 'user',
-          parts: [{ text: 'Expanded prompt' }],
-        });
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            role: 'user',
+            parts: [{ text: 'Expanded prompt' }],
+          }),
+        );
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(finishedSpy).toHaveBeenCalledTimes(1);
       });

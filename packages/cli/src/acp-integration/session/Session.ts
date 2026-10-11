@@ -6765,10 +6765,15 @@ export class Session implements SessionContext {
               ]);
             }
 
+            // Mark unconditionally: a fresh turn's send-path mark
+            // (llm-chat.ts markApiHistoryPrompt) never runs when the turn
+            // is aborted or cancelled before the send, yet the loop-top
+            // abort and #preserveUnsentMessageHistory still push
+            // `nextMessage` into model history — unmarked, it would stay
+            // unrewindable for the rest of the session. markApiHistoryPrompt
+            // ignores non-string ids, so this cannot double-mark.
             let nextMessage: Content | null = { role: 'user', parts };
-            if (!isFreshUserTurn) {
-              markApiHistoryPrompt(nextMessage, historyPromptId);
-            }
+            markApiHistoryPrompt(nextMessage, historyPromptId);
             let turnCount = 0;
             let restorePostAnswerNoticesAttached = false;
             const toolLoopState = createDaemonToolLoopState(
