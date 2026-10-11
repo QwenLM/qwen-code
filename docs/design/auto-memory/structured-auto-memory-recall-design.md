@@ -221,8 +221,10 @@ close budget, but that flush is best-effort: the cache-safe slot it reads is
 process-global, so another session capturing the slot first drops it silently.
 Compaction — which the warning-tier condition only makes less likely, since the
 token-independent screenshot trigger and a forced `/compress` both compact below
-that tier —, `/clear`, `/resume`, `/branch`, process exit and a close flush that
-lost the shared cache-safe slot to another session do not flush: up to N skipped
+that tier —, `/clear`, `/resume`, `/branch`, process exit, a close flush that
+lost the shared cache-safe slot to another session, and a close flush whose own
+budget expired while it waited for that slot (the run is abandoned rather than
+left to fork after the close tore its Config down) do not flush: up to N skipped
 turns are lost there, and a switch drops both sessions' skip state. The window
 bound is checked at skip time only, so a long following turn can still push a
 skipped turn out of the tail. These losses are what the paired runs must

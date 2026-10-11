@@ -1499,8 +1499,8 @@ export class MemoryManager {
    * slot, then extracts the pending snapshot unless it went stale or the run
    * outlived `deadline` (the creating caller's budget, which bounds the run
    * itself, not only that caller's wait), and settles the cadence entry exactly
-   * once no matter which caller timed out. Never rejects, so a boundary always
-   * gets a boolean.
+   * once whenever it does run. A run abandoned for its deadline leaves the
+   * entry pending instead. Never rejects, so a boundary always gets a boolean.
    */
   private async runPendingExtractFlush(
     sessionId: string,
