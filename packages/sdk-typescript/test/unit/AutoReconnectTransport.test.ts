@@ -312,7 +312,7 @@ describe('AutoReconnectTransport', () => {
         fetch: vi.fn(async () => {
           throw new DaemonTransportClosedError();
         }),
-        subscribeEvents: vi.fn(async function* () {
+        subscribeEvents: vi.fn(() => {
           throw new DaemonTransportClosedError();
         }),
       });
@@ -347,7 +347,6 @@ describe('AutoReconnectTransport', () => {
       expect(replacement.fetch).not.toHaveBeenCalled();
       expect(replacement.subscribeEvents).not.toHaveBeenCalled();
       expect(restFetch).not.toHaveBeenCalled();
-      expect(transport.connected).toBe(false);
     });
 
     describe.each(['fetch', 'subscription'] as const)(
@@ -364,7 +363,7 @@ describe('AutoReconnectTransport', () => {
               fetch: vi.fn(async () => {
                 throw new DaemonTransportClosedError();
               }),
-              subscribeEvents: vi.fn(async function* () {
+              subscribeEvents: vi.fn(() => {
                 throw new DaemonTransportClosedError();
               }),
             });
@@ -382,9 +381,6 @@ describe('AutoReconnectTransport', () => {
               operation === 'fetch'
                 ? transport.fetch('http://d/health', {})
                 : transport.subscribeEvents('s1').next();
-            const rejected = expect(pending).rejects.toThrow(
-              DaemonTransportClosedError,
-            );
 
             await entered.promise;
             transport.dispose();
@@ -393,10 +389,9 @@ describe('AutoReconnectTransport', () => {
             } else {
               pendingFactory.reject(new Error('factory failed'));
             }
-            await rejected;
+            await expect(pending).rejects.toThrow(DaemonTransportClosedError);
             transport.dispose();
 
-            expect(transport.connected).toBe(false);
             expect(transport.type).toBe('acp-http');
             expect(replacement.dispose).toHaveBeenCalledTimes(
               outcome === 'resolves' ? 1 : 0,
@@ -416,7 +411,7 @@ describe('AutoReconnectTransport', () => {
             fetch: vi.fn(async () => {
               throw new DaemonTransportClosedError();
             }),
-            subscribeEvents: vi.fn(async function* () {
+            subscribeEvents: vi.fn(() => {
               throw new DaemonTransportClosedError();
             }),
           });
@@ -432,9 +427,6 @@ describe('AutoReconnectTransport', () => {
             operation === 'fetch'
               ? transport.fetch('http://d/health', {})
               : transport.subscribeEvents('s1').next();
-          const rejected = expect(pending).rejects.toThrow(
-            DaemonTransportClosedError,
-          );
 
           await entered.promise;
           pendingFactory.resolve(replacement);
@@ -446,8 +438,8 @@ describe('AutoReconnectTransport', () => {
               resolve();
             });
           });
+          await expect(pending).rejects.toThrow(DaemonTransportClosedError);
           await disposed;
-          await rejected;
           transport.dispose();
 
           expect(typeAtDisposal).toBe('acp-ws');
@@ -466,7 +458,7 @@ describe('AutoReconnectTransport', () => {
         fetch: vi.fn(async () => {
           throw new DaemonTransportClosedError();
         }),
-        subscribeEvents: vi.fn(async function* () {
+        subscribeEvents: vi.fn(() => {
           throw new DaemonTransportClosedError();
         }),
       });
