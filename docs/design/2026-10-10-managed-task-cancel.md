@@ -88,8 +88,11 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
    - No TypeScript change is needed: the existing `requestStop` is replay-safe (an already-set flag is a no-op), and a terminal run refuses the request.
 
 5. **A bounded delivery parks; a parked cancel only reconciles.**
-   - A live run whose request is still not visible retries with the dispatch backoff, up to 16 attempts. With the 1 s to 1 min defaults the 15 waits add up to about ten minutes.
-   - The budget counts claims (the operation's claim generation), not completed retries, and a delivery renews its lease every third of the lease while it runs. An attempt that hangs past the lease (for example on a cold Harness load) is therefore neither re-claimed underneath itself nor able to escape the budget; a claim past the budget parks on the record without sending.
+   - A live run whose request is still not visible retries with the dispatch backoff, up to 16 attempts. With the 1 s to 1 min defaults the 15 waits add up to about ten minutes. That is the whole bound when attempts fail fast: a real-stack run measured 608 s from admission to parking. Each attempt also has a deadline (see the send below), so at the default timeouts the bound is about an hour and a half if every attempt hangs.
+   - The budget counts claims (the operation's claim generation), not completed retries. A delivery renews its lease every third of the lease while it runs, so an attempt slower than the lease (for example on a cold Harness load) is not re-claimed underneath itself.
+   - The send runs on its own thread, and the delivery waits for it at most five minutes, or four Harness request timeouts when that is longer (`deadlineFor`). After that the send counts as an unproven outcome: the delivery reads the record, then retries or parks, and its lease renewal stops. So a send that never returns cannot hold the claim past the budget. The real-stack run found such a send: a client close stuck behind a reader on a half-open Harness stream.
+   - An abandoned send may still land later. The record judges it like any lost reply.
+   - A claim past the budget parks on the record without sending.
    - After that the operation becomes `recovery_blocked` with `task_cancel_unconfirmed`, `java_durable`, `blocked`.
    - The Harness's own refusals (`hosted_turn_recovery_required` while the parent waits on recovery, `hosted_children_unavailable`) are not proof either way, so they spend the same budget; for that window the open cancel holds the Session's operation slot, as the contract says an open cancel does.
    - A `failed` cancel is terminal but keeps the contract's `blocked` delivery state, so its `available_at` moves to the maximum: no scan of the blocked index range reads it again.
@@ -164,12 +167,14 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
   - the contract's state fields per outcome, under the claim, and a failed cancel leaving the blocked scan range for good;
   - the relay's evidence on real SQL: only a cancel that took effect on the Turn leaves `turn.cancel.requested`, one admitted on an ended Turn leaves nothing, and the space-carrying internal key round-trips;
   - the stop state read by the record's primary key from its committed body.
-- **Delivery** (`TaskCancelCoordinatorTest`, 10 tests):
+- **Delivery** (`TaskCancelCoordinatorTest`, 12 tests):
   - completion from the record, and coalescing without a send;
   - `task_already_settled` without a send;
   - a refusal and a lost reply judged by the record;
   - the budgeted retry, then the parking, and a claim past the budget parking without a send;
   - a slow delivery renewing its lease;
+  - a send that never returns: abandoned at the attempt deadline, the claim retries and stops renewing, then parks at the budget;
+  - the attempt deadline at the default request timeout and under a longer one;
   - a kind without a cancel path;
   - parked reconciliation that never re-sends, and one that cannot read the record waiting a whole recheck.
 - **Relay** (`ChildResultRelayTest`, 9 new tests):
@@ -189,18 +194,33 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
   - `ManagedAgentApiContractTest` serves both routes: `202`, replay, cross-surface replay, conflict, action refusal, `400` (including an unknown WebShell field and an overlong key answering `invalid_idempotency_key`), `404`, the tenant filter's `403`, and the operation read-back carrying `task_id`.
   - `PlannedTaskContractTest` now pins both routes as `partial` and checks the `requestId` instances.
   - `SurfaceRegistry` gains both routes under a new `TASK_OPERATOR` rule class, which `SurfaceAdmissionAcceptanceTest` probes on both surfaces: `404` below read, `403 task_forbidden` for a reader, and an OPERATOR or owner-rank caller admitted to the route's own `409`. The same suite pins that a retained key never bypasses current access: the admitting OPERATOR replays, then gets `403 task_forbidden` once demoted to reader and `404 session_not_found` once the Session is deleted.
+- **Real stack** (after the first change merged, [results on #13746](https://github.com/QwenLM/qwen-code/issues/13746#issuecomment-6100505354)):
+  - The stack: the packaged chain with a live Hosted Harness, real child Sessions, a scripted model, and fault-injecting proxies in front of the Session Store and the Harness.
+  - The orderings it ran:
+    - a lost cancel reply;
+    - the Harness killed when the cancel arrived, and after the stop commit;
+    - 503s until the budget parked;
+    - a cancel racing the child's completion;
+    - a child holding a queued session message;
+    - the parent's close racing a cancel;
+    - the WebShell route.
+  - Findings:
+    - A half-open Harness stream hung the delivery. `HarnessEventStream.close()` waited on the lock its blocked reader held, which wedged the generation adoption's client close, and the attempt renewed its lease forever. `close()` no longer takes that lock (`HarnessEventStreamCloseTest`), and the attempt deadline bounds any other send that hangs.
+    - A close admitted right after a cancel does not stop the child physically. See Follow-up work.
 - **Not run:**
-  - a product-stack run with a live Hosted Harness and a real child Session;
-  - the #12380 Stage F fault round for this kind (lost cancel reply, cancel during settlement, cancel racing the parent close, cancel after the owner is gone). The unit suites above cover each of those orderings against the recorded control-plane calls, not on a real stack.
+  - a cancel after the owner is gone;
+  - the minted-but-no-Turn window: on the real stack a refused child create still produced a Turn, so only the unit tests reach it.
 - **Shared with the relay, not changed here:** delivery reaches the parent through the same Hosted attachment the child result relay uses. Whatever stops that path (a parent whose creator lost the Workspace grants its execution needs, or a Session another process still holds attached) stops the relay's own commits the same way, and a cancel then parks after its budget.
 
 ## Follow-up work
 
-| Item                    | Scope                                                                                                                                                                                                                            |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H3 kinds                | When `background_shell` and `monitor` enable: Shell settles `stop_requested` after its request (the publisher settles `exited` today), Monitor gains a stop request, and both join `CANCELLABLE_TASK_KINDS` with a delivery arm. |
-| Workflow, automation    | With the workflow runtime (#13803) and H6 per_run: a stop request on their records, then the same delivery and stop arms.                                                                                                        |
-| Channel delivery cancel | With H5's public mutation routes: reuse this slice's operation model (decision 10).                                                                                                                                              |
-| Child output            | Link a child task to its child Session, or relay its output as task events behind `read_output`.                                                                                                                                 |
-| WebShell                | A task panel with a cancel control, and client methods for the task routes.                                                                                                                                                      |
-| Stage F                 | The product-stack fault round named under Validation.                                                                                                                                                                            |
+| Item                    | Scope                                                                                                                                                                                                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H3 kinds                | When `background_shell` and `monitor` enable: Shell settles `stop_requested` after its request (the publisher settles `exited` today), Monitor gains a stop request, and both join `CANCELLABLE_TASK_KINDS` with a delivery arm.                                     |
+| Workflow, automation    | With the workflow runtime (#13803) and H6 per_run: a stop request on their records, then the same delivery and stop arms.                                                                                                                                            |
+| Channel delivery cancel | With H5's public mutation routes: reuse this slice's operation model (decision 10).                                                                                                                                                                                  |
+| Child output            | Link a child task to its child Session, or relay its output as task events behind `read_output`.                                                                                                                                                                     |
+| WebShell                | A task panel with a cancel control, and client methods for the task routes.                                                                                                                                                                                          |
+| Stage F                 | The real-stack round's remaining ordering: a cancel after the owner is gone.                                                                                                                                                                                         |
+| Close stops the child   | The relay's stop arm skips a parent that is no longer `ACTIVE`, and the close cascade waits for each child's Turn to end (H4b). So a close admitted right after a cancel lets the child run on; whether the close should stop children instead is tracked in #13875. |
+| Hosted stream idleness  | The Hosted Harness event stream sends no heartbeat, so the Java client cannot tell a half-open stream from a quiet one. Only a close ends such a read today; an idle bound needs a Harness heartbeat first.                                                          |
