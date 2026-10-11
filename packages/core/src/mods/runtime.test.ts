@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { ModRuntime } from './runtime.js';
-import type { ModLog } from './types.js';
+import type { ModLog, ModOptions } from './types.js';
 
 const signal = () => new AbortController().signal;
 const fixture = (
@@ -31,12 +31,17 @@ const fixture = (
 describe('ModRuntime with the real QuickJS worker', () => {
   const runtimes: ModRuntime[] = [];
   const logs: ModLog[] = [];
-  const create = async (source = fixture(), abort = signal()) => {
+  const create = async (
+    source = fixture(),
+    abort = signal(),
+    options: ModOptions = {},
+  ) => {
     const runtime = await ModRuntime.create(
-      source,
+      { root: '/fixture', entry: '/fixture/mod.js', source },
       '/workspace',
       (log) => logs.push(log),
       abort,
+      options,
     );
     runtimes.push(runtime);
     return runtime;
@@ -107,7 +112,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
     [
       'imports',
       "import fs from 'node:fs'; export function register() {}",
-      /imports are not supported/,
+      /relative static/,
     ],
     [
       'unknown event',
@@ -184,6 +189,24 @@ describe('ModRuntime with the real QuickJS worker', () => {
         AbortSignal.timeout(1500),
       ),
     ).rejects.toThrow(/cancelled/);
+  });
+
+  it('passes a frozen JSON copy of options into register', async () => {
+    const options = { label: 'original', tags: ['one'] };
+    const runtime = await create(
+      `export function register(on, options) {
+      if (!Object.isFrozen(options) || !Object.isFrozen(options.tags)) throw new Error('unfrozen');
+      on('session.start', async ($, e, next) => { await $.command.register({name:'hello',description:'options'}); return next(e); });
+      on('command.run', {command:'hello'}, () => ({ text: options.label + ':' + options.tags.join(',') }));
+    }`,
+      signal(),
+      options,
+    );
+    options.label = 'changed';
+    options.tags.push('two');
+    expect(await runtime.runCommand('hello', '', signal())).toBe(
+      'original:one',
+    );
   });
 
   it('bounds logs and applies a whole session.end timeout', async () => {

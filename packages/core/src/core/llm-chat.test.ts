@@ -3507,6 +3507,21 @@ describe('LlmChat', async () => {
       expect(reactiveOpts.trigger).toBe('auto');
       expect(reactiveOpts.originalTokenCount).toBe(135_000);
       expect(reactiveOpts.precomputedEffectiveTokens).toBe(135_000);
+      // The ceiling is the error's FIRST number (`limitTokens`), not the
+      // actual count: this is the only assertion covering the
+      // producer→`tryCompress`→`compress()` hops, so dropping either forward
+      // or swapping in `actualTokens` must turn it red (#13432).
+      expect(reactiveOpts.observedServerCeiling).toBe(128_000);
+      // The kind travels on the same producer→`tryCompress`→`compress()`
+      // hops: an input-bound ceiling must not size an output budget
+      // downstream (#13876).
+      expect(reactiveOpts.observedServerCeilingKind).toBe('total');
+      // The route that reported the ceiling must travel with it, or the
+      // service cannot tell a retry on that route from a side-query on another
+      // one (#13876). Same producer→tryCompress→compress() hop.
+      expect(reactiveOpts.requestRouteKey).toBe(
+        mockConfig.getModelRouteIdentity(mockConfig.getModel()),
+      );
       expectStreamCalls(2);
       expect(requestAt(1).contents).toEqual(expectedRequestContents);
       expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
