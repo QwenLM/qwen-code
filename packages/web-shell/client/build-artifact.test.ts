@@ -408,14 +408,15 @@ describe('build artifact — transcript entry (#11031)', () => {
     // every entry ships — no interactive cwd code enters this graph — and
     // measured 1,323,120 before main's host-status copy. After rebasing onto
     // c34b8423, main measures 1,321,586 and this branch 1,324,022; substituting
-    // main's i18n table yields an identical JS remainder. The ceiling leaves
-    // a small margin around that intentional UI; re-measure and lower it if
-    // the entry gets leaner.
+    // main's i18n table yields an identical JS remainder. The interrupted-turn
+    // copy (#13436) lands in that same shared table and measures 1,325,202. The
+    // ceiling leaves a small margin around that intentional UI; re-measure and
+    // lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_325_000);
+    expect(js.length).toBeLessThan(1_326_500);
   });
 
   it('carries no Live Voice strings and looks none up', () => {
