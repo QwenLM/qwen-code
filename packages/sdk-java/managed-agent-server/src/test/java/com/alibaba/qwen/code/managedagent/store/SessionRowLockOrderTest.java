@@ -270,7 +270,11 @@ class SessionRowLockOrderTest {
                 "recordRecoveryAdmission", "retractContinuationOutput",
                 "retractHarnessTurnOutput", "recordHarnessEvents",
                 "cancelBeforeAdmission", "failTurn",
-                "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent");
+                "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent",
+                // Main's rename-delivery family (#13682): each takes the
+                // session-row FOR UPDATE before its delivery-row work.
+                "beginSessionRename", "completeSessionRename",
+                "abandonSessionRename", "claimRename");
         // The comparison population is pinned as exactly as the locker set:
         // a locker that loses its turn-row access must shrink this set
         // loudly instead of silently dropping out of the ordering
@@ -280,7 +284,9 @@ class SessionRowLockOrderTest {
                         "appendLiveSessionEventIfAbsent",
                         "appendPublicEventIfAbsent", "beginSessionMutation",
                         "beginTaskCancelOperation", "completeOperation",
-                        "completeSessionMutation", "unarchiveWorkspaceSession");
+                        "completeSessionMutation", "unarchiveWorkspaceSession",
+                        "beginSessionRename", "completeSessionRename",
+                        "abandonSessionRename", "claimRename");
         // The turn-row population, pinned exactly like the locker set: a
         // member that reaches the turn row without taking the session lock
         // never enters `lockers`, so this assertion — not the violation
@@ -307,12 +313,15 @@ class SessionRowLockOrderTest {
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
                         "updateHarnessCursor", "validateOperationStart",
                         "withdrawSubmissionAttempted");
-        // The reference the parse cannot resolve to one member —
-        // ItemRow.toRecord behind the lambda parameter at the item read —
-        // is pinned exactly: a new unresolvable reference fails here, and
-        // this entry goes stale the day the call is typed or moved.
+        // The references the parse cannot resolve to one member —
+        // ItemRow.toRecord behind the lambda parameter at the item read,
+        // and main's this::renameDelivery RowMapper references (#13682),
+        // whose arity a method reference never spells — are pinned exactly:
+        // a new unresolvable reference fails here, and an entry goes stale
+        // the day the call is typed or moved.
         assertThat(audit.exemptions())
-                .containsExactly("ItemRow.toRecord/1");
+                .containsExactly("ItemRow.toRecord/1",
+                        "ManagedAgentStore.renameDelivery/2");
         // The harvest is asserted against the bytecode's own enumeration,
         // recursively over nested types and as a multiset: a member the
         // parse dropped — including one of two overloads sharing a

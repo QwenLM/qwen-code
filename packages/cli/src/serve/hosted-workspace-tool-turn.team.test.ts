@@ -23,8 +23,11 @@ import {
   HostedWorkspaceToolTurn,
   HOSTED_AGENT_TOOL,
   HOSTED_AGENT_WORKTREE_TOOL,
+  HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_TEAM_AGENT_TOOL,
   HOSTED_TEAM_AGENT_WORKTREE_TOOL,
+  HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL,
+  hostedTeamMessageInput,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
@@ -33,7 +36,19 @@ import {
   type HostedTeamStore,
 } from './hosted-team-session.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
-import { settleInterruptedTurnRuntime } from './hosted-runtime-recovery.js';
+import { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import {
+  broadcastMessageId,
+  broadcastRunId,
+  hostedCallKey,
+  teamMemberPreamble,
+} from './hosted-member-chain.js';
+import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
+import {
+  answerCommittedTurnCalls,
+  settleInterruptedTurnRuntime,
+} from './hosted-runtime-recovery.js';
+import { encodeChildLaunchEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import {
   HOSTED_APPROVAL_OPTIONS,
   HOSTED_TOOL_APPROVAL_POLICY,
@@ -41,9 +56,9 @@ import {
   resolveHostedAction,
 } from './hosted-tool-approval.js';
 
-// H4e-b1: team_state and team_task stay disabled until the physical
-// acceptance pass, so the gate is lifted per test; with it closed the turn
-// keeps the H4b surface exactly.
+// H4e-b1: team_state and team_task are enabled, so the flags close the
+// real gate per test; with either closed the turn keeps the H4b surface
+// exactly, which is what a rollback of the enablement restores.
 const enablement = vi.hoisted(() => ({ teamState: true, teamTask: true }));
 vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
@@ -58,12 +73,13 @@ vi.mock(
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
         if (
-          !(
-            (domain === 'team_state' && enablement.teamState) ||
-            (domain === 'team_task' && enablement.teamTask)
-          )
+          (domain === 'team_state' && !enablement.teamState) ||
+          (domain === 'team_task' && !enablement.teamTask)
         )
-          actual.assertManagedSessionDomainEnabled(domain);
+          throw new actual.ManagedSessionRecordError(
+            `domain ${domain} is registered but not enabled for submission.`,
+          );
+        actual.assertManagedSessionDomainEnabled(domain);
       },
     };
   },
@@ -113,14 +129,18 @@ function createTurn(
     hookEvents?: string[];
     funnel?: HostedTeamSession;
     childWorkspaces?: boolean;
+    messages?: boolean;
+    /** H4e-b2: another Turn of the same Session. */
+    promptId?: string;
   } = {},
 ): HostedWorkspaceToolTurn {
   const hookEvents = options.hookEvents;
+  const promptId = options.promptId ?? 'prompt';
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     createManagedHarnessHandle(session),
-    'prompt',
+    promptId,
     async (type, messageParts, model, identity) => {
       const uuid = identity?.uuid ?? randomUUID();
       await session.sink.write({
@@ -132,7 +152,7 @@ function createTurn(
         type,
         cwd: root,
         version: 'test',
-        daemonPromptId: 'prompt',
+        daemonPromptId: promptId,
         message: {
           role: type === 'assistant' ? 'model' : 'user',
           parts: messageParts,
@@ -153,6 +173,16 @@ function createTurn(
         queueConsumption: () => undefined,
       },
       teams: options.funnel ?? teams,
+      ...(options.messages
+        ? {
+            messages: new HostedSessionMessageSession(
+              { authority: session.authority, resources: session.resources },
+              sessionKey,
+              children,
+              undefined,
+            ),
+          }
+        : {}),
       ...(hookEvents
         ? {
             hooks: {
@@ -336,12 +366,26 @@ it('composes worktree isolation with team membership', async () => {
   });
 });
 
+// With the team on, `name` is a supported argument, so the refusal of
+// another legacy argument no longer lists it among them.
+it('stops listing name as legacy once the team domains are enabled', async () => {
+  const answer = await execute(createTurn(), [
+    member('alice', 'call-1', { model: 'other' }),
+  ]);
+  expect(answer).toContain('unsupported argument \\"model\\"');
+  expect(answer).toContain('working_dir, model and subagent_type');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
 it('keeps refusing name while the team domains are disabled', async () => {
   enablement.teamState = false;
   enablement.teamTask = false;
   const answer = await execute(createTurn(), [member('alice', 'call-1')]);
   expect(answer).toContain('unsupported argument');
   expect(answer).toContain('\\"name\\"');
+  expect(answer).toContain('working_dir, name, model');
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
   );
@@ -587,6 +631,266 @@ it('labels a member result notification with its name', async () => {
   expect(text).toContain('all clean');
 });
 
+// A run keeps the label of the roster it joined: a result the relay accepts
+// after its team was deleted still names its member.
+it('keeps the label on a result accepted after its team was deleted', async () => {
+  const turn = createTurn();
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  const childRunId = 'prompt:call-alice';
+  await children.dispatchStarted(childRunId, {
+    dispatchId: 'dispatch-1',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach(childRunId, 'session-child');
+  await children.settleCompleted(childRunId, {
+    result: Buffer.from('all clean', 'utf8'),
+    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+  });
+  expect(
+    await execute(turn, [call('team_delete', {}, 'call-delete')]),
+  ).toContain('deleted.');
+  await children.accept(childRunId, {
+    notification: { description: 'alice task' },
+  });
+  const input = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'input.accepted')!;
+  const text = JSON.parse(
+    (
+      await session.resources.read(
+        assertManagedSessionDurableRef(input.payload['contentRef'], 'input'),
+      )
+    ).toString('utf8'),
+  ).text as string;
+  expect(text).toContain(
+    '<kind>child_agent</kind>\n<teammate>alice</teammate>',
+  );
+});
+
+it('declares send_message with team addressing beside the team tools', async () => {
+  const signal = new AbortController().signal;
+  const tools = await createTurn({ messages: true }).declarations(signal);
+  expect(tools.filter((tool) => tool.name === 'send_message')).toEqual([
+    HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL,
+  ]);
+  // H4e-b2 decisions 3 and 4: a member by name, every member with "*",
+  // or a child by task id — exactly one of to and task_id.
+  expect(HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL.description).toContain(
+    'to every member at once (to: "*")',
+  );
+  expect(HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL.parametersJsonSchema).toEqual({
+    type: 'object',
+    properties: {
+      to: expect.objectContaining({ type: 'string' }),
+      task_id: expect.objectContaining({ type: 'string' }),
+      message: (
+        HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.parametersJsonSchema as {
+          properties: Record<string, unknown>;
+        }
+      ).properties['message'],
+    },
+    required: ['message'],
+    additionalProperties: false,
+  });
+});
+
+// #13841: an isolated member's result names its merge outcome beside its
+// name, and team_delete counts it as running until its run settles, which
+// for an isolated member follows the merge.
+it('labels an isolated member with its merge outcome and waits for its settle', async () => {
+  const turn = createTurn({ childWorkspaces: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [
+    member('alice', 'call-alice', { isolation: 'worktree' }),
+  ]);
+  const childRunId = 'prompt:call-alice';
+  await children.dispatchStarted(childRunId, {
+    dispatchId: 'dispatch-1',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach(childRunId, 'session-child');
+  expect(
+    await execute(turn, [call('team_delete', {}, 'call-delete-early')]),
+  ).toContain('still has running members: alice');
+  const childWorkspaceId = 'a'.repeat(32);
+  await children.settleCompleted(childRunId, {
+    result: Buffer.from('all clean', 'utf8'),
+    receipt: Buffer.from(
+      JSON.stringify({
+        childSessionId: 'session-child',
+        turnId: 'turn-1',
+        status: 'completed',
+        completedAt: 1,
+        workspace: {
+          mode: 'worktree',
+          childWorkspaceId,
+          outcome: 'conflicted',
+          code: 'conflicted',
+          conflictPaths: ['src/a.ts'],
+          resultRef: `refs/qwen/child-workspaces/${childWorkspaceId}/result`,
+        },
+      }),
+      'utf8',
+    ),
+  });
+  await children.accept(childRunId, {
+    notification: { description: 'alice task' },
+  });
+  const input = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'input.accepted')!;
+  const text = JSON.parse(
+    (
+      await session.resources.read(
+        assertManagedSessionDurableRef(input.payload['contentRef'], 'input'),
+      )
+    ).toString('utf8'),
+  ).text as string;
+  expect(text).toContain('<teammate>alice</teammate>');
+  expect(text).toContain('<workspace>merge conflicted at');
+  expect(text).toContain('all clean');
+  expect(await execute(turn, [call('task_list', {}, 'call-list')])).toContain(
+    'alice: completed',
+  );
+  expect(
+    await execute(turn, [call('team_delete', {}, 'call-delete')]),
+  ).toContain('Team \\"review\\" deleted.');
+});
+
+// #13822 continues a finished child as a new run; H4e-b2 lets the roster
+// follow it, so a finished member of the active team is continued and
+// stays the same member.
+it('messages a running member and continues a finished one as the same member', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  const alice = children.taskIdOf('prompt:call-alice');
+  const bob = children.taskIdOf('prompt:call-bob');
+  expect(
+    await execute(turn, [
+      call(
+        'send_message',
+        { task_id: bob, message: 'also check the tests' },
+        'call-note',
+      ),
+    ]),
+  ).toContain('Message queued for delivery');
+  // H4e-b2 decision 3: a name routes as its first run's task id does.
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'Bob', message: 'hi' }, 'call-by-name'),
+    ]),
+  ).toContain(`Message queued for delivery to member \\"bob\\" (task ${bob}).`);
+  await children.dispatchStarted('prompt:call-alice', {
+    dispatchId: 'dispatch-1',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach('prompt:call-alice', 'session-alice');
+  await children.settleCompleted('prompt:call-alice', {
+    result: Buffer.from('all clean', 'utf8'),
+    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+  });
+  // H4e-b2 decision 2: a finished member of the active team is continued,
+  // and the continuation opens its instruction with the member preamble.
+  expect(
+    await execute(turn, [
+      call(
+        'send_message',
+        { task_id: alice, message: 'now fix them' },
+        'call-more',
+      ),
+    ]),
+  ).toContain('continued it as');
+  const continued = children.record('prompt:call-more')!;
+  expect(continued.predecessorChildRunId).toBe('prompt:call-alice');
+  const envelope = JSON.parse(
+    (await session.resources.read(continued.inputRef)).toString('utf8'),
+  ) as { prompt: string };
+  expect(envelope.prompt).toBe(
+    `${teamMemberPreamble({ name: 'alice', teamName: 'review' })}now fix them`,
+  );
+  const listing = await execute(turn, [call('task_list', {}, 'call-list')]);
+  // The member is its chain head: running, with the head's task id.
+  expect(listing).toContain(
+    `alice: running — ${children.taskIdOf('prompt:call-more')}\\nbob: running — ${bob}`,
+  );
+  // A plain child beside the team continues as before.
+  await execute(turn, [
+    call(
+      'agent',
+      { description: 'plain', prompt: 'look', run_in_background: true },
+      'call-plain',
+    ),
+  ]);
+  await children.dispatchStarted('prompt:call-plain', {
+    dispatchId: 'dispatch-2',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach('prompt:call-plain', 'session-plain');
+  await children.settleCompleted('prompt:call-plain', {
+    result: Buffer.from('seen', 'utf8'),
+    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+  });
+  expect(
+    await execute(turn, [
+      call(
+        'send_message',
+        {
+          task_id: children.taskIdOf('prompt:call-plain'),
+          message: 'look again',
+        },
+        'call-plain-more',
+      ),
+    ]),
+  ).toContain('continued it as');
+  expect(children.record('prompt:call-plain-more')).toBeDefined();
+});
+
+// Once its team is deleted, no new work routes through its roster, so a
+// former member continues as a plain child.
+it('continues a former member once its team is deleted', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await children.dispatchStarted('prompt:call-alice', {
+    dispatchId: 'dispatch-1',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach('prompt:call-alice', 'session-alice');
+  await children.settleCompleted('prompt:call-alice', {
+    result: Buffer.from('all clean', 'utf8'),
+    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+  });
+  expect(
+    await execute(turn, [call('team_delete', {}, 'call-delete')]),
+  ).toContain('deleted.');
+  expect(
+    await execute(turn, [
+      call(
+        'send_message',
+        {
+          task_id: children.taskIdOf('prompt:call-alice'),
+          message: 'one more thing',
+        },
+        'call-more',
+      ),
+    ]),
+  ).toContain('continued it as');
+  expect(children.record('prompt:call-more')).toMatchObject({
+    predecessorChildRunId: 'prompt:call-alice',
+  });
+});
+
 it('answers an interrupted turn by what each journal-only call committed', async () => {
   // An earlier turn opened the team.
   await teams.run('team_create', { team_name: 'review' }, 'earlier:call-team');
@@ -752,4 +1056,1398 @@ it('fires PostToolUse for a team tool that ran, never for one it refused', async
   expect(events).toContain('PreToolUse');
   expect(events).not.toContain('PostToolUse');
   expect(events).not.toContain('PostToolUseFailure');
+});
+
+// ---------------------------------------------------------------------
+// H4e-b2: the lead's mailbox over Session messages
+// (docs/design/2026-10-11-managed-agent-team-mailbox.md).
+
+/** A child run that dispatched, attached and completed. */
+async function finish(childRunId: string, result = 'done'): Promise<void> {
+  await children.dispatchStarted(childRunId, {
+    dispatchId: `dispatch-${childRunId}`,
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach(childRunId, `session-${childRunId}`);
+  await children.settleCompleted(childRunId, {
+    result: Buffer.from(result, 'utf8'),
+    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+  });
+}
+
+function recordCount(domain: 'child_run' | 'session_message'): number {
+  return session.authority.extensionRecordsInDomain(domain).length;
+}
+
+async function launchPromptOf(childRunId: string): Promise<string> {
+  const run = children.record(childRunId)!;
+  return (
+    JSON.parse(
+      (await session.resources.read(run.inputRef)).toString('utf8'),
+    ) as {
+      prompt: string;
+    }
+  ).prompt;
+}
+
+it('admits the team form of send_message with exactly one recipient', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [{ message: 'hi' }, 'takes exactly one of to'],
+    [
+      { to: 'alice', task_id: 'task_x', message: 'hi' },
+      'takes exactly one of to',
+    ],
+    [{ to: '  ', message: 'hi' }, '\\"to\\" must be a member name'],
+    [
+      { to: 'alice', summary: 'greeting', message: 'hi' },
+      'unsupported argument \\"summary\\"',
+    ],
+  ];
+  for (const [args, text] of cases)
+    expect(
+      await execute(turn, [call('send_message', args, `call-${text.length}`)]),
+    ).toContain(text);
+  // A broadcast reads the roster its batch leaves, so it never shares a
+  // batch with a change to that roster.
+  expect(
+    await execute(turn, [
+      member('alice', 'call-alice'),
+      call('send_message', { to: ' * ', message: 'hi all' }, 'call-all'),
+    ]),
+  ).toContain(
+    'cannot share a batch with team_create, team_delete or a member launch',
+  );
+  // The launch is refused on its own side too, whatever the order.
+  expect(
+    await execute(turn, [
+      call('send_message', { to: '*', message: 'hi all' }, 'call-all-2'),
+      member('alice', 'call-alice-2'),
+    ]),
+  ).toContain(
+    'Hosted team member cannot launch in the same batch as send_message to \\"*\\"',
+  );
+  expect(roster()).toEqual([]);
+});
+
+it('encodes the input of a team send with its recipients first', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  // The encoded input is what an approval card and its 8 KiB preview show:
+  // the recipient comes before a long message (H4e-b2 decision 3).
+  const encode = vi.spyOn(
+    turn as unknown as {
+      encodeToolInput(payload: { toolName: string; input: unknown }): unknown;
+    },
+    'encodeToolInput',
+  );
+  await execute(turn, [
+    call('send_message', { message: 'start', to: 'alice' }, 'call-hi'),
+  ]);
+  expect(
+    encode.mock.calls
+      .map(([payload]) => payload)
+      .filter((payload) => payload.toolName === 'send_message')
+      .map((payload) => Object.keys(payload.input as object)),
+  ).toEqual([['to', 'message']]);
+});
+
+it('answers a broadcast that reached no member as an error', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await children.settleFailed('prompt:call-alice', {
+    stopReason: 'creation_failed',
+    reason: null,
+    started: false,
+  });
+  const answer = await execute(turn, [
+    call('send_message', { to: '*', message: 'hi all' }, 'call-all'),
+  ]);
+  expect(answer).toContain('"error":"The message reached no member:');
+  expect(answer).toContain('- alice: not reached: Member \\"alice\\" ended');
+});
+
+it('addresses a member by name and refuses the leader, a stranger and no team', async () => {
+  const turn = createTurn({ messages: true });
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'alice', message: 'hi' }, 'call-none'),
+    ]),
+  ).toContain('No open team');
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  // A member launched earlier in the batch is resolved when the send runs.
+  const answer = await execute(turn, [
+    member('alice', 'call-alice'),
+    call(
+      'send_message',
+      { to: 'Alice', message: 'start with docs' },
+      'call-hi',
+    ),
+  ]);
+  expect(answer).toContain(
+    `Message queued for delivery to member \\"alice\\" (task ${children.taskIdOf('prompt:call-alice')})`,
+  );
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'leader', message: 'hi' }, 'call-self'),
+    ]),
+  ).toContain('You are the team leader');
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'zed', message: 'hi' }, 'call-zed'),
+    ]),
+  ).toContain(
+    '\\"zed\\" is not a member of team \\"review\\". Members: alice.',
+  );
+});
+
+it('broadcasts to every member with mixed outcomes and replays without sending twice', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  await execute(turn, [member('carol', 'call-carol')]);
+  await finish('prompt:call-bob');
+  await children.settleFailed('prompt:call-carol', {
+    stopReason: 'creation_failed',
+    reason: null,
+    started: false,
+  });
+  const answer = await execute(turn, [
+    call('send_message', { to: '*', message: 'wrap up' }, 'call-all'),
+  ]);
+  expect(answer).toContain(
+    'Message sent to 2 of 3 members of team \\"review\\"',
+  );
+  expect(answer).toContain(
+    `- alice: queued for its running task ${children.taskIdOf('prompt:call-alice')}.`,
+  );
+  const bobRun = broadcastRunId('prompt', 'call-all', 2);
+  expect(answer).toContain(
+    `- bob: had completed; continued as task ${children.taskIdOf(bobRun)}`,
+  );
+  // A member's refusal names it and how to replace it (decision 3).
+  expect(answer).toContain(
+    '- carol: not reached: Member \\"carol\\" ended (failed: creation_failed) and cannot receive messages; for more work, launch a new member under a new name.',
+  );
+  // Each recipient has its own ids, in their own namespace.
+  const aliceMessage = session.authority.extensionRecord(
+    'session_message',
+    broadcastMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-all',
+      position: 1,
+    }),
+  );
+  expect(aliceMessage).toBeDefined();
+  const continued = children.record(bobRun)!;
+  expect(continued.predecessorChildRunId).toBe('prompt:call-bob');
+  expect(continued.run.executionCallId).toBe('prompt:call-all');
+  expect(await launchPromptOf(bobRun)).toBe(
+    `${teamMemberPreamble({ name: 'bob', teamName: 'review' })}wrap up`,
+  );
+  // The replay finds every recipient's committed send and adds nothing.
+  const before = [recordCount('child_run'), recordCount('session_message')];
+  expect(
+    await execute(createTurn({ messages: true }), [
+      call('send_message', { to: '*', message: 'wrap up' }, 'call-all'),
+    ]),
+  ).toContain('Message sent to 2 of 3 members');
+  expect([recordCount('child_run'), recordCount('session_message')]).toEqual(
+    before,
+  );
+});
+
+it('keeps broadcast ids apart from a plain call whose provider id equals them', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [
+    call('send_message', { to: '*', message: 'one' }, 'call-all'),
+  ]);
+  const derivedRun = broadcastRunId('prompt', 'call-all', 1);
+  const derivedMessage = broadcastMessageId({
+    senderSessionId: sessionKey.sessionId,
+    turnId: 'prompt',
+    callId: 'call-all',
+    position: 1,
+  });
+  const alice = children.taskIdOf('prompt:call-alice');
+  const before = recordCount('session_message');
+  for (const callId of [derivedRun, derivedMessage])
+    expect(
+      await execute(turn, [
+        call('send_message', { task_id: alice, message: 'one' }, callId),
+      ]),
+    ).toContain('Message queued for delivery');
+  expect(recordCount('session_message')).toBe(before + 2);
+});
+
+it('opens a member launch with its preamble inside the envelope bound', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  expect(await launchPromptOf('prompt:call-alice')).toBe(
+    `${teamMemberPreamble({ name: 'alice', teamName: 'review' })}review the change`,
+  );
+  // The longest prompt that fits alone is refused once the preamble is in.
+  const definition = {
+    definitionId: 'hosted-agent/hosted-workspace-shell/1',
+    definitionRevision: 1,
+    definitionDigest: session.authority.sessionHeader.definitionRef.digest,
+  };
+  const fits = (length: number) => {
+    try {
+      encodeChildLaunchEnvelope({
+        description: 'bob task',
+        prompt: 'x'.repeat(length),
+        definition,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let low = 0;
+  let high = 64 * 1024;
+  while (low < high) {
+    const middle = (low + high + 1) >> 1;
+    if (fits(middle)) low = middle;
+    else high = middle - 1;
+  }
+  expect(
+    await execute(turn, [
+      call(
+        'agent',
+        { description: 'bob task', prompt: 'x'.repeat(low), name: 'bob' },
+        'call-bob',
+      ),
+    ]),
+  ).toContain('byte_limit');
+  expect(children.record('prompt:call-bob')).toBeUndefined();
+});
+
+it('answers a replayed send by name after its team was deleted', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'alice', message: 'more' }, 'call-more'),
+    ]),
+  ).toContain('Member \\"alice\\" had completed; continued it as task');
+  await finish('prompt:call-more');
+  await execute(turn, [call('team_delete', {}, 'call-delete')]);
+  // The committed send answers, as a plain child's: a former member's
+  // continuation carries no label (decision 6).
+  const replayed = await execute(createTurn({ messages: true }), [
+    call('send_message', { to: 'alice', message: 'more' }, 'call-more'),
+  ]);
+  expect(replayed).toContain(
+    `Child agent ${children.taskIdOf('prompt:call-alice')} had completed; continued it as ${children.taskIdOf('prompt:call-more')}`,
+  );
+  expect(replayed).not.toContain('labeled');
+});
+
+it('replays a broadcast after its team was deleted or replaced without sending again', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  await execute(turn, [
+    call('send_message', { to: '*', message: 'wrap up' }, 'call-all'),
+  ]);
+  await finish(broadcastRunId('prompt', 'call-all', 1));
+  await execute(turn, [call('team_delete', {}, 'call-delete')]);
+  const replay = () =>
+    execute(createTurn({ messages: true }), [
+      call('send_message', { to: '*', message: 'wrap up' }, 'call-all'),
+    ]);
+  const before = [recordCount('child_run'), recordCount('session_message')];
+  expect(await replay()).toContain(
+    'The message was sent to 1 member before its team changed; nothing more was sent.\\n- alice: had completed; continued as task',
+  );
+  // A new team under the same name, whose roster the broadcast never read.
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team-2'),
+  ]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  const withBob = [recordCount('child_run'), recordCount('session_message')];
+  expect(await replay()).toContain(
+    'The message was sent to 1 member before its team changed; nothing more was sent.',
+  );
+  expect([recordCount('child_run'), recordCount('session_message')]).toEqual(
+    withBob,
+  );
+  expect(withBob[1]).toBe(before[1]);
+});
+
+it('tells a replayed broadcast only of a continuation that came before its own', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  await execute(turn, [
+    call('send_message', { to: '*', message: 'all' }, 'call-all'),
+  ]);
+  await finish(broadcastRunId('prompt', 'call-all', 1));
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'later' }, 'call-x'),
+  ]);
+  await children.settleFailed('prompt:call-x', {
+    stopReason: 'creation_failed',
+    reason: null,
+    started: false,
+  });
+  // The later continuation never started, but it followed this broadcast's.
+  const replayed = await execute(createTurn({ messages: true }), [
+    call('send_message', { to: '*', message: 'all' }, 'call-all'),
+  ]);
+  expect(replayed).toContain('Message sent to every member');
+  expect(replayed).not.toContain('previous continuation');
+});
+
+it('records the owner a send of this Turn gave work, even once it completed', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [
+    call('task_create', { subject: 'fix', description: 'fix it' }, 'call-task'),
+  ]);
+  await finish('prompt:call-alice');
+  // Two steps in one batch: the send continues alice, then the board
+  // records her on the open task.
+  const answer = await execute(turn, [
+    call('send_message', { to: 'alice', message: 'fix #1' }, 'call-give'),
+    call(
+      'task_update',
+      { taskId: '1', status: 'in_progress', owner: 'alice' },
+      'call-own',
+    ),
+  ]);
+  expect(answer).toContain(
+    'Task #1 updated (status: in_progress, owner: alice).',
+  );
+  expect(answer).not.toContain('send_message to \\"alice\\" first');
+  // The continuation can complete before the owner update lands; the
+  // same Turn still records the work it gave.
+  await finish('prompt:call-give');
+  await execute(turn, [
+    call(
+      'task_update',
+      { taskId: '1', status: 'pending', owner: '' },
+      'call-park',
+    ),
+  ]);
+  expect(
+    await execute(turn, [
+      call(
+        'task_update',
+        { taskId: '1', status: 'in_progress', owner: 'alice' },
+        'call-own-again',
+      ),
+    ]),
+  ).toContain('Task #1 updated (status: in_progress, owner: alice).');
+  // A later Turn gave no work: the refusal is a condition, never a
+  // claim about which task a past send carried.
+  await execute(turn, [
+    call(
+      'task_update',
+      { taskId: '1', status: 'pending', owner: '' },
+      'call-park-2',
+    ),
+  ]);
+  const later = await execute(
+    createTurn({ messages: true, promptId: 'prompt-2' }),
+    [
+      call(
+        'task_update',
+        { taskId: '1', status: 'in_progress', owner: 'alice' },
+        'call-later',
+      ),
+    ],
+  );
+  expect(later).toContain(
+    'If it already did this task\'s work, from its launch prompt or a message you sent it, set status \\"completed\\" with this owner once its report is in. Otherwise give it the work with send_message to \\"alice\\" first',
+  );
+});
+
+it('answers an interrupted broadcast recipient by recipient', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  await execute(turn, [member('carol', 'call-carol')]);
+  await children.settleFailed('prompt:call-carol', {
+    stopReason: 'creation_failed',
+    reason: null,
+    started: false,
+  });
+  // The broadcast reached alice, then its Harness died before bob and
+  // before the answer: the journal holds the call, alice's message, and
+  // no tool result. Carol had ended, so no send would reach her.
+  await session.sink.write({
+    uuid: randomUUID(),
+    parentUuid: null,
+    sessionId: sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    model: 'model',
+    type: 'assistant',
+    cwd: root,
+    version: 'test',
+    daemonPromptId: 'prompt',
+    message: {
+      role: 'model',
+      // A hook rewrote the input that ran: recovery probes every position
+      // whatever the journaled arguments say.
+      parts: [
+        {
+          functionCall: {
+            id: 'call-all',
+            name: 'send_message',
+            args: { to: 'alice', message: 'wrap up' },
+          },
+        },
+      ],
+    },
+  });
+  await children.sendToChild({
+    taskId: children.taskIdOf('prompt:call-alice'),
+    text: 'wrap up',
+    messageId: broadcastMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-all',
+      position: 1,
+    }),
+    continuationRunId: broadcastRunId('prompt', 'call-all', 1),
+    executionCallId: 'prompt:call-all',
+    closing: false,
+  });
+  await answerCommittedTurnCalls({
+    session,
+    sessionId: sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    children,
+    teams,
+    messages: new HostedSessionMessageSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      children,
+      undefined,
+    ),
+  });
+  const answer = JSON.stringify(
+    (await session.sink.project())
+      .filter((entry) => entry.type === 'tool_result')
+      .flatMap((entry) => entry.message?.parts ?? [])
+      .find((part) => part.functionResponse?.id === 'call-all')
+      ?.functionResponse?.response,
+  );
+  expect(answer).toContain(
+    'The broadcast was interrupted after it was sent to 1 member; do not send it again to the members it reached.',
+  );
+  expect(answer).toContain('- alice: queued for its running task');
+  expect(answer).toContain(
+    'It did not reach: bob. Send to those members by name if they still need it.',
+  );
+  expect(answer).toContain(
+    'It did not reach carol, which has ended and cannot take it.',
+  );
+});
+
+it('answers an interrupted send by name whose continuation never started', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  await session.sink.write({
+    uuid: randomUUID(),
+    parentUuid: null,
+    sessionId: sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    model: 'model',
+    type: 'assistant',
+    cwd: root,
+    version: 'test',
+    daemonPromptId: 'prompt',
+    message: {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'call-more',
+            name: 'send_message',
+            args: { to: 'alice', message: 'more' },
+          },
+        },
+      ],
+    },
+  });
+  // The send continued alice, then the Harness died before its answer, and
+  // the continuation proved it never started: a failed child sends no
+  // notification, so the recovered answer must say the message is lost.
+  await children.sendToChild({
+    taskId: children.taskIdOf('prompt:call-alice'),
+    text: 'more',
+    messageId: 'msg_unused',
+    continuationRunId: 'prompt:call-more',
+    executionCallId: 'prompt:call-more',
+    closing: false,
+  });
+  await children.settleFailed('prompt:call-more', {
+    stopReason: 'creation_failed',
+    reason: null,
+    started: false,
+  });
+  await answerCommittedTurnCalls({
+    session,
+    sessionId: sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    children,
+    teams,
+    messages: new HostedSessionMessageSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      children,
+      undefined,
+    ),
+  });
+  const answer = JSON.stringify(
+    (await session.sink.project())
+      .filter((entry) => entry.type === 'tool_result')
+      .flatMap((entry) => entry.message?.parts ?? [])
+      .find((part) => part.functionResponse?.id === 'call-more')
+      ?.functionResponse?.response,
+  );
+  expect(answer).toContain(
+    `Member \\"alice\\" had completed; continued it as task ${children.taskIdOf('prompt:call-more')}, which never started (creation_failed), so this message did not arrive. Send it again with send_message to \\"alice\\".`,
+  );
+});
+
+it('names a continuation that never started and routes its task id from the member', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'first' }, 'call-1'),
+  ]);
+  await children.settleFailed('prompt:call-1', {
+    stopReason: 'creation_failed',
+    reason: null,
+    started: false,
+  });
+  // The next send continues the member again and says the previous
+  // continuation never started.
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'alice', message: 'again' }, 'call-2'),
+    ]),
+  ).toContain(
+    'Its previous continuation never started (creation_failed), so the work it carried did not arrive; send that work again unless this message carries it.',
+  );
+  await children.settleFailed('prompt:call-2', {
+    stopReason: 'creation_failed',
+    reason: null,
+    started: false,
+  });
+  expect(
+    await execute(turn, [
+      call('send_message', { to: '*', message: 'all' }, 'call-all'),
+    ]),
+  ).toContain('Its previous continuation never started (creation_failed)');
+  await children.settleFailed(broadcastRunId('prompt', 'call-all', 1), {
+    stopReason: 'creation_failed',
+    reason: null,
+    started: false,
+  });
+  // The never-started continuation's own task id still reaches the chain,
+  // and a member addressed by task id is answered as one.
+  const byId = await execute(turn, [
+    call(
+      'send_message',
+      { task_id: children.taskIdOf('prompt:call-1'), message: 'by id' },
+      'call-3',
+    ),
+  ]);
+  expect(byId).toContain(
+    'Member \\"alice\\" had completed; continued it as task',
+  );
+  expect(byId).toContain('Its result arrives labeled \\"alice\\".');
+  expect(byId).toContain(
+    'Its previous continuation never started (creation_failed)',
+  );
+  expect(children.record('prompt:call-3')?.predecessorChildRunId).toBe(
+    'prompt:call-alice',
+  );
+  // A replay of the first send finds that its own continuation never
+  // started, so it says the message did not arrive.
+  expect(
+    await execute(createTurn({ messages: true }), [
+      call('send_message', { to: 'alice', message: 'first' }, 'call-1'),
+    ]),
+  ).toContain(
+    `continued it as task ${children.taskIdOf('prompt:call-1')}, which never started (creation_failed), so this message did not arrive. Send it again with send_message to \\"alice\\".`,
+  );
+});
+
+it('counts the messages a never-started continuation lost, and tells a cancelled one apart', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'one' }, 'call-1'),
+  ]);
+  // The continuation has not started yet, so the next send is a message
+  // queued for it.
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'alice', message: 'two' }, 'call-2'),
+    ]),
+  ).toContain(
+    `Message queued for delivery to member \\"alice\\" (task ${children.taskIdOf('prompt:call-1')}).`,
+  );
+  await children.settleFailed('prompt:call-1', {
+    stopReason: 'creation_failed',
+    reason: null,
+    started: false,
+  });
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'alice', message: 'three' }, 'call-3'),
+    ]),
+  ).toContain(
+    'Its previous continuation never started (creation_failed), so the work it carried did not arrive, nor did 1 message sent to it; send that work and those messages again unless this message carries them.',
+  );
+  // A replay of the queued message says it never arrived.
+  expect(
+    await execute(createTurn({ messages: true }), [
+      call('send_message', { to: 'alice', message: 'two' }, 'call-2'),
+    ]),
+  ).toContain(
+    `Message was queued for member \\"alice\\" as task ${children.taskIdOf('prompt:call-1')}, which never started (creation_failed), so this message did not arrive. Send it again with send_message to \\"alice\\".`,
+  );
+  // A continuation a user cancelled before it started is resent only if
+  // its work is still wanted.
+  await children.requestStop('prompt:call-3');
+  await children.settleCancelled('prompt:call-3', { started: false });
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'alice', message: 'four' }, 'call-4'),
+    ]),
+  ).toContain(
+    'Its previous continuation was cancelled before it started (stop_requested), so the work it carried did not arrive; send that work again only if it is still wanted and this message does not carry it.',
+  );
+});
+
+it('refuses a send by name to a stopping member and one stopped on request', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await children.requestStop('prompt:call-alice');
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'alice', message: 'hi' }, 'call-1'),
+    ]),
+  ).toContain(
+    'The message to member \\"alice\\" was refused: Member \\"alice\\" is being stopped and cannot receive messages.',
+  );
+  await finish('prompt:call-alice');
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'alice', message: 'hi' }, 'call-2'),
+    ]),
+  ).toContain(
+    'Member \\"alice\\" completed after a stop was requested and cannot receive messages; for more work, launch a new member under a new name.',
+  );
+  expect(children.record('prompt:call-2')).toBeUndefined();
+});
+
+it('reports a broadcast recipient the active cap refuses', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  for (const name of ['bob', 'carol', 'dave', 'erin'])
+    await execute(turn, [member(name, `call-${name}`)]);
+  const answer = await execute(turn, [
+    call('send_message', { to: '*', message: 'status?' }, 'call-all'),
+  ]);
+  expect(answer).toContain('Message sent to 4 of 5 members');
+  expect(answer).toContain(
+    '- alice: not reached: Hosted child agent refused to continue member \\"alice\\" (task',
+  );
+  expect(answer).toContain('(count_limit)');
+});
+
+it('puts the recipients of a team send first in its input', () => {
+  expect(
+    Object.keys(
+      hostedTeamMessageInput({ message: 'x'.repeat(10_000), to: '*' }),
+    ),
+  ).toEqual(['to', 'message']);
+  expect(
+    Object.keys(hostedTeamMessageInput({ message: 'x', task_id: 'task_1' })),
+  ).toEqual(['task_id', 'message']);
+});
+
+it('counts a committed broadcast as dispatched after a restart', async () => {
+  const setup = createTurn({ messages: true });
+  await execute(setup, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(setup, [member('alice', 'call-alice')]);
+  const events: string[] = [];
+  const broadcast = call(
+    'send_message',
+    { to: '*', message: 'hi' },
+    'call-all',
+  );
+  const responses = await createTurn({
+    messages: true,
+    hookEvents: events,
+  }).execute(
+    [broadcast],
+    [
+      {
+        functionCall: {
+          id: 'call-all',
+          name: 'send_message',
+          args: broadcast.args,
+        },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  expect(events).toContain('PostToolUse');
+  events.length = 0;
+  // A new turn object has no in-memory dispatch record: the committed
+  // recipients are the evidence.
+  await createTurn({ messages: true, hookEvents: events }).resumeHookResults(
+    responses.filter((part) => part.functionResponse?.id === 'call-all'),
+    'model',
+    new AbortController().signal,
+  );
+  expect(events).toContain('PostToolUse');
+});
+
+/** A call the journal holds with no answer, as a dead Harness left it. */
+async function journalCall(
+  callId: string,
+  args: Record<string, unknown>,
+): Promise<void> {
+  await session.sink.write({
+    uuid: randomUUID(),
+    parentUuid: null,
+    sessionId: sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    model: 'model',
+    type: 'assistant',
+    cwd: root,
+    version: 'test',
+    daemonPromptId: 'prompt',
+    message: {
+      role: 'model',
+      parts: [{ functionCall: { id: callId, name: 'send_message', args } }],
+    },
+  });
+}
+
+/** The answer recovery gives a journal-only call of the turn "prompt". */
+async function recoveredAnswer(callId: string): Promise<string> {
+  await answerCommittedTurnCalls({
+    session,
+    sessionId: sessionKey.sessionId,
+    cwd: root,
+    promptId: 'prompt',
+    children,
+    teams,
+    messages: new HostedSessionMessageSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      children,
+      undefined,
+    ),
+  });
+  return JSON.stringify(
+    (await session.sink.project())
+      .filter((entry) => entry.type === 'tool_result')
+      .flatMap((entry) => entry.message?.parts ?? [])
+      .find((part) => part.functionResponse?.id === callId)?.functionResponse
+      ?.response,
+  );
+}
+
+const neverStarted = (childRunId: string) =>
+  children.settleFailed(childRunId, {
+    stopReason: 'creation_failed',
+    reason: null,
+    started: false,
+  });
+
+it('records the owner a send of a wake turn gave work', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [
+    call('task_create', { subject: 'fix', description: 'fix it' }, 'call-task'),
+  ]);
+  await finish('prompt:call-alice');
+  // The lead reads a result in a wake turn, whose call keys collapse its
+  // prompt id to a digest; the owner rule reads the same keys.
+  const wakePrompt = 'msg_result:message:accept:notify';
+  const wake = createTurn({ messages: true, promptId: wakePrompt });
+  expect(
+    await execute(wake, [
+      call('send_message', { to: 'alice', message: 'fix #1' }, 'call-give'),
+      call(
+        'task_update',
+        { taskId: '1', status: 'in_progress', owner: 'alice' },
+        'call-own',
+      ),
+    ]),
+  ).toContain('Task #1 updated (status: in_progress, owner: alice).');
+  const continued = hostedCallKey(wakePrompt, 'call-give');
+  expect(children.record(continued)?.predecessorChildRunId).toBe(
+    'prompt:call-alice',
+  );
+  await finish(continued);
+  expect(
+    await execute(wake, [
+      call('task_update', { taskId: '1', status: 'pending' }, 'call-park'),
+    ]),
+  ).toContain('Task #1 updated (status: pending, owner: alice).');
+  expect(
+    await execute(createTurn({ messages: true, promptId: 'prompt-2' }), [
+      call('task_update', { taskId: '1', status: 'in_progress' }, 'call-back'),
+    ]),
+  ).toContain('cannot keep task #1 open: it has finished');
+});
+
+it('replays a broadcast whose recipients never started as not reached', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  await finish('prompt:call-alice');
+  await finish('prompt:call-bob');
+  // alice waits in a continuation, so the broadcast queues a message for
+  // it; bob is continued. Neither run ever starts.
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'first' }, 'call-a'),
+  ]);
+  expect(
+    await execute(turn, [
+      call('send_message', { to: '*', message: 'all' }, 'call-all'),
+    ]),
+  ).toContain('Message sent to every member');
+  const bobRun = broadcastRunId('prompt', 'call-all', 2);
+  await neverStarted('prompt:call-a');
+  await neverStarted(bobRun);
+  const before = [recordCount('child_run'), recordCount('session_message')];
+  const replayed = await execute(createTurn({ messages: true }), [
+    call('send_message', { to: '*', message: 'all' }, 'call-all'),
+  ]);
+  expect(replayed).toContain(
+    'Message sent to 2 of 2 members of team \\"review\\", but it did not arrive at 2 of them. Send it by name to any member below that did not get it and still needs it.',
+  );
+  expect(replayed).toContain(
+    `- alice: queued for task ${children.taskIdOf('prompt:call-a')}, which never started (creation_failed), so the message did not arrive.`,
+  );
+  expect(replayed).toContain(
+    `- bob: had completed; continued as task ${children.taskIdOf(bobRun)}, which never started (creation_failed), so the message did not arrive.`,
+  );
+  expect([recordCount('child_run'), recordCount('session_message')]).toEqual(
+    before,
+  );
+});
+
+it('recovers an interrupted broadcast whose recipient never started as not reached', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  await finish('prompt:call-alice');
+  await journalCall('call-all', { to: '*', message: 'wrap up' });
+  await children.sendToChild({
+    taskId: children.taskIdOf('prompt:call-alice'),
+    text: 'wrap up',
+    messageId: broadcastMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-all',
+      position: 1,
+    }),
+    continuationRunId: broadcastRunId('prompt', 'call-all', 1),
+    executionCallId: 'prompt:call-all',
+    closing: false,
+  });
+  await neverStarted(broadcastRunId('prompt', 'call-all', 1));
+  const answer = await recoveredAnswer('call-all');
+  expect(answer).toContain(
+    'The broadcast was interrupted after it was sent to 1 member.\\n- alice: had completed; continued as task',
+  );
+  expect(answer).not.toContain('do not send it again');
+  expect(answer).toContain(
+    'It did not reach: alice, bob. Send to those members by name if they still need it.',
+  );
+});
+
+it('recovers an interrupted broadcast after its team changed without naming the new roster', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  await children.sendToChild({
+    taskId: children.taskIdOf('prompt:call-alice'),
+    text: 'wrap up',
+    messageId: broadcastMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-all',
+      position: 1,
+    }),
+    continuationRunId: broadcastRunId('prompt', 'call-all', 1),
+    executionCallId: 'prompt:call-all',
+    closing: false,
+  });
+  await finish(broadcastRunId('prompt', 'call-all', 1));
+  await execute(turn, [call('team_delete', {}, 'call-delete')]);
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team-2'),
+  ]);
+  await execute(turn, [member('carol', 'call-carol')]);
+  await journalCall('call-all', { to: '*', message: 'wrap up' });
+  const answer = await recoveredAnswer('call-all');
+  expect(answer).toContain(
+    'The broadcast was interrupted after it was sent to 1 member; do not send it again to the members it reached. Its team has changed since, so nothing tells who else it was meant for.',
+  );
+  expect(answer).not.toContain('carol');
+});
+
+it('recovers an interrupted send by name to a running member with its name', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await journalCall('call-hi', { to: 'alice', message: 'hi' });
+  await children.sendToChild({
+    taskId: children.taskIdOf('prompt:call-alice'),
+    text: 'hi',
+    messageId: sessionMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-hi',
+    }),
+    continuationRunId: 'prompt:call-hi',
+    executionCallId: 'prompt:call-hi',
+    closing: false,
+  });
+  expect(await recoveredAnswer('call-hi')).toContain(
+    `Message queued for delivery to member \\"alice\\" (task ${children.taskIdOf('prompt:call-alice')}).`,
+  );
+});
+
+it('sends a broadcast to no further member once its turn is cancelled', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  for (const name of ['alice', 'bob', 'carol'])
+    await execute(turn, [member(name, `call-${name}`)]);
+  const controller = new AbortController();
+  const sendToChild = children.sendToChild.bind(children);
+  const spy = vi
+    .spyOn(children, 'sendToChild')
+    .mockImplementation(async (params) => {
+      const route = await sendToChild(params);
+      controller.abort();
+      return route;
+    });
+  const calls = [
+    call('send_message', { to: '*', message: 'stop soon' }, 'call-all'),
+  ];
+  const answer = JSON.stringify(
+    await createTurn({ messages: true }).execute(
+      calls,
+      calls.map((each) => ({
+        functionCall: { id: each.callId, name: each.name, args: each.args },
+      })),
+      'model',
+      controller.signal,
+    ),
+  );
+  spy.mockRestore();
+  expect(answer).toContain(
+    'Message sent to 1 of 3 members of team \\"review\\"; the turn was cancelled before the rest.',
+  );
+  expect(answer).toContain('- bob: not sent: the turn was cancelled.');
+  expect(answer).toContain('- carol: not sent: the turn was cancelled.');
+  expect(recordCount('session_message')).toBe(1);
+});
+
+it('answers a replayed send whose continuation was cancelled before it started', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'first' }, 'call-1'),
+  ]);
+  await neverStarted('prompt:call-1');
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'second' }, 'call-2'),
+  ]);
+  await children.requestStop('prompt:call-2');
+  await children.settleCancelled('prompt:call-2', { started: false });
+  // Neither arrived: the resend asked for carries the earlier work too.
+  expect(
+    await execute(createTurn({ messages: true }), [
+      call('send_message', { to: 'alice', message: 'second' }, 'call-2'),
+    ]),
+  ).toContain(
+    `continued it as task ${children.taskIdOf('prompt:call-2')}, which was cancelled before it started (stop_requested), so this message did not arrive. If it is still wanted, send it again with send_message to \\"alice\\". Its previous continuation never started (creation_failed), so the work it carried did not arrive; send that work again unless your resend of this message carries it.`,
+  );
+});
+
+it('notes a never-started continuation only on the continuation after it', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'one' }, 'call-1'),
+  ]);
+  await neverStarted('prompt:call-1');
+  expect(
+    await execute(turn, [
+      call('send_message', { to: 'alice', message: 'two' }, 'call-2'),
+    ]),
+  ).toContain('Its previous continuation never started');
+  // A message to that newer continuation follows no never-started run.
+  const queued = await execute(turn, [
+    call('send_message', { to: 'alice', message: 'three' }, 'call-3'),
+  ]);
+  expect(queued).toContain(
+    `Message queued for delivery to member \\"alice\\" (task ${children.taskIdOf('prompt:call-2')}).`,
+  );
+  expect(queued).not.toContain('previous continuation');
+});
+
+it('answers a replayed message to a member that never started as ended', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'hi' }, 'call-hi'),
+  ]);
+  await neverStarted('prompt:call-alice');
+  expect(
+    await execute(createTurn({ messages: true }), [
+      call('send_message', { to: 'alice', message: 'hi' }, 'call-hi'),
+    ]),
+  ).toContain(
+    `Message was queued for member \\"alice\\" as task ${children.taskIdOf('prompt:call-alice')}, which never started (creation_failed), so this message did not arrive. Member \\"alice\\" has ended; for more work, launch a new member under a new name.`,
+  );
+});
+
+/** A member that took a message and then was stopped, as H4f does it. */
+async function stopAttached(childRunId: string): Promise<void> {
+  await children.dispatchStarted(childRunId, {
+    dispatchId: `dispatch-${childRunId}`,
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach(childRunId, `session-${childRunId}`);
+  await children.requestStop(childRunId);
+  await children.settleCancelled(childRunId, {
+    started: true,
+    childSessionId: `session-${childRunId}`,
+  });
+}
+
+const relay = () =>
+  new HostedSessionMessageSession(
+    { authority: session.authority, resources: session.resources },
+    sessionKey,
+    children,
+    undefined,
+  );
+
+for (const outcome of ['cancelled', 'rejected'] as const)
+  it(`recovers a broadcast whose message to a started member was ${outcome} as not reached`, async () => {
+    const turn = createTurn({ messages: true });
+    await execute(turn, [
+      call('team_create', { team_name: 'review' }, 'call-team'),
+    ]);
+    await execute(turn, [member('alice', 'call-alice')]);
+    await execute(turn, [member('bob', 'call-bob')]);
+    await journalCall('call-all', { to: '*', message: 'wrap up' });
+    // The broadcast queued its message for running alice, then the Harness
+    // died before bob and before the answer.
+    const messageId = broadcastMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-all',
+      position: 1,
+    });
+    await children.sendToChild({
+      taskId: children.taskIdOf('prompt:call-alice'),
+      text: 'wrap up',
+      messageId,
+      continuationRunId: broadcastRunId('prompt', 'call-all', 1),
+      executionCallId: 'prompt:call-all',
+      closing: false,
+    });
+    // alice was stopped before the message was read, so the relay ended
+    // its delivery with no receipt.
+    if (outcome === 'rejected') {
+      await children.dispatchStarted('prompt:call-alice', {
+        dispatchId: 'dispatch-prompt:call-alice',
+        runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+      });
+      await children.attach('prompt:call-alice', 'session-prompt:call-alice');
+      await relay().handover(messageId, 'session-prompt:call-alice');
+      await relay().settle(messageId, 'rejected');
+      await children.requestStop('prompt:call-alice');
+      await children.settleCancelled('prompt:call-alice', {
+        started: true,
+        childSessionId: 'session-prompt:call-alice',
+      });
+    } else {
+      await relay().settle(messageId, 'cancelled');
+      await stopAttached('prompt:call-alice');
+    }
+    const answer = await recoveredAnswer('call-all');
+    expect(answer).toContain(
+      `The broadcast was interrupted after it was sent to 1 member.\\n- alice: queued for task ${children.taskIdOf('prompt:call-alice')}, but its delivery was ${outcome}, so the message did not arrive.`,
+    );
+    expect(answer).not.toContain('do not send it again');
+    expect(answer).toContain(
+      'It did not reach: bob. Send to those members by name if they still need it.',
+    );
+    expect(answer).toContain(
+      'It did not reach alice, which has ended and cannot take it.',
+    );
+  });
+
+it('answers a replayed send by name whose message was cancelled', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'hi' }, 'call-hi'),
+  ]);
+  await relay().settle(
+    sessionMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-hi',
+    }),
+    'cancelled',
+  );
+  await stopAttached('prompt:call-alice');
+  expect(
+    await execute(createTurn({ messages: true }), [
+      call('send_message', { to: 'alice', message: 'hi' }, 'call-hi'),
+    ]),
+  ).toContain(
+    `Message was queued for member \\"alice\\" (task ${children.taskIdOf('prompt:call-alice')}), but its delivery was cancelled, so it did not arrive. Member \\"alice\\" has ended; for more work, launch a new member under a new name.`,
+  );
+});
+
+it('recovers a send by task id to a plain child whose message was cancelled', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call(
+      'agent',
+      { description: 'plain task', prompt: 'review the change' },
+      'call-plain',
+    ),
+  ]);
+  await journalCall('call-hi', {
+    task_id: children.taskIdOf('prompt:call-plain'),
+    message: 'hi',
+  });
+  const messageId = sessionMessageId({
+    senderSessionId: sessionKey.sessionId,
+    turnId: 'prompt',
+    callId: 'call-hi',
+  });
+  await children.sendToChild({
+    taskId: children.taskIdOf('prompt:call-plain'),
+    text: 'hi',
+    messageId,
+    continuationRunId: 'prompt:call-hi',
+    executionCallId: 'prompt:call-hi',
+    closing: false,
+  });
+  await relay().settle(messageId, 'cancelled');
+  await stopAttached('prompt:call-plain');
+  expect(await recoveredAnswer('call-hi')).toContain(
+    `Message was queued for child agent ${children.taskIdOf('prompt:call-plain')}, but its delivery was cancelled, so it did not arrive. That child agent has ended; launch a new agent for this work if it is still needed.`,
+  );
+});
+
+const sendToKey = (callId: string) =>
+  sessionMessageId({
+    senderSessionId: sessionKey.sessionId,
+    turnId: 'prompt',
+    callId,
+  });
+
+it('answers a replayed send whose message failed by what a resend would meet', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  const replay = (callId: string, to: string, message: string) =>
+    execute(createTurn({ messages: true }), [
+      call('send_message', { to, message }, callId),
+    ]);
+  // alice still runs: her message's delivery failed, so it is sent again.
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'one' }, 'call-a'),
+  ]);
+  await relay().settle(sendToKey('call-a'), 'cancelled');
+  expect(await replay('call-a', 'alice', 'one')).toContain(
+    'but its delivery was cancelled, so it did not arrive. Send it again with send_message to \\"alice\\" if it is still needed.',
+  );
+  // bob failed while his message was still waiting for its handover: the
+  // relay will cancel it, so the answer already reads it so.
+  await execute(turn, [
+    call('send_message', { to: 'bob', message: 'two' }, 'call-b'),
+  ]);
+  await children.dispatchStarted('prompt:call-bob', {
+    dispatchId: 'dispatch-prompt:call-bob',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach('prompt:call-bob', 'session-prompt:call-bob');
+  await children.settleFailed('prompt:call-bob', {
+    stopReason: 'child_failed',
+    reason: null,
+    started: true,
+  });
+  expect(await replay('call-b', 'bob', 'two')).toContain(
+    'but its delivery was cancelled, so it did not arrive. Member \\"bob\\" has ended; for more work, launch a new member under a new name.',
+  );
+});
+
+it('answers a message to a continuation stopped before it started as settling', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await finish('prompt:call-alice');
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'work' }, 'call-1'),
+  ]);
+  await execute(turn, [
+    call('send_message', { to: 'alice', message: 'more' }, 'call-2'),
+  ]);
+  await children.requestStop('prompt:call-1');
+  expect(
+    await execute(createTurn({ messages: true }), [
+      call('send_message', { to: 'alice', message: 'more' }, 'call-2'),
+    ]),
+  ).toContain(
+    'but its delivery was cancelled, so it did not arrive. Its latest continuation is being stopped before it started; if that continuation ends without starting, send it again with send_message to \\"alice\\" if it is still needed.',
+  );
+});
+
+it('replays a broadcast whose message to a member failed as not arrived there', async () => {
+  const turn = createTurn({ messages: true });
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  await execute(turn, [member('bob', 'call-bob')]);
+  await execute(turn, [
+    call('send_message', { to: '*', message: 'all' }, 'call-all'),
+  ]);
+  await relay().settle(
+    broadcastMessageId({
+      senderSessionId: sessionKey.sessionId,
+      turnId: 'prompt',
+      callId: 'call-all',
+      position: 1,
+    }),
+    'cancelled',
+  );
+  await stopAttached('prompt:call-alice');
+  const replayed = await execute(createTurn({ messages: true }), [
+    call('send_message', { to: '*', message: 'all' }, 'call-all'),
+  ]);
+  expect(replayed).toContain(
+    'Message sent to 2 of 2 members of team \\"review\\", but it did not arrive at 1 of them.',
+  );
+  expect(replayed).toContain(
+    `- alice: queued for task ${children.taskIdOf('prompt:call-alice')}, but its delivery was cancelled, so the message did not arrive. It has ended and takes no messages.`,
+  );
+  expect(replayed).toContain(
+    `- bob: queued for its running task ${children.taskIdOf('prompt:call-bob')}.`,
+  );
 });

@@ -33,6 +33,8 @@ management:
 qwen:
   managed-agent:
     agent-revision: '${QWEN_MANAGED_AGENT_REVISION:1}'
+    definition-models: '${QWEN_MANAGED_AGENT_DEFINITION_MODELS:}'
+    definition-tool-profiles: '${QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:hosted-workspace-files/1}'
     trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'
     auth:
       mode: '${QWEN_MANAGED_AGENT_AUTH_MODE:auto}'

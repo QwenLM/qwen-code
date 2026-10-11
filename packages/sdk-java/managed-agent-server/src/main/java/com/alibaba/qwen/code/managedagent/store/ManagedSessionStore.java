@@ -780,6 +780,43 @@ public class ManagedSessionStore {
     }
 
     @Transactional
+    public ToolResultResourceRef publishAgentInstructions(String tenantId,
+            String workspaceId, String sessionId, String instructions) {
+        validateScope(tenantId, workspaceId, sessionId);
+        byte[] bytes = instructions.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES) {
+            throw payloadTooLarge("Agent instructions exceed 64 KiB.");
+        }
+        String digest = sha256(bytes);
+        String resourceId = "agent-instructions-" + digest;
+        String scopeKey = sessionScopeKey(tenantId, sessionId);
+        Timestamp now = databaseNow();
+        ResourceRow existing = findResource(scopeKey, resourceId);
+        if (existing == null) {
+            jdbc.update("INSERT INTO qwen_managed_session_resource"
+                            + " (session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
+                            + " kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
+                            + " publish_command_id, state, created_at, last_verified_at)"
+                            + " VALUES (?, ?, ?, ?, ?, 'managed-agent-instructions', 1, ?, ?,"
+                            + " 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
+                    scopeKey, tenantId, workspaceId, sessionId, resourceId,
+                    bytes.length, digest, bytes, resourceId, now, now);
+        } else {
+            requireResourceScope(existing, tenantId, workspaceId, sessionId, resourceId);
+            verifyStoredResource(existing);
+            if (!"managed-agent-instructions".equals(existing.kind())
+                    || existing.schemaVersion() != 1
+                    || existing.byteLength() != bytes.length
+                    || !digest.equals(existing.digest())) {
+                throw conflict("managed_session_resource_conflict",
+                        "Agent instructions resource does not match.");
+            }
+        }
+        return new ToolResultResourceRef(resourceId,
+                "managed-agent-instructions", 1, bytes.length, digest);
+    }
+
+    @Transactional
     public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request) {
         validateScope(tenantId, request.workspaceId(), sessionId);
@@ -828,7 +865,7 @@ public class ManagedSessionStore {
                 request.byteLength(), request.digest());
     }
 
-    private static int toolResultLimit(String kind) {
+    static int toolResultLimit(String kind) {
         if (kind == null) {
             return 0;
         }
@@ -1401,7 +1438,10 @@ public class ManagedSessionStore {
         if (!"MYSQL_INLINE".equals(resource.storageKind())
                 || !("REFERENCED".equals(resource.state())
                     || "PUBLISHED".equals(resource.state()) && resource.schemaVersion() == 1
-                        && resource.byteLength() > 0 && resource.byteLength() <= toolResultLimit(resource.kind()))
+                        && (resource.byteLength() > 0 && resource.byteLength() <= toolResultLimit(resource.kind())
+                            || "managed-agent-instructions".equals(resource.kind())
+                                && resource.byteLength() >= 0
+                                && resource.byteLength() <= ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES))
                 || resource.bytes() == null
                 || resource.objectKey() != null
                 || resource.objectVersionId() != null

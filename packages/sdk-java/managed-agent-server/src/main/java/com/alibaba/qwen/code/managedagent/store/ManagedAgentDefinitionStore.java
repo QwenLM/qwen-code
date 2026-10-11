@@ -1,6 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Map;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.dao.DuplicateKeyException;
@@ -98,12 +103,48 @@ public class ManagedAgentDefinitionStore {
         return record(tenantId, idempotencyKey, requestDigest, result, now);
     }
 
+    public Map<String, Object> pinnedContent(SessionRecord session) {
+        DefinitionRevision revision = find(session.tenantId(),
+                session.agentId(), Long.parseLong(session.agentRevision()))
+                .orElseThrow(ManagedAgentDefinitionStore::notFound);
+        Map<String, Object> content;
+        try {
+            content = new ObjectMapper().readValue(revision.definitionJson(),
+                    new TypeReference<Map<String, Object>>() { });
+        } catch (Exception error) {
+            throw new IllegalStateException("Invalid pinned definition", error);
+        }
+        if (!revision.digest().equals(session.agentDefinitionDigest())
+                || !new RequestDigests().digest(content)
+                        .equals("sha256:" + session.agentDefinitionDigest())) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "hosted_agent_definition_conflict",
+                    "The pinned agent definition digest does not match.");
+        }
+        return content;
+    }
+
     public Optional<DefinitionRevision> latest(String tenantId,
             String agentId) {
         return first(jdbc.query("SELECT agent_id, revision, digest,"
                 + " definition_json, created_at FROM managed_agent_definition"
                 + " WHERE tenant_id = ? AND agent_id = ?"
                 + " ORDER BY revision DESC LIMIT 1",
+                ManagedAgentDefinitionStore::row, tenantId, agentId));
+    }
+
+    /**
+     * The latest revision read inside the caller's transaction with the
+     * agent's rows write-locked (D8b): a Session pinned to "latest" cannot
+     * interleave with a concurrent update writing that same next revision.
+     * FOR UPDATE stands for both engines: H2 has no FOR SHARE.
+     */
+    public Optional<DefinitionRevision> latestForUpdate(String tenantId,
+            String agentId) {
+        return first(jdbc.query("SELECT agent_id, revision, digest,"
+                + " definition_json, created_at FROM managed_agent_definition"
+                + " WHERE tenant_id = ? AND agent_id = ?"
+                + " ORDER BY revision DESC LIMIT 1 FOR UPDATE",
                 ManagedAgentDefinitionStore::row, tenantId, agentId));
     }
 

@@ -65,6 +65,22 @@ class ManagedAgentWorkspaceReplayTest {
         private final AtomicBoolean armed = new AtomicBoolean(false);
     }
 
+    // Parks the first caller to reach a gated probe after the gate is
+    // armed, so a race's pre-read provably precedes the recorder's commit.
+    private static void park(RaceGate gate) {
+        if (gate != null && gate.armed.compareAndSet(true, false)) {
+            gate.parked.countDown();
+            try {
+                if (!gate.through.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("race release timed out");
+                }
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(error);
+            }
+        }
+    }
+
     private ManagedAgentService service(AtomicBoolean files, RaceGate gate) {
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector() {
@@ -75,21 +91,17 @@ class ManagedAgentWorkspaceReplayTest {
 
                     @Override
                     public boolean isWorkspaceFilesAvailable() {
-                        if (gate != null
-                                && gate.armed.compareAndSet(true, false)) {
-                            gate.parked.countDown();
-                            try {
-                                if (!gate.through.await(30,
-                                        TimeUnit.SECONDS)) {
-                                    throw new IllegalStateException(
-                                            "race release timed out");
-                                }
-                            } catch (InterruptedException error) {
-                                Thread.currentThread().interrupt();
-                                throw new IllegalStateException(error);
-                            }
-                        }
+                        park(gate);
                         return files.get();
+                    }
+
+                    // The rename race parks here: the racer's replay
+                    // pre-read is already done and beginSessionRename has
+                    // not yet run.
+                    @Override
+                    public boolean supportsFencedTitles() {
+                        park(gate);
+                        return true;
                     }
 
                     @Override
@@ -496,7 +508,7 @@ class ManagedAgentWorkspaceReplayTest {
                                         .isEqualTo("workspace_unavailable")));
     }
 
-    // The recorder admission (V66): a non-creator OPERATOR's retry of his
+    // The recorder admission (V69): a non-creator OPERATOR's retry of his
     // own recorded key replays the recorded outcome — the retry an
     // idempotency key exists for — while another OPERATOR who never
     // recorded the key keeps the refusal.
@@ -642,12 +654,15 @@ class ManagedAgentWorkspaceReplayTest {
         ExecutorService threads = Executors.newFixedThreadPool(2);
         RaceGate submitGate = new RaceGate();
         RaceGate cancelGate = new RaceGate();
+        RaceGate renameGate = new RaceGate();
         // One gate per race: each race's service parks its racer on the
         // gate that race arms.
         ManagedAgentService submitService = service(
                 new AtomicBoolean(true), submitGate);
         ManagedAgentService cancelService = service(
                 new AtomicBoolean(true), cancelGate);
+        ManagedAgentService renameService = service(
+                new AtomicBoolean(true), renameGate);
         // The submit race's recorded Turn is the cancel race's target.
         AtomicReference<String> racedTurn = new AtomicReference<>();
         try {
@@ -678,9 +693,27 @@ class ManagedAgentWorkspaceReplayTest {
             assertThat(cancelAnswer).isInstanceOfSatisfying(
                     ApiException.class, error -> assertThat(error.getCode())
                             .isEqualTo("workspace_unavailable"));
+
+            // The rename twin: the in-store COMPLETED read-back arm must
+            // re-run the recorder/creator gate on the command row, or the
+            // racer is served the recorded rename body with replayed=true.
+            Object renameAnswer = raceSecondCaller(threads, renameGate,
+                    () -> {
+                        var result = renameService.renameSession(tenant,
+                                "actor-a", "rename-race", sessionId,
+                                "raced title");
+                        assertThat(result.replayed()).isFalse();
+                        return result;
+                    },
+                    () -> renameService.renameSession(tenant, "actor-c",
+                            "rename-race", sessionId, "raced title"));
+            assertThat(renameAnswer).isInstanceOfSatisfying(
+                    ApiException.class, error -> assertThat(error.getCode())
+                            .isEqualTo("workspace_unavailable"));
         } finally {
             submitGate.through.countDown();
             cancelGate.through.countDown();
+            renameGate.through.countDown();
             threads.shutdownNow();
         }
     }

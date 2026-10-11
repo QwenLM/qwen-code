@@ -121,7 +121,7 @@ public interface AgentStateStore {
 
     /**
      * The actor-carrying variant records the caller on the command row
-     * (V66), so the row's replay answers the actor who recorded it — an
+     * (V69), so the row's replay answers the actor who recorded it — an
      * OPERATOR's own retry of his own key — and not only the creator. The
      * default drops the actor for implementations without the column.
      */
@@ -137,7 +137,7 @@ public interface AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId);
 
-    /** The actor-carrying twin of {@link #insertTurnCommand} (V66). */
+    /** The actor-carrying twin of {@link #insertTurnCommand} (V69). */
     default Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
@@ -149,13 +149,37 @@ public interface AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind);
 
-    /** The actor-carrying twin of {@link #insertTurnCommand} (V66). */
+    /** The actor-carrying twin of {@link #insertTurnCommand} (V69). */
     default SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
         return beginSessionMutation(tenantId, operation, idempotencyKey,
                 requestDigest, sessionId, kind);
     }
+
+    SessionMutationCommand beginSessionRename(String tenantId, String idempotencyKey,
+            String requestDigest, String sessionId, String title);
+
+    /** The actor-carrying twin (V69): the recorded rename answers its recorder. */
+    default SessionMutationCommand beginSessionRename(String tenantId,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String title, String actorId) {
+        return beginSessionRename(tenantId, idempotencyKey, requestDigest,
+                sessionId, title);
+    }
+
+    SessionRecord completeSessionRename(String tenantId, String idempotencyKey,
+            String sessionId, String title, String harnessBootId, long revision);
+
+    void abandonSessionRename(String tenantId, String idempotencyKey,
+            String sessionId, long revision, String owner);
+
+    List<StoreModels.RenameDelivery> deliverableRenames(long now);
+
+    Optional<StoreModels.RenameDelivery> claimRename(StoreModels.RenameDelivery delivery,
+            String owner, Duration lease);
+
+    void retryRename(StoreModels.RenameDelivery delivery, String owner, long availableAt);
 
     SessionRecord completeSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId,
@@ -426,6 +450,13 @@ public interface AgentStateStore {
 
     MaterializationResult materializeNextBatch(String tenantId,
             String sessionId, int limit);
+
+    /**
+     * Rotates a stale materialization target behind the fresher ones by
+     * touching only {@code updated_at} on its progress row — never
+     * {@code covered_sequence}, which the gap guard must freeze on failure.
+     */
+    void deferMaterializationTarget(String tenantId, String sessionId);
 
     List<DispatchTarget> findDispatchable(long now, int limit);
 
