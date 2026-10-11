@@ -79,6 +79,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
+import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   HostedModelUnavailableError,
@@ -2452,6 +2453,17 @@ async function executeHostedTurn(
             cause instanceof HostedModelUnavailableError
           )
             stopReason = 'model_unavailable';
+          if (
+            stopReason === 'error' &&
+            cause instanceof WorkflowStartCancelledError
+          ) {
+            // A registry-side cancel while the workflow start is held
+            // (cancelStarting/abortAll reaches the run's controller with
+            // this Turn's signal live) is a cancelled Turn, not a failed
+            // one — the Workflow tool answers the same error as cancelled.
+            state = 'cancelled';
+            stopReason = 'cancelled';
+          }
           if (state === 'error') {
             // The model layer surfaces any abort as a cancellation, so a
             // deadline expiry names the deadline, not the thrown cause.

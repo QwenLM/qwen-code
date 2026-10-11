@@ -43,6 +43,7 @@ import {
 import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
+import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import { channelInputId } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js';
 import { HostedChannelSession } from './hosted-channel-session.js';
 import { commitHostedFileHistory } from './hosted-file-history.js';
@@ -19213,6 +19214,57 @@ describe('Hosted Harness Runtime turn takeover', () => {
       expect(replayed.status).toBe(202);
       expect(replayed.body.lastEventId).toBe(admitted.body.lastEventId);
       expect(state.workflow).toHaveBeenCalledTimes(1);
+      await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
+    });
+
+    it('settles a registry-side cancel of the workflow start as a cancelled turn', async () => {
+      const { server, authorize, send } = await workflowApp();
+      state.workflow.mockRejectedValueOnce(new WorkflowStartCancelledError());
+      const admitted = await send(
+        workflowPrompt({ args: { x: 1 } }),
+        PROMPT_ID,
+      );
+      expect(admitted.status).toBe(202);
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      // The turn_result records a cancelled turn, never a failed one: the
+      // registry torn down the start with this Turn's signal still live is
+      // not a model or runtime failure.
+      const lines = (
+        await readFile(path.join(state.root, `${SESSION_ID}.jsonl`), 'utf8')
+      )
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const turnSettled = lines.find(
+        (entry) =>
+          entry['type'] === 'system' &&
+          entry['subtype'] === 'managed_session_event_v1' &&
+          (
+            entry['managedSession'] as
+              | { kind?: string; payload?: Record<string, unknown> }
+              | undefined
+          )?.kind === 'turn.settled' &&
+          (
+            (
+              entry['managedSession'] as {
+                payload: Record<string, unknown>;
+              }
+            ).payload as Record<string, unknown>
+          )['turnId'] === PROMPT_ID,
+      );
+      expect(turnSettled).toMatchObject({
+        managedSession: {
+          payload: { outcome: 'cancelled', stopReason: 'cancelled' },
+        },
+      });
       await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
     });
 
