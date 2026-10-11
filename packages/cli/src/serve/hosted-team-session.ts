@@ -46,10 +46,12 @@ import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.j
 import {
   HostedChildChains,
   givenWorkThisTurn,
+  hasCompletedRun,
   hostedMemberView,
   hostedNeverStarted,
   isEndedMember,
   isRunningMember,
+  neverStartedAction,
   neverStartedClause,
   outboundChildMessages,
   type HostedMemberView,
@@ -168,7 +170,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_update',
     description:
-      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader", a member that is still running, or a member you gave work with send_message earlier in this turn; any other member that has finished can be the owner only of a completed task, so a task whose owner has finished moves to another open status only with a new owner or new work sent first. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update: to give a member new work, send_message it the work by name first, then update the task in the same turn.',
+      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader", a member that is still running and not being stopped, or a member you gave work with send_message earlier in this turn. A member that completed work can otherwise be the owner only of a completed task, so a task whose owner has finished moves to another open status only with a new owner or new work sent first. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update: to give a member new work, send_message it the work by name first, then update the task in the same turn.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -763,28 +765,42 @@ export class HostedTeamSession {
     // H4e-b2 decision 7: the board is a record, never a delivery. The
     // answer never asks for a send outright: the launch prompt or a send
     // earlier in the Turn may already have given this work, and when such
-    // a send exists it says so.
+    // a send exists it says so. A call that restates its task's owner and
+    // status is not checked again, so the answer reads the member itself:
+    // work that never arrived is asked for again, and a member that has
+    // ended is never pointed to a send.
     let notice = '';
-    if (
-      owner != null &&
-      owner !== MANAGED_TEAM_LEADER &&
-      task.status !== 'completed'
-    ) {
-      const member = team.members.find((each) => each.name === owner);
-      const given =
-        member !== undefined &&
+    const member =
+      owner != null && owner !== MANAGED_TEAM_LEADER
+        ? team.members.find((each) => each.name === owner)
+        : undefined;
+    if (member !== undefined && task.status !== 'completed') {
+      const chains = this.chains();
+      const view = hostedMemberView(chains, member.childRunId);
+      const recorded = ` "${owner}" was not notified: task_update records the board only.`;
+      if (isEndedMember(view)) {
+        notice = `${recorded} ${owner} cannot take more work: it ${view.stopping ? 'is being stopped' : view.stopRequestedCompletion ? 'completed after a stop was requested' : `has ${view.state}`}.`;
+      } else if (view.neverStarted !== undefined) {
+        const neverStarted = hostedNeverStarted(
+          view.neverStarted,
+          this.messagesTo(view.neverStarted.childRunId),
+        );
+        notice = `${recorded} Its latest continuation ${neverStartedClause(neverStarted)}. ${neverStartedAction(neverStarted, member.name)}.`;
+      } else if (
         turnPrefix !== undefined &&
         givenWorkThisTurn(
-          this.chains(),
+          chains,
           member.childRunId,
           outboundChildMessages(
             this.store.authority.extensionRecordsInDomain('session_message'),
           ),
           turnPrefix,
-        );
-      notice = given
-        ? ` "${owner}" was not notified: task_update records the board only. A send_message earlier in this turn gave ${owner} work; if it did not carry this task, give it with send_message to "${owner}".`
-        : ` "${owner}" was not notified: task_update records the board only. If ${owner} does not already have this work, give it with send_message to "${owner}".`;
+        )
+      ) {
+        notice = `${recorded} A send_message earlier in this turn gave ${owner} work; if it did not carry this task, give it with send_message to "${owner}".`;
+      } else {
+        notice = `${recorded} If ${owner} does not already have this work, give it with send_message to "${owner}".`;
+      }
     }
     return (
       `Task #${number} updated (status: ${task.status}` +
@@ -970,7 +986,8 @@ export class HostedTeamSession {
    * while the member can still take work. A continuation that never started
    * says so, with how many messages to it never arrived — a failed child
    * sends no notification, so this line is how the lead learns of it — but
-   * not its own task id: a send to that ended run would be refused.
+   * not its own task id, which names no live run: the head's reaches the
+   * member.
    */
   private rosterLine(
     member: { readonly name: string; readonly childRunId: string },
@@ -1031,7 +1048,8 @@ export class HostedTeamSession {
    *   settles a child while the lead's Turn runs, so one batch cannot keep
    *   it running until task_update lands;
    * - a completed member may otherwise own only a task the call leaves
-   *   completed, so the board records who did the work (#13846);
+   *   completed, so the board records who did the work (#13846), and so
+   *   may an ended member any run of whose chain completed;
    * - a member that failed, was cancelled, is stopping, or completed after
    *   a stop request has ended: it never lands on open work.
    * No refusal claims which task a past send carried, since no record ties
@@ -1062,18 +1080,31 @@ export class HostedTeamSession {
         : `Member "${owner}" ${state}`;
     const unassign = kept ? ', or set owner "" to unassign it' : '';
     if (isEndedMember(view)) {
-      // A head that settled after a stop request did complete its work, so
-      // it may still be recorded on the task it completed.
-      if (view.stopRequestedCompletion && completing) return;
+      // A run of the chain that completed may have done this task's work,
+      // so the member may still be recorded on the task the call completes,
+      // whatever a later run did — a head that settled after a stop request
+      // among them.
+      if (completing && hasCompletedRun(chains, member.childRunId)) return;
       if (view.stopRequestedCompletion)
         throw new HostedTeamRefusal(
           `${who('completed after a stop was requested, so it cannot be continued')}. If it did this task's work, set status "completed" with this owner; otherwise launch a new member for it${unassign}.`,
+        );
+      // A continuation stopped before it attached may end without
+      // starting, which hands the member back to its predecessor.
+      if (view.stoppingBeforeStart)
+        throw new HostedTeamRefusal(
+          `${who('is being stopped before its latest continuation started')}. If that continuation ends without starting, the member can take work again: check task_list once it settles${kept ? ', set owner "" to unassign the task, or assign "leader"' : ''}.`,
         );
       const ended = view.stopping
         ? 'is being stopped'
         : view.state === 'cancelled'
           ? 'was cancelled'
           : `has ${view.state}`;
+      // No run of it completed, so it did no task's work.
+      if (completing)
+        throw new HostedTeamRefusal(
+          `Member "${owner}" ${ended} without completing a run, so it did not do this task's work. Record the member that did it, or "leader".`,
+        );
       throw new HostedTeamRefusal(
         kept
           ? `${who(ended)}. Launch a new member for this work, set owner "" to unassign it, or assign "leader".`
@@ -1091,7 +1122,7 @@ export class HostedTeamSession {
         this.messagesTo(view.neverStarted.childRunId),
       );
       throw new HostedTeamRefusal(
-        `${who(`has finished, and its latest continuation ${neverStartedClause(neverStarted)}`)}. ${neverStarted.cancelled ? 'If that work is still wanted, send it again' : 'Send that work again'} with send_message to "${owner}", then update the task in the same turn${unassign}.`,
+        `${who(`has finished, and its latest continuation ${neverStartedClause(neverStarted)}`)}. ${neverStartedAction(neverStarted, owner)}, then update the task in the same turn${unassign}.`,
       );
     }
     if (

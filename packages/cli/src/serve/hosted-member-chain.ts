@@ -227,6 +227,11 @@ export interface HostedMemberView {
   readonly state: 'running' | 'completed' | 'failed' | 'cancelled';
   /** Running, with a stop requested. */
   readonly stopping: boolean;
+  /**
+   * Stopping a continuation that has not attached a child Session yet: if
+   * it ends without starting, the head goes back to its predecessor.
+   */
+  readonly stoppingBeforeStart: boolean;
   /** Settled after a stop was requested: completed, but never continued. */
   readonly stopRequestedCompletion: boolean;
   /** Completed with no stop requested: a message continues it. */
@@ -254,6 +259,11 @@ export function hostedMemberView(
     head,
     state,
     stopping: state === 'running' && head?.stopRequested === true,
+    stoppingBeforeStart:
+      state === 'running' &&
+      head?.stopRequested === true &&
+      head.predecessorChildRunId !== null &&
+      head.childSessionId === null,
     stopRequestedCompletion:
       state === 'completed' && head?.stopRequested === true,
     continuable:
@@ -441,6 +451,35 @@ export function givenWorkThisTurn(
         fromThisTurn(message.run.executionCallId),
     )
   );
+}
+
+/**
+ * Whether a run of the member's chain completed: it may have done a task's
+ * work, so the member may be recorded on the task a call completes, as
+ * #13846 records a completed member, whatever later runs of the chain did.
+ */
+export function hasCompletedRun(
+  chains: HostedChildChains,
+  rootChildRunId: string,
+): boolean {
+  return chains
+    .chain(rootChildRunId)
+    .some((run) => run.run.state === 'settled');
+}
+
+/**
+ * What to do about the work a never-started continuation carried, and the
+ * messages it lost: send them again, or, after a user's cancel, only if
+ * they are still wanted.
+ */
+export function neverStartedAction(
+  neverStarted: HostedNeverStarted,
+  owner: string,
+): string {
+  const lost = neverStarted.lostMessages > 0;
+  return neverStarted.cancelled
+    ? `If that work${lost ? ' and those messages are' : ' is'} still wanted, send ${lost ? 'them' : 'it'} again with send_message to "${owner}"`
+    : `Send that work${lost ? ' and those messages' : ''} again with send_message to "${owner}"`;
 }
 
 /** A head that cannot take more work at all: it ended or is ending. */

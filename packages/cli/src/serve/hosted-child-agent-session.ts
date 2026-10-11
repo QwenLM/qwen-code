@@ -668,7 +668,13 @@ export class HostedChildAgentSession {
             reason:
               member === undefined
                 ? `${subject} is being stopped and cannot receive messages.`
-                : `Member "${member.name}" is being stopped and cannot receive messages.`,
+                : head.predecessorChildRunId !== null &&
+                    head.childSessionId === null
+                  ? // Stopped before it attached, it may end without
+                    // starting, which hands the member back to its
+                    // predecessor.
+                    `Member "${member.name}" is being stopped before its latest continuation started and cannot receive messages now. If that continuation ends without starting, the member takes messages again: check task_list once it settles.`
+                  : `Member "${member.name}" is being stopped and cannot receive messages.`,
           };
         }
         if (params.closing) {

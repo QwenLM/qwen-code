@@ -586,6 +586,24 @@ function sentMessageText(
     .extensionRecordsInDomain('team_state')
     .map((entry) => parseTeamState(entry.record))
     .find((each) => each.lifecycle !== 'deleted');
+  const lines = reached
+    .map(
+      (each) => `- ${each.name ?? `position ${each.position}`}: ${each.text}`,
+    )
+    .join('\n');
+  const arrived = reached.filter((each) => each.arrived).length;
+  const head = `The broadcast was interrupted after it was sent to ${reached.length} member${reached.length === 1 ? '' : 's'}${arrived > 0 ? '; do not send it again to the members it reached' : ''}.`;
+  // The batch rule keeps the roster the broadcast read; a team deleted or
+  // replaced since leaves no roster to tell the rest by, as a live replay
+  // finds (decision 9).
+  if (
+    team === undefined ||
+    reached.some(
+      (each) =>
+        team.members[each.position - 1]?.childRunId !== each.rootChildRunId,
+    )
+  )
+    return `${head} Its team has changed since, so nothing tells who else it was meant for.\n${lines}`;
   const chains = new HostedChildChains(
     input.session.authority.extensionRecordsInDomain('child_run'),
   );
@@ -594,21 +612,15 @@ function sentMessageText(
   // cannot take it by name either.
   const missed: string[] = [];
   const ended: string[] = [];
-  for (const [index, member] of (team?.members ?? []).entries()) {
+  for (const [index, member] of team.members.entries()) {
     const committed = reached.find((each) => each.position === index + 1);
     if (committed?.arrived) continue;
     if (isEndedMember(hostedMemberView(chains, member.childRunId)))
       ended.push(member.name);
     else missed.push(member.name);
   }
-  const arrived = reached.filter((each) => each.arrived).length;
   return (
-    `The broadcast was interrupted after it was sent to ${reached.length} member${reached.length === 1 ? '' : 's'}${arrived > 0 ? '; do not send it again to the members it reached' : ''}.\n` +
-    reached
-      .map(
-        (each) => `- ${each.name ?? `position ${each.position}`}: ${each.text}`,
-      )
-      .join('\n') +
+    `${head}\n${lines}` +
     (missed.length > 0
       ? `\nIt did not reach: ${missed.join(', ')}. Send to those members by name if they still need it.`
       : '') +

@@ -14,7 +14,10 @@ import {
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
-import { decodeChildLaunchEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import {
+  decodeChildLaunchEnvelope,
+  MANAGED_CHILD_LIMITS,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseSessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -960,6 +963,31 @@ describe('team members over Session messages (H4e-b2)', () => {
     expect(
       await inputText(parent.session, 'msg_from-former:message'),
     ).not.toContain('<teammate>');
+  });
+
+  it('names the member in the bounds a send to it meets', async () => {
+    const parent = await lead();
+    await join(parent, 'alice', 'run-a');
+    for (let index = 0; index < 8; index++)
+      await sendTo(parent.children, 'run-a', `m${index}`, `m${index}`);
+    expect(
+      await sendTo(parent.children, 'run-a', 'one too many', 'm8'),
+    ).toEqual({
+      kind: 'refused',
+      reason: `Member "alice" (task ${parent.children.taskIdOf('run-a')}) has 8 messages still on their way to it (count_limit); wait for them to arrive.`,
+    });
+    // The envelope bound counts the preamble every continuation carries.
+    expect(
+      await sendTo(
+        parent.children,
+        'run-a',
+        'x'.repeat(MANAGED_CHILD_LIMITS.maxEnvelopeBytes),
+        'big',
+      ),
+    ).toEqual({
+      kind: 'refused',
+      reason: `Message exceeds what a child task can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes together with its launch description and the member preamble every continuation of "alice" carries.`,
+    });
   });
 
   it('replays a named launch whose committed prompt carries a preamble', async () => {

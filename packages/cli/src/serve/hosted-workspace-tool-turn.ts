@@ -116,7 +116,6 @@ import {
   hostedCallKey,
   hostedPromptKey,
   hostedRouteDetails,
-  messagesSentToIt,
   neverStartedClause,
   neverStartedPhrase,
   teamMemberPreamble,
@@ -532,11 +531,27 @@ type HostedChildMessageRoute = Awaited<
 >;
 type HostedSentRoute = Exclude<HostedChildMessageRoute, { kind: 'refused' }>;
 
-/** H4e-b2: the continuation taken before this one never started. */
+/**
+ * H4e-b2: the continuation taken before this one never started, so the
+ * work it carried and the messages it lost are asked for again — unless
+ * the send carries them, or, when this send did not arrive either, the
+ * resend it asks for.
+ */
 function previousNote(route: HostedSentRoute): string {
   const previous = route.previousNeverStarted;
   if (previous === undefined) return '';
-  return ` Its previous continuation ${neverStartedClause(previous)}; ${previous.cancelled ? 'send that work again only if it is still wanted and this message does not carry it' : 'send that work again unless this message carries it'}.`;
+  const lost = previous.lostMessages > 0;
+  const what = `that work${lost ? ' and those messages' : ''}`;
+  const them = lost ? 'them' : 'it';
+  const carrier =
+    route.ownNeverStarted === undefined
+      ? 'this message'
+      : 'your resend of this message';
+  return ` Its previous continuation ${neverStartedClause(previous)}; ${
+    previous.cancelled
+      ? `send ${what} again only if ${lost ? 'they are' : 'it is'} still wanted and ${carrier} does not carry ${them}`
+      : `send ${what} again unless ${carrier} carries ${them}`
+  }.`;
 }
 
 /**
@@ -556,13 +571,17 @@ export function hostedRouteAnswer(
   if (own !== undefined) {
     const told =
       route.kind === 'message'
-        ? `Message was queued for ${member === undefined ? `child agent ${task}` : `member "${member.name}" as task ${task}`}, which ${neverStartedClause(own)}, this one included.`
-        : `${member === undefined ? `Child agent ${children.taskIdOf(route.predecessorChildRunId)}` : `Member "${member.name}"`} had completed; continued it as task ${task}, which ${neverStartedPhrase(own)}, so this message did not arrive${own.lostMessages > 0 ? `, nor did ${messagesSentToIt(own.lostMessages)}` : ''}.`;
-    // A launch that never started has no earlier run to send to again.
+        ? `Message was queued for ${member === undefined ? `child agent ${task}` : `member "${member.name}" as task ${task}`}, which ${neverStartedPhrase(own)}, so this message did not arrive.`
+        : `${member === undefined ? `Child agent ${children.taskIdOf(route.predecessorChildRunId)}` : `Member "${member.name}"`} had completed; continued it as task ${task}, which ${neverStartedPhrase(own)}, so this message did not arrive.`;
+    // Each answer asks again only for its own message: what else that run
+    // carried or lost belongs to its own calls' answers and to the next
+    // send's note. A launch that never started ended its member or child.
     const resend =
-      own.predecessorChildRunId === null
-        ? ''
-        : ` ${own.cancelled ? 'If it is still wanted, send' : 'Send'} what did not arrive again with send_message to ${member === undefined ? `task_id "${children.taskIdOf(own.predecessorChildRunId)}"` : `"${member.name}"`}.`;
+      own.predecessorChildRunId !== null
+        ? ` ${own.cancelled ? 'If it is still wanted, send it' : 'Send it'} again with send_message to ${member === undefined ? `task_id "${children.taskIdOf(own.predecessorChildRunId)}"` : `"${member.name}"`}.`
+        : member === undefined
+          ? ` That child agent has ended; ${own.cancelled ? 'if this work is still wanted, launch a new agent for it' : 'launch a new agent for this work'}.`
+          : ` Member "${member.name}" has ended; ${own.cancelled ? 'if this work is still wanted, launch a new member under a new name for it' : 'for more work, launch a new member under a new name'}.`;
     return told + resend + previousNote(route);
   }
   if (route.kind === 'message')
@@ -3524,6 +3543,7 @@ export class HostedWorkspaceToolTurn {
         request.call.args['to'],
         text,
         answer,
+        signal,
       );
     }
     const taskId = (request.call.args['task_id'] as string).trim();
@@ -3562,6 +3582,7 @@ export class HostedWorkspaceToolTurn {
     to: string,
     text: string,
     answer: (text: string, failed: boolean) => Promise<Part[]>,
+    signal: AbortSignal,
   ): Promise<Part[]> {
     const children = this.childAgents!;
     const teams = this.teams!;
@@ -3646,8 +3667,16 @@ export class HostedWorkspaceToolTurn {
       // replay can find.
       let sent = 0;
       let arrived = 0;
+      // A cancelled Turn sends to no further member: each send may launch
+      // a continuation, which spends the Session's launches.
+      let cancelled = false;
       for (const [index, member] of team.members.entries()) {
         const position = index + 1;
+        if (signal.aborted) {
+          cancelled = true;
+          lines.push(`- ${member.name}: not sent: the turn was cancelled.`);
+          continue;
+        }
         const route = await send(
           children.taskIdOf(member.childRunId),
           broadcastMessageId({
@@ -3673,7 +3702,7 @@ export class HostedWorkspaceToolTurn {
       return answer(
         arrived === team.members.length
           ? `Message sent to every member of team "${team.name}". There is no inline reply: each member answers through its result notification or a message to you.\n${lines.join('\n')}`
-          : `Message sent to ${arrived} of ${team.members.length} members of team "${team.name}"; the others did not receive it.\n${lines.join('\n')}`,
+          : `Message sent to ${sent} of ${team.members.length} members of team "${team.name}"${arrived < sent ? `, and ${sent - arrived} of those runs never started, so it did not arrive there` : ''}${cancelled ? `; the turn was cancelled before the rest` : ''}. Send it by name to any member below that did not get it and still needs it.\n${lines.join('\n')}`,
         false,
       );
     }
