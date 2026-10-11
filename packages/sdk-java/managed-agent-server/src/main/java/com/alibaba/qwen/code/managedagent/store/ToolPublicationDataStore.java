@@ -636,6 +636,7 @@ public final class ToolPublicationDataStore {
                 "Invalid admission outcome");
         byte[] bytes = outcome.toString().getBytes(StandardCharsets.UTF_8);
         require(bytes.length <= MAX_TERMINAL, "Admission outcome is too large");
+        grants.lockStagedPlacement(key, publicationId);
         JsonNode original = finished(key, publicationId, writerToken);
         JsonNode envelope = original.path("result");
         String decision = "complete".equals(text(envelope.path("capture"), "captureStatus"))
@@ -653,13 +654,14 @@ public final class ToolPublicationDataStore {
             lockTenant(key);
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                     text(key, "sessionId"), writerId, writerGeneration, writerToken);
-            var publication = jdbc.queryForMap("SELECT producer_phase,"
+            var publication = jdbc.queryForMap("SELECT producer_phase, binding_json, binding_digest,"
                     + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined,"
                     + " admission_bytes, admission_used_bytes,"
                     + " admission_resource_id, terminal_resource_id FROM qwen_tool_publication"
                     + " WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
                     + " AND workspace_id = ? AND session_id = ? FOR UPDATE",
                     scope, publicationId, text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"));
+            ToolPublicationStore.requireLockedBinding(publication, original.path("binding"));
             require("FINISHED".equals(publication.get("producer_phase"))
                     || "REFERENCED".equals(publication.get("producer_phase")),
                     "Publication is not finished");
@@ -716,10 +718,12 @@ public final class ToolPublicationDataStore {
                 lockTenant(key);
                 sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                         text(key, "sessionId"), writerId, writerGeneration, writerToken);
-                var publication = jdbc.queryForMap("SELECT producer_phase, terminal_resource_id,"
+                var publication = jdbc.queryForMap("SELECT producer_phase, terminal_resource_id, binding_json, binding_digest,"
                         + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
-                        + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
-                        scope, publicationId);
+                        + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
+                        + " AND workspace_id = ? AND session_id = ? FOR UPDATE", scope, publicationId,
+                        text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"));
+                ToolPublicationStore.requireLockedBinding(publication, original.path("binding"));
                 require("FINISHED".equals(publication.get("producer_phase"))
                         && ((Number) publication.get("quarantined")).intValue() == 0
                         && original.path("terminal").path("resourceId").asText()
@@ -1450,6 +1454,14 @@ public final class ToolPublicationDataStore {
 
     void requireStagedCall(JsonNode key, String publicationId) {
         grants.requireStagedCall(key, publicationId);
+    }
+
+    void lockStagedPlacement(JsonNode key, String publicationId) {
+        grants.lockStagedPlacement(key, publicationId);
+    }
+
+    void lockPublicationPlacement(JsonNode key, String publicationId) {
+        grants.lockPublicationPlacement(key, publicationId);
     }
 
     void lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
