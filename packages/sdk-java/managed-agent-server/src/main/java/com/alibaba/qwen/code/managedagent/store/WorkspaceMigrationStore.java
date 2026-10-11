@@ -279,8 +279,9 @@ public final class WorkspaceMigrationStore {
 
     public void failed(String code) {
         String stable = code.matches("[a-z0-9_]{1,64}") ? code : "migration_failed";
-        jdbc.update("UPDATE managed_workspace_migration SET last_error_code = ?, state = CASE WHEN ? = 'source_drift'"
-                + " THEN 'INVALIDATED' ELSE state END, updated_at = CURRENT_TIMESTAMP(6)"
+        jdbc.update("UPDATE managed_workspace_migration SET last_error_code = ?, state = CASE WHEN"
+                + " ? IN ('source_drift', 'resource_collected') THEN 'INVALIDATED' ELSE state END,"
+                + " updated_at = CURRENT_TIMESTAMP(6)"
                 + " WHERE operation_id = ? AND state NOT IN ('COMPLETED', 'ABORTED')", stable, stable, id);
     }
 

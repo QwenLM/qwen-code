@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -66,47 +67,62 @@ public final class WorkspaceRecoveryStore {
             check(path.isAbsolute() && path.normalize().equals(path), "invalid_request");
         }
         String requestDigest = hash(requestBytes);
-        transactions.executeWithoutResult(status -> {
-            var existing = operation(id);
-            if (existing != null) {
-                check(tenant.equals(existing.get("tenant_id")) && storage.equals(existing.get("storage_id"))
-                        && mode.equals(existing.get("mode")) && requestDigest.equals(existing.get("request_digest")),
-                        "operation_conflict");
-                return;
-            }
-            Map<String, Object> capture = null;
-            JsonNode registration;
-            if ("verify".equals(mode)) {
-                capture = operation(uuid(request, "captureOperationId"));
-                check(capture != null && "SEALED".equals(capture.get("state"))
-                        && tenant.equals(capture.get("tenant_id")) && storage.equals(capture.get("storage_id")),
-                        "capture_not_sealed");
-                JsonNode original = parse((String) capture.get("request_json"));
-                for (String field : List.of("fenceOperationId", "mountRevision", "sourceRoot", "bundleRoot", "fileHistoryRoot")) {
-                    check(original.path(field).equals(request.path(field)), "operation_conflict");
+        // The stream-capture collector fences its byte drop with a locking read over this
+        // table; a registration that meets it fails with a lock wait instead of racing
+        // silently, and the collector defers and releases quickly, so retry transiently.
+        int attempts = 0;
+        while (true) {
+            try {
+                transactions.executeWithoutResult(status -> register(requestDigest));
+                break;
+            } catch (PessimisticLockingFailureException error) {
+                if (++attempts >= 3) {
+                    throw error;
                 }
-                registration = parse((String) capture.get("registration_json"));
-            } else {
-                registration = currentRegistration();
             }
-            jdbc.update("INSERT INTO managed_workspace_recovery_operation (operation_id, tenant_id, storage_id,"
-                    + " mode, capture_operation_id, request_digest, request_json, registration_json, source_digest,"
-                    + " session_count, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?,"
-                    + " CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))", id, tenant, storage, mode,
-                    capture == null ? null : capture.get("operation_id"), requestDigest, request.toString(),
-                    registration.toString(), hash(new byte[0]), "capture".equals(mode) ? "CAPTURING" : "VERIFYING");
-            if (capture != null) {
-                jdbc.update("INSERT INTO managed_workspace_recovery_session (operation_id, session_id, source_digest,"
-                        + " source_json, state) SELECT ?, session_id, source_digest, source_json, 'PENDING'"
-                        + " FROM managed_workspace_recovery_session WHERE operation_id = ?", id, capture.get("operation_id"));
-                jdbc.update("UPDATE managed_workspace_recovery_operation SET source_digest = ?, session_count = ?"
-                        + " WHERE operation_id = ?", capture.get("source_digest"), capture.get("session_count"), id);
-            } else {
-                SourceCut cut = scanSources(true);
-                jdbc.update("UPDATE managed_workspace_recovery_operation SET source_digest = ?, session_count = ?"
-                        + " WHERE operation_id = ?", cut.digest(), cut.count(), id);
+        }
+    }
+
+    private void register(String requestDigest) {
+        var existing = operation(id);
+        if (existing != null) {
+            check(tenant.equals(existing.get("tenant_id")) && storage.equals(existing.get("storage_id"))
+                    && mode.equals(existing.get("mode")) && requestDigest.equals(existing.get("request_digest")),
+                    "operation_conflict");
+            return;
+        }
+        Map<String, Object> capture = null;
+        JsonNode registration;
+        if ("verify".equals(mode)) {
+            capture = operation(uuid(request, "captureOperationId"));
+            check(capture != null && "SEALED".equals(capture.get("state"))
+                    && tenant.equals(capture.get("tenant_id")) && storage.equals(capture.get("storage_id")),
+                    "capture_not_sealed");
+            JsonNode original = parse((String) capture.get("request_json"));
+            for (String field : List.of("fenceOperationId", "mountRevision", "sourceRoot", "bundleRoot", "fileHistoryRoot")) {
+                check(original.path(field).equals(request.path(field)), "operation_conflict");
             }
-        });
+            registration = parse((String) capture.get("registration_json"));
+        } else {
+            registration = currentRegistration();
+        }
+        jdbc.update("INSERT INTO managed_workspace_recovery_operation (operation_id, tenant_id, storage_id,"
+                + " mode, capture_operation_id, request_digest, request_json, registration_json, source_digest,"
+                + " session_count, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?,"
+                + " CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))", id, tenant, storage, mode,
+                capture == null ? null : capture.get("operation_id"), requestDigest, request.toString(),
+                registration.toString(), hash(new byte[0]), "capture".equals(mode) ? "CAPTURING" : "VERIFYING");
+        if (capture != null) {
+            jdbc.update("INSERT INTO managed_workspace_recovery_session (operation_id, session_id, source_digest,"
+                    + " source_json, state) SELECT ?, session_id, source_digest, source_json, 'PENDING'"
+                    + " FROM managed_workspace_recovery_session WHERE operation_id = ?", id, capture.get("operation_id"));
+            jdbc.update("UPDATE managed_workspace_recovery_operation SET source_digest = ?, session_count = ?"
+                    + " WHERE operation_id = ?", capture.get("source_digest"), capture.get("session_count"), id);
+        } else {
+            SourceCut cut = scanSources(true);
+            jdbc.update("UPDATE managed_workspace_recovery_operation SET source_digest = ?, session_count = ?"
+                    + " WHERE operation_id = ?", cut.digest(), cut.count(), id);
+        }
     }
 
     public JsonNode call(String method, JsonNode params) {
@@ -158,8 +174,10 @@ public final class WorkspaceRecoveryStore {
                 default -> throw failure("unknown_method");
             };
         } catch (RecoveryFailure error) {
-            if ("source_drift".equals(error.code)) {
-                invalidate("source_drift");
+            if ("source_drift".equals(error.code) || "resource_collected".equals(error.code)) {
+                // The bytes have no other copy: no retry can succeed, so terminate instead
+                // of wedging CAPTURING and pinning this cut's retired Sessions forever.
+                invalidate(error.code);
             }
             recordFailure(error.code);
             throw error;
