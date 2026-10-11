@@ -1348,6 +1348,25 @@ export class MemoryManager {
     result: Awaited<ReturnType<typeof runAutoMemoryExtract>> | undefined,
     startEpoch: number,
   ): void {
+    // Both early returns below drop this run's outcome, but a completed run
+    // already persisted its own project's extract cursor by the time it lands
+    // here — `runAutoMemoryExtract` writes it before returning. Record what
+    // that write covers before either exit can leave the entry behind it, or a
+    // later flush replays a snapshot this run extracted and persists the
+    // cursor backwards, which the next run then reads as a reason to re-scan
+    // everything after it. Only the snapshot this run's own root parked is
+    // covered: after a `/cd` the entry belongs to the live root, whose newer
+    // snapshot this run never extracted (see the guard below).
+    if (result && !result.skippedReason) {
+      const covered = this.extractCadence.get(params.sessionId);
+      if (
+        covered?.pending !== undefined &&
+        covered.pending.projectRoot === params.projectRoot &&
+        params.history.length >= covered.pending.history.length
+      ) {
+        delete covered.pending;
+      }
+    }
     if (startEpoch !== this.cadenceDiscardEpoch) return;
     if (getExtractNoopSkipTurns() === 0) {
       this.extractCadence.delete(params.sessionId);
@@ -1511,30 +1530,37 @@ export class MemoryManager {
       // running a snapshot earned in project A after the session moved to B
       // would read B's turns against A's memory and write A's memory from
       // them. The session-id guard above cannot see a relocation, so check
-      // the root the same way.
+      // the root the same way. Only refuse this snapshot: the session lives on
+      // across a `/cd`, so a skip in the new root can have parked a newer one
+      // behind this flush, and that one is still owed the run.
       const liveProjectRoot = pending.config?.getProjectRoot?.();
       if (
         liveProjectRoot !== undefined &&
         liveProjectRoot !== pending.projectRoot
       ) {
-        this.extractCadence.delete(sessionId);
+        if (this.extractCadence.get(sessionId)?.pending === pending) {
+          this.extractCadence.delete(sessionId);
+        }
         return false;
       }
-      // A newer run for this session completed while the slot was held, so it
-      // already covered the snapshot. Replaying it would fork over content
-      // that was extracted and persist the cursor backwards, which the next
-      // run then reads as a reason to re-scan everything after it. Leave the
-      // newer run's entry alone; only clear one this snapshot still owns.
-      // A run that instead *dropped* the snapshot (history shrank under it)
-      // rewrites the cursor downward, so the length test cannot see it. A newer
-      // skip that replaced it leaves `pending` defined and still owes a run.
+      // The entry no longer holds this snapshot: a newer run for the session
+      // completed while the slot was held (leaving its own coverage, or a
+      // dropped snapshot behind) or a newer skip replaced it. Either way the
+      // state it carries describes turns this run never extracted, and
+      // replaying it forks over content that was already covered and persists
+      // the cursor backwards, which the next run then reads as a reason to
+      // re-scan everything after it. A replacement that *shrank* under the
+      // snapshot (compaction, then another skip) is the same case: the length
+      // test below cannot see it, because a shrink rewrites the cursor
+      // downward while the parked snapshot keeps a length no live history has.
+      // Leave the newer entry alone; only clear one this snapshot still owns.
       const state = this.extractCadence.get(sessionId);
+      if (state !== undefined && state.pending !== pending) return false;
       if (
         state !== undefined &&
-        (state.pending === undefined ||
-          state.lastExtractedLength >= pending.history.length)
+        state.lastExtractedLength >= pending.history.length
       ) {
-        if (state.pending === pending) this.extractCadence.delete(sessionId);
+        this.extractCadence.delete(sessionId);
         return false;
       }
       const result:
