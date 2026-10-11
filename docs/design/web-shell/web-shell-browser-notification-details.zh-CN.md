@@ -2,6 +2,8 @@
 
 [English](web-shell-browser-notification-details.md) | [简体中文](web-shell-browser-notification-details.zh-CN.md)
 
+状态：2026-10-11，本文件记录回合结束通知的历史设计。当前任务通知名称、审批／问答提醒、独立请求去重及首次浮窗自动申请授权的行为，以[操作提醒设计](../browser-action-notifications.zh-CN.md)为准；原有“从不自动申请权限”的承诺已被该设计取代。
+
 基础版合入 #11398 后，本次增强让用户直接辨认通知对应的会话、查看本轮回复摘录，并点击返回对应会话。权限、后台触发和去重规则沿用基础版，内置入口现按品牌设计默认开启偏好。不增加 daemon 路由或协议字段；新增的公共 Web Shell 品牌选项见[品牌设计](web-shell-browser-notification-branding.zh-CN.md)。
 
 ## 内容与图标

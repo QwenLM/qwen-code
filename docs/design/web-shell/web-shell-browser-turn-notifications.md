@@ -2,7 +2,7 @@
 
 [English](web-shell-browser-turn-notifications.md) | [简体中文](web-shell-browser-turn-notifications.zh-CN.md)
 
-Status: historical design for the 2026-09-08 baseline. The provisions below about being disabled by default, generic copy, focusing the window only on click, and adding no public API describe the baseline at #11398. For current behavior, see [notification content and session navigation](web-shell-browser-notification-details.zh-CN.md) and [configurable branding](web-shell-browser-notification-branding.zh-CN.md), which supersede this baseline. English counterparts are available through the language links in those two designs.
+Status: historical design for the 2026-09-08 baseline. The provisions below about being disabled by default, generic copy, focusing the window only on click, and adding no public API describe the baseline at #11398. For the later turn-end behavior, see [notification content and session navigation](web-shell-browser-notification-details.zh-CN.md) and [configurable branding](web-shell-browser-notification-branding.zh-CN.md), which supersede this baseline. English counterparts are available through the language links in those two designs. For the 2026-10-11 task label, approval/question reminders, and replacement of the never-auto-request permission guarantee, see the [action reminder design](../browser-action-notifications.md).
 
 ## Decisions and scope
 

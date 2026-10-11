@@ -3,6 +3,7 @@ import type { DaemonPermissionRequestEvent } from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
+  permissionRequestEvent,
   turnCompleteEvent,
 } from './utils/mockDaemon';
 
@@ -19,6 +20,10 @@ declare global {
     __taskNotificationFocused: boolean;
     __taskNotificationPermissionRequests: number;
     __taskNextNotificationPermission: NotificationPermission;
+    __taskHoldNotificationPermission: boolean;
+    __taskResolveNotificationPermission?: (
+      permission: NotificationPermission,
+    ) => void;
   }
 }
 
@@ -52,6 +57,7 @@ async function captureNotifications(
         sessionStorage.getItem('notification-test-permission-requests') ?? 0,
       );
       window.__taskNextNotificationPermission = 'default';
+      window.__taskHoldNotificationPermission = false;
       Object.defineProperty(document, 'hasFocus', {
         value: () => window.__taskNotificationFocused,
       });
@@ -72,7 +78,11 @@ async function captureNotifications(
                     'notification-test-permission-requests',
                     String(window.__taskNotificationPermissionRequests),
                   );
-                  this.permission = window.__taskNextNotificationPermission;
+                  this.permission = window.__taskHoldNotificationPermission
+                    ? await new Promise<NotificationPermission>((resolve) => {
+                        window.__taskResolveNotificationPermission = resolve;
+                      })
+                    : window.__taskNextNotificationPermission;
                   sessionStorage.setItem(
                     'notification-test-permission',
                     this.permission,
@@ -100,44 +110,32 @@ function actionRequest(
   id = 1,
 ): DaemonPermissionRequestEvent {
   const requestId = `action-${id}`;
-  return {
+  return permissionRequestEvent(requestId, {
     id,
-    v: 1,
-    type: 'permission_request',
-    data: {
-      requestId,
-      sessionId,
-      toolCall:
-        kind === 'question'
-          ? {
-              toolCallId: requestId,
-              title: 'Ask user 1 question',
-              kind: 'think',
-              _meta: { toolName: 'ask_user_question' },
-              rawInput: {
-                questions: [
-                  {
-                    header: 'Destination',
-                    question: 'Which private deployment target?',
-                    options: [{ label: 'Staging' }, { label: 'Production' }],
-                  },
-                ],
-              },
-            }
-          : {
-              name: 'Bash',
-              input: { command: 'printf web-shell-e2e' },
+    sessionId,
+    toolCall:
+      kind === 'question'
+        ? {
+            toolCallId: requestId,
+            title: 'Ask user 1 question',
+            kind: 'think',
+            _meta: { toolName: 'ask_user_question' },
+            rawInput: {
+              questions: [
+                {
+                  header: 'Destination',
+                  question: 'Which private deployment target?',
+                  options: [{ label: 'Staging' }, { label: 'Production' }],
+                },
+              ],
             },
-      options: [
-        { optionId: 'allow_once', label: 'Allow once' },
-        { optionId: 'reject_once', label: 'Reject' },
-      ],
-    },
-  };
+          }
+        : undefined,
+  }) as DaemonPermissionRequestEvent;
 }
 
 for (const kind of ['approval', 'question'] as const) {
-  test(`notifies for a live ${kind} without approving it or consuming completion`, async ({
+  test(`notifies for a live ${kind} without approving it or consuming completion @smoke`, async ({
     page,
   }, testInfo) => {
     await captureNotifications(page);
@@ -155,7 +153,9 @@ for (const kind of ['approval', 'question'] as const) {
         page.getByText('Which private deployment target?', { exact: true }),
       ).toBeVisible();
     } else {
-      await expect(page.getByText('Allow once', { exact: true })).toBeVisible();
+      await expect(
+        page.getByText('Yes, allow once', { exact: true }),
+      ).toBeVisible();
     }
     await expect
       .poll(() => page.evaluate(() => window.__taskNotifications.length))
@@ -208,7 +208,7 @@ test('keeps history and foreground requests silent and allows a later background
   await daemon.sse.waitForConnection(scenario.sessionId);
   await expect(page.getByRole('banner')).toContainText(scenario.displayName);
   await expect(
-    page.getByRole('radio', { name: 'Allow once', exact: true }),
+    page.getByRole('radio', { name: 'Yes, allow once', exact: true }),
   ).toBeVisible();
   expect(await page.evaluate(() => window.__taskNotifications.length)).toBe(0);
   await daemon.sendEvent({
@@ -288,14 +288,14 @@ async function openActionPanel(
   await expect(
     kind === 'question'
       ? page.getByText('Which private deployment target?', { exact: true })
-      : page.getByText('Allow once', { exact: true }),
+      : page.getByText('Yes, allow once', { exact: true }),
   ).toBeVisible();
   await waitForAnimations(page);
   return { scenario, daemon };
 }
 
 for (const kind of ['approval', 'question'] as const) {
-  test(`exposes interactive browser notification help in the ${kind} header`, async ({
+  test(`exposes interactive browser notification help in the ${kind} header @smoke`, async ({
     page,
   }, testInfo) => {
     await captureNotifications(page);
@@ -309,7 +309,7 @@ for (const kind of ['approval', 'question'] as const) {
       exact: true,
     });
     const help = page.locator('[data-web-shell-notification-help]');
-    await expect(button).toHaveAttribute('aria-pressed', 'true');
+    await expect(button).not.toHaveAttribute('aria-pressed');
     await button.hover();
     await expect(help).toBeVisible();
     await help.hover();
@@ -365,29 +365,33 @@ for (const kind of ['approval', 'question'] as const) {
       expect(daemon.permissionRequests()).toHaveLength(0);
     }
     await page.screenshot({
-      path: `../../.qwen/e2e-tests/browser-notification-access/${kind}-popover-final-v3.png`,
+      path: `../../.qwen/e2e-tests/browser-action-notifications/${kind}-popover.png`,
       fullPage: true,
     });
     await help.focus();
-    for (const key of ['1', 'Control+Enter', 'Escape']) {
+    for (const key of ['1', 'Control+Enter']) {
       await help.press(key);
       expect(daemon.permissionRequests()).toHaveLength(0);
       await button.focus();
       await expect(help).toBeVisible();
       await help.focus();
     }
+    await help.press('Escape');
+    await expect(help).not.toBeVisible();
+    await expect(button).toBeFocused();
+    expect(daemon.permissionRequests()).toHaveLength(0);
     await button.click();
     await expect(help).toBeVisible();
     expect(daemon.permissionRequests()).toHaveLength(0);
     await expect(
       kind === 'question'
         ? page.getByText('Which private deployment target?', { exact: true })
-        : page.getByText('Allow once', { exact: true }),
+        : page.getByText('Yes, allow once', { exact: true }),
     ).toBeVisible();
   });
 }
 
-test('attempts permission once across panels and reload, then allows a manual grant', async ({
+test('attempts permission once across panels and reload, then allows a manual grant @smoke', async ({
   page,
 }, testInfo) => {
   await captureNotifications(page, {
@@ -443,7 +447,8 @@ test('attempts permission once across panels and reload, then allows a manual gr
   await help
     .getByRole('button', { name: 'Allow notifications', exact: true })
     .click();
-  await expect(button).toHaveAttribute('aria-pressed', 'true');
+  await expect(help.getByRole('status')).toHaveText('Enabled for this site.');
+  await expect(button).toBeFocused();
   await expect(help).toContainText('Enabled for this site.');
   expect(
     await page.evaluate(() => window.__taskNotificationPermissionRequests),
@@ -472,7 +477,7 @@ for (const permission of ['default', 'denied', 'unavailable'] as const) {
     await button.click();
     const help = page.locator('[data-web-shell-notification-help]');
     await expect(help).toBeVisible();
-    await expect(button).toHaveAttribute('aria-pressed', 'false');
+    await expect(button).not.toHaveAttribute('aria-pressed');
     await expect(help).toContainText(/site|browser|Browser/);
     expect(
       await page.evaluate(() => window.__taskNotificationPermissionRequests),
@@ -507,7 +512,9 @@ test('shows localized notification help in the question header', async ({
   await page.getByRole('button', { name: '任务通知', exact: true }).hover();
   const help = page.locator('[data-web-shell-notification-help]');
   await expect(help).toBeVisible();
-  await expect(help).toContainText(/已|通知/);
+  await expect(help).toContainText(
+    '页面在后台或者切换到其他页签时，当前聊天需要审批、等待回答、回合结束或失败会发送提醒，点击通知返回对应聊天，不会自动审批或回答。',
+  );
   await waitForAnimations(page);
   await expect
     .poll(() =>
@@ -518,7 +525,7 @@ test('shows localized notification help in the question header', async ({
     )
     .toBe(true);
   await page.screenshot({
-    path: '../../.qwen/e2e-tests/browser-notification-access/question-popover-zh-CN-final-v3.png',
+    path: '../../.qwen/e2e-tests/browser-action-notifications/question-popover-zh-CN.png',
     fullPage: true,
   });
 });
@@ -538,7 +545,6 @@ test('enables an explicitly off preference with existing browser permission', as
   await help
     .getByRole('button', { name: 'Enable notifications', exact: true })
     .click();
-  await expect(button).toHaveAttribute('aria-pressed', 'true');
   await expect(help.getByRole('status')).toHaveText('Enabled for this site.');
   expect(
     await page.evaluate(() => window.__taskNotificationPermissionRequests),
@@ -584,3 +590,110 @@ for (const kind of ['approval', 'question'] as const) {
     expect(daemon.permissionRequests()).toHaveLength(0);
   });
 }
+
+for (const kind of ['approval', 'question'] as const) {
+  test(`isolates hover-opened help while a ${kind} option retains focus @smoke`, async ({
+    page,
+  }, testInfo) => {
+    await captureNotifications(page);
+    const { daemon } = await openActionPanel(
+      page,
+      String(testInfo.project.use.baseURL),
+      kind,
+    );
+    const option = page.getByRole('radio', {
+      name: kind === 'question' ? /Staging/ : 'Yes, allow once',
+    });
+    const bell = page.getByRole('button', {
+      name: 'Task notifications',
+      exact: true,
+    });
+    const help = page.locator('[data-web-shell-notification-help]');
+    await option.focus();
+    await bell.hover();
+    await expect(help).toBeVisible();
+    await expect(option).toBeFocused();
+    const selected = await page
+      .getByRole('radio', { checked: true })
+      .allTextContents();
+    for (const key of ['1', 'Control+Enter']) {
+      await page.keyboard.press(key);
+      await expect(help).toBeVisible();
+      expect(daemon.permissionRequests()).toHaveLength(0);
+      expect(
+        await page.getByRole('radio', { checked: true }).allTextContents(),
+      ).toEqual(selected);
+    }
+    await page.keyboard.press('Escape');
+    await expect(help).not.toBeVisible();
+    await expect(bell).toBeFocused();
+    expect(daemon.permissionRequests()).toHaveLength(0);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => daemon.permissionRequests().length).toBe(1);
+    expect(daemon.permissionRequests()[0].body).toEqual({
+      outcome: { outcome: 'selected', optionId: 'cancel' },
+    });
+  });
+}
+
+test('does not repeat a dismissed manual authorization when an action arrives @smoke', async ({
+  page,
+}, testInfo) => {
+  await captureNotifications(page, {
+    permission: 'default',
+    savedPreference: false,
+  });
+  const scenario = createWebShellDaemonScenario({ events: [] });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.goto(`/session/${scenario.sessionId}?language=en`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await expect(page.getByRole('banner')).toContainText(scenario.displayName);
+  await page.evaluate(() => {
+    window.__taskHoldNotificationPermission = true;
+  });
+  await page.getByRole('button', { name: 'More', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Settings', exact: true })
+    .first()
+    .click();
+  await page
+    .getByRole('navigation', { name: 'Settings' })
+    .getByRole('button', { name: /^UI/ })
+    .click();
+  await page
+    .getByRole('button', { name: 'Allow notifications', exact: true })
+    .click();
+  expect(
+    await page.evaluate(() => window.__taskNotificationPermissionRequests),
+  ).toBe(1);
+  await page.getByTestId('panel-back').click();
+  const event = actionRequest(scenario.sessionId, 'question');
+  await daemon.sendEvent(event);
+  const bell = page.getByRole('button', {
+    name: 'Task notifications',
+    exact: true,
+  });
+  await expect(bell).toHaveAttribute('title', 'Waiting for your permission…');
+  await page.evaluate(() =>
+    window.__taskResolveNotificationPermission?.('default'),
+  );
+  await expect(bell).toHaveAttribute(
+    'title',
+    'Notifications are not authorized yet.',
+  );
+  expect(
+    await page.evaluate(() => window.__taskNotificationPermissionRequests),
+  ).toBe(1);
+  scenario.events = [event];
+  await page.reload();
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await expect(bell).toHaveAttribute(
+    'title',
+    'Notifications are not authorized yet.',
+  );
+  expect(
+    await page.evaluate(() => window.__taskNotificationPermissionRequests),
+  ).toBe(1);
+});

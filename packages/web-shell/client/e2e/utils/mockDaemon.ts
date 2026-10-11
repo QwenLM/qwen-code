@@ -701,7 +701,7 @@ export function replayCompleteEvent(
 
 export function permissionRequestEvent(
   requestId: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: { id?: number; sessionId?: string; toolCall?: unknown } = {},
 ): DaemonEvent {
   return {
     ...(options.id !== undefined ? { id: options.id } : {}),
@@ -710,15 +710,15 @@ export function permissionRequestEvent(
     data: {
       requestId,
       sessionId: options.sessionId,
-      toolCall: {
+      toolCall: options.toolCall ?? {
         name: 'Bash',
         input: {
           command: 'printf web-shell-e2e',
         },
       },
       options: [
-        { optionId: 'allow_once', label: 'Allow once' },
-        { optionId: 'reject_once', label: 'Reject' },
+        { optionId: 'allow_once', label: 'Allow', kind: 'allow_once' },
+        { optionId: 'cancel', label: 'Reject', kind: 'reject_once' },
       ],
     },
   };

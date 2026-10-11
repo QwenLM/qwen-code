@@ -11,6 +11,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { PermissionRequest } from '../../adapters/types';
 import { AskUserQuestion } from './AskUserQuestion';
+import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -93,6 +94,7 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+  vi.unstubAllGlobals();
 });
 
 function rerender(
@@ -1483,3 +1485,56 @@ describe('AskUserQuestion multi-select', () => {
     expect(submitButton()!.disabled).toBe(true);
   });
 });
+
+it.each(['Escape', 'Control+Enter'])(
+  'isolates %s from the focused question under hover-opened notification help',
+  (key) => {
+    vi.stubGlobal('isSecureContext', true);
+    vi.stubGlobal(
+      'Notification',
+      Object.assign(vi.fn(), { permission: 'granted' }),
+    );
+    render();
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <BrowserTurnNotifications language="en">
+            <AskUserQuestion
+              request={request}
+              onConfirm={onConfirm}
+              onError={onError}
+            />
+          </BrowserTurnNotifications>
+        </I18nProvider>,
+      ),
+    );
+    const option = optionButtons()[0];
+    act(() => option.focus());
+    const bell = container!.querySelector<HTMLButtonElement>(
+      '[aria-label="Task notifications"]',
+    )!;
+    act(() =>
+      bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+    );
+    expect(document.activeElement).toBe(option);
+    expect(
+      document.querySelector('[data-web-shell-notification-help]'),
+    ).not.toBeNull();
+    pressKey(option, key === 'Escape' ? 'Escape' : 'Enter', {
+      cancelable: true,
+      ctrlKey: key === 'Control+Enter',
+    });
+    expect(onConfirm).not.toHaveBeenCalled();
+    if (key === 'Escape') {
+      expect(
+        document.querySelector('[data-web-shell-notification-help]'),
+      ).toBeNull();
+      expect(document.activeElement).toBe(bell);
+    } else {
+      expect(
+        document.querySelector('[data-web-shell-notification-help]'),
+      ).not.toBeNull();
+      expect(document.activeElement).toBe(option);
+    }
+  },
+);

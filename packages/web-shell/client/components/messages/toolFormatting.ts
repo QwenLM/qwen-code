@@ -1,4 +1,7 @@
 import type { ACPToolCall } from '../../adapters/types.js';
+import { isAskUserQuestionToolName } from '../../constants/toolNames.js';
+
+export { isAskUserQuestionToolName } from '../../constants/toolNames.js';
 
 export { isActiveToolStatus } from '../../adapters/toolClassification.js';
 
@@ -165,11 +168,6 @@ export function localizeToolDisplayName(
     if (translated !== key) return translated;
   }
   return displayName;
-}
-
-export function isAskUserQuestionToolName(toolName: string): boolean {
-  const normalized = toolName.toLowerCase();
-  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
 }
 
 export function isAdvisorToolName(toolName: string): boolean {

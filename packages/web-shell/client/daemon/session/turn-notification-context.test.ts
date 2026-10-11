@@ -18,6 +18,7 @@ function terminal(promptId = 'p', stopReason = 'end_turn'): DaemonEvent {
 
 function permission(requestId = 'p'): DaemonEvent {
   return {
+    v: 1,
     type: 'permission_request',
     data: { sessionId: 's', requestId },
   };
@@ -63,7 +64,9 @@ describe('turn notification observer', () => {
     observer.observe(
       'scope',
       's',
-      { ...permission(), sessionId: 'other' },
+      { ...permission(), sessionId: 'other' } as DaemonEvent & {
+        sessionId: string;
+      },
       false,
       content,
     );

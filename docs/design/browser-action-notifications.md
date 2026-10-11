@@ -109,3 +109,33 @@ enabled/denied copy, safe keyboard handling, persisted attempts, and screenshots
 Guidance follows [Apple Notifications settings](https://support.apple.com/en-gb/guide/mac-help/-mh40583/mac)
 and [Microsoft Notifications and Do Not Disturb](https://support.microsoft.com/en-us/windows/experience/notifications-and-do-not-disturb-in-windows).
 E2E uses an isolated mock API, not user permissions.
+
+## Public behavior and embedder migration
+
+The Settings row and panel control share the new “Task notifications” label.
+Settings exclusions continue to match `builtin:browser-notifications`, not
+the display label.
+
+The first eligible approval/question panel attempts authorization and enables
+notifications after a grant. This replaces the previous public guarantee that
+permission is never requested automatically. Hosts opting in through
+`browserNotifications` receive this behavior; hosts without it and iframes do
+not expose the control. `defaultEnabled` still only supplies the initial
+preference, and an explicitly saved off choice suppresses automatic requests.
+Manual permission attempts also count toward the site attempt; dismissing one
+never triggers an automatic retry, including when another panel mounts later.
+Browsers may suppress a request without a gesture or return denial; denied
+permission requires recovery through browser site settings.
+
+Tool-name classification lives in the UI-free `constants/toolNames.ts` and is
+re-exported by the display formatting module, keeping its display-name map out
+of the daemon SDK dependency graph. Only main-chat and split-pane daemon
+callers enable the tool-approval notification control; other managed approval
+cards do not advertise reminders.
+
+Related changes also cover `App.tsx` and `components/ChatPane.tsx` for control
+scope; `App.test.tsx`, `SettingsMessage.dom.test.tsx`, and
+`e2e/web-shell.settings-exclusions.spec.ts` for compatibility assertions;
+`BrowserNotificationControl.test.tsx` and `DaemonSessionProvider.test.tsx` for
+interaction/projection regressions; and `e2e/utils/mockDaemon.ts` for realistic
+permission option shapes.

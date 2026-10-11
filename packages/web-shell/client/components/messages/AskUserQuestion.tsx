@@ -477,6 +477,16 @@ export function AskUserQuestion({
   // option navigation remains scoped to the roving-tabindex option group.
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (
+        e.key !== 'Escape' &&
+        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
+        (!isEditableTarget(e.target) ||
+          (e.key === 'Enter' && (e.ctrlKey || e.metaKey)))
+      ) {
+        if (e.key === 'Enter' || e.key === ' ') e.preventDefault();
+        return;
+      }
+
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       if (collapsed) {
         if (

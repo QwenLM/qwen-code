@@ -23694,6 +23694,96 @@ describe('DaemonSessionProvider', () => {
     },
   );
 
+  it.each(['approval', 'question', 'no observer'] as const)(
+    'flushes pending action projections only for a notification observer (%s)',
+    async (kind) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      const gate = createDeferred<void>();
+      const consumed = createDeferred<void>();
+      const notify = vi.fn();
+      const session = createMockSession({
+        sessionId: 'action-projection',
+        async *events(opts) {
+          yield {
+            v: 1,
+            type: 'replay_complete',
+            data: { sessionId: 'action-projection' },
+          };
+          await gate.promise;
+          yield {
+            v: 1,
+            type: 'permission_request',
+            data: {
+              sessionId: 'action-projection',
+              requestId: 'pending-action',
+              toolCall:
+                kind === 'question'
+                  ? {
+                      _meta: { toolName: 'ask_user_question' },
+                      rawInput: { questions: [{ question: 'Choose?' }] },
+                    }
+                  : { name: 'Bash', input: { command: 'echo hello' } },
+              options: [
+                { optionId: 'allow_once', label: 'Allow', kind: 'allow_once' },
+              ],
+            },
+          };
+          consumed.resolve();
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let store: DaemonTranscriptStore | undefined;
+      function Harness() {
+        store = useDaemonTranscriptStore();
+        return null;
+      }
+      await renderWithProvider(
+        <Harness />,
+        { autoConnect: true },
+        kind === 'no observer'
+          ? undefined
+          : createTurnNotificationObserver(notify),
+      );
+      vi.useFakeTimers();
+      try {
+        await act(async () => {
+          gate.resolve();
+          await consumed.promise;
+          await flushPromises();
+        });
+        if (kind === 'no observer') {
+          expect(
+            store!
+              .getSnapshot()
+              .blocks.some((block) => block.kind === 'permission'),
+          ).toBe(false);
+          act(() => vi.advanceTimersByTime(16));
+          expect(
+            store!
+              .getSnapshot()
+              .blocks.some((block) => block.kind === 'permission'),
+          ).toBe(true);
+          expect(notify).not.toHaveBeenCalled();
+        } else {
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ outcome: kind }),
+          );
+          expect(
+            store!
+              .getSnapshot()
+              .blocks.some((block) => block.kind === 'permission'),
+          ).toBe(true);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('toggles browser notifications without restarting the session stream', async () => {
     vi.stubGlobal('isSecureContext', true);
     vi.stubGlobal('crypto', webcrypto);

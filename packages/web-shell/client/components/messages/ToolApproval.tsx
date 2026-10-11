@@ -35,6 +35,7 @@ interface ToolApprovalProps {
   onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
   variant?: 'inline' | 'floating';
   disabled?: boolean;
+  showBrowserNotifications?: boolean;
   /**
    * Whether this approval should pull keyboard focus to its safe-default option
    * when it becomes the topmost (visible) one — on appearance, or when a panel/
@@ -256,6 +257,7 @@ export function ToolApproval({
   onConfirm,
   variant = 'inline',
   disabled = false,
+  showBrowserNotifications = false,
   keyboardActive = true,
   extraDescriptionId,
   planTodos = [],
@@ -491,6 +493,16 @@ export function ToolApproval({
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (
+        e.key !== 'Escape' &&
+        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
+        (!isEditableTarget(e.target) ||
+          (e.key === 'Enter' && (e.ctrlKey || e.metaKey)))
+      ) {
+        if (e.key === 'Enter' || e.key === ' ') e.preventDefault();
+        return;
+      }
+
+      if (
         e.target instanceof Element &&
         ((e.key !== 'Escape' && e.target.closest('[data-plan-interactive]')) ||
           e.target.closest('[data-approval-shortcuts-ignore]'))
@@ -644,7 +656,7 @@ export function ToolApproval({
         <span className={styles.name} id={headingId}>
           {toolName}
         </span>
-        <BrowserNotificationControl />
+        {showBrowserNotifications && <BrowserNotificationControl />}
       </div>
 
       {descriptionText && (

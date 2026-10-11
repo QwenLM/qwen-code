@@ -2,6 +2,8 @@
 
 [English](web-shell-browser-notification-branding.md) | [简体中文](web-shell-browser-notification-branding.zh-CN.md)
 
+Status: 2026-10-11, this document records the historical turn-end notification design. The current task-notification label, approval/question reminders, independent request deduplication, and first-panel authorization attempt are specified by the [action reminder design](../browser-action-notifications.md), which supersedes the earlier never-auto-request permission guarantee.
+
 ## Problem and scope
 
 Before this PR, #11398 used the fixed `Qwen Code` title and passed no icon to Notification. This PR introduces the bundled PNG and the requested QwenCode spelling, alongside configurable branding.

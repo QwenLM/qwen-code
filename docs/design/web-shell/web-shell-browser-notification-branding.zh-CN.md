@@ -2,6 +2,8 @@
 
 [English](web-shell-browser-notification-branding.md) | [简体中文](web-shell-browser-notification-branding.zh-CN.md)
 
+状态：2026-10-11，本文件记录回合结束通知的历史设计。当前任务通知名称、审批／问答提醒、独立请求去重及首次浮窗自动申请授权的行为，以[操作提醒设计](../browser-action-notifications.zh-CN.md)为准；原有“从不自动申请权限”的承诺已被该设计取代。
+
 ## 问题与范围
 
 本 PR 之前，#11398 使用固定的 `Qwen Code` 标题，不向 Notification 传入图标。本 PR 引入随包 PNG 和用户指定的 QwenCode 拼写，并支持品牌配置。

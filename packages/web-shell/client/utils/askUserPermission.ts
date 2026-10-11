@@ -5,7 +5,7 @@
  */
 
 import type { PermissionRequest } from '../adapters/types.js';
-import { isAskUserQuestionToolName } from '../components/messages/toolFormatting.js';
+import { isAskUserQuestionToolName } from '../constants/toolNames.js';
 
 /**
  * True when a pending permission is an AskUserQuestion prompt (it carries a

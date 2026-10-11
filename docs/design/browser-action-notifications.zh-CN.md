@@ -85,3 +85,25 @@ ToolApproval 与 AskUserQuestion 在标题右上角共用通知状态按钮，�
 和截图。系统指引依据 [Apple 通知设置](https://support.apple.com/en-gb/guide/mac-help/-mh40583/mac)
 与 [Microsoft 通知／请勿打扰文档](https://support.microsoft.com/en-us/windows/experience/notifications-and-do-not-disturb-in-windows)。
 E2E 使用隔离的模拟 API，不操作用户权限。
+
+## 公开行为与接入迁移
+
+设置项及浮窗统一使用“任务通知”名称；设置排除项仍按
+`builtin:browser-notifications` 标识匹配，不按显示文案匹配。
+
+首次符合条件的审批／问答浮窗会主动尝试授权，并在授权成功后开启通知，
+这取代了此前“不会自动申请权限”的公开行为。宿主传入 `browserNotifications`
+即启用该流程；未接入或 iframe 中不显示入口。`defaultEnabled` 仍只指定
+未保存偏好时的初始值，用户明确关闭通知时不会自动申请。浏览器可能抑制
+非用户手势的申请或返回拒绝；拒绝后需要通过浏览器站点设置恢复。
+手动授权申请也计入站点的一次申请记录；关闭申请后，不会因其他浮窗随后出现而自动重试。
+
+问答工具名称判断放在不依赖 UI 的 `constants/toolNames.ts`，由展示格式化模块
+重新导出，避免 daemon SDK 间接引入展示名称映射。工具审批中的通知入口仅由
+主聊天和分屏的 daemon 请求调用方开启，其他管理审批卡片不显示该入口。
+
+实现还涉及 `App.tsx`、`components/ChatPane.tsx` 的入口作用域、
+`App.test.tsx`、`SettingsMessage.dom.test.tsx` 和
+`e2e/web-shell.settings-exclusions.spec.ts` 的兼容断言，以及
+`BrowserNotificationControl.test.tsx`、`DaemonSessionProvider.test.tsx` 的交互／投影
+回归和 `e2e/utils/mockDaemon.ts` 的真实权限选项形状。

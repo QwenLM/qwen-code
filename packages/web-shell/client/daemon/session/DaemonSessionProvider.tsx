@@ -3924,16 +3924,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 );
               }
               if (sessionRef.current === activeSession) {
-                if (event.type === 'permission_request') flushTranscriptSync();
-                turnNotifications.observe(activeSession, event, false, () =>
-                  getTurnNotificationContent(
+                turnNotifications.observe(activeSession, event, false, () => {
+                  if (event.type === 'permission_request')
+                    flushTranscriptSync();
+                  return getTurnNotificationContent(
                     event,
                     store.getSnapshot().blocks,
                     connectionRef.current.sessionId === activeSession.sessionId
                       ? connectionRef.current.displayName
                       : getSessionDisplayName(activeSession.state),
-                  ),
-                );
+                  );
+                });
               }
               if (
                 event.type === 'turn_complete' ||

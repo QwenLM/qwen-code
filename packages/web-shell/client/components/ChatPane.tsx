@@ -1780,6 +1780,7 @@ export function ChatPane({
         {pendingToolApproval && (
           <div className={styles.approval} data-testid="pane-approval">
             <ToolApproval
+              showBrowserNotifications
               disabled={isExitPlanApproval && modeControlsBusy}
               planExecutionMode={connection.planExecutionMode}
               request={pendingToolApproval}

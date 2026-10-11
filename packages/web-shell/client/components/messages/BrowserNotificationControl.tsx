@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
 import { useI18n } from '../../i18n';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import { Button } from '../ui/button';
 import {
   Popover,
@@ -22,6 +23,7 @@ export function BrowserNotificationControl() {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const content = useRef<HTMLDivElement>(null);
+  const restoredFocus = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const requestPermissionOnce = settings?.requestPermissionOnce;
   useEffect(() => requestPermissionOnce?.(), [requestPermissionOnce]);
@@ -37,10 +39,10 @@ export function BrowserNotificationControl() {
       ? 'unavailable'
       : settings.permission === 'denied'
         ? 'denied'
-        : settings.error
-          ? 'error'
-          : enabled
-            ? 'helpEnabled'
+        : enabled
+          ? 'helpEnabled'
+          : settings.error
+            ? 'error'
             : settings.permission === 'default'
               ? 'helpWaiting'
               : 'disabled';
@@ -59,7 +61,7 @@ export function BrowserNotificationControl() {
     cancelClose();
     timer.current = setTimeout(() => {
       if (
-        !trigger.current?.matches(':focus-within') &&
+        (restoredFocus.current || !trigger.current?.matches(':focus-within')) &&
         !content.current?.matches(':focus-within')
       )
         setOpen(false);
@@ -69,8 +71,10 @@ export function BrowserNotificationControl() {
   return (
     <span
       className="ml-auto inline-flex shrink-0"
-      data-approval-shortcuts-ignore
-      onKeyDown={(event) => event.stopPropagation()}
+      data-web-shell-notification-open={open || undefined}
+      onKeyDown={(event) => {
+        if (open || event.key !== 'Escape') event.stopPropagation();
+      }}
     >
       <Popover
         open={open}
@@ -87,13 +91,15 @@ export function BrowserNotificationControl() {
             size="icon-xs"
             className={enabled ? 'text-primary' : 'text-muted-foreground'}
             aria-label={t('browserNotifications.label')}
-            aria-pressed={enabled}
             title={t(`browserNotifications.${status}`)}
             onPointerEnter={(event) => {
               if (event.pointerType !== 'touch') show();
             }}
             onPointerLeave={leave}
-            onFocus={show}
+            onFocus={() => {
+              restoredFocus.current = false;
+              show();
+            }}
             onBlur={leave}
             onClick={(event) => {
               event.preventDefault();
@@ -102,6 +108,7 @@ export function BrowserNotificationControl() {
             onKeyDown={(event) => {
               if (!['Enter', ' ', 'ArrowDown'].includes(event.key)) return;
               event.preventDefault();
+              restoredFocus.current = false;
               show();
               requestAnimationFrame(() =>
                 content.current?.focus({ preventScroll: true }),
@@ -121,9 +128,11 @@ export function BrowserNotificationControl() {
           aria-label={t('browserNotifications.label')}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
-          onEscapeKeyDown={() =>
-            trigger.current?.focus({ preventScroll: true })
-          }
+          onEscapeKeyDown={(event) => {
+            event.stopPropagation();
+            trigger.current?.focus({ preventScroll: true });
+            restoredFocus.current = true;
+          }}
           onPointerEnter={cancelClose}
           onPointerLeave={leave}
           onFocusCapture={cancelClose}
@@ -158,7 +167,15 @@ export function BrowserNotificationControl() {
               type="button"
               size="sm"
               disabled={!canAuthorize || settings.pending}
-              onClick={() => void settings.setEnabled(true)}
+              onClick={async () => {
+                await settings.setEnabled(true);
+                const active = getShadowAwareActiveElement(content.current);
+                if (
+                  content.current &&
+                  (!active || active === content.current.ownerDocument.body)
+                )
+                  trigger.current?.focus({ preventScroll: true });
+              }}
             >
               {t(
                 settings.permission === 'granted'
@@ -166,6 +183,16 @@ export function BrowserNotificationControl() {
                   : 'browserNotifications.allow',
               )}
             </Button>
+          )}
+          {enabled && settings.error && (
+            <p className="text-muted-foreground">
+              {t('browserNotifications.error')}
+            </p>
+          )}
+          {!settings.persistent && (
+            <p className="text-muted-foreground">
+              {t('browserNotifications.temporary')}
+            </p>
           )}
           <p>{t('browserNotifications.helpWhen')}</p>
           <p className="text-muted-foreground">

@@ -168,6 +168,39 @@ describe('browser task notifications', () => {
     expect(next.settings!.permission).toBe('granted');
   });
 
+  it('does not auto-request after an in-flight manual prompt is dismissed', async () => {
+    FakeNotification.permission = 'default';
+    let dismiss!: (permission: NotificationPermission) => void;
+    FakeNotification.requestPermission.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          dismiss = resolve;
+        }),
+    );
+    const capture: Capture = {};
+    const root = render(capture);
+    act(() => {
+      void capture.settings!.setEnabled(true);
+    });
+    function Panel() {
+      const request = useBrowserNotificationSettings()?.requestPermissionOnce;
+      useEffect(() => request?.(), [request]);
+      return null;
+    }
+    act(() =>
+      root.render(
+        <BrowserTurnNotifications language="en">
+          <Panel />
+          <Probe capture={capture} />
+        </BrowserTurnNotifications>,
+      ),
+    );
+    expect(capture.settings!.pending).toBe(true);
+    await act(async () => dismiss('default'));
+    expect(FakeNotification.requestPermission).toHaveBeenCalledOnce();
+    expect(capture.settings!.pending).toBe(false);
+  });
+
   it.each(['off', 'denied', 'granted', 'unavailable'] as const)(
     'does not auto-request notification authorization when %s',
     async (reason) => {
