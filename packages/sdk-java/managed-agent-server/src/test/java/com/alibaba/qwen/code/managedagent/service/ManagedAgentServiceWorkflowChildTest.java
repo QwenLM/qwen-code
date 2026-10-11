@@ -9,6 +9,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
+import com.alibaba.qwen.code.managedagent.api.ApiModels;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
@@ -113,5 +115,66 @@ class ManagedAgentServiceWorkflowChildTest {
         assertThat(replayedKey.getValue()).isEqualTo(attemptedKey.getValue())
                 .isEqualTo(ManagedAgentService.childCreationKey(PARENT, RUN));
         assertThat(replayed.getValue()).isEqualTo(attempted.getValue());
+    }
+
+    @Test
+    void loneSurrogatesTradeForReplacementBeforeTheDigestAndTheInsert() {
+        String raw = "x surrogate " + (char) 0xD800 + " here";
+        assertThat(service.createWorkflowChildSession(TENANT, PARENT, RUN,
+                "workflow/audit", 1L, DIGEST, raw, Map.of("note", raw))
+                .sessionId()).isEqualTo("workflow-child");
+
+        ArgumentCaptor<List<Map<String, Object>>> input =
+                ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<String> digest = ArgumentCaptor.forClass(String.class);
+        verify(store).insertChildSessionCommand(eq(TENANT), eq(PARENT),
+                anyString(), anyString(), anyString(), input.capture(),
+                digest.capture(), any(StoreModels.SessionLineage.class));
+        Map<String, Object> block = input.getValue().get(0);
+        String normalized = raw.replace((char) 0xD800, '�');
+        assertThat(block.get("script")).isEqualTo(normalized);
+        assertThat(block.get("args")).isEqualTo(Map.of("note", normalized));
+        // The digest names the representation the column keeps: recomputing
+        // it from the persisted input round-trips instead of wedging the Turn.
+        assertThat(digest.getValue()).isEqualTo(
+                SubmitHarnessTurn.computePayloadDigest(input.getValue()));
+    }
+
+    @Test
+    void userTextWithALoneSurrogateIsNormalizedTheSameWay() {
+        when(harness.isAvailable()).thenReturn(true);
+        when(store.insertSessionCommand(anyString(), anyString(), anyString(),
+                anyString(), anyString(), any(), any(), any(), anyList(),
+                anyString())).thenReturn(new StoreModels.Admission(
+                        "session-new", null, false, true));
+        String raw = "x surrogate " + (char) 0xD800 + " here";
+
+        service.createSession(TENANT, "actor", "key-1", null, null, null,
+                null, List.of(new ApiModels.InputBlock("text", raw)));
+
+        ArgumentCaptor<List<Map<String, Object>>> input =
+                ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<String> digest = ArgumentCaptor.forClass(String.class);
+        verify(store).insertSessionCommand(anyString(), anyString(),
+                anyString(), anyString(), anyString(), any(), any(), any(),
+                input.capture(), digest.capture());
+        List<Map<String, Object>> inserted = input.getValue();
+        String normalized = raw.replace((char) 0xD800, '�');
+        assertThat(inserted).containsExactly(
+                Map.of("type", "text", "text", normalized));
+        assertThat(digest.getValue()).isEqualTo(
+                SubmitHarnessTurn.computePayloadDigest(inserted));
+    }
+
+    @Test
+    void replaceLoneSurrogatesTradesOnlyTheUnpaired() {
+        assertThat(ManagedAgentService.replaceLoneSurrogates(
+                "x" + (char) 0xD800)).isEqualTo("x" + '�');
+        assertThat(ManagedAgentService.replaceLoneSurrogates(
+                "x" + (char) 0xDFFF + "y")).isEqualTo("x" + '�' + "y");
+        assertThat(ManagedAgentService.replaceLoneSurrogates("café 中 😀"))
+                .isEqualTo("café 中 😀");
+        assertThat(ManagedAgentService.replaceLoneSurrogates("plain"))
+                .isEqualTo("plain");
     }
 }

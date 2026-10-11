@@ -168,5 +168,32 @@ class JsonSupportTest {
         assertEquals("{\"a\":1,\"b\":[1,2,0.0001],\"c\":{\"x\":true,\"y\":{}},\"d\":null}",
                 JsonSupport.encode(value));
     }
+
+    @Test
+    void protocolHelperMessagesKeepTheirFieldPath() {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("count", -1L);
+        assertEquals("ctx.count must be non-negative",
+                assertThrows(DaemonProtocolException.class,
+                        () -> JsonSupport.requiredNonNegativeLong(block,
+                                "count", "ctx")).getMessage());
+
+        block.put("count", 0L);
+        assertEquals("ctx.count must be positive",
+                assertThrows(DaemonProtocolException.class,
+                        () -> JsonSupport.optionalPositiveLong(block, "count",
+                                "ctx")).getMessage());
+
+        block.put("count", (long) Integer.MAX_VALUE + 1L);
+        assertEquals("ctx.count is outside the integer range",
+                assertThrows(DaemonProtocolException.class,
+                        () -> JsonSupport.requiredInt(block, "count", "ctx"))
+                        .getMessage());
+
+        assertEquals("ctx.inner must be an object",
+                assertThrows(DaemonProtocolException.class,
+                        () -> JsonSupport.requiredObject(Map.of(), "inner",
+                                "ctx")).getMessage());
+    }
 }
 

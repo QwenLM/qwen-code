@@ -370,7 +370,8 @@ final class JsonSupport {
         Object value = object.get(field);
         long result = exactLong(value, context + "." + field);
         if (result < 0) {
-            throw new DaemonProtocolException(context + " must be non-negative");
+            throw new DaemonProtocolException(context + "." + field
+                    + " must be non-negative");
         }
         return result;
     }
@@ -383,7 +384,8 @@ final class JsonSupport {
         }
         long result = exactLong(value, context + "." + field);
         if (result <= 0) {
-            throw new DaemonProtocolException(context + " must be positive");
+            throw new DaemonProtocolException(context + "." + field
+                    + " must be positive");
         }
         return result;
     }
@@ -392,7 +394,7 @@ final class JsonSupport {
             String context) {
         long value = exactLong(object.get(field), context + "." + field);
         if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
-            throw new DaemonProtocolException(context
+            throw new DaemonProtocolException(context + "." + field
                     + " is outside the integer range");
         }
         return (int) value;
@@ -402,7 +404,8 @@ final class JsonSupport {
             String field, String context) {
         Map<String, Object> value = optionalObject(object, field);
         if (value == null) {
-            throw new DaemonProtocolException(field + " must be an object");
+            throw new DaemonProtocolException(context + "." + field
+                    + " must be an object");
         }
         return value;
     }
