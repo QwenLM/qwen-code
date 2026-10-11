@@ -378,6 +378,72 @@ describe('HostedMonitorLoop', () => {
     await closeLoop(rig);
   });
 
+  it('settles a parked quota at the watch exit that follows it (#13856)', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    rig.executor.provesStop = false;
+    await rig.loop.start(params({ maxEvents: 1 }));
+
+    rig.executor.onLine?.('one');
+    await rig.clock.advance(1_000);
+    await rig.loop.done;
+    expect(committed(rig.authority).run.state).toBe('recovery_blocked');
+
+    // The park left the record open: the watch kept running, so its own
+    // physical end is still the evidence that settles it.
+    await rig.executor.exitNaturally();
+    await rig.loop.done;
+    expect(committed(rig.authority)).toMatchObject({
+      stopReason: 'exited',
+      run: { state: 'settled', execution: 'settled' },
+    });
+    await closeLoop(rig);
+  });
+
+  it('projects a platform stop that follows a parked idle window (#13856)', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    rig.executor.provesStop = false;
+    await rig.loop.start(params({ idleTimeoutMs: 60_000 }));
+
+    rig.executor.onLine?.('kept-alive');
+    await rig.clock.advance(1_000);
+    await rig.clock.advance(60_000);
+    await rig.loop.done;
+    expect(committed(rig.authority).run.state).toBe('recovery_blocked');
+
+    // A8 still holds after a park: a requested stop projects as
+    // stop_requested, never as a bare exit.
+    await rig.executor.exitStopped();
+    await rig.loop.done;
+    expect(committed(rig.authority)).toMatchObject({
+      stopReason: 'stop_requested',
+      run: { state: 'cancelled', execution: 'settled' },
+    });
+    await closeLoop(rig);
+  });
+
+  it('upgrades a parked record when the close drain proves the stop (#13856)', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    rig.executor.provesStop = false;
+    await rig.loop.start(params({ maxEvents: 1 }));
+
+    rig.executor.onLine?.('one');
+    await rig.clock.advance(1_000);
+    await rig.loop.done;
+    expect(committed(rig.authority).run.state).toBe('recovery_blocked');
+
+    // The Session close drained, so its stop call is proven and must not be
+    // skipped over the park.
+    await rig.loop.stop('stop_requested');
+    expect(committed(rig.authority)).toMatchObject({
+      stopReason: 'stop_requested',
+      run: { state: 'cancelled', execution: 'settled' },
+    });
+    await closeLoop(rig);
+  });
+
   it('flushes the buffer and settles exited when the watch ends', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
