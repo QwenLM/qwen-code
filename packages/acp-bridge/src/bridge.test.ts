@@ -110,6 +110,7 @@ import {
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   IMAGE_ONLY_PROMPT_TEXT,
+  MAX_SUBMITTED_PROMPT_CHARS,
 } from './bridgeTypes.js';
 import {
   CHANNEL_LIVENESS_INTERVAL_MS,
@@ -17128,10 +17129,11 @@ describe('createAcpSessionBridge', () => {
         sourceType: 'channel',
       });
       const abort = new AbortController();
+      const userChunks: unknown[] = [];
       const events = bridge.subscribeEvents(session.sessionId, {
         signal: abort.signal,
       });
-      const userChunk = (async () => {
+      const drain = (async () => {
         for await (const event of events) {
           if (event.type !== 'session_update') continue;
           const update = (
@@ -17139,9 +17141,10 @@ describe('createAcpSessionBridge', () => {
               update?: { sessionUpdate?: string; content?: unknown };
             }
           ).update;
-          if (update?.sessionUpdate === 'user_message_chunk') return update;
+          if (update?.sessionUpdate === 'user_message_chunk') {
+            userChunks.push(update.content);
+          }
         }
-        throw new Error('no user_message_chunk observed');
       })();
       const submittedPrompt = ' original Channel question\n';
       const prompt: PromptRequest['prompt'] = [
@@ -17155,13 +17158,10 @@ describe('createAcpSessionBridge', () => {
         { submittedPrompt },
       );
 
-      await expect(userChunk).resolves.toMatchObject({
-        content: { type: 'text', text: submittedPrompt },
-      });
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
       expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
         { text: submittedPrompt, state: 'running' },
       ]);
-      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
       expect(handle.agent.promptCalls[0]).toMatchObject({
         prompt: [
           { type: 'text', text: 'internal channel instructions' },
@@ -17184,6 +17184,11 @@ describe('createAcpSessionBridge', () => {
       promptGate.resolve({ stopReason: 'end_turn' });
       await promptPromise;
       abort.abort();
+      await drain;
+      // Drain the whole echo: exactly one projected text chunk. Losing the
+      // echo loop's suppression guard would republish the declaration for
+      // every text block.
+      expect(userChunks).toEqual([{ type: 'text', text: submittedPrompt }]);
       await bridge.shutdown();
     });
 
@@ -17212,11 +17217,11 @@ describe('createAcpSessionBridge', () => {
         throw new Error('no user_message_chunk observed');
       })();
       // One representative per class alternative: BEL/ESC for the C0 halves,
-      // NEL for C1, DEL, U+2028, and a variation selector, with TAB and LF
-      // retained by contract.
+      // NEL for C1, DEL, and U+2028 neutralized to spaces; TAB, LF, and the
+      // grapheme-rendering variation selector are retained by contract.
       const submittedPrompt =
         'a\u0007b\u001bc\u0085d\u007fe\u2028f\u2764\ufe0fg\th\ni';
-      const sanitizedDeclaration = 'a b c d e f\u2764 g\th\ni';
+      const sanitizedDeclaration = 'a b c d e f\u2764\ufe0fg\th\ni';
       const promptPromise = bridge.sendPrompt(
         session.sessionId,
         {
@@ -17251,6 +17256,63 @@ describe('createAcpSessionBridge', () => {
       promptGate.resolve({ stopReason: 'end_turn' });
       await promptPromise;
       abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('keeps grapheme joiners intact in a declared Channel display projection', async () => {
+      const promptGate = deferred<PromptResponse>();
+      const handle = makeChannel({ promptImpl: () => promptGate.promise });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      const abort = new AbortController();
+      const userChunks: unknown[] = [];
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const drain = (async () => {
+        for await (const event of events) {
+          if (event.type !== 'session_update') continue;
+          const update = (
+            event.data as {
+              update?: { sessionUpdate?: string; content?: unknown };
+            }
+          ).update;
+          if (update?.sessionUpdate === 'user_message_chunk') {
+            userChunks.push(update.content);
+          }
+        }
+      })();
+      // ZWJ, ZWNJ, a variation selector, and CGJ join or select a neighbor's
+      // rendering; neutralizing them would split the family emoji and the
+      // Persian word on the live display while the model receives the text
+      // intact.
+      const submittedPrompt =
+        'family \u{1f468}\u200d\u{1f469}\u200d\u{1f466} pair mi\u200crauad key 1\ufe0f\u20e3 a\u034fb';
+      const promptPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [
+            { type: 'text', text: 'internal channel instructions' },
+            { type: 'text', text: 'safe question' },
+          ],
+        },
+        undefined,
+        { submittedPrompt },
+      );
+
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+        { text: submittedPrompt, state: 'running' },
+      ]);
+      promptGate.resolve({ stopReason: 'end_turn' });
+      await promptPromise;
+      abort.abort();
+      await drain;
+      expect(userChunks).toEqual([{ type: 'text', text: submittedPrompt }]);
       await bridge.shutdown();
     });
 
@@ -17333,6 +17395,13 @@ describe('createAcpSessionBridge', () => {
         name: 'annotation-anchor-only',
         context: { submittedPrompt: '\ufff9' },
       },
+      // ZWJ and VS16 are kept by the display projection, so this arm pins
+      // the blankness gate re-neutralizing them: a declaration of nothing
+      // but kept grapheme joiners is still invisible.
+      {
+        name: 'grapheme-joiner-only',
+        context: { submittedPrompt: '\u200d\ufe0f' },
+      },
       {
         name: 'invalid',
         context: { submittedPrompt: 42 as unknown as string },
@@ -17367,7 +17436,7 @@ describe('createAcpSessionBridge', () => {
         throw new Error('no user_message_chunk observed');
       })();
 
-      await bridge.sendPrompt(
+      const promptPromise = bridge.sendPrompt(
         session.sessionId,
         {
           sessionId: session.sessionId,
@@ -17381,6 +17450,14 @@ describe('createAcpSessionBridge', () => {
         undefined,
         context,
       );
+      // Admission creates the pending entry synchronously and the
+      // immediately-resolving mock settles the turn right after, so pin the
+      // pending surface before awaiting: an ineligible declaration must
+      // drive neither it nor the echo below.
+      expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+        { text: 'machine wrapper' },
+      ]);
+      await promptPromise;
 
       await expect(userChunk).resolves.toMatchObject({
         content: { type: 'text', text: 'machine wrapper' },
@@ -17429,6 +17506,78 @@ describe('createAcpSessionBridge', () => {
       const invisible = sendWithDeclaration('\u200b'.repeat(1_000_000));
       await invisible.promptPromise;
 
+      expect(invisible.admissionMs).toBeLessThan(
+        Math.max(20, prose.admissionMs * 10),
+      );
+      await bridge.shutdown();
+    });
+
+    it('discards an over-cap declaration without paying the neutralization scan', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      const abort = new AbortController();
+      const userChunks: unknown[] = [];
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const drain = (async () => {
+        for await (const event of events) {
+          if (event.type !== 'session_update') continue;
+          const update = (
+            event.data as {
+              update?: { sessionUpdate?: string; content?: unknown };
+            }
+          ).update;
+          if (update?.sessionUpdate === 'user_message_chunk') {
+            userChunks.push(update.content);
+          }
+        }
+      })();
+
+      const sendWithDeclaration = (submittedPrompt: string) => {
+        const start = performance.now();
+        const promptPromise = bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'machine wrapper' }],
+          },
+          undefined,
+          { submittedPrompt },
+        );
+        const admissionMs = performance.now() - start;
+        // Admission creates the pending entry synchronously; capture it
+        // before the immediately-resolving mock settles the turn.
+        const pendingText = bridge.getPendingPrompts(session.sessionId)[0]
+          ?.text;
+        return { promptPromise, admissionMs, pendingText };
+      };
+
+      // A visible over-cap declaration is treated as absent: the pending
+      // text and the echo stay content-derived instead of projecting it.
+      // This first send also warms the one-time admission costs.
+      const visible = sendWithDeclaration(
+        'v'.repeat(MAX_SUBMITTED_PROMPT_CHARS + 1),
+      );
+      expect(visible.pendingText).toBe('machine wrapper');
+      await visible.promptPromise;
+      abort.abort();
+      await drain;
+      expect(userChunks).toEqual([{ type: 'text', text: 'machine wrapper' }]);
+
+      // An all-invisible megabyte is the neutralization scan's worst case;
+      // the cap keeps an eligible session from paying it on the daemon's
+      // single event loop.
+      const prose = sendWithDeclaration('a'.repeat(1_000_000));
+      await prose.promptPromise;
+      const invisible = sendWithDeclaration('\u200b'.repeat(1_000_000));
+      await invisible.promptPromise;
       expect(invisible.admissionMs).toBeLessThan(
         Math.max(20, prose.admissionMs * 10),
       );

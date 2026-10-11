@@ -8,7 +8,7 @@ main `1919ff97f5` 上的普通 daemon 提问会执行已配置的 UserPromptSubm
 
 ## 范围与归属
 
-保留所属会话的配置、消息总线、cwd、注册信息与环境。在现有客户端、daemon 准入、bridge 与 ACP 子进程边界之间显式传递提交文本。已声明提交仅在实时展示面（排队项与回显）复用现有 Channel 显示投影；持久记录的显示文本仍仅由已认证 worker 投影提供。旧 hook 调用策略、provider 配置、凭证、默认扩展注册和托管记忆召回保持不变。
+保留所属会话的配置、消息总线、cwd、注册信息与环境。在现有客户端、daemon 准入、bridge 与 ACP 子进程边界之间显式传递提交文本。已声明提交仅在实时展示面（排队项、实时回显，以及由排队项派生的温热回合状态 prompt 文本）复用现有 Channel 显示投影；持久记录的显示文本仍仅由已认证 worker 投影提供。旧 hook 调用策略、provider 配置、凭证、默认扩展注册和托管记忆召回保持不变。
 
 REST prompt 准入属于 live-session-owner 范围，使用已解析的 owner bridge 和 runtime。ACP HTTP/WebSocket 准入使用已绑定的会话与 bridge。不增加路由，也不引入 primary-runtime 回退。
 
@@ -18,7 +18,7 @@ REST prompt 准入属于 live-session-owner 范围，使用已解析的 owner br
 
 REST 与 ACP 传输路由读取声明，通过 bridge context 的 `submittedPrompt` 传递。REST channel-worker 请求不会通过该路由获得来源，包括 worker 授权已失效的请求。bridge 从请求中删除公开与私有提交键，仅将 context 中声明的文本重新注入为 `qwen.daemon.submittedPrompt`；具有 worker 分类的 channel 回合和提升为普通回合的 mid-turn 派发省略该字段。内部定时任务、子会话、Live task 及其他自动派发不提供声明。实时语音委派同样省略声明：其请求文本来自模型生成的工具参数，而非独立核实的用户转写。
 
-`sourceType: "channel"` 会话在请求包含文本块、当前回合没有 channel-worker 分类、也没有 worker 显示投影时，可把 context 中声明的非空白 `submittedPrompt` 用作显示投影。这是对 #11645「每条 channel prompt 路径都展示送达模型的确切 prompt」契约的一项有意例外，服务于 #13747 跟踪的外部 Channel 网关 —— 它在准备后的包装文本旁转发第三方来文原文。目前仓库内尚无任何生产方使用该例外 —— channel 会话只由 supervisor 启动的 worker 创建，而 worker 总是提供已认证投影 —— 因此该例外属于临时约定，等待维护者对 #13747 尚未回答的 triage 问题作出裁定。bridge 在投影前先把 Unicode 格式字符、Default_Ignorable 集合、BRAILLE PATTERN BLANK、孤立代理项、变体选择符、行/段分隔符以及除 TAB 和 LF 外的 C0/C1/DEL 控制符中和为空格，再做空白判定，因此纯不可见字符的声明按空白处理；有效声明除此之外保留原始空白。空白声明与纯附件请求继续从内容取得显示文本。bridge 将中和后的声明仅用于排队文本和实时用户回显，绝不把声明写入私有显示文本字段，因此持久用户记录的显示文本 —— 以及所有把它读回为模型输入的消费方（自动标题生成与跨会话 `@session` 引用），加上由同一字段供给的回合结果记录 prompt 文本与 OTel input-message 属性 —— 始终来自真实 prompt 或已认证 worker 投影。bridge 向模型转发完整 prompt；来源字段为 hooks 逐字保留未改动的原始声明。来源标签与声明不授予 worker 权限：不会设置 `qwen.channel.prompt`、绕过循环检测或采信调用方自报的私有显示元数据。REST 请求只要携带 worker 分类、授权或显示键，仍不能回退到提交声明。普通会话的显示行为保持不变。
+`sourceType: "channel"` 会话在请求包含文本块、当前回合没有 channel-worker 分类、也没有 worker 显示投影时，可把 context 中声明的非空白 `submittedPrompt` 用作显示投影。这是对 #11645「每条 channel prompt 路径都展示送达模型的确切 prompt」契约的一项有意例外，服务于 #13747 跟踪的外部 Channel 网关 —— 它在准备后的包装文本旁转发第三方来文原文。目前仓库内尚无任何生产方使用该例外，因此它属于临时约定，等待维护者对 #13747 尚未回答的 triage 问题作出裁定。裁定必须权衡真实的可达性：daemon 目前并不保留 `channel` 来源标签，任何持有 prompt 权限的调用方今天都可以自报 `channel` 会话，并在没有 worker 认证的情况下选择其回合的实时展示文本。bridge 在投影前先把 Unicode 格式字符、Default_Ignorable 集合、BRAILLE PATTERN BLANK、孤立代理项、行/段分隔符以及除 TAB 和 LF 外的 C0/C1/DEL 控制符中和为空格，再对完全中和后的形式做空白判定，因此纯不可见字符的声明按空白处理；投影出去的展示形式保留字形连接字符（ZWNJ/ZWJ、变体选择符与 CGJ），使连体文字与 emoji 序列完整渲染；有效声明除此之外保留原始空白。长度超过 `MAX_SUBMITTED_PROMPT_CHARS`（64 KiB）的声明按缺失处理，以此为准入路径上的同步中和扫描设界。空白声明与纯附件请求继续从内容取得显示文本。bridge 将中和后的声明仅用于排队文本、实时用户回显，以及由排队项派生的温热回合状态 prompt 文本，绝不把声明写入私有显示文本字段，因此持久用户记录的显示文本 —— 以及所有把它读回为模型输入的消费方（自动标题生成与跨会话 `@session` 引用），加上由同一字段供给的回合结果记录 prompt 文本与 OTel input-message 属性 —— 始终来自真实 prompt 或已认证 worker 投影。因此温热的回合 API（存活会话上的 `turns/current`、`turns/:promptId`）在回合存活期间显示声明；冷重启之后，相同端点返回的持久记录仍然从内容派生。bridge 向模型转发完整 prompt；来源字段为 hooks 逐字保留未改动的原始声明。来源标签与声明不授予 worker 权限：不会设置 `qwen.channel.prompt`、绕过循环检测或采信调用方自报的私有显示元数据。REST 请求只要携带 worker 分类、授权或显示键，仍不能回退到提交声明。普通会话的显示行为保持不变。
 
 在 ACP 进程准入处，可信父进程可以提供私有键；直接 ACP 客户端可以通过公开声明逐请求启用，但不能伪造私有键。公开键在准入处消费，不继续传入 Session。可信父进程缺少私有声明时，不能回退到公开键。
 

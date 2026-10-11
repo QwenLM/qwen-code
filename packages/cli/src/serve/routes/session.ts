@@ -8001,8 +8001,8 @@ export function registerSessionRoutes(
         // display projection; a forged key from any other caller is dropped
         // here and again at the bridge admission strip. (A submission
         // declaration below can still project the turn's transient live
-        // display — pending entry and echo — but never the recorded display
-        // text.)
+        // display — pending entry, echo, and the warm turn-status prompt
+        // text they feed — but never the recorded display text.)
         const trustedChannelPrompt =
           channelWorkerAuthorized && channelPrompt === true;
 
