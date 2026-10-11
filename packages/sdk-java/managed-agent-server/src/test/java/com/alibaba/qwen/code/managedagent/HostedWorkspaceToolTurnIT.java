@@ -442,12 +442,13 @@ class HostedWorkspaceToolTurnIT {
                             assertThat(workspace.resolve("child/sibling.txt")).doesNotExist();
                             assertThat(Files.readString(workspace.resolve("child/unicode-ok.txt")))
                                     .isEqualTo("中文😀é\\ud800");
-                            int publications = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication", Integer.class);
-                            if (cases.contains("o2")) assertThat(publications).isPositive();
-                            else assertThat(publications).isZero();
                             assertThat(Files.readString(workspace.resolve("child/unicode-secondary-ok.txt")))
                                     .isEqualTo("中文😀é\\ud800");
                             for (String sessionId : List.of(sessions.get(index).get("sessionId").toString(), secondarySessionId)) {
+                                int publications = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication"
+                                        + " WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, sessionId);
+                                if (cases.contains("o2")) assertThat(publications).isPositive();
+                                else assertThat(publications).isZero();
                                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution"
                                         + " WHERE harness_session_id = ?", Integer.class, sessionId)).isEqualTo(1);
                                 var execution = jdbc.queryForMap("SELECT dispatch_generation, execution_state, execution_status"
