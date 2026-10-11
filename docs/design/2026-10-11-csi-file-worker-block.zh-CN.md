@@ -1,4 +1,4 @@
-# 私有 CSI 文件 worker 与保留历史
+# 私有 CSI 文件 worker、保留历史与本地进程隔离
 
 [English](2026-10-11-csi-file-worker-block.md) | [简体中文](2026-10-11-csi-file-worker-block.zh-CN.md)
 
@@ -8,7 +8,14 @@
 worker 侧特性，基于主干 `fce50611b665989494df5fbd8bc91b4cad7b723c`。
 主干已有 CSI mount 身份、保留读取 source 和普通 managed worker，但没有
 私有文件 worker。本 PR 提供从已有 container boot 入口到描述符
-Read/Write/Edit 和保留文件历史的完整 worker 侧调用链，以 Draft 提交架构评审。
+Read/Write/Edit 和保留文件历史的完整 worker 侧调用链，并纳入原 PR #13893
+的 Java 本地进程拒绝边界，以 Draft 提交架构评审。
+
+Java 与 Node 使用完全相同的私有能力 manifest 和摘要。Java 嵌入式 API
+可以构造预留的 Session 隔离请求，但本地进程 provisioner 在解析存储、产生
+进程效果或持久注册之前拒绝。主干没有选择该能力的普通生产调用者。这属于
+前置特性工作，不是修复主干已有 CSI 生产路径。将边界和专用 worker 合并
+并不会新增 native authority producer。
 
 Java native SQL issuer 和 Hosted Session 编排仍是独立特性。本 worker
 要求它们提供远程 authority 契约；主干普通生产 Session 路径尚不能产生该
@@ -22,13 +29,14 @@ Hosted turn 或 Kubernetes 部署。
 构造、attestation 和 context 安装；版本 5 还固定 authority origin，在其
 提供有效证据时支持文件执行。
 
-| 层                        | 职责                                                                      | 消费者                                 |
-| ------------------------- | ------------------------------------------------------------------------- | -------------------------------------- |
-| File boot 和 wire 契约    | 封闭 JSON、精确身份、lease、incarnation、Pod/storage/mount attestation    | Container worker 启动和私有 HTTP 路由  |
-| Native readback 客户端    | 认证当前 bind/prepare/execute 证据，封闭 grant/resource 校验              | 文件历史绑定、准备和 native tool 执行  |
-| Composer 和描述符 backend | 单一原始 Session、验证 root、no-follow 遍历、原始观察和写入、保留备份认证 | 实际 Core Read/Write/Edit 工具         |
-| 保留历史                  | Snapshot/preimage 准备和认证备份观察，无通用 rewind 或删除                | 同一 composer 和 executor history 实例 |
-| Core mutation 契约        | 可选 scoped 观察和修改，不回退到环境中的 pathname                         | 提供给实际工具 Config 的描述符 backend |
+| 层                        | 职责                                                                      | 消费者                                             |
+| ------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------- |
+| Java profile 和本地拒绝   | 规范 Session 请求身份；在所有本地进程生命周期效果前拒绝                   | 嵌入式 Broker 请求、持久 reconciliation 和运维观察 |
+| File boot 和 wire 契约    | 封闭 JSON、精确身份、lease、incarnation、Pod/storage/mount attestation    | Container worker 启动和私有 HTTP 路由              |
+| Native readback 客户端    | 认证当前 bind/prepare/execute 证据，封闭 grant/resource 校验              | 文件历史绑定、准备和 native tool 执行              |
+| Composer 和描述符 backend | 单一原始 Session、验证 root、no-follow 遍历、原始观察和写入、保留备份认证 | 实际 Core Read/Write/Edit 工具                     |
+| 保留历史                  | Snapshot/preimage 准备和认证备份观察，无通用 rewind 或删除                | 同一 composer 和 executor history 实例             |
+| Core mutation 契约        | 可选 scoped 观察和修改，不回退到环境中的 pathname                         | 提供给实际工具 Config 的描述符 backend             |
 
 绑定在构造工具前认证当前安装的 context 和 authority。准备在保留 preimage
 前验证完整接受成员及原始输入。执行认证精确 grant、安装 Session 和准备历史，
@@ -40,6 +48,14 @@ Hosted turn 或 Kubernetes 部署。
 能力 manifest 和协议 fixture 保留 PR #13526 的字节。新的 scoped mutation
 及 retained storage 参数在 composer 中有实际生产 setter，在工具、history
 和 executor 中有实际 read site。普通 worker 不选择该 backend，保留已有行为。
+
+Java 请求沿用 Broker 编码，保留规范 Session UUID 隔离、Workspace generation
+和存储身份、根相对工作目录及规范绝对 mount root。拒绝根据精确能力摘要，
+不依赖 provisioner kind 或隔离类型，覆盖请求创建、两个 provision 重载、
+资源创建/接管、reconciliation、confirmation、运维注册/停止观察及 release。
+Session 和 Workspace 两类隔离均返回不可重试的 HTTP 409
+`runtime_provision_failed`；异步操作返回失败的 completion stage。其他格式
+合法的未知摘要保留主干行为。拒绝不授予 native 执行、退役或释放权限。
 
 拆分还补齐依赖评审中发现的三处 worker 侧缺口。Retained executor 使用词法
 containment，并让原始描述符 backend 负责 no-follow 准入，不再观察环境中的
@@ -67,16 +83,25 @@ rewind、备份删除、退役或复用权限。Drain 仍是拒绝边界，报�
 生产范围是 `packages/cli/src/serve` 下新增的 `managed-csi-file-*` 和
 `managed-csi-native-readback` 模块、container 入口及 context/executor/history
 接线，以及 Core 文件 mutation、保留 history 和 workspace memory guard
-消费者。各层包含测试和共享 wire fixture。
+消费者，以及 Java profile 身份和本地进程 provisioner 拒绝。各层包含测试
+和共享 wire fixture。
 
 不包含 Java SQL issuer、migration、Hosted runner、Session activation/recovery、
 原始 checkpoint proof、application finalize、物理释放或公开 profile 选择。
-已有 Java 本地拒绝 PR #13893 和 publication 锁顺序 PR #13894 保持独立评审。
+PR #13893 已纳入此组件并由其替代。Publication 锁顺序 PR #13894 仍独立，
+因为它修复普通 SQL publication 路径，不依赖此 worker。
 
 ## 验证和验收
 
 先执行全局 CLI baseline，确认当前主干或安装 worker 不能选择新 boot 契约。
 无法进入 CSI 执行是特性缺失基线，不是已有生产 bug。
+
+通过 Java 嵌入式 API 注入预定摘要，确认在 resolver 调用、子进程 marker、
+持久目录变更或运维效果前拒绝。覆盖两类隔离及所有生命周期入口，包括合成
+handle 和注册；这些 fixture 不证明存在历史私有注册。检查规范 profile
+身份及 Java/Node 摘要一致性。使用同一份新构建的候选 Node bundle，确认
+已有普通和持久 Java worker 可用，覆盖 context 安装、attestation、confirmation
+及重新打开 Broker 后的接管。
 
 在候选验证 boot 4/5 解析、实际 container 入口分派、旧路径拒绝、context 和
 attestation 授权及封闭路由处理。执行契约使用真实 HTTP authority fixture
@@ -89,12 +114,13 @@ mount 或描述符映射都必须明确标注；未修改的生产启动仍应�
 这类探针不证明 Linux CSI 或目标集群生命周期行为。
 
 此 Draft 验收要求根目录 build/typecheck/bundle、Core 和 CLI 定向回归测试、
-范围内格式和 lint、独立 test-engineer 报告及两次干净的完整 diff 自审。
+范围内格式和 lint、独立 test-engineer 报告及两次干净的完整 diff 自审，
+同时要求定向 Java 测试、Checkstyle、SpotBugs 和打包。
 评审需一起判断跨包契约和必要远程 authority。部署和完整 native 验收是后续 gate。
 
 ## 风险和后续
 
-这是涉及 Core 和 CLI 的较大 feature，触发仓库生产行数 advisory，需要
+这是涉及 Core、CLI 和 Java 的较大 feature，触发仓库生产行数 advisory，需要
 maintainer 架构评审。主干尚无 worker authority producer；普通私有 Session
 使用该组件前必须另行接入。
 

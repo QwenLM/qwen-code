@@ -184,6 +184,18 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-csi-file-worker.ts',
+    {
+      reason:
+        'The Kubernetes Downward API supplies Pod identity for the dedicated file worker process; startup freezes that identity for its one immutable Session, independently of workspace environment overlays.',
+      accesses: {
+        'key:QWEN_NODE_NAME': 1,
+        'key:QWEN_POD_NAMESPACE': 1,
+        'key:QWEN_POD_UID': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-csi-worker.ts',
     {
       reason:
