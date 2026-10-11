@@ -24,7 +24,7 @@ vi.mock('child_process', async (importOriginal) => {
   return { ...actual, spawn: spawnMock, execFile: execFileMock };
 });
 
-import { AcpConnection } from './acpConnection.js';
+import { AcpConnection, buildAcpClientCapabilities } from './acpConnection.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 
 type MockChild = {
@@ -138,6 +138,17 @@ describe('AcpConnection process spawning', () => {
 
     const options = spawnMock.mock.calls.at(-1)?.[2] as { detached?: boolean };
     expect(options.detached).toBe(false);
+  });
+});
+
+describe('AcpConnection initialize capabilities', () => {
+  it('advertises the structured-question capability', () => {
+    // Pinned by value: dropping the key would silently move the companion onto
+    // the flattened option path while the rest of the suite stayed green.
+    expect(buildAcpClientCapabilities()).toEqual({
+      _meta: { 'qwen.askUserQuestion': true },
+      fs: { readTextFile: true, writeTextFile: true },
+    });
   });
 });
 

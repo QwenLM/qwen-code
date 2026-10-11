@@ -43850,6 +43850,10 @@ describe('Session', () => {
       },
     ];
 
+    // Hoisted so tests can assert the tool-facing payload the confirmation
+    // actually receives, not just the parallel trusted-answer side channel.
+    const onConfirmMock = vi.fn().mockResolvedValue(undefined);
+
     class AskUserQuestionTool {
       readonly name = core.ToolNames.ASK_USER_QUESTION;
       readonly kind = core.Kind.Think;
@@ -43869,7 +43873,7 @@ describe('Session', () => {
           type: 'ask_user_question',
           title: 'Please answer the following question(s):',
           questions: trustedAnswerQuestions,
-          onConfirm: vi.fn().mockResolvedValue(undefined),
+          onConfirm: onConfirmMock,
         }),
         getDescription: vi.fn().mockReturnValue(this.name),
         toolLocations: vi.fn().mockReturnValue([]),
@@ -43931,6 +43935,13 @@ describe('Session', () => {
         'call-auq',
         trustedAnswerQuestions,
         { '0': 'No' },
+      );
+      // The tool-facing consumer must receive the recovered answers too; a
+      // revert of the payload literal to `output.answers` leaves the
+      // side-channel assertion above green while the tool reports no answers.
+      expect(onConfirmMock).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'No' } },
       );
     });
 

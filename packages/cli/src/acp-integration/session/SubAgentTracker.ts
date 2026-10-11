@@ -33,7 +33,6 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
-  ASK_USER_QUESTION_ANSWERS_META_KEY,
   buildPermissionRequestContent,
   interactionMetaFields,
   type PermissionPersistencePolicy,
@@ -366,9 +365,6 @@ export class SubAgentTracker {
           offeredPermissionOptions,
           this.flattenStructuredQuestions,
         );
-        const metaAnswers = (
-          output as { _meta?: Record<string, unknown> | null }
-        )._meta?.[ASK_USER_QUESTION_ANSWERS_META_KEY];
         const answers =
           'answers' in output
             ? (output.answers as Record<string, string> | undefined)
@@ -377,7 +373,6 @@ export class SubAgentTracker {
         await event.respond(outcome, {
           answers:
             answers ??
-            (metaAnswers as Record<string, string> | undefined) ??
             resolveAskUserQuestionAnswers(
               fullConfirmationDetails,
               output.outcome.outcome === 'selected'

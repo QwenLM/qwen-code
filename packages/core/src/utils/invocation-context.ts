@@ -9,6 +9,13 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 export const INVOCATION_CONTEXT_META_KEY = 'qwen-code/invocation';
 export const PRIVATE_PARENT_CAPABILITY_META_KEY =
   'qwen-code/private-parent-capability';
+/**
+ * Client capability an ACP host advertises on `initialize` to say it consumes
+ * the structured `ask_user_question` payload (`_meta.qwenQuestions`, plus the
+ * private top-level `answers` response sibling). A host that omits it receives
+ * a single question flattened into real per-choice `PermissionOption`s.
+ */
+export const ASK_USER_QUESTION_CAPABILITY_META_KEY = 'qwen.askUserQuestion';
 export const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
 
 export interface InvocationContextV1 {

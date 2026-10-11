@@ -260,13 +260,6 @@ const ASK_USER_QUESTION_OTHER_TOKEN = 'other';
  * parenthesised marker instead of a concrete answer.
  */
 export const ASK_USER_QUESTION_OTHER_ANSWER = '(Other)';
-/**
- * `_meta` key a client may use to return structured answers on the
- * `RequestPermissionResponse`, as an alternative to the top-level `answers`
- * sibling. `_meta` is a legal ACP response field, so an opt-in client can
- * ride it without inventing a new tool response shape.
- */
-export const ASK_USER_QUESTION_ANSWERS_META_KEY = 'qwenAnswers';
 
 interface ParsedAskUserQuestionOptionId {
   readonly questionIndex: number;

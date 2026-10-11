@@ -1077,11 +1077,19 @@ class AcpSubagentExecutor implements SubagentExecutor {
     };
     const runtime = this.params.runtimeContext;
     const callId = params.toolCall.toolCallId;
-    const meta = params.toolCall._meta?.['claudeCode'];
+    const claudeMeta = params.toolCall._meta?.['claudeCode'];
+    const qwenToolName = params.toolCall._meta?.['toolName'];
+    // Peers frame the tool name differently: Claude Code nests it under
+    // `_meta.claudeCode.toolName`, while a Qwen peer puts it at
+    // `_meta.toolName` and carries `kind: 'think'` for a question. Both must
+    // resolve here, or the routed-question denial below cannot recognise a
+    // Qwen peer's question and would answer it by selecting the first option.
     const name =
-      isRecord(meta) && typeof meta['toolName'] === 'string'
-        ? meta['toolName']
-        : (params.toolCall.kind ?? 'external_tool');
+      isRecord(claudeMeta) && typeof claudeMeta['toolName'] === 'string'
+        ? claudeMeta['toolName']
+        : typeof qwenToolName === 'string'
+          ? qwenToolName
+          : (params.toolCall.kind ?? 'external_tool');
     // Turn-level and request-integrity states: the turn is already over, the
     // request is not ours, or it cannot be answered safely (no options, or
     // ambiguous duplicate option IDs). ACP `cancelled` is the right response —

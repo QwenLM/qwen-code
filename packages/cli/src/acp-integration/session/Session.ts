@@ -459,7 +459,6 @@ import {
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
-  ASK_USER_QUESTION_ANSWERS_META_KEY,
   buildPermissionRequestContent,
   interactionMetaFields,
   type PermissionPersistencePolicy,
@@ -15586,17 +15585,12 @@ export class Session implements SessionContext {
                 );
               }
 
-              // Answers arrive one of three ways: the private top-level
-              // `answers` sibling a Qwen host returns, an opt-in
-              // `_meta.qwenAnswers`, or — for a flattened question answered
+              // Answers arrive either as the private top-level `answers` sibling a
+              // Qwen host returns, or — for a flattened question answered
               // through a real PermissionOption — reconstructed from the
               // selected option id.
-              const metaAnswers = (
-                output as { _meta?: Record<string, unknown> | null }
-              )._meta?.[ASK_USER_QUESTION_ANSWERS_META_KEY];
               const answers =
                 output.answers ??
-                (metaAnswers as Record<string, string> | undefined) ??
                 resolveAskUserQuestionAnswers(
                   confirmationDetails,
                   output.outcome.outcome === 'selected'

@@ -16,6 +16,7 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  ACP_ASK_USER_QUESTION_CAPABILITY_META_KEY,
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
   CHANNEL_BTW_METHOD,
@@ -215,7 +216,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           // `_meta.qwenQuestions` and answers through the private `answers`
           // field, so it must keep the rich path instead of flat options.
           clientCapabilities: {
-            _meta: { 'qwen.askUserQuestion': true },
+            _meta: { [ACP_ASK_USER_QUESTION_CAPABILITY_META_KEY]: true },
           },
           _meta: {
             [ACP_PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,

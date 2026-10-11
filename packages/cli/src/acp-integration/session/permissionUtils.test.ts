@@ -345,6 +345,54 @@ describe('permissionUtils', () => {
       ).toThrow('invalid option');
     });
 
+    it('rejects an encoded id that was never offered, even when encoded ids are allowed', () => {
+      // The offered-set membership check must run before the encoded-id
+      // branch; otherwise allowing encoded ids becomes a blanket approval.
+      const options = toPermissionOptions(
+        confirmation(),
+        false,
+        undefined,
+        true,
+      );
+      expect(() =>
+        resolvePermissionOutcome(
+          { outcome: { outcome: 'selected', optionId: 'ask:q0:o5' } },
+          options,
+          true,
+        ),
+      ).toThrow('unoffered option');
+    });
+
+    it('flattens a lone multiSelect question to mutually exclusive options (semantics deferred to a follow-up PR)', () => {
+      const multi = {
+        type: 'ask_user_question' as const,
+        title: 'Question',
+        questions: [
+          {
+            header: 'Features',
+            question: 'Which features do you want to enable?',
+            options: [
+              { label: 'Alpha', description: 'First choice.' },
+              { label: 'Beta', description: 'Second choice.' },
+            ],
+            multiSelect: true,
+          },
+        ],
+        onConfirm: async () => undefined,
+      };
+      expect(
+        toPermissionOptions(multi, false, undefined, true).map(
+          (option) => option.optionId,
+        ),
+      ).toEqual(['ask:q0:o0', 'ask:q0:o1', 'ask:q0:other', 'cancel']);
+      // The recovered answer carries no truncation marker, so a genuine
+      // one-item multi-select answer is byte-identical to this degraded one;
+      // the dedicated multiSelect PR owns that distinction.
+      expect(resolveAskUserQuestionAnswers(multi, 'ask:q0:o0')).toEqual({
+        '0': 'Alpha',
+      });
+    });
+
     it('projects every question and choice into the tool call content', () => {
       expect(buildPermissionRequestContent(confirmation())).toEqual([
         {

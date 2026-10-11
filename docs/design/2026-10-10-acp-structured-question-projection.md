@@ -98,6 +98,16 @@ payload but because its vote is only allow/cancel and it picks the
 least-escalating proceed option — flat per-choice options would silently record
 the first choice, so it keeps the generic pair.
 
+One in-repo client deliberately does **not** advertise: the external-agent
+executor that drives a configured ACP peer. It cannot render choices and it
+resolves a vote by kind, so a flattened question would let it record the first
+choice as the user's answer. Its routed-question guard therefore has to
+recognise a question by the talking peer's own framing — Claude Code nests the
+name under `_meta.claudeCode.toolName`, whereas a Qwen peer puts it at
+`_meta.toolName` and sends `kind: 'think'` — and deny the tool cleanly. Reading
+only the Claude-shaped name left the guard blind to a Qwen peer, which is the
+regression this design closes.
+
 ### 4. Answer recovery
 
 `resolvePermissionOutcome` currently rejects any `optionId` that is not a member
@@ -113,8 +123,8 @@ of `ToolConfirmationOutcome`. A flattened `ask:q0:o2` id is offered but is not a
    `payload.answers`.
 
 The existing enum check remains for every other confirmation type. Answers are
-taken from the private top-level `answers` sibling when present, then from an
-opt-in `_meta.qwenAnswers`, then reconstructed from the selected option id.
+taken from the private top-level `answers` sibling when present, then
+reconstructed from the selected option id.
 
 ## Design decisions
 
@@ -140,6 +150,15 @@ opt-in `_meta.qwenAnswers`, then reconstructed from the selected option id.
   byte-for-byte.
 - **Content projection is always on.** It is additive; a Qwen surface that
   renders its own question card from `_meta` ignores the extra text block.
+- **Qwen Live version skew.** The Live opt-out protects only a Live build that
+  contains it. Live has no dependency path to the CLI and ships on its own
+  release train, so an older Live driving a CLI built from this change would
+  still send `clientCapabilities: {}`; the CLI then flattens, and Live's blind
+  allow vote resolves through its least-escalating picker to the first choice,
+  which the CLI records as a trusted answer. Before this change that same vote
+  hit `proceed_once` and produced the visible "No valid answers were provided.".
+  Keeping the two in lockstep is a requirement of this rollout, not an
+  assumption.
 - **Docs.** The limitation and the capability contract are recorded here and in
   `docs/users/integration-zed.md` and `packages/zed-extension/README.md`.
 
@@ -158,14 +177,27 @@ opt-in `_meta.qwenAnswers`, then reconstructed from the selected option id.
   asserting the recovered `answers`; an acpAgent test asserting
   `setAskUserQuestionHostSupported` is called only when the capability is
   advertised.
+- An external-agent executor test asserting a Qwen-framed question
+  (`_meta.toolName` + `kind: 'think'`) is denied like a Claude-framed one,
+  rather than answered with the first option.
+- A test that an unoffered encoded id still throws while the encoded-id branch
+  is enabled, pinning the offer-then-accept order.
+- Advertisement pins: the acp-bridge handshake assertion, the channel-loop
+  initialize assertion, the Live adaptor assertion, the companion initialize
+  assertion, and a cross-package test pinning the channel-base duplicate to the
+  core constant.
 
 ## Open questions
 
 - **Multi-question on standard clients.** Whether a future phase can issue
   sequential `session/request_permission` calls, one per question, reusing the
   same `toolCall`, is still unvalidated against Zed and the VS Code companion.
+  Tracked as its own follow-up PR.
 - **`multiSelect` fidelity.** A future phase could issue one yes/no confirmation
-  per option instead of degrading to single-select.
+  per option instead of degrading to single-select, or mark the truncation in
+  the recovered answer the way `Other…` is marked. Tracked as its own follow-up
+  PR; the current degradation is pinned by a test so the docs cannot silently
+  drift if the predicate is later tightened.
 
 ## References
 

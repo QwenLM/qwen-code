@@ -97,8 +97,13 @@ connection = new AgentSideConnection(() => ({
       return {stopReason:'end_turn'};
     }
     if (scenario.startsWith('permission')) {
-      const toolName = scenario === 'permission-question' ? 'AskUserQuestion' : scenario === 'permission-question-snake' ? 'ask_user_question' : 'Write';
-      const request = () => connection.requestPermission({sessionId:'fixture',toolCall:{toolCallId:'same',title:'Write',kind:'edit',rawInput:{command:'rm -rf ./build'},_meta:{claudeCode:{toolName}}},options:[{optionId:'once',name:'Once',kind:'allow_once'},{optionId:'always',name:'Always',kind:'allow_always'},{optionId:'no',name:'No',kind:'reject_once'}]});
+      // A Qwen peer frames the tool name under _meta.toolName and carries
+      // kind:'think' for a question; Claude Code nests it under _meta.claudeCode.
+      const qwenQuestion = scenario === 'permission-question-qwen';
+      const toolName = qwenQuestion ? 'ask_user_question' : scenario === 'permission-question' ? 'AskUserQuestion' : scenario === 'permission-question-snake' ? 'ask_user_question' : 'Write';
+      const toolKind = qwenQuestion ? 'think' : 'edit';
+      const toolCallMeta = qwenQuestion ? {toolName} : {claudeCode:{toolName}};
+      const request = () => connection.requestPermission({sessionId:'fixture',toolCall:{toolCallId:'same',title:'Write',kind:toolKind,rawInput:{command:'rm -rf ./build'},_meta:toolCallMeta},options:[{optionId:'once',name:'Once',kind:'allow_once'},{optionId:'always',name:'Always',kind:'allow_always'},{optionId:'no',name:'No',kind:'reject_once'}]});
       const result = scenario === 'permission-duplicate' ? await Promise.all([request(), request()]) : [await request()];
       await send({sessionUpdate:'agent_message_chunk',content:{type:'text',text:JSON.stringify(result)}});
       permissionCount++;
@@ -924,21 +929,22 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
     await expect(executor.execute(context())).rejects.toThrow('closed');
     expect(executor.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
   });
-  it.each(['permission-question', 'permission-question-snake'])(
-    'denies routed interactive question %s',
-    async (scenario) => {
-      const options = params(scenario);
-      const approval = vi.fn();
-      options.eventEmitter!.on(AgentEventType.TOOL_WAITING_APPROVAL, approval);
-      const executor = await create(options);
-      await executor.execute(context());
-      // Denies the TOOL (selects reject_once), not the TURN (`cancelled`).
-      expect(JSON.parse(executor.getFinalText())).toEqual([
-        { outcome: { outcome: 'selected', optionId: 'no' } },
-      ]);
-      expect(approval).not.toHaveBeenCalled();
-    },
-  );
+  it.each([
+    'permission-question',
+    'permission-question-snake',
+    'permission-question-qwen',
+  ])('denies routed interactive question %s', async (scenario) => {
+    const options = params(scenario);
+    const approval = vi.fn();
+    options.eventEmitter!.on(AgentEventType.TOOL_WAITING_APPROVAL, approval);
+    const executor = await create(options);
+    await executor.execute(context());
+    // Denies the TOOL (selects reject_once), not the TURN (`cancelled`).
+    expect(JSON.parse(executor.getFinalText())).toEqual([
+      { outcome: { outcome: 'selected', optionId: 'no' } },
+    ]);
+    expect(approval).not.toHaveBeenCalled();
+  });
   it('denies when no approval listener exists', async () => {
     const executor = await create(params('permission'));
     await executor.execute(context());

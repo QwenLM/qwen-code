@@ -5,6 +5,7 @@
  */
 
 import { logger } from '../utils/logger.js';
+import { ASK_USER_QUESTION_CAPABILITY_META_KEY } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import {
   ClientSideConnection,
   ndJsonStream,
@@ -46,6 +47,22 @@ import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 const SHUTDOWN_GRACE_MS = 75_000;
 const SIGTERM_GRACE_MS = 75_000;
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+
+/**
+ * Capabilities this companion sends on `initialize`. Exported so a test can pin
+ * the wire value: the companion renders structured questions from the raw
+ * `questions` payload, so dropping `qwen.askUserQuestion` would silently push
+ * it onto the flattened option path.
+ */
+export function buildAcpClientCapabilities(): {
+  _meta: Record<string, boolean>;
+  fs: { readTextFile: boolean; writeTextFile: boolean };
+} {
+  return {
+    _meta: { [ASK_USER_QUESTION_CAPABILITY_META_KEY]: true },
+    fs: { readTextFile: true, writeTextFile: true },
+  };
+}
 
 /**
  * ACP Connection Handler for VSCode Extension
@@ -273,11 +290,31 @@ export class AcpConnection {
               if (outcome === 'cancelled') {
                 return { outcome: { outcome: 'cancelled' } };
               }
+              // Never vote an id the peer did not offer. If the capability is
+              // dropped or renamed the CLI flattens the question, `proceed_once`
+              // is absent, and an unvalidated literal would throw
+              // "unoffered option" and abort the turn with the typed answers
+              // discarded. Mirrors the daemon twin's strict resolution.
+              const offeredOptions = Array.isArray(permissionData.options)
+                ? permissionData.options
+                : [];
+              const selectedOptionId =
+                optionId &&
+                offeredOptions.some((option) => option.optionId === optionId)
+                  ? optionId
+                  : offeredOptions.some(
+                        (option) => option.optionId === 'proceed_once',
+                      )
+                    ? 'proceed_once'
+                    : undefined;
+              if (selectedOptionId === undefined) {
+                logger.log(
+                  '[ACP] AskUserQuestion option not advertised; cancelling',
+                );
+                return { outcome: { outcome: 'cancelled' } };
+              }
               return {
-                outcome: {
-                  outcome: 'selected',
-                  optionId: optionId || 'proceed_once',
-                },
+                outcome: { outcome: 'selected', optionId: selectedOptionId },
                 answers,
               } as RequestPermissionResponse;
             }
@@ -375,16 +412,7 @@ export class AcpConnection {
     const initResponse = await Promise.race([
       wiredConnection.initialize({
         protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {
-          // This companion renders structured questions from the raw
-          // `questions` payload and answers through the private `answers`
-          // field, so it must keep the rich path instead of flat options.
-          _meta: { 'qwen.askUserQuestion': true },
-          fs: {
-            readTextFile: true,
-            writeTextFile: true,
-          },
-        },
+        clientCapabilities: buildAcpClientCapabilities(),
       }),
       processExitPromise,
     ]);

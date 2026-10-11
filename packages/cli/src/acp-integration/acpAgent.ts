@@ -5,6 +5,7 @@
  */
 
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { ASK_USER_QUESTION_CAPABILITY_META_KEY } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import {
   findSessionAgentBinding,
   type SessionAgentNativeBinding,
@@ -15553,7 +15554,11 @@ class QwenAgent implements Agent {
     // `_meta.qwenQuestions` path; any other ACP client gets a flat per-choice
     // option list (see `toPermissionOptions`). This is a wire-format
     // capability, so it is honored on read-only Agent Hosts too.
-    if (this.clientCapabilities?._meta?.['qwen.askUserQuestion'] === true) {
+    if (
+      this.clientCapabilities?._meta?.[
+        ASK_USER_QUESTION_CAPABILITY_META_KEY
+      ] === true
+    ) {
       config.setAskUserQuestionHostSupported(true);
     }
     if (chatRecording !== false) {

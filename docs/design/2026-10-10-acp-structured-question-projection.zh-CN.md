@@ -85,6 +85,13 @@ agent 读取客户端 `initialize` 能力上的厂商 `_meta` 键
 它渲染富载荷，而是因为它的投票只有 allow/cancel，且取升级最小的 proceed 选项——
 逐选项扁平化会静默记录第一个选项，因此它保留通用按钮对。
 
+有一个仓库内客户端**刻意不**声明：驱动所配置 ACP 对端的外部 agent executor。它无法
+渲染选项，且按 kind 解析投票，因此扁平化的问题会让它把第一个选项记录为用户答案。所以
+它的 routed-question guard 必须按对话对端自身的封装来识别问题——Claude Code 把名称嵌
+在 `_meta.claudeCode.toolName`，而 Qwen 对端放在 `_meta.toolName` 并发送
+`kind: 'think'`——并干净地拒绝该工具。只读 Claude 形状的名称会让 guard 对 Qwen 对端
+失明，这正是本设计所关闭的回退。
+
 ### 4. 答案恢复
 
 `resolvePermissionOutcome` 目前会拒绝任何不属于 `ToolConfirmationOutcome` 的
@@ -99,7 +106,7 @@ agent 读取客户端 `initialize` 能力上的厂商 `_meta` 键
    `{ [questionIndex]: selectedLabel }`，作为 `payload.answers` 交给工具。
 
 其余确认类型仍保留原枚举校验。答案的取值顺序为：优先使用私有顶层 `answers` 同级
-字段，其次使用可选的 `_meta.qwenAnswers`，最后从所选 option id 重建。
+字段，最后从所选 option id 重建。
 
 ## 设计决策
 
@@ -120,6 +127,12 @@ agent 读取客户端 `initialize` 能力上的厂商 `_meta` 键
   Qwen 自有界面保持现有载荷逐字节不变。
 - **内容投影始终开启。** 它是增量的；从 `_meta` 渲染自有问题卡片的 Qwen 界面会
   忽略额外的文本块。
+- **Qwen Live 版本错配。** Live 的退出机制只保护包含该键的 Live 构建。Live 与 CLI
+  之间没有依赖路径，且各自独立发版，因此较旧的 Live 驱动由本次改动构建的 CLI 时仍会
+  发送 `clientCapabilities: {}`；CLI 随即扁平化，而 Live 的盲选 allow 会通过其
+  "升级最小" 选择器落到第一个选项，CLI 将其记录为可信答案。改动前同一票会命中
+  `proceed_once`，产生可见的 "No valid answers were provided."。二者保持同版本节奏
+  是本次发布的前提要求，而非假设。
 - **文档。** 该限制与该能力契约记录于此，以及
   `docs/users/integration-zed.md` 和 `packages/zed-extension/README.md`。
 
@@ -135,13 +148,22 @@ agent 读取客户端 `initialize` 能力上的厂商 `_meta` 键
 - 一个 Session 测试以编码 option id 驱动 `requestPermission` 并断言恢复出的
   `answers`；一个 acpAgent 测试断言仅在声明能力时调用
   `setAskUserQuestionHostSupported`。
+- 一个外部 agent executor 测试断言 Qwen 封装的问题（`_meta.toolName` +
+  `kind: 'think'`）与 Claude 封装的一样被拒绝，而不是以第一个选项作答。
+- 一个测试断言在启用编码 id 分支时，未提供的编码 id 仍抛错，从而钉住"先校验提供集合、
+  再接受"的顺序。
+- 声明侧的钉住：acp-bridge 握手断言、channel-loop initialize 断言、Live adaptor
+  断言、companion initialize 断言，以及一个把 channel-base 的副本钉到 core 常量的
+  跨包测试。
 
 ## 待解决问题
 
 - **标准客户端上的多题。** 未来阶段能否对同一 `toolCall` 复用来发起逐题顺序
-  `session/request_permission`，尚未针对 Zed 与 VS Code 伴侣验证。
-- **`multiSelect` 保真度。** 未来阶段可改为每个选项一次是/否确认，而不是降级为
-  单选。
+  `session/request_permission`，尚未针对 Zed 与 VS Code 伴侣验证。作为独立的后续 PR
+  跟踪。
+- **`multiSelect` 保真度。** 未来阶段可改为每个选项一次是/否确认，而不是降级为单选；
+  或像 `Other…` 那样在恢复出的答案中标记截断。作为独立的后续 PR 跟踪；当前的降级行为
+  由测试钉住，以免日后收紧判定条件时文档被悄悄拉偏。
 
 ## 参考
 

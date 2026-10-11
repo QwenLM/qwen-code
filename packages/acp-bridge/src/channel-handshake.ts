@@ -10,6 +10,7 @@ import type {
   InitializeResponse,
 } from '@agentclientprotocol/sdk';
 import { PRIVATE_PARENT_CAPABILITY_META_KEY } from '@qwen-code/qwen-code-core';
+import { ASK_USER_QUESTION_CAPABILITY_META_KEY } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import {
   ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
@@ -60,7 +61,10 @@ export function createChannelInitializeRequest(
       [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
     },
     clientCapabilities: {
-      _meta: { 'qwen.goalProposals': true, 'qwen.askUserQuestion': true },
+      _meta: {
+        'qwen.goalProposals': true,
+        [ASK_USER_QUESTION_CAPABILITY_META_KEY]: true,
+      },
       fs: {
         readTextFile: delegateReadTextFileToClient,
         writeTextFile: true,
