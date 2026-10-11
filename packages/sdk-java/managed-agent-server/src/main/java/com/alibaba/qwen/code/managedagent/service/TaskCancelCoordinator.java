@@ -25,6 +25,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -292,11 +293,39 @@ public class TaskCancelCoordinator {
      * a client close wedged behind a reader on a half-open Harness stream
      * did — stays an unknown outcome instead of the claim's whole life.
      * An abandoned send may still land; the record judges it like any
-     * lost reply.
+     * lost reply, and the send logs how it ended. The send runs on the
+     * executor the waiting delivery holds a thread of, so that executor
+     * must stay unbounded (virtual-thread-per-task): on a bounded pool a
+     * delivery could wait on its own send queued behind it.
      */
     private void sendWithinDeadline(OperationRecord operation,
             TaskTarget target) {
-        Future<?> sending = executor.submit(() -> send(operation, target));
+        AtomicBoolean abandoned = new AtomicBoolean();
+        Future<?> sending = executor.submit(() -> {
+            try {
+                send(operation, target);
+            } catch (RuntimeException error) {
+                if (abandoned.get()) {
+                    LOG.warn("Abandoned task cancel send failed"
+                                    + " tenant={} session={} operation={}"
+                                    + " claim={} failure={}",
+                            operation.tenantId(), operation.sessionId(),
+                            operation.operationId(),
+                            operation.claimGeneration(),
+                            error.getClass().getSimpleName() + ": "
+                                    + error.getMessage());
+                }
+                throw error;
+            }
+            if (abandoned.get()) {
+                LOG.warn("Abandoned task cancel send returned; the record"
+                                + " decides its outcome tenant={} session={}"
+                                + " operation={} claim={}",
+                        operation.tenantId(), operation.sessionId(),
+                        operation.operationId(),
+                        operation.claimGeneration());
+            }
+        });
         try {
             sending.get(attemptDeadline.toMillis(), TimeUnit.MILLISECONDS);
         } catch (ExecutionException error) {
@@ -308,6 +337,7 @@ public class TaskCancelCoordinator {
             }
             throw new IllegalStateException(error.getCause());
         } catch (TimeoutException error) {
+            abandoned.set(true);
             sending.cancel(true);
             LOG.warn("Task cancel delivery attempt abandoned after {}"
                             + " tenant={} session={} operation={} claim={}",

@@ -3,16 +3,13 @@ package com.alibaba.qwen.code.daemon;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.sun.net.httpserver.HttpServer;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.URI;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -30,90 +27,20 @@ import org.junit.jupiter.api.Timeout;
 // so a regression fails instead of hanging the suite; the teardown then
 // ends the held body, which also releases a wedged closer.
 class HarnessEventStreamCloseTest {
-    private static final String BOOT_ID =
-            "11111111-1111-4111-8111-111111111111";
-    private static final String SESSION_ID =
-            "33333333-3333-4333-8333-333333333333";
-    private static final String CLIENT_ID = "client-1";
-    private static final String DIGEST = "sha256:"
-            + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    private static final String EVENT_EPOCH = "epoch-1";
+    private static final String FRAME = "id: 1\nevent: status\n"
+            + "data: {\"v\":1,\"type\":\"status\",\"id\":1,\"data\":{}}\n\n";
 
-    private HttpServer server;
-    private ExecutorService serverExecutor;
-    private URI baseUri;
-    private CountDownLatch holdStream;
+    private HeldStreamHarness harness;
 
     @BeforeEach
     void setUp() throws IOException {
-        holdStream = new CountDownLatch(1);
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        serverExecutor = Executors.newCachedThreadPool();
-        server.setExecutor(serverExecutor);
-        server.createContext("/capabilities", exchange -> {
-            byte[] bytes = ("{\"v\":1,\"mode\":\"http-bridge\","
-                    + "\"features\":[\"hosted_harness_private_v1\","
-                    + "\"managed_session_journal_delta_v1\"],"
-                    + "\"transports\":[\"rest\"],\"hostedHarness\":{"
-                    + "\"protocolVersions\":{\"current\":1,"
-                    + "\"supported\":[1]},\"bootId\":\"" + BOOT_ID
-                    + "\",\"capabilityDigest\":\"" + DIGEST + "\"}}")
-                    .getBytes(StandardCharsets.UTF_8);
-            exchange.getResponseHeaders().set("Content-Type",
-                    "application/json");
-            exchange.sendResponseHeaders(200, bytes.length);
-            exchange.getResponseBody().write(bytes);
-            exchange.close();
-        });
-        server.createContext("/session", exchange -> {
-            byte[] bytes = ("{\"sessionId\":\"" + SESSION_ID
-                    + "\",\"workspaceCwd\":\"/control\","
-                    + "\"attached\":true,\"clientId\":\"" + CLIENT_ID
-                    + "\"}").getBytes(StandardCharsets.UTF_8);
-            exchange.getResponseHeaders().set("Content-Type",
-                    "application/json");
-            exchange.getResponseHeaders().set(
-                    HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-            exchange.sendResponseHeaders(200, bytes.length);
-            exchange.getResponseBody().write(bytes);
-            exchange.close();
-        });
-        // Headers, then a body that never arrives: from the client, a
-        // half-open stream looks exactly like this.
-        server.createContext("/session/" + SESSION_ID + "/events",
-                exchange -> {
-                    exchange.getResponseHeaders().set("Content-Type",
-                            "text/event-stream");
-                    exchange.getResponseHeaders().set("Content-Encoding",
-                            "identity");
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.EVENT_EPOCH_HEADER,
-                            EVENT_EPOCH);
-                    exchange.getResponseHeaders().set(
-                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    exchange.sendResponseHeaders(200, 0);
-                    exchange.getResponseBody().flush();
-                    try {
-                        holdStream.await();
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                    }
-                    exchange.close();
-                });
-        server.start();
-        baseUri = URI.create("http://127.0.0.1:"
-                + server.getAddress().getPort());
+        harness = HeldStreamHarness.start();
     }
 
     @AfterEach
     void tearDown() {
-        holdStream.countDown();
-        if (server != null) {
-            server.stop(0);
-        }
-        if (serverExecutor != null) {
-            serverExecutor.shutdownNow();
+        if (harness != null) {
+            harness.stop();
         }
     }
 
@@ -135,23 +62,61 @@ class HarnessEventStreamCloseTest {
                 opened);
     }
 
+    // A close that lands while next() already holds a whole frame: the
+    // frame is dropped rather than delivered off a closed stream, so the
+    // read position does not move.
+    @Test
+    @Timeout(60)
+    void aCloseRacingABufferedFrameReportsTheStreamClosed()
+            throws Exception {
+        assertCloseRacingTheReadReportsClosed(FRAME);
+    }
+
+    // A close that lands as the body ends: the reader sees the close, not
+    // the server ending the stream, which a consumer reads as an early end.
+    @Test
+    @Timeout(60)
+    void aCloseRacingTheEndOfTheBodyReportsTheStreamClosed()
+            throws Exception {
+        assertCloseRacingTheReadReportsClosed("");
+    }
+
+    private void assertCloseRacingTheReadReportsClosed(String body)
+            throws Exception {
+        HostedHarnessClient client = harness.client();
+        try {
+            HarnessSessionRef session = client.createSession(
+                    CreateHarnessSession.builder()
+                            .harnessSessionId(HeldStreamHarness.SESSION_ID)
+                            .build());
+            AtomicReference<HarnessEventStream> opened =
+                    new AtomicReference<>();
+            HarnessEventStream stream = new HarnessEventStream(client,
+                    session, new CloseOnFirstRead(body, opened), 1 << 20, 0,
+                    HeldStreamHarness.EVENT_EPOCH);
+            opened.set(stream);
+            IllegalStateException closed = assertThrows(
+                    IllegalStateException.class, stream::next);
+            assertEquals("HarnessEventStream is closed", closed.getMessage());
+            assertEquals(0, stream.getLastEventId());
+        } finally {
+            client.close();
+        }
+    }
+
     private void assertCloseEndsTheBlockedRead(
             Consumer<HostedHarnessClient> close,
             AtomicReference<HarnessEventStream> opened) throws Exception {
-        HostedHarnessClient client = HostedHarnessClient.builder()
-                .baseUri(baseUri)
-                .bearerToken("harness-token")
-                .capabilityDigest(DIGEST)
-                .build();
+        HostedHarnessClient client = harness.client();
         HarnessSessionRef session = client.createSession(
                 CreateHarnessSession.builder()
-                        .harnessSessionId(SESSION_ID)
+                        .harnessSessionId(HeldStreamHarness.SESSION_ID)
                         .build());
         HarnessEventStream stream = client.streamEvents(
                 StreamHarnessEvents.builder()
                         .session(session)
                         .lastEventId(0)
-                        .eventEpoch(EVENT_EPOCH)
+                        .eventEpoch(HeldStreamHarness.EVENT_EPOCH)
                         .build());
         if (opened != null) {
             opened.set(stream);
@@ -212,5 +177,41 @@ class HarnessEventStreamCloseTest {
         thread.setDaemon(true);
         thread.start();
         return thread;
+    }
+
+    // A body whose first read closes the stream it feeds and still hands
+    // over its bytes: the close lands inside next(), after the read began
+    // and before the frame (or the end of the body) is acted on.
+    private static final class CloseOnFirstRead extends InputStream {
+        private final InputStream bytes;
+        private final AtomicReference<HarnessEventStream> stream;
+        private boolean closedTheStream;
+
+        CloseOnFirstRead(String body,
+                AtomicReference<HarnessEventStream> stream) {
+            this.bytes = new ByteArrayInputStream(
+                    body.getBytes(StandardCharsets.UTF_8));
+            this.stream = stream;
+        }
+
+        @Override
+        public int read() throws IOException {
+            closeTheStreamOnce();
+            return bytes.read();
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length)
+                throws IOException {
+            closeTheStreamOnce();
+            return bytes.read(buffer, offset, length);
+        }
+
+        private void closeTheStreamOnce() {
+            if (!closedTheStream) {
+                closedTheStream = true;
+                stream.get().close();
+            }
+        }
     }
 }
