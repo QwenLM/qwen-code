@@ -17,10 +17,7 @@ import {
   HARNESS_MODEL_START_PHASES,
   harnessCheckpointIsAgentWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
-import {
-  managedExtensionRecordKey,
-  managedTaskId,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import {
   assertManagedSessionStableId,
   type ManagedSessionDurableRef,
@@ -464,12 +461,9 @@ async function answerAbandonedTurnCalls(input: {
         {
           text:
             hostedAgentBackgroundStartedText(
-              managedTaskId(
-                managedExtensionRecordKey(
-                  input.session.authority.sessionHeader.sessionKey.sessionId,
-                  'child_run',
-                  launched.run.executionCallId ?? callKey,
-                ),
+              managedChildTaskId(
+                input.session.authority.sessionHeader.sessionKey.sessionId,
+                launched.run.executionCallId ?? callKey,
               ),
             ) + (member === undefined ? '' : hostedTeamJoinedText(member)),
         },
@@ -808,13 +802,10 @@ export async function fillParkedRoundAgentGaps(input: {
       // receipt: no wait row exists for it, so its consumption belongs to
       // the wake pump — never to this fill.
       if (foldOwed) {
-        const taskId = managedTaskId(
-          managedExtensionRecordKey(
-            input.managed.authority.sessionHeader.sessionKey.sessionId,
-            'child_run',
-            admitted.run.executionCallId ??
-              hostedChildRunIdFor(input.promptId, callId),
-          ),
+        const taskId = managedChildTaskId(
+          input.managed.authority.sessionHeader.sessionKey.sessionId,
+          admitted.run.executionCallId ??
+            hostedChildRunIdFor(input.promptId, callId),
         );
         await writeFold(
           convertToFunctionResponse(name, callId, [
