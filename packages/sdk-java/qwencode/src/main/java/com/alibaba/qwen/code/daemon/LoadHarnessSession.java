@@ -11,6 +11,7 @@ public final class LoadHarnessSession {
     private final String toolProfile;
     private final boolean driveRuntimeRecovery;
     private final boolean cancellationTakeover;
+    private final boolean suppressChildAgents;
     private Map<String, Object> lifecycleAuthority;
     private Map<String, Object> agentDefinition;
     private boolean stopMessages;
@@ -28,7 +29,8 @@ public final class LoadHarnessSession {
 
     public LoadHarnessSession withChildWorkspaces(boolean value) {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
-                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
+                suppressChildAgents);
         copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = lifecycleAuthority;
         copy.childWorkspaces = value;
@@ -41,7 +43,8 @@ public final class LoadHarnessSession {
             throw new IllegalArgumentException("Invalid lifecycle authority");
         }
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
-                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
+                suppressChildAgents);
         copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
         copy.childWorkspaces = childWorkspaces;
@@ -53,7 +56,8 @@ public final class LoadHarnessSession {
      * of its message inputs, from before the load can kick it. */
     public LoadHarnessSession withStoppedMessages() {
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
-                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+                passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover,
+                suppressChildAgents);
         copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = lifecycleAuthority;
         copy.childWorkspaces = childWorkspaces;
@@ -101,6 +105,15 @@ public final class LoadHarnessSession {
             ManagedSessionStoreConnection managedSessionStore,
             boolean passiveManagedRuntimeRecovery, String toolProfile,
             boolean driveRuntimeRecovery, boolean cancellationTakeover) {
+        this(harnessSessionId, managedSessionStore, passiveManagedRuntimeRecovery,
+                toolProfile, driveRuntimeRecovery, cancellationTakeover, false);
+    }
+
+    public LoadHarnessSession(String harnessSessionId,
+            ManagedSessionStoreConnection managedSessionStore,
+            boolean passiveManagedRuntimeRecovery, String toolProfile,
+            boolean driveRuntimeRecovery, boolean cancellationTakeover,
+            boolean suppressChildAgents) {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
                 harnessSessionId, "harnessSessionId");
         this.managedSessionStore = managedSessionStore;
@@ -108,6 +121,7 @@ public final class LoadHarnessSession {
         this.toolProfile = toolProfile;
         this.driveRuntimeRecovery = driveRuntimeRecovery;
         this.cancellationTakeover = cancellationTakeover;
+        this.suppressChildAgents = suppressChildAgents;
     }
 
     String getHarnessSessionId() {
@@ -128,6 +142,9 @@ public final class LoadHarnessSession {
         }
         if (toolProfile != null) {
             result.put("toolProfile", toolProfile);
+        }
+        if (suppressChildAgents) {
+            result.put("suppressChildAgents", true);
         }
         if (driveRuntimeRecovery) {
             result.put("driveRuntimeRecovery", true);

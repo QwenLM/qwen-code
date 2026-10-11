@@ -6,6 +6,13 @@
 
 ## 问题与范围
 
+PR #13674 准入更新：公开前台 Shell 抑制 child/team 工具并排除公开生命周期。
+内部 TeamLead 夹具现在经可信空创建入口固定 `hosted-workspace-team-lead/1`，
+无需 SQL 改写 profile，保留内部审批、lineage 和 protocol-0 关闭。
+公开创建与已存储定义不能生成该策略。下文历史实机验收使用旧环境步骤，
+不证明新准入；原有三项 Linux/MySQL 进程案例仍为必需验收。
+详见[内部准入设计](2026-10-11-internal-team-lead-admission.zh-CN.md)。
+
 H4e-a 固定了团队可以提交什么:名册与生命周期(`team_state`)、任务板(`team_task`)、mailbox(`team_message`)与计划审批(`team_plan`),全部位于 lead Session 的 journal 中,全部禁用。还没有任何东西生产它们。在 Hosted 路径上,lead 可以启动 child agent(H4b),但无法为它们命名、把它们编成组、给它们一块任务板,也无法删除团队;`name` 在准入时作为 legacy 专属参数被拒绝,也没有声明任何团队工具。
 
 H4e-a 设计把整个运行时交给了 "H4e-b"。这一片太大,无法一次落地,其中一部分还要等尚未开始的工作。mailbox 中继、成员一侧的投递以及成员的续跑,都建立在 H4d-b(Session 消息运行时,见 [H4d-a 设计](2026-10-09-managed-session-messages.zh-CN.md))之上,而 H4d-b 在撰写本设计时尚无实现,此后已经落地([H4d-b 设计](2026-10-10-managed-session-message-runtime.zh-CN.md),#13822);计划审批与成员关停都以 mailbox 消息传递。因此 H4e-b 拆为三片:
@@ -102,7 +109,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
 - **工具轮。** 每个工具的准入矩阵,以及决策 2、3、5、7 的每种拒绝,包括批次规则。每个工具调用的重放:重放的调用不会增加团队、成员、任务或边。`task_create` 提交任务之后、工具结果之前的崩溃:重放以相同的编号作答,且不开启第二个任务。启动与加入之间的崩溃,两种结果都覆盖。删除之后的任务编号。完成、修改与删除 owner 的 run 已结束的任务。run 已成功完成的成员被设为在该调用之后处于 completed 的任务的 owner,而在未完成的任务上被拒绝,包括保留该 owner 重新打开的任务。中途停止后再重放的多记录依赖更新。`task_list` 中的名册视图,含停止原因与运行中成员的 task id。`<teammate>` 标签,以及隔离成员旁边的 `<workspace>` 结果,`team_delete` 会等待其 settle。给运行中成员的消息、对已结束成员续跑的拒绝、团队删除后前成员的续跑,以及删除后才被接受的结果仍保留标签。审批类别与预览。
 - **Authority。** 没有新规则,因此 H4e-a 的测试套件照旧成立。重建持有团队记录的 Session 会恢复它们,重开白名单放行它们。
 - **Java。** 带开启团队且有成员运行的 lead 关闭,会对成员执行 H4b 级联且不提交任何团队记录,生命周期门禁在认领下仍拒绝团队记录。
-- **Hosted IT。** `HostedTeamLeadMySqlIT` 在 Hosted MySQL 车道中运行:基于 MySQL 的真实 Spring 服务器以脚本化模型驱动打包的 Harness,覆盖团队流程(两份带标签的汇报、成员运行时被拒的 `team_delete`、已完成成员被设为其所完成任务的 owner)、等待运行中成员结束的 lead 关闭,以及 `default` 模式下的审批卡片。它与实机验收一样,在第一个 Turn 之前设置档位,得到 Shell 通道的 lead。
+- **Hosted IT。** `HostedTeamLeadMySqlIT` 在 Hosted MySQL 车道中运行:基于 MySQL 的真实 Spring 服务器以脚本化模型驱动打包的 Harness,覆盖团队流程(两份带标签的汇报、成员运行时被拒的 `team_delete`、已完成成员被设为其所完成任务的 owner)、等待运行中成员结束的 lead 关闭,以及 `default` 模式下的审批卡片。lead 现在由可信内部准入创建，保留三项原有断言，不打开公开 Shell 开关，也不经 SQL 提升权限。新 head 的 Linux/MySQL 验收待完成。
 - **实机验收**,在启用之前,于真实 Hosted 环境上:
   - lead 创建团队,按名字拉起两个成员,分配任务板任务,收到两个带名字的汇报,把任务标记为完成并删除团队;
   - lead 在仍有成员运行时关闭,该成员被取消,而团队记录保持不变;
@@ -112,7 +119,7 @@ H4e-b1 不需要任何尚未落地的东西。它的成员就是 H4b 的 child a
   - lead 在仍有成员运行时关闭,会取消该成员:它的 `child_run` 带着停止请求以 `cancelled` 结束,它的 Session 关闭,团队记录不变,lead 也从未被复活。关闭会等待成员的 Turn 结束(决策 8),这也包括成员正在等待的审批。
   - 在加入提交之前杀掉 Harness,留下一个 `child_run`、没有名册条目;在加入提交之后杀掉,留下一个 `child_run`、一个名册条目。两种情况下成员 Session 都会运行,但 lead 的 Turn 以 `managed_runtime_recovery_blocked` 失败,因此成员的结果永远到不了 lead(开放问题 5)。不建团队、改用不带名字的后台启动做同样的运行,结局相同。channel 收尾的回答(决策 11)没有覆盖到,因为该环境没有 channel 适配器。
   - 有成员运行时 `team_delete` 被拒绝,点名该成员,且不提交任何修订。`task_list` 不弹审批卡,`team_create`、`task_create`、`task_update` 与 Agent 的审批卡都显示输入预览。只从启用列表中去掉这两个 domain 的对照组不声明任何团队工具,也没有 `name`,传入 `name` 时以不支持参数的回答拒绝,且不提交任何记录。
-  - 这次验收需要一个申报过的环境步骤:新建的 Session 在第一个 Turn 之前用 SQL 切到 `hosted-workspace-shell/1`。目前没有任何 Java 路由会创建带 Shell 通道的 Session:公共 Workspace Session 得到的是 `hosted-workspace-files/1`,公共创建接口拒绝覆盖档位,child Session 复制父 Session 的档位。因此与 H4b 的 Agent 工具一样,团队工具要等某条公共路由开放 Shell 档位之后才能触达用户。
+  - 那次历史验收使用一个申报过的环境步骤:新建的 Session 在第一个 Turn 之前用 SQL 切到 `hosted-workspace-shell/1`。PR #13674 在进程夹具中将它替换为可信内部准入。公开前台 Shell 属于独立策略，不开放 H4b Agent 或团队工具；公开团队准入契约仍为后续工作。历史验收不证明新的保留 profile。
 
 ## 验收标准
 
