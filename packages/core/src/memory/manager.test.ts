@@ -2556,15 +2556,20 @@ describe('MemoryManager', () => {
 
       release();
       await other;
-      await vi.waitFor(
-        () =>
-          expect(
-            vi
-              .mocked(runAutoMemoryExtract)
-              .mock.calls.map((call) => call[0].history.length),
-          ).toContain(6),
-        { timeout: 2000 },
-      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      // Both parked runs outlived their budget, so they are abandoned instead
+      // of forking after it: the replaced snapshot stays pending.
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).not.toContain(6);
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).toContain(6);
     });
 
     it('keeps a newer snapshot a parked run settled without extracting', async () => {
@@ -2916,6 +2921,43 @@ describe('MemoryManager', () => {
       expect(vi.mocked(runAutoMemoryExtract).mock.calls[2][0].sessionId).toBe(
         'sess',
       );
+    });
+
+    it('abandons a parked flush once its budget expires instead of forking', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve(engagedNoop('other'));
+          }),
+      );
+      const other = turn(mgr, 2, 'other');
+      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+
+      release();
+      await other;
+      await mgr.drain();
+
+      // The flush budget expired while the run was parked, so it must not
+      // fork the snapshot it was started for.
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).not.toContain(4);
+
+      // The skipped turn is still recorded, and the next boundary extracts it.
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(
+        vi
+          .mocked(runAutoMemoryExtract)
+          .mock.calls.map((call) => call[0].history.length),
+      ).toContain(4);
     });
   });
 

@@ -1432,7 +1432,10 @@ export class MemoryManager {
    * Resolves `true` only when the pending turns were extracted. Resolves
    * `false` when this call did not settle within `timeoutMs`, when the run
    * extracted nothing (skipped or threw — the turns stay recorded so a later
-   * boundary can retry them), and when the snapshot went stale before it ran.
+   * boundary can retry them), when the snapshot went stale before it ran, and
+   * when the budget expired while the shared run was parked: the run is then
+   * abandoned rather than left to fork after the caller has moved on, and the
+   * pending turns stay recorded for a later boundary.
    * Overlapping calls for one session share a single run while keeping their
    * own timeout. That shared run is tracked here, not in `inFlight`, so
    * `drain()` does not wait for the flush wrapper itself — but the extraction
@@ -1450,7 +1453,8 @@ export class MemoryManager {
     // answer describes turns this caller did not ask about.
     let entry = this.extractFlushRuns.get(sessionId);
     if (!entry || entry.pending !== pending) {
-      const run = this.runPendingExtractFlush(sessionId, pending);
+      const deadline = Date.now() + timeoutMs;
+      const run = this.runPendingExtractFlush(sessionId, pending, deadline);
       entry = { pending, run };
       this.extractFlushRuns.set(sessionId, entry);
       const started = entry;
@@ -1492,13 +1496,16 @@ export class MemoryManager {
 
   /**
    * The shared body behind {@link flushPendingExtract}: waits for the project
-   * slot, then extracts the pending snapshot unless it went stale, and settles
-   * the cadence entry exactly once no matter which caller timed out. Never
-   * rejects, so a boundary always gets a boolean.
+   * slot, then extracts the pending snapshot unless it went stale or the run
+   * outlived `deadline` (the creating caller's budget, which bounds the run
+   * itself, not only that caller's wait), and settles the cadence entry exactly
+   * once no matter which caller timed out. Never rejects, so a boundary always
+   * gets a boolean.
    */
   private async runPendingExtractFlush(
     sessionId: string,
     pending: ScheduleExtractParams,
+    deadline: number,
   ): Promise<boolean> {
     try {
       // This session's own in-flight or trailing extraction may hold the
@@ -1543,6 +1550,11 @@ export class MemoryManager {
         }
         return false;
       }
+      // The deadline bounds the run, not only the wait: a flush that outlived
+      // its boundary must not fork an extraction the close path has already
+      // torn the Config down under. Leave the snapshot pending so a later
+      // boundary can retry the turns.
+      if (Date.now() >= deadline) return false;
       // The entry no longer holds this snapshot: a newer run for the session
       // completed while the slot was held (leaving its own coverage, or a
       // dropped snapshot behind) or a newer skip replaced it. Either way the
