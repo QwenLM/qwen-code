@@ -798,11 +798,11 @@ jobs:
         run: |
           set -euo pipefail
           # The README links here, so the page must name the current release
-          # rather than the frozen Electron bridge assets attached below.
+          # rather than whatever assets happen to be attached below.
           title="Qwen Code Desktop latest (v$RELEASE_VERSION)"
           notes="$(printf '%s\n\n%s' \
             "Download Qwen Code Desktop v$RELEASE_VERSION for macOS, Windows, and Linux: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
-            'This release is the stable auto-update feed. The installers attached here are legacy Electron update-bridge assets kept for old clients; do not use them for a fresh install.')"
+            'This release is the stable auto-update feed. Files attached here serve the auto-updater; download installers from the link above.')"
           feed_assets=(release-assets/desktop-latest.json)
           if [ "$ELECTRON_BRIDGE" = 'true' ]; then
             shopt -s nullglob
@@ -845,7 +845,9 @@ jobs:
               exit 0
             fi
             gh release upload "$FEED_TAG" "${feed_assets[@]}" --clobber
-            gh release edit "$FEED_TAG" --title "$title" --notes "$notes"
+            # Page text is cosmetic; it must not fail the job that gates the OSS mirror.
+            gh release edit "$FEED_TAG" --title "$title" --notes "$notes" ||
+              echo "::warning::Could not update the $FEED_TAG release title and notes; the feed itself was published."
           else
             gh release create "$FEED_TAG" "${feed_assets[@]}" --title "$title" --notes "$notes" --latest=false
           fi

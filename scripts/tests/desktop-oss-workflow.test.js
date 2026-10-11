@@ -419,6 +419,10 @@ describe('Desktop OSS mirror workflow', () => {
     expect(editNotes).toBeGreaterThan(
       updateFeed.indexOf('will not replace newer stable feed'),
     );
+    // Cosmetic text must not fail the job that gates the OSS mirror sync.
+    expect(updateFeed).toMatch(
+      /gh release edit "\$FEED_TAG" --title "\$title" --notes "\$notes" \|\|\n\s+echo "::warning::/,
+    );
     expect(updateFeed).toContain(
       '--title "$title" --notes "$notes" --latest=false',
     );
