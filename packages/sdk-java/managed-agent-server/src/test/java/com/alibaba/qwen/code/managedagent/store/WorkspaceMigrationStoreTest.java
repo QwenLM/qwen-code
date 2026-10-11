@@ -193,6 +193,15 @@ class WorkspaceMigrationStoreTest {
         }
     }
 
+    @Test
+    void collectedSourceBytesInvalidateTheMigration() {
+        var operation = store(true);
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRING");
+        operation.failed("resource_collected");
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(operation.inspect().path("lastErrorCode").asText()).isEqualTo("resource_collected");
+    }
+
     @ParameterizedTest
     @CsvSource({"false,recovery_read_failed", "true,recovery_read_failed",
             "false,migration_not_writable", "true,migration_not_writable"})
@@ -362,6 +371,22 @@ class WorkspaceMigrationStoreTest {
         assertThat(operation.inspect().path("state").asText()).isEqualTo("ABORTED");
         assertThat(guard.inspect("tenant", "storage")).contains("state=fenced revision=1");
         guard.restoreOriginal("tenant", "storage", 1, request.path("fenceOperationId").asText());
+    }
+
+    @Test
+    void refusesAStorageWhoseChildWorkspaceIsStillOpen() {
+        jdbc.update("INSERT INTO qwen_managed_child_workspace (tenant_id, parent_session_id, child_run_id,"
+                + " child_workspace_id, workspace_id, workspace_generation, storage_id, parent_cwd_relative,"
+                + " state, created_at, updated_at) VALUES ('tenant', 'parent', 'run', ?, 'workspace', 1,"
+                + " 'storage', '.', 'ready', 0, 0)", "0".repeat(32));
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
+        // A landed merge still owes its cleanup.
+        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'applied' WHERE child_workspace_id = ?",
+                "0".repeat(32));
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
+        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'conflicted' WHERE child_workspace_id = ?",
+                "0".repeat(32));
+        assertThat(store(true).inspect().path("state").asText()).isEqualTo("RETIRING");
     }
 
     @Test

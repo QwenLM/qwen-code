@@ -853,9 +853,9 @@ function collectFinalAssistantTurnIds(
 
 /**
  * A turn's hideable "steps": tool activity, plans, mid-turn assistant text,
- * and non-final background notifications. The final content and any other
- * system/shell/insight rows (errors, cancellations, command output) are kept
- * visible even when the turn is collapsed.
+ * non-final background notifications, and background result markers. Final
+ * content and other system/shell/insight rows (errors, cancellations, command
+ * output) are kept visible even when the turn is collapsed.
  */
 function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'parallel_agents') return true;
@@ -875,7 +875,11 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
       }
-      return item.message.source === 'vision_bridge_notice';
+      return (
+        item.message.source === 'background_notification_turn_started' ||
+        item.message.source === 'background_task_completed' ||
+        item.message.source === 'vision_bridge_notice'
+      );
     case 'user':
     case 'user_shell':
     case 'btw':

@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -60,6 +61,32 @@ public interface AgentStateStore {
             String requestDigest, String title, List<Map<String, Object>> input,
             String payloadDigest, StoreModels.SessionLineage lineage) {
         throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /**
+     * The isolation slice (#13753 I1): the same creation, bound to the
+     * child run's ready child Workspace. The child's row takes the
+     * Workspace's directory instead of the parent's; the creating
+     * transaction locks the Workspace row and refuses unless it is ready,
+     * unfinished, prepared from the parent's current Workspace and storage,
+     * and names {@code childCwdRelative}.
+     */
+    default StoreModels.Admission insertChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage,
+            String childCwdRelative) {
+        throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /**
+     * The child directory a child run's Workspace recorded, or null before
+     * its layout was recorded. Readiness is the creating transaction's to
+     * check, so a replay still answers once the Workspace moved on.
+     */
+    default String findChildWorkspaceCwd(String tenantId,
+            String parentSessionId, String childRunId) {
+        return null;
     }
 
     /** The replay of {@link #insertChildSessionCommand}: same key and
@@ -147,6 +174,20 @@ public interface AgentStateStore {
     Set<String> completedWorkspaceCloses(String tenantId,
             List<String> sessionIds);
 
+    /**
+     * Whether the Session's creator-keyed execution facts hold — the
+     * Registry still backs the binding exactly, its state is ACTIVE, and
+     * the create-command actor keeps OPERATOR or above. This is the
+     * passive-attachment subset the execution authority re-verifies, so
+     * any admission certifying a run under the creator's grants checks it
+     * first.
+     */
+    boolean hasExecutionRegistryFacts(String tenantId, String sessionId);
+
+    /** The given Sessions whose execution facts hold, in one read. */
+    Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
+            java.util.Collection<String> sessionIds);
+
     SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest);
 
@@ -164,9 +205,10 @@ public interface AgentStateStore {
      * Admits a controlled same-Workspace cwd change (W2) on a bound Session,
      * or returns the operation the same actor already admitted under the
      * key. The target directory is already normalized and the request digest
-     * already covers it; admission checks the creation actor, the current
-     * grant, the Registry facts, the expected context revision and the busy
-     * barriers in the pinned order of the W2 design.
+     * already covers it; admission checks the read grant, replays under the
+     * key, then the caller's Workspace role, the deployment gate, the
+     * Session state, the creator-keyed Registry facts, the expected context
+     * revision and the busy barriers in the pinned order.
      */
     OperationAdmission beginCwdChangeOperation(String tenantId,
             String sessionId, String actorId, String actorDigest,
@@ -199,6 +241,61 @@ public interface AgentStateStore {
     /** The result of a settled cwd change. */
     record CwdChangeOutcome(boolean completed, String failureCode,
             Long resultContextRevision) {
+    }
+
+    /**
+     * H4f: admits a public task cancel, or returns the operation the same
+     * actor already admitted under the key. The caller has validated the
+     * key and checked current access; under the Session lock this replays
+     * a retained key first, then — only for a new request — requires an
+     * active Session ({@code 409 session_not_active}), the task's
+     * {@code cancel} action ({@code 409 task_action_unavailable}) and no
+     * other open operation ({@code 409 session_operation_active}).
+     */
+    default OperationAdmission beginTaskCancelOperation(String tenantId,
+            String sessionId, String taskId, String actorDigest,
+            String idempotencyKey, String requestDigest) {
+        throw new UnsupportedOperationException("Task cancel is unavailable");
+    }
+
+    /** Task cancels due for delivery: pending, or leased past their lease. */
+    default List<OperationTarget> findDeliverableTaskCancels(int limit) {
+        return List.of();
+    }
+
+    /** Parked (recovery_blocked) task cancels due for reconciliation. */
+    default List<OperationTarget> findParkedTaskCancels(int limit) {
+        return List.of();
+    }
+
+    /**
+     * Records a task cancel's outcome: {@code completed} with a receipt,
+     * {@code failed} or {@code recovery_blocked} with its code (the latter
+     * parked until {@code retryAt}). A leased claim ({@code owner} set)
+     * settles only while it is still current; a parked operation
+     * ({@code owner} null) only while it is still parked.
+     *
+     * @return false when the claim or the parking is no longer current
+     */
+    default boolean settleTaskCancel(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            TaskCancelOutcome outcome, long retryAt) {
+        throw new UnsupportedOperationException("Task cancel is unavailable");
+    }
+
+    /** A task cancel's recorded outcome: its public status and code. */
+    record TaskCancelOutcome(String status, String failureCode) {
+        public static TaskCancelOutcome completed() {
+            return new TaskCancelOutcome("completed", null);
+        }
+
+        public static TaskCancelOutcome failed(String failureCode) {
+            return new TaskCancelOutcome("failed", failureCode);
+        }
+
+        public static TaskCancelOutcome recoveryBlocked(String failureCode) {
+            return new TaskCancelOutcome("recovery_blocked", failureCode);
+        }
     }
 
     Optional<OperationRecord> findOperation(String tenantId,
@@ -281,6 +378,16 @@ public interface AgentStateStore {
             List<String> sessionIds);
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
+
+    /** The Sessions whose Snapshot covers more than their replay floor. */
+    List<ReplayFloorTarget> findReplayFloorTargets(int limit);
+
+    /**
+     * Raises the Session's replay floor, never above the Snapshot's covered
+     * sequence, so a client told to resync can resume from the Snapshot.
+     */
+    ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
+            long floorSequence);
 
     List<MaterializationTarget> findMaterializationTargets(int limit);
 

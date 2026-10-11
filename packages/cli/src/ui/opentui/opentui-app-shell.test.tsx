@@ -42,6 +42,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
+import {
+  getDialogMaxHeight,
+  STATIC_EXTRA_HEIGHT,
+} from '../utils/layoutUtils.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
 import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
@@ -2059,6 +2063,35 @@ describe('OpenTuiApp transcript scroll region', () => {
     expect(screen.getByText('dialog:theme')).toBeTruthy();
     expect(region?.textContent).not.toContain('dialog:theme');
     expect(chrome?.textContent).toContain('dialog:theme');
+  });
+
+  it("gives the dialog region ink's fixed, clipped row budget", async () => {
+    // ink renders every popup inside a region of exactly
+    // `rows - STATIC_EXTRA_HEIGHT(3) - MAIN_CONTENT_HEIGHT_RESERVATION(2)`
+    // rows, clipped and top-aligned, with the composer swapped out. A
+    // content-height region bottom-anchors the popup instead: a dialog ink
+    // stretches to fill the viewport stayed short, and a picker taller than
+    // the region pushed the composer off screen. The expectation is derived
+    // from the shared constant rather than written as a literal, so the two
+    // renderers' budgets cannot drift apart with the suite green.
+    const regionHeight = getDialogMaxHeight(40, STATIC_EXTRA_HEIGHT);
+    await renderWithTranscript();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'theme' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/theme');
+    // The mount stub returns a bare string, so its parent is the region box.
+    expect(layoutOf(screen.getByText('dialog:theme'))).toMatchObject({
+      flexDirection: 'column',
+      height: regionHeight,
+      overflow: 'hidden',
+    });
+    // The same budget has to reach the dialogs: a list that sized itself to the
+    // full terminal would push its footer hint out of the clipped region.
+    expect(mocks.state.dialogProps?.['availableTerminalHeight']).toBe(
+      regionHeight,
+    );
   });
 
   it('shows queued prompts in the chrome, above the composer itself', async () => {
