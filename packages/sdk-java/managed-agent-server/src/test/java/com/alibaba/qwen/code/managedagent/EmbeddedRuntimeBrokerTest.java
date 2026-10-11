@@ -13,11 +13,21 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -200,6 +210,241 @@ class EmbeddedRuntimeBrokerTest {
                 .hasMessageContaining("closed");
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"CLOSING",
+            "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED"})
+    void unboundLifecycleClosedSessionsAreFencedByTheDurableRow(String status)
+            throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        // No in-process drain entry: the resolver must reject every
+        // closed-or-closing row durably, so the retired set no longer grows
+        // on the lifecycle path and the fence survives restarts.
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, status, null, null, 0, 0, 1,
+                        1, null, 0)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
+        }
+    }
+
+    @Test
+    void drainDuringSettleStillFencesTheWarm() throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        // deliver() settles before completing the operation, so drain() reads
+        // the row while it is still CLOSING and must not count on the
+        // in-process set: the durable fence has to refuse the warm.
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "CLOSING", null, null, 0, 0, 1,
+                        1, null, 0)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            broker.drain(SESSION_ID).toCompletableFuture().join();
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
+        }
+    }
+
+    @Test
+    void drainRetiresASessionWhoseRowIsGone() throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        // A vanished row is the one state the durable fence cannot cover;
+        // the in-process entry keeps the closed refusal instead of the
+        // not-owned one.
+        when(store.findSessionById(SESSION_ID)).thenReturn(Optional.empty());
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            broker.drain(SESSION_ID).toCompletableFuture().join();
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
+        }
+    }
+
+    @Test
+    void drainLeavesAnActiveSessionWarmable() throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "ACTIVE", null, null, 0, 0, 1,
+                        1, null, 0)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            broker.drain(SESSION_ID).toCompletableFuture().join();
+            broker.warm(SESSION_ID).toCompletableFuture().join();
+        }
+    }
+
+    @Test
+    void drainStillRetiresAClosedSessionInProcess() throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "CLOSED", null, null, 0, 0, 1,
+                        1, null, 0)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            // The durable row fences CLOSED, so drain() adds no in-process
+            // entry for it; the re-warm still refuses.
+            broker.drain(SESSION_ID).toCompletableFuture().join();
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
+        }
+    }
+
+    @Test
+    void releaseStillSettlesAnUnboundClosedSession() throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "CLOSED", null, null, 0, 0, 1,
+                        1, null, 0)));
+        ManagedAgentProperties properties = properties();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        seedReleasedSession(sessions, bindings, properties);
+        try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
+                properties, bindings, sessions,
+                new InMemoryToolExecutionRepository())) {
+            // The admission fence refuses new work on a closed Session, but
+            // release is a teardown route: it must still resolve the
+            // Session's scope so an already-released Runtime Session
+            // answers idempotently.
+            HttpURLConnection connection = (HttpURLConnection) broker
+                    .getBaseUri().resolve("/internal/runtime-broker/v1/"
+                            + "tool-sessions/" + RUNTIME_ID + ":release")
+                    .toURL().openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Authorization",
+                    "Bearer broker-token");
+            connection.setDoOutput(true);
+            connection.getOutputStream().write(("{\"protocolVersion\":1,"
+                    + "\"requestId\":\"req-release\","
+                    + "\"harnessSessionId\":\"" + SESSION_ID + "\"}")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(connection.getResponseCode()).isEqualTo(200);
+            assertThat(new String(connection.getInputStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8))
+                    .contains("\"released\":true");
+            connection.disconnect();
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"CLOSING",
+            "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED"})
+    void acquireOfANewRuntimeSessionIsFencedLikeWarm(String status)
+            throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, status, null, null, 0, 0, 1,
+                        1, null, 0)));
+        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
+            // A Runtime Session this process does not hold would provision a
+            // Runtime, which is new work on a closed Session.
+            HttpURLConnection connection = (HttpURLConnection) broker
+                    .getBaseUri().resolve("/internal/runtime-broker/v1/"
+                            + "tool-sessions:acquire")
+                    .toURL().openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Authorization",
+                    "Bearer broker-token");
+            connection.setDoOutput(true);
+            connection.getOutputStream().write(("{\"protocolVersion\":1,"
+                    + "\"requestId\":\"req-acquire\","
+                    + "\"harnessSessionId\":\"" + SESSION_ID + "\","
+                    + "\"runtimeSessionId\":\"" + RUNTIME_ID + "\","
+                    + "\"turnKind\":\"bootstrap\"}")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(connection.getResponseCode()).isEqualTo(409);
+            assertThat(new String(connection.getErrorStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8))
+                    .contains("runtime_broker_session_closed");
+            connection.disconnect();
+        }
+    }
+
+    @Test
+    void reconcileStillAnswersAnUnknownExecutionOfAClosedSession()
+            throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "CLOSED", null, null, 0, 0, 1,
+                        1, null, 0)));
+        ManagedAgentProperties properties = properties();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        seedReleasedSession(sessions, bindings, properties);
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        String digest = "sha256:" + "b".repeat(64);
+        ToolExecutionRecord prepared = ToolExecutionRecord.prepared("call-1",
+                "idem-1", "binding-1", 1, SESSION_ID, RUNTIME_ID, "turn-1",
+                "tool-call-1", digest,
+                Map.of("sessionId", RUNTIME_ID, "promptId", "turn-1",
+                        "callId", "tool-call-1", "argsDigest", digest));
+        executions.findOrCreate(prepared);
+        ToolExecutionRecord claimed = executions.claimDispatch("call-1",
+                "owner-1", Duration.ofMinutes(5));
+        assertThat(executions.compareAndSet(claimed, claimed.withUnknown(),
+                "owner-1", claimed.getDispatchGeneration())).isNotNull();
+        try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
+                properties, bindings, sessions, executions)) {
+            // The reconcile of an UNKNOWN outcome is evidence work after
+            // the close: the fence must not answer it, so the path still
+            // resolves the Session's scope, and the binding check reports
+            // the execution's recorded generation as unanswerable — the
+            // binding it was dispatched to is gone from this Broker.
+            RuntimeBrokerService service = serviceOf(broker);
+            assertThatThrownBy(() -> service.reconcileExecution(SESSION_ID,
+                    RUNTIME_ID, "call-1").toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo(
+                                    "runtime_execution_evidence_unavailable"));
+        }
+    }
+
+    @Test
+    void namesTheSupportedProvisionersInTheKubernetesRejection()
+            throws Exception {
+        ManagedAgentProperties properties = properties();
+        properties.getRuntimeBroker().setProvisioner("kubernetes");
+        // Blank derives the canonical workspace ID for the k8s/local path.
+        properties.getRuntimeBroker().setWorkspaceId("");
+
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not supported")
+                .hasMessageContaining("local-process, static");
+    }
+
     @Test
     void refusesANonLoopbackListenAddressWithoutTheOptIn() throws Exception {
         ManagedAgentProperties properties = properties();
@@ -245,6 +490,42 @@ class EmbeddedRuntimeBrokerTest {
             assertThat(broker.getBaseUri()).isNotNull();
             assertThat(broker.getBaseUri().getScheme()).isEqualTo("http");
         }
+    }
+
+    private static final String RUNTIME_ID =
+            "550e8400-e29b-41d4-a716-446655440001";
+
+    private static void seedReleasedSession(
+            InMemoryRuntimeSessionRepository sessions,
+            InMemoryRuntimeBindingRepository bindings,
+            ManagedAgentProperties properties) {
+        ManagedAgentProperties.RuntimeBroker broker =
+                properties.getRuntimeBroker();
+        RuntimeScope scope = new RuntimeScope("tenant-a",
+                broker.getWorkspaceId(), broker.getWorkspaceGeneration(),
+                broker.getWorkspaceCwd(),
+                properties.getHarness().getCapabilityDigest(),
+                broker.getIsolationClass());
+        // persistedSession confirms the historical record's parent binding
+        // before it settles anything.
+        RuntimeBindingRecord binding = bindings.findOrCreate(
+                new RuntimeProvisionRequest(scope, null));
+        RuntimeSessionRecord acquiring = new RuntimeSessionRecord(
+                new RuntimeSession(SESSION_ID, RUNTIME_ID, "bootstrap",
+                        scope),
+                binding.getBindingId(), binding.getGeneration(),
+                RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now());
+        sessions.findOrCreate(acquiring);
+        sessions.compareAndSet(acquiring, acquiring.withState(
+                RuntimeSessionRecord.State.RELEASED, Instant.now()));
+    }
+
+    private static RuntimeBrokerService serviceOf(EmbeddedRuntimeBroker broker)
+            throws Exception {
+        java.lang.reflect.Field field = EmbeddedRuntimeBroker.class
+                .getDeclaredField("service");
+        field.setAccessible(true);
+        return (RuntimeBrokerService) field.get(broker);
     }
 
     @Test
