@@ -37,10 +37,13 @@ The test-tree `SurfaceRegistry` names every mounted route, internal ones
 included, with its admission rule class; `SurfaceRegistryGateTest` fails any
 mounted route the registry lacks, so a new public or WebShell route needs both
 a spec operation and a registry entry ([actor-roles design](../../../docs/design/2026-10-07-managed-agent-actor-roles.md), D5).
-Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
-`1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
+Sessions created for the built-in `qwen-code` agent record the agent revision
+from `QWEN_MANAGED_AGENT_REVISION` (default `1`); a Session pinned to a stored
+definition records the revision it resolved at admission. `POST /v1/agents`,
+`GET /v1/agents/{id}` and
 `POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
-revisions; Sessions do not use them yet. Every response carries `X-Request-Id`, which error
+revisions; a Session pinned to one executes that stored revision (see "Stored
+agent execution" below). Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
 projection versions they were accepted with. They keep their Item and Part
 identity too, except after Harness recovery retracts output: the retracted
@@ -243,13 +246,7 @@ different Session conflicts. A successful concurrent request can still complete
 the receipt, and a failing sibling cannot overwrite that completed outcome. It
 cannot complete a retired receipt once a later rename has completed either: that
 sibling answers `409 session_mutation_superseded` and the newer public SQL title stays.
-The Harness title was already written before this check; ordering overlapping
-Harness writes remains a follow-up tracked in #13269. A
-same-key request sent after the later rename is the newest request and still
-applies, including when a concurrent sibling retires its receipt again. Each
-new attempt records the Session's current journal sequence on its command row;
-existing receipts use their original requested event until they are retried.
-Retries do not re-append the original `requested` event. If the command store
+The latest title attempt is now a durable delivery with a monotonically increasing per-Session revision. The Harness checks this revision inside its journal commit and uses a stable command identity per attempt, so a late older versioned write cannot undo a newer versioned title and a lost reply can be replayed without another write. A failed same-key request retried after a later rename receives a new revision and can still win. Pending same-key retries keep their original revision. A recovery worker redelivers the latest unfinished title and completes its public receipt; older completion attempts cannot affect the newer delivery. Both inline requests and recovery workers claim before sending; failure cleanup requires the current unexpired owner. Fresh disabled or unsupported Harness requests are refused before admission. Workspace migration also refuses unfinished title delivery even when the public command is FAILED. Close, archive, delete and cwd changes wait for this delivery to settle, including when its public command is FAILED, so sealing cannot strand a title already accepted by the Harness. The Harness must advertise title protocol version 1 before the SDK sends a versioned title. Plain private SDK title writes remain supported and preserve the watermark. See [the concurrency design](../../../docs/design/2026-10-08-managed-session-rename-delivery.md). If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight
 lifecycle change blocks another one. A retry with the same key from the same
@@ -781,12 +778,12 @@ executions, Sessions and bindings in bounded batches on a dedicated scheduler;
 it does not stop workers or delete Workspace files. Configure
 `qwen.managed-agent.runtime-broker.retention` with these environment variables:
 
-| Variable                                          | Default | Meaning                                                                             |
-| ------------------------------------------------- | ------- | ----------------------------------------------------------------------------------- |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_ENABLED`    | `false` | Enable cleanup when the Runtime Broker is also enabled                              |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE`    | `30d`   | Minimum age of eligible terminal records; must be positive                          |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_BATCH_SIZE` | `100`   | Per-tick bound on scanned bindings, scanned children and total deleted rows; 1–1000 |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_SCAN_DELAY` | `1m`    | Positive delay between ticks, at least 1ms                                          |
+| Variable                                          | Default | Meaning                                                                                                                           |
+| ------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_ENABLED`    | `false` | Enable cleanup when the Runtime Broker is also enabled                                                                            |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE`    | `30d`   | Minimum age of eligible terminal records; must be positive; unit-less values use days; explicit units such as `12h` are preserved |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_BATCH_SIZE` | `100`   | Per-tick bound on scanned bindings, scanned children and total deleted rows; 1–1000                                               |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_SCAN_DELAY` | `1m`    | Positive delay between ticks, at least 1ms                                                                                        |
 
 Recovery records, Workspace holders and CSI retirement keep their bindings.
 Child Session lineage also keeps a binding until its canonical parent child_run
@@ -1107,3 +1104,11 @@ Do not recreate or move the directory, change `QWEN_HOME`, or modify retained ba
 Promotion increments mount revision once. Successful `prepare` and `promote` commits clear the migration's previous error code. Update the deployment's Workspace root and restart Broker/Harness with the original QWEN_HOME before opening admission. An old deployment mapping fails closed. New file Turns and undo use fresh Runtime identities. Source rows, messages, journal, keys and backup names remain unchanged. Failure preserves the fence; missing stop proof, unsupported profiles or drift require diagnosis. Reverse migration is a new verified operation at a higher revision.
 
 The target marker is the sole manifest exception and must match the copied source marker or the exact operation-pinned target marker. Do not hand-edit it. No online drain, directory copying, public migration route, Shell/MCP/Hook migration or source-lost recovery is provided. Uninitialized retained members without a verifiable frozen private definition are refused. Production Linux/MySQL acceptance evidence must be recorded separately from injected-identity tests.
+
+### Stored agent execution
+
+Sessions pin a stored AgentDefinition revision and digest at admission. `permission_policy` and `tools` select the Session's immutable approval mode and hosted tool profile. `model` accepts `{}` or `{ "id": "configured-model" }`; `instructions` accepts UTF-8 text up to 64 KiB. Skills, MCP servers, environment templates and per-definition approval timeouts remain unsupported and are refused explicitly.
+
+Set `QWEN_MANAGED_AGENT_DEFINITION_MODELS` to comma-separated IDs configured in the Harness's deployment `modelProviders`; it defaults to empty. Each ID must resolve to one configured provider route with deployment credentials. An absent or ambiguous route or unresolved credentials fails the Turn with `model_unavailable` before inference. Credentials never belong in definitions. Enable and configure the Managed Session Store for stored-definition execution; instructions are delivered as digest-addressed resource references and verified on load.
+
+`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` defaults to `hosted-workspace-files/1`. Before opting into `hosted-workspace-files/2`, drain old workers and upgrade every provisioner according to #13166. Empty permission policies inherit the deployment approval mode (default `yolo`); use `default` for deployments that require approval.

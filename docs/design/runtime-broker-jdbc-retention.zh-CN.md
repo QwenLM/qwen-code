@@ -26,7 +26,7 @@ JdbcRuntimeRetention 提供不依赖框架的 JDBC sweep，嵌入方提供同连
 
 批量值为 B 时，每轮最多检查 B 个 binding、B 个子行，三表合计最多删除 B 行。大家族跨轮处理。每个事务依次锁 tenant placement domain、slot、binding 和子记录；使用当前已提交状态复查资格与引用，然后依次删除 execution、session、binding。不执行无界级联删除。数据库错误回滚并向上抛出。Local publication 修改在原有事务中依次锁 tenant placement guard、原 JDBC binding 和 execution，再锁 publication，防止引用创建与删除竞争，并保持 session 生命周期的锁顺序。CSI 保持现有锁顺序。
 
-Managed-server 使用独立单线程 scheduler，只有 Broker 和 retention 同时开启才创建。qwen.managed-agent.runtime-broker.retention 配置为 enabled=false、max-age=30d、batch-size=100（1–1000）、scan-delay=1m。保留期和间隔必须为正数。成功轮次记录计数；失败轮次记录错误并在下个周期重试。失败只回滚当前 binding 事务，同轮此前的提交继续保留，暂不提供这些部分提交的计数报告。恢复调度保持独立。已有 HTTP 和业务 repository 接口保持不变。
+Managed-server 使用独立单线程 scheduler，只有 Broker 和 retention 同时开启才创建。qwen.managed-agent.runtime-broker.retention 配置为 enabled=false、max-age=30d、batch-size=100（1–1000）、scan-delay=1m。保留期和间隔必须为正数。不带单位的 max-age 按天解析；显式单位（包括小于一天的保留期）保持原义。成功轮次记录计数；失败轮次记录错误并在下个周期重试。失败只回滚当前 binding 事务，同轮此前的提交继续保留，暂不提供这些部分提交的计数报告。恢复调度保持独立。已有 HTTP 和业务 repository 接口保持不变。
 
 在独立 schema initializer 和新 Flyway migration 中同步增加 binding 状态/时间/ID、tenant/状态及嵌入方引用键索引，不修改历史 migration。Placement 使用 SELECT 1、LIMIT 1 和状态/身份标量条件，保持有效记录的 blocksPlacement 语义、身份精确比较，并把不完整 seed/lease 字段保守视为存在。不解密历史凭据，且不依赖 retention 开关。
 

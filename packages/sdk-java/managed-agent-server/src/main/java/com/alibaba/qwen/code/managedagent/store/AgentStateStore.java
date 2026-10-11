@@ -124,6 +124,22 @@ public interface AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind);
 
+    SessionMutationCommand beginSessionRename(String tenantId, String idempotencyKey,
+            String requestDigest, String sessionId, String title);
+
+    SessionRecord completeSessionRename(String tenantId, String idempotencyKey,
+            String sessionId, String title, String harnessBootId, long revision);
+
+    void abandonSessionRename(String tenantId, String idempotencyKey,
+            String sessionId, long revision, String owner);
+
+    List<StoreModels.RenameDelivery> deliverableRenames(long now);
+
+    Optional<StoreModels.RenameDelivery> claimRename(StoreModels.RenameDelivery delivery,
+            String owner, Duration lease);
+
+    void retryRename(StoreModels.RenameDelivery delivery, String owner, long availableAt);
+
     SessionRecord completeSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId);

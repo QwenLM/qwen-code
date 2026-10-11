@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import java.time.Duration;
+import java.util.Map;
 import javax.sql.DataSource;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -93,6 +94,12 @@ class RuntimeRetentionConfigurationTest {
                     assertThat(settings.getBatchSize()).isEqualTo(23);
                     assertThat(settings.getScanDelay()).isEqualTo(Duration.ofMinutes(2));
                 });
+        for (var entry : Map.of("30", Duration.ofDays(30),
+                "12h", Duration.ofHours(12), "30ms", Duration.ofMillis(30)).entrySet()) {
+            configured.withPropertyValues("QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE=" + entry.getKey())
+                    .run(ctx -> assertThat(ctx.getBean(ManagedAgentProperties.class)
+                            .getRuntimeBroker().getRetention().getMaxAge()).isEqualTo(entry.getValue()));
+        }
     }
 
     @ParameterizedTest

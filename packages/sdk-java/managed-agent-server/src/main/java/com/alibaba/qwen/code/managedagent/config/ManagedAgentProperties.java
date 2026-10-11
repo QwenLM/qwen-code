@@ -2,10 +2,12 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.convert.DurationUnit;
 import java.util.Locale;
 import java.util.Set;
 
@@ -23,6 +25,11 @@ public class ManagedAgentProperties {
     private final Automation automation = new Automation();
     private final Channels channels = new Channels();
     private String agentRevision = "1";
+    // The tool profiles a stored AgentDefinition may select (D8c-1).
+    // hosted-workspace-files/2 joins only after the #13166 glob rollout.
+    private List<String> definitionToolProfiles =
+            List.of("hosted-workspace-files/1");
+    private List<String> definitionModels = List.of();
     private String trustedActorHeader = "";
 
     public Harness getHarness() {
@@ -76,6 +83,21 @@ public class ManagedAgentProperties {
     public void setAgentRevision(String agentRevision) {
         this.agentRevision = agentRevision;
     }
+    public List<String> getDefinitionToolProfiles() {
+        return definitionToolProfiles;
+    }
+    public void setDefinitionToolProfiles(
+            List<String> definitionToolProfiles) {
+        this.definitionToolProfiles = definitionToolProfiles;
+    }
+
+    public List<String> getDefinitionModels() {
+        return definitionModels;
+    }
+
+    public void setDefinitionModels(List<String> definitionModels) {
+        this.definitionModels = definitionModels;
+    }
 
     public String getTrustedActorHeader() {
         return trustedActorHeader;
@@ -107,6 +129,13 @@ public class ManagedAgentProperties {
                     "Hosted Workspace files require"
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
+        }
+        // A definition Session publishes its instructions through the
+        // Session Store at Harness create, so the Harness implies the
+        // Store even when Workspace files are off (D8c-2).
+        if (harness.isEnabled() && !sessionStore.isEnabled()) {
+            throw new IllegalStateException(
+                    "Hosted Harness requires the Managed Session Store");
         }
         if (automation.isEnabled()) {
             // A non-positive value fails at tick time, nearly silently:
@@ -694,6 +723,7 @@ public class ManagedAgentProperties {
 
         public static class Retention {
             private boolean enabled;
+            @DurationUnit(ChronoUnit.DAYS)
             private Duration maxAge = Duration.ofDays(30);
             private int batchSize = 100;
             private Duration scanDelay = Duration.ofMinutes(1);
