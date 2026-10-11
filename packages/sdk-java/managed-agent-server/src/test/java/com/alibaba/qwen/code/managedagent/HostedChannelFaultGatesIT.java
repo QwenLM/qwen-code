@@ -835,6 +835,10 @@ class HostedChannelFaultGatesIT {
                                             .resolve("driver-" + tag
                                                     + ".log")))
                             .isTrue();
+                    assertThat(driver.exitValue())
+                            .as(HostedChannelGateSupport.safeRead(caseDir
+                                    .resolve("driver-" + tag + ".log")))
+                            .isZero();
                     JsonNode results = support.resultsOf(caseDir, tag);
                     assertThat(results.path("sends")).hasSize(1);
                     HostedChannelGateSupport.assertSendsTo(results);
@@ -1132,6 +1136,10 @@ class HostedChannelFaultGatesIT {
                     Files.writeString(release, "go");
                     assertThat(driver.waitFor(120, TimeUnit.SECONDS))
                             .as("parked driver completion").isTrue();
+                    assertThat(driver.exitValue())
+                            .as(HostedChannelGateSupport.safeRead(caseDir
+                                    .resolve("driver-" + tag + ".log")))
+                            .isZero();
                     JsonNode settled = support.resultsOf(caseDir, tag);
                     assertThat(settled.path("sends"))
                             .as("recovery re-reads identity; nothing re-sends")

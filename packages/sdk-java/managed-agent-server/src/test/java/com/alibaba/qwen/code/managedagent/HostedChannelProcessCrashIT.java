@@ -342,11 +342,13 @@ class HostedChannelProcessCrashIT {
                                 "dropVerb", "receipt", "maxTicks", 300));
                 Process driver = launch.process();
                 String tag = launch.tag();
+                long bounceDone;
                 try {
                     support.awaitLog(caseDir, "driver-" + tag + ".log",
                             "FG7_DROPPED receipt", driver);
                     killFixture();
                     startFixture(caseDir, tenant, internalPort);
+                    bounceDone = System.currentTimeMillis();
                     assertThat(driver.waitFor(300, TimeUnit.SECONDS))
                             .as("driver converges behind the bounce:\n%s",
                                     HostedChannelGateSupport.safeRead(caseDir
@@ -363,6 +365,22 @@ class HostedChannelProcessCrashIT {
                     }
                 }
                 JsonNode results = support.resultsOf(caseDir, tag);
+                boolean postBounce = false;
+                for (JsonNode relay : results.path("relays")) {
+                    // A relay records its answer's status; liveness past
+                    // the bounce means a healthy answer, not any answer.
+                    if ("receipt".equals(relay.path("verb").asText())
+                            && !relay.path("dropped").asBoolean()
+                            && relay.path("status").asInt() < 400
+                            && relay.path("ts").asLong() >= bounceDone) {
+                        postBounce = true;
+                        break;
+                    }
+                }
+                assertThat(postBounce)
+                        .as("a warm receipt relay reached the restarted"
+                                + " control plane")
+                        .isTrue();
                 assertThat(results.path("sends"))
                         .as("at most one physical send across the bounce")
                         .hasSize(1);
