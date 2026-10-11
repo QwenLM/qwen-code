@@ -123,7 +123,6 @@ const wakeDeps = vi.hoisted(() => ({
 const domainEnablement = vi.hoisted(() => ({
   childRun: false,
   monitorRun: false,
-  teams: false,
 }));
 
 vi.mock(
@@ -140,7 +139,6 @@ vi.mock(
       ) => {
         if (domain === 'child_run' && domainEnablement.childRun) return;
         if (domain === 'monitor_run' && domainEnablement.monitorRun) return;
-        if (domain.startsWith('team_') && domainEnablement.teams) return;
         actual.assertManagedSessionDomainEnabled(domain);
       },
       // H4b: record commits gate per kind, beside the admission mock.
@@ -2426,7 +2424,6 @@ describe('Hosted Harness no-tool session', () => {
   // its tool_result landed: the aftermath answers it from its record before
   // the Turn settles, so the next Turn's model is never told to retry it.
   it('answers a committed team call of a crashed wake Turn from its record', async () => {
-    domainEnablement.teams = true;
     const inputId = await prewriteAutomationCrashedTurnSession();
     const key = {
       tenantId: 'tenant',
@@ -2516,7 +2513,6 @@ describe('Hosted Harness no-tool session', () => {
         'committed its team change',
       );
     } finally {
-      domainEnablement.teams = false;
       await managed.close().catch(() => undefined);
     }
   });
@@ -5953,7 +5949,6 @@ describe('Hosted Harness no-tool session', () => {
   // a Session that led a team reopens with its own committed history.
   it('reopens a Session whose journal carries its team and board', async () => {
     domainEnablement.childRun = true;
-    domainEnablement.teams = true;
     try {
       const key = {
         tenantId: 'tenant',
@@ -6059,7 +6054,7 @@ describe('Hosted Harness no-tool session', () => {
           .status,
       ).toBe(204);
     } finally {
-      domainEnablement.teams = false;
+      domainEnablement.childRun = false;
     }
   });
 
@@ -10005,24 +10000,13 @@ describe('Hosted Harness no-tool session', () => {
       body,
     );
     expect(created.status).toBe(200);
+    // Captured here and asserted after the Turn: an assertion inside the
+    // model mock fails only the Turn, which the test would not see.
+    let firstDeclarations: string[] | undefined;
     state.model.mockImplementationOnce(async ({ toolTurn }) => {
-      expect(
-        (await toolTurn!.declarations(new AbortController().signal)).map(
-          (tool) => tool.name,
-        ),
-      ).toEqual([
-        'read_file',
-        'write_file',
-        'edit',
-        'run_shell_command',
-        'monitor',
-        // H4b: a Shell-laned root Session advertises its Agent tool,
-        // and (H4d-b) messages the child tasks it launched.
-        'agent',
-        'send_message',
-        // #13803: and, behind its own kind gate, its Workflow tool.
-        'workflow',
-      ]);
+      firstDeclarations = (
+        await toolTurn!.declarations(new AbortController().signal)
+      ).map((tool) => tool.name!);
       return { text: 'text without side effects', model: 'test-model' };
     });
     const prompt = [{ type: 'text', text: 'hello' }];
@@ -10047,6 +10031,25 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000 },
     );
+    expect(firstDeclarations).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      'run_shell_command',
+      'monitor',
+      // H4b: a Shell-laned root Session advertises its Agent tool,
+      // and (H4d-b) messages the child tasks it launched.
+      'agent',
+      // H4e-b1: with the team domains enabled, so are its team tools.
+      'team_create',
+      'team_delete',
+      'task_create',
+      'task_update',
+      'task_list',
+      'send_message',
+      // #13803: and, behind its own kind gate, its Workflow tool.
+      'workflow',
+    ]);
     expect(acquire).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -10100,6 +10103,12 @@ describe('Hosted Harness no-tool session', () => {
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
       'agent',
+      // H4e-b1: with the team domains enabled, so are its team tools.
+      'team_create',
+      'team_delete',
+      'task_create',
+      'task_update',
+      'task_list',
       'send_message',
       // #13803: and, behind its own kind gate, its Workflow tool.
       'workflow',
@@ -19208,7 +19217,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
   // retry it and the retry opens a second task.
   it('answers a committed team call of a cancelled user Turn from its record', async () => {
     domainEnablement.childRun = true;
-    domainEnablement.teams = true;
     try {
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
@@ -19355,7 +19363,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
         supertest(replacement).delete(`/session/${SESSION_ID}`),
       );
     } finally {
-      domainEnablement.teams = false;
       domainEnablement.childRun = false;
     }
   }, 30_000);
@@ -19368,7 +19375,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     'answers a committed team sibling of a Runtime park through the %s route',
     async (route) => {
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
         acquireSpy = vi
@@ -19604,7 +19610,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
           supertest(replacement).delete(`/session/${SESSION_ID}`),
         );
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
@@ -19625,7 +19630,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     'answers a committed %s sibling before the bare-load resume of a publication Session',
     async (sibling, expected) => {
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         const key = {
           tenantId: 'tenant',
@@ -19916,7 +19920,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
         );
         await headers(supertest(second).delete(`/session/${SESSION_ID}`));
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
@@ -19933,7 +19936,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     async (sibling) => {
       const kind = 'task_create' as 'task_create' | 'agent';
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
         vi.spyOn(
@@ -20149,7 +20151,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(retried).toBe(0);
         expect(domainCommits('team_task')).toBe(1);
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },

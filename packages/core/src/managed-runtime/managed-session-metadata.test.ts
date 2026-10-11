@@ -687,11 +687,11 @@ describe('managed session metadata', () => {
     await withAuthority(harness, async (authority) => {
       await expect(
         authority.commitDomainRecord(
-          renameCommand('cmd-team-state'),
-          // team_state is in the domain vocabulary but never in the
+          renameCommand('cmd-team-message'),
+          // team_message is in the domain vocabulary but not in the
           // enabled list. child_run is per-kind exempt here; every
           // H-family body hits the extension funnel first instead.
-          { domain: 'team_state', content: {} },
+          { domain: 'team_message', content: {} },
           { class: 'trusted_entry' },
         ),
       ).rejects.toThrow(/registered but not enabled for submission/);
