@@ -13,6 +13,7 @@ import { ToolRegistry } from '../tool-registry.js';
 import { ExecTool } from '../exec.js';
 import { ToolMode, getToolExposure } from '../code-mode.js';
 import { ToolNames } from '../tool-names.js';
+import type { ExecutionEnvironment } from '../../services/execution-environment.js';
 
 describe('Code-mode fork restriction matches declared call surfaces', () => {
   it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
@@ -139,5 +140,30 @@ describe('Code-mode fork restriction matches declared call surfaces', () => {
     expect(sentence).toBeDefined();
     expect(sentence).toContain(JSON.stringify([ToolNames.READ_FILE]));
     expect(sentence).toContain(ToolNames.EXEC);
+  });
+
+  it('drops the exec carve-out for a container-backed hybrid session', () => {
+    // Container execution falls back to direct tools, so the child message
+    // must not claim the code mode always admits exec there; a non-container
+    // hybrid session keeps the carve-out.
+    const container = buildChildMessage(
+      'Inspect the implementation',
+      [ToolNames.READ_FILE],
+      undefined,
+      undefined,
+      makeFakeConfig({
+        toolMode: ToolMode.CodeMode,
+        executionEnvironment: {} as ExecutionEnvironment,
+      }).getToolMode(),
+    );
+    expect(container).not.toContain(`except ${ToolNames.EXEC}`);
+    const hybrid = buildChildMessage(
+      'Inspect the implementation',
+      [ToolNames.READ_FILE],
+      undefined,
+      undefined,
+      makeFakeConfig({ toolMode: ToolMode.CodeMode }).getToolMode(),
+    );
+    expect(hybrid).toContain(`except ${ToolNames.EXEC}`);
   });
 });

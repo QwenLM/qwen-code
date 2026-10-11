@@ -2044,11 +2044,17 @@ export class AgentCore {
             )))
       );
     }
+    // An explicit empty execution list denies every direct call (the
+    // documented deny-all contract); without a nested grant the code-mode
+    // exec/tool_search surface closes with it. A non-empty nested list keeps
+    // exec reachable, the same route toolConfigAllowsSkill derives.
     if (
-      (toolName === ToolNames.EXEC &&
+      (this.executionAllowedTools.length > 0 ||
+        (this.nestedExecutionAllowedTools?.size ?? 0) > 0) &&
+      ((toolName === ToolNames.EXEC &&
         isCodeModeEnabled(this.runtimeContext.getToolMode?.())) ||
-      (toolName === ToolNames.TOOL_SEARCH &&
-        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly)
+        (toolName === ToolNames.TOOL_SEARCH &&
+          this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly))
     ) {
       return true;
     }

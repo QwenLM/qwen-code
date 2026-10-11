@@ -18,6 +18,12 @@ import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
 import type { ResidentBackgroundAgent } from '../../agents/background-tasks.js';
 import { ToolNames } from '../tool-names.js';
+import { ToolMode } from '../code-mode.js';
+import { ToolRegistry } from '../tool-registry.js';
+import { ExecTool } from '../exec.js';
+import { AgentCore } from '../../agents/runtime/agent-core.js';
+import { MockTool } from '../../test-utils/mock-tool.js';
+import { makeFakeConfig } from '../../test-utils/config.js';
 import {
   Config,
   ApprovalMode,
@@ -1283,8 +1289,10 @@ describe('AgentTool', () => {
       expect(forkTools.minItems).toBeUndefined();
       expectText(forkTools.description, [
         'Only valid with subagent_type "fork"',
-        'In `direct` mode the model-visible tool declarations remain unchanged',
-        "this allowlist also narrows the fork's declarations",
+        '`direct` mode keeps declarations unchanged',
+        'hybrid `code_mode` narrows them to the list',
+        'Code modes admit `exec` ahead of a non-empty list',
+        'an empty array rejects every tool call',
       ]);
     });
 
@@ -3672,6 +3680,46 @@ describe('AgentTool', () => {
       );
       expect(allowed()).toEqual([]);
     });
+
+    it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
+      'deny-all fork_tools closes the exec route in %s',
+      async (mode) => {
+        config.getToolMode = vi.fn().mockReturnValue(mode);
+        parentTools(readSearchCall, [...bridged()]);
+        await runFork(
+          forkParams('deny all tools', {
+            prompt: 'reason without tools',
+            fork_tools: [],
+          }),
+        );
+        expect(allowed()).toEqual([]);
+        // Drive the captured child toolConfig through a real AgentCore: the
+        // empty execution allowlist must close the exec route in both code
+        // modes, at the declaration surface and at the admission gate.
+        const childConfig = makeFakeConfig({ toolMode: mode });
+        const registry = new ToolRegistry(childConfig);
+        vi.spyOn(childConfig, 'getToolRegistry').mockReturnValue(registry);
+        registry.registerTool(new ExecTool(childConfig));
+        registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+        const core = new AgentCore(
+          'deny-all-fork',
+          childConfig,
+          { systemPrompt: '' },
+          { model: 'test-model' },
+          { max_turns: 1 },
+          toolConfig(),
+        );
+        const declarations = await core.prepareTools();
+        expect(declarations.map((d) => d.name)).not.toContain(ToolNames.EXEC);
+        expect(
+          (
+            core as unknown as {
+              isToolExecutionAllowed: (t: string) => boolean;
+            }
+          ).isToolExecutionAllowed.call(core, ToolNames.EXEC),
+        ).toBe(false);
+      },
+    );
 
     it('preserves display_image in the fork declarations but denies its execution', async () => {
       parentTools([

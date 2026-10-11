@@ -143,11 +143,20 @@ describe('fork MCP policy inheritance', () => {
             tools,
           );
           const declarations = await core.prepareTools();
-          const exec = declarations.find((d) => d.name === 'exec')!;
-          expect(exec.description).not.toContain('mcp__payments__charge');
-          expect(exec.description).not.toContain('mcp__github__create_issue');
-          if (pattern.includes('github')) {
-            expect(exec.description).toContain('mcp__github__read_file');
+          // An empty inherited execution list is the documented deny-all:
+          // the code modes must not re-admit exec ahead of it, so the child
+          // declares nothing. The offline pattern reaches that state at
+          // generation 1; the github arm keeps a non-empty list and the
+          // exec-wrapper assertions below.
+          if (tools.executionAllowedTools?.length === 0) {
+            expect(declarations).toEqual([]);
+          } else {
+            const exec = declarations.find((d) => d.name === 'exec')!;
+            expect(exec.description).not.toContain('mcp__payments__charge');
+            expect(exec.description).not.toContain('mcp__github__create_issue');
+            if (pattern.includes('github')) {
+              expect(exec.description).toContain('mcp__github__read_file');
+            }
           }
           let frame: readonly string[] | undefined;
           await core.runInAgentFrames(async () => {

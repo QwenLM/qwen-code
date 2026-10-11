@@ -857,7 +857,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
             minLength: 1,
           },
           description:
-            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. Entries cannot have surrounding whitespace; wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*". In `direct` mode the model-visible tool declarations remain unchanged for prompt-cache sharing; under hybrid `tools.mode: "code_mode"` this allowlist also narrows the fork\'s declarations. Forks can never execute ask_user_question; omit fork_tools to allow every other inherited tool, or use an empty array to reject every tool call.',
+            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. Entries cannot have surrounding whitespace; wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*". `direct` mode keeps declarations unchanged for prompt-cache sharing; hybrid `code_mode` narrows them to the list. Code modes admit `exec` ahead of a non-empty list (and `tool_search` in `code_mode_only`). Forks never execute ask_user_question; omit fork_tools to allow every other inherited tool, or an empty array rejects every tool call.',
         },
         fork_profile: {
           type: 'string',

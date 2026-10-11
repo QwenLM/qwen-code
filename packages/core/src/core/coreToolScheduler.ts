@@ -1964,6 +1964,10 @@ export class CoreToolScheduler {
       parentCallId: parent.callId,
       source: 'code_mode',
       goalContext: parent.goalContext,
+      // Copied verbatim (including an empty array, which fails closed): a
+      // nested call resumed outside the parent's async frame — e.g. after an
+      // approval — re-establishes the ambient allowlist from this field.
+      codeModeAllowedToolNames: parent.codeModeAllowedToolNames,
     };
     return new Promise<CodeModeToolResult>((resolve, reject) => {
       this.nestedQueue.push({ request, signal, resolve, reject, onResult });

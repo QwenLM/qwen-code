@@ -8427,6 +8427,17 @@ export class Config {
   }
 
   getToolMode(): ToolModeValue {
+    // Container execution cannot host exec and the registry falls back to
+    // direct tools there, so report the effective mode rather than the
+    // configured one. CodeModeOnly is excluded: registry creation rejects
+    // it. The virtual getter matters because derived (e.g. container
+    // subagent) configs supply the environment by overriding it.
+    if (
+      this.toolMode === ToolMode.CodeMode &&
+      this.getExecutionEnvironment() !== undefined
+    ) {
+      return ToolMode.Direct;
+    }
     return this.toolMode;
   }
 
@@ -12676,7 +12687,7 @@ export class Config {
         );
       }
       if (
-        this.getToolMode() === ToolMode.CodeMode &&
+        this.toolMode === ToolMode.CodeMode &&
         !this.codeModeWarnings.containerFallback
       ) {
         this.codeModeWarnings.containerFallback = true;

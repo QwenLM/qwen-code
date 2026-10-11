@@ -19,6 +19,7 @@ import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
 import { ToolSearchTool } from '../tools/tool-search.js';
 import { getToolCallRuntime } from './tool-call-runtime.js';
+import { getCurrentCodeModeAllowedNames } from '../utils/code-mode-allowed-names.js';
 import {
   Kind,
   ToolConfirmationOutcome,
@@ -597,6 +598,70 @@ describe('CodeModeOnly scheduler dispatch', () => {
     await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
     expect(execute).toHaveBeenCalledOnce();
     expect(call().status).toBe('success');
+  }, 40_000);
+
+  it('re-establishes the parent allowlist for a nested call resumed after approval', async () => {
+    // The approval resume path runs outside the parent exec's async frame, so
+    // the nested tool can only observe the allowlist when the scheduler
+    // re-establishes it from the request — which requires dispatchCodeModeTool
+    // to copy codeModeAllowedToolNames onto the nested request.
+    let observed: readonly string[] | undefined | 'unset' = 'unset';
+    const execute = vi.fn(async () => {
+      observed = getCurrentCodeModeAllowedNames();
+      return {
+        llmContent: 'approved',
+        returnDisplay: 'approved',
+      };
+    });
+    const updates: ToolCall[][] = [];
+    const { scheduler, run, completed, call } = setup(
+      [
+        new MockTool({
+          name: 'approval_probe',
+          kind: Kind.Other,
+          params: { type: 'object' },
+          getDefaultPermission: async () => 'ask',
+          getConfirmationDetails: async () => ({
+            type: 'info',
+            title: 'Approve nested tool',
+            prompt: 'Continue?',
+            onConfirm: vi.fn().mockResolvedValue(undefined),
+          }),
+          execute,
+        }),
+      ],
+      {
+        params: { interactive: true },
+        onToolCallsUpdate: (calls) => updates.push(calls),
+      },
+    );
+
+    const controller = new AbortController();
+    const scheduled = run(
+      'exec-approval-allowlist',
+      'prompt-approval-allowlist',
+      'await tools.approval_probe({})',
+      { codeModeAllowedToolNames: ['approval_probe'] },
+      controller.signal,
+    );
+    const waiting = () =>
+      findUpdate(updates, 'approval_probe', 'awaiting_approval');
+    await vi.waitFor(() => expect(waiting() !== undefined).toBe(true), {
+      timeout: 30_000,
+    });
+    const { request, confirmationDetails } = waiting() as WaitingToolCall;
+    await scheduler.handleConfirmationResponse(
+      request.callId,
+      confirmationDetails.onConfirm,
+      ToolConfirmationOutcome.ProceedOnce,
+      controller.signal,
+    );
+
+    await scheduled;
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+    expect(execute).toHaveBeenCalledOnce();
+    expect(call().status).toBe('success');
+    expect(observed).toEqual(['approval_probe']);
   }, 40_000);
 
   it('runs nested hooks with the real tool name', async () => {

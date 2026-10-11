@@ -85,8 +85,9 @@ current registry. Tools are sorted by canonical name. A name is normalized to
 a JavaScript property by replacing invalid identifier characters and prefixing
 names that begin with a digit. If two canonical names normalize to the same
 property, an exact canonical match wins over rewritten names. If neither is an
-exact match, the lexicographically first name wins. The description names the
-omitted collision.
+exact match, the lexicographically first name wins. One debug warning names the
+omitted collision; the description names it only when search is unavailable in
+the current scope.
 
 The description defines:
 
