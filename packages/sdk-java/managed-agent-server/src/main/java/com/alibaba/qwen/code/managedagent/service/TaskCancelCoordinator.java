@@ -313,7 +313,8 @@ public class TaskCancelCoordinator {
                             operation.operationId(),
                             operation.claimGeneration(),
                             error.getClass().getSimpleName() + ": "
-                                    + error.getMessage());
+                                    + error.getMessage(),
+                            error);
                 }
                 throw error;
             }
@@ -347,6 +348,7 @@ public class TaskCancelCoordinator {
             throw new IllegalStateException("The delivery attempt was"
                     + " still running after " + attemptDeadline, error);
         } catch (InterruptedException error) {
+            abandoned.set(true);
             sending.cancel(true);
             Thread.currentThread().interrupt();
             throw new IllegalStateException(

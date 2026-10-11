@@ -14,6 +14,9 @@ import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -38,8 +41,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 /**
  * H4f delivery: every outcome is read from the task's committed record,
@@ -64,9 +69,19 @@ class TaskCancelCoordinatorTest {
     private final AtomicReference<TaskTarget> afterSend =
             new AtomicReference<>();
     private int attempts;
+    private final Logger coordinatorLog =
+            (Logger) LoggerFactory.getLogger(TaskCancelCoordinator.class);
+    private final ListAppender<ILoggingEvent> logged = new ListAppender<>();
+
+    @AfterEach
+    void detachLog() {
+        coordinatorLog.detachAppender(logged);
+    }
 
     @BeforeEach
     void setUp() {
+        logged.start();
+        coordinatorLog.addAppender(logged);
         store = mock(AgentStateStore.class);
         records = mock(ManagedExtensionRecordStore.class);
         harness = mock(HarnessConnector.class);
@@ -293,9 +308,121 @@ class TaskCancelCoordinatorTest {
                     eq(1_000 + TaskCancelCoordinator.PARKED_RECHECK
                             .toMillis()));
             assertThat(sent).hasSize(2);
+
+            // Released, each abandoned send says how it ended.
+            release.countDown();
+            ILoggingEvent returned = awaitLog(
+                    "Abandoned task cancel send returned");
+            assertThat(returned.getFormattedMessage()).contains(
+                    "tenant=tenant", "session=session", "operation=op_1");
         } finally {
             release.countDown();
             executor.shutdownNow();
+        }
+    }
+
+    // A send that fails after it was abandoned logs the failure with its
+    // cause chain, where the interrupt that abandoned it shows.
+    @Test
+    void anAbandonedSendThatFailsLateLogsItsCause() throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            coordinator = new TaskCancelCoordinator(store, records, harness,
+                    executor,
+                    Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
+                    new ManagedAgentProperties(), Duration.ofMillis(200));
+            target.set(childRun("running", false));
+            doAnswer(args -> {
+                awaitIgnoringInterrupts(release);
+                throw new IllegalStateException("late refusal",
+                        new InterruptedException());
+            }).when(harness).runChildOperation(eq(TENANT), eq(SESSION),
+                    any());
+            coordinator.dispatch(TENANT, SESSION, OPERATION);
+            verify(store, timeout(10_000)).retryOperation(eq(TENANT),
+                    eq(SESSION), eq(OPERATION), anyString(), eq(1L),
+                    anyLong());
+            release.countDown();
+            ILoggingEvent failed = awaitLog(
+                    "Abandoned task cancel send failed");
+            assertThat(failed.getFormattedMessage()).contains(
+                    "operation=op_1", "IllegalStateException: late refusal");
+            assertThat(failed.getThrowableProxy()).isNotNull();
+            assertThat(failed.getThrowableProxy().getCause().getClassName())
+                    .isEqualTo(InterruptedException.class.getName());
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    // An interrupted delivery abandons its send the same way: the send
+    // still logs how it ended.
+    @Test
+    void anInterruptedDeliveryAbandonsItsSendToo() throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch sending = new CountDownLatch(1);
+        AtomicReference<Thread> delivery = new AtomicReference<>();
+        try {
+            coordinator = new TaskCancelCoordinator(store, records, harness,
+                    executor,
+                    Clock.fixed(Instant.ofEpochMilli(1_000), ZoneOffset.UTC),
+                    new ManagedAgentProperties(), Duration.ofMinutes(1));
+            when(store.claimOperation(eq(TENANT), eq(SESSION), eq(OPERATION),
+                    anyString(), any())).thenAnswer(ignored -> {
+                        delivery.set(Thread.currentThread());
+                        return Optional.of(operation("RUNNING", attempts));
+                    });
+            target.set(childRun("running", false));
+            doAnswer(args -> {
+                sending.countDown();
+                awaitIgnoringInterrupts(release);
+                return null;
+            }).when(harness).runChildOperation(eq(TENANT), eq(SESSION),
+                    any());
+            coordinator.dispatch(TENANT, SESSION, OPERATION);
+            assertThat(sending.await(10, TimeUnit.SECONDS)).isTrue();
+            delivery.get().interrupt();
+            verify(store, timeout(10_000)).retryOperation(eq(TENANT),
+                    eq(SESSION), eq(OPERATION), anyString(), eq(1L),
+                    anyLong());
+            release.countDown();
+            assertThat(awaitLog("Abandoned task cancel send returned")
+                    .getFormattedMessage()).contains("operation=op_1");
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    private ILoggingEvent awaitLog(String prefix) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            List<ILoggingEvent> events;
+            // Appends hold the appender's monitor; copy under it too.
+            synchronized (logged) {
+                events = new java.util.ArrayList<>(logged.list);
+            }
+            for (ILoggingEvent event : events) {
+                if (event.getFormattedMessage().startsWith(prefix)) {
+                    return event;
+                }
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError("no log starting with: " + prefix);
+    }
+
+    // Like the real wedge (a lock wait), the held send ignores interrupts.
+    private static void awaitIgnoringInterrupts(CountDownLatch release) {
+        while (release.getCount() > 0) {
+            try {
+                release.await();
+            } catch (InterruptedException ignored) {
+                // keep holding
+            }
         }
     }
 

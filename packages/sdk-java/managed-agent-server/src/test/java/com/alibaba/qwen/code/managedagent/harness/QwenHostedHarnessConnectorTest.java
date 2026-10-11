@@ -1214,7 +1214,7 @@ class QwenHostedHarnessConnectorTest {
 
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         QwenHostedHarnessConnector connector =
-                approvalModeFixture(client, unanswered);
+                approvalModeFixture(client, failingOnce(unanswered));
         assertThatThrownBy(() -> connector.runChildOperation("tenant-a",
                 SESSION_ID, cancel)).isSameAs(unanswered);
         assertThatThrownBy(() -> connector.runChildOperation("tenant-a",
@@ -1226,7 +1226,7 @@ class QwenHostedHarnessConnectorTest {
         // The recovery route caches its cold load the same way.
         HostedHarnessClient recovering = mock(HostedHarnessClient.class);
         QwenHostedHarnessConnector recovery =
-                approvalModeFixture(recovering, unanswered);
+                approvalModeFixture(recovering, failingOnce(unanswered));
         assertThatThrownBy(() -> recovery.recoverManagedRuntime("tenant-a",
                 SESSION_ID, false)).isSameAs(unanswered);
         assertThatThrownBy(() -> recovery.runChildOperation("tenant-a",
@@ -1236,8 +1236,56 @@ class QwenHostedHarnessConnectorTest {
         verify(recovering, never()).runChildOperation(any(), any());
     }
 
+    // Only the ref the failing call minted is evicted: one verified when
+    // it was attached stays cached when a later check throws, so a store
+    // blip costs no cold re-load. The ref and the record agree (`yolo`).
+    @Test
+    void anUnansweredApprovalModeCheckKeepsARefVerifiedEarlier() {
+        DataAccessResourceFailureException unanswered =
+                new DataAccessResourceFailureException("interrupted");
+        Map<String, Object> cancel = Map.of("kind", "cancel",
+                "childRunId", "run-1");
+
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector connector =
+                approvalModeFixture(client, failingSecond(unanswered));
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a",
+                SESSION_ID, true)).isSameAs(unanswered);
+        connector.runChildOperation("tenant-a", SESSION_ID, cancel);
+        verify(client, times(1)).loadSession(any());
+        verify(client).runChildOperation(any(), any());
+
+        HostedHarnessClient recovering = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector recovery =
+                approvalModeFixture(recovering, failingSecond(unanswered));
+        recovery.recoverManagedRuntime("tenant-a", SESSION_ID, false);
+        assertThatThrownBy(() -> recovery.recoverManagedRuntime("tenant-a",
+                SESSION_ID, false)).isSameAs(unanswered);
+        recovery.runChildOperation("tenant-a", SESSION_ID, cancel);
+        verify(recovering, times(1)).loadSession(any());
+        verify(recovering).runChildOperation(any(), any());
+    }
+
+    // The record says `default`; the check throws on the minting call.
+    private static ManagedActionStore failingOnce(RuntimeException unanswered) {
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID))
+                .thenThrow(unanswered).thenReturn("default");
+        return actions;
+    }
+
+    // The record says `yolo`; the check answers, then throws once.
+    private static ManagedActionStore failingSecond(
+            RuntimeException unanswered) {
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("yolo")
+                .thenThrow(unanswered).thenReturn("yolo");
+        return actions;
+    }
+
     private QwenHostedHarnessConnector approvalModeFixture(
-            HostedHarnessClient client, RuntimeException unanswered) {
+            HostedHarnessClient client, ManagedActionStore actions) {
         HostedHarnessCapabilities capabilities =
                 mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
@@ -1254,9 +1302,6 @@ class QwenHostedHarnessConnectorTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
-        when(actions.approvalMode("tenant-a", SESSION_ID))
-                .thenThrow(unanswered).thenReturn("default");
         ManagedAgentProperties properties = properties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(
