@@ -105,7 +105,9 @@ export class HostedTeamRefusal extends Error {}
  * The stop a lead tool requests of a member's head. A user's H4f cancel
  * commits the same revision (H4e-b3 decision 10), so the lead's request
  * goes through the child funnel, never through this funnel's store: the
- * two funnels each own their writes chain.
+ * two funnels each own their writes chain. A lane whose Shell profile
+ * suppresses child agents attaches no such funnel; the team surface
+ * there is read-only, and a member it may carry refuses shutdowns.
  */
 export interface HostedTeamStops {
   requestStop(childRunId: string): Promise<void>;
@@ -454,7 +456,7 @@ export class HostedTeamSession {
   constructor(
     private readonly store: HostedTeamStore,
     private readonly key: ManagedSessionKey,
-    private readonly stops: HostedTeamStops,
+    private readonly stops?: HostedTeamStops,
   ) {}
 
   team(teamId: string): TeamState | undefined {
@@ -734,6 +736,13 @@ export class HostedTeamSession {
       );
     const view = hostedMemberView(this.chains(), member.childRunId);
     if (isRunningMember(view) && !view.stopping && view.head !== undefined) {
+      // A lane without the child funnel has nothing to stop through, and
+      // can only carry members read-only; refusing here costs the merge
+      // shape that attaches the surface without the funnel.
+      if (this.stops === undefined)
+        throw new HostedTeamRefusal(
+          `${name} cannot be stopped from this Session.`,
+        );
       await this.stops.requestStop(view.head.childRunId);
       return `${name} is being stopped. Delete the team once task_list shows it ended.`;
     }
