@@ -167,7 +167,7 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
   - the contract's state fields per outcome, under the claim, and a failed cancel leaving the blocked scan range for good;
   - the relay's evidence on real SQL: only a cancel that took effect on the Turn leaves `turn.cancel.requested`, one admitted on an ended Turn leaves nothing, and the space-carrying internal key round-trips;
   - the stop state read by the record's primary key from its committed body.
-- **Delivery** (`TaskCancelCoordinatorTest`, 12 tests):
+- **Delivery** (`TaskCancelCoordinatorTest`, 14 tests):
   - completion from the record, and coalescing without a send;
   - `task_already_settled` without a send;
   - a refusal and a lost reply judged by the record;
@@ -175,6 +175,7 @@ The facts below are from `main` at `ba8615f4c4` (Flyway V60, contract `1.38.0`),
   - a slow delivery renewing its lease;
   - a send that never returns: abandoned at the attempt deadline, the claim retries and stops renewing, then parks at the budget;
   - the attempt deadline at the default request timeout and under a longer one;
+  - an abandoned send logging how it ended, after a timeout or an interrupted delivery, and a late failure logged with its cause;
   - a kind without a cancel path;
   - parked reconciliation that never re-sends, and one that cannot read the record waiting a whole recheck.
 - **Relay** (`ChildResultRelayTest`, 9 new tests):
