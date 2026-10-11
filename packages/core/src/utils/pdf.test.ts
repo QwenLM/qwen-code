@@ -38,17 +38,29 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     readdir: vi.fn(),
     readFile: vi.fn(),
     rm: vi.fn(async () => undefined),
+    open: vi.fn(),
+    lstat: vi.fn(),
+  };
+});
+
+vi.mock('./pdf-command.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./pdf-command.js')>();
+  return {
+    ...actual,
+    execPDFCommandFromHandle: vi.fn(),
   };
 });
 
 import { execFile } from 'node:child_process';
-import { readdir, readFile } from 'node:fs/promises';
 import { readFileWithinBase64Limit } from './inline-media.js';
 
 vi.mock('./inline-media.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./inline-media.js')>();
   return { ...actual, readFileWithinBase64Limit: vi.fn() };
 });
+import type { FileHandle } from 'node:fs/promises';
+import { lstat, open, readdir, readFile, rm } from 'node:fs/promises';
+import { execPDFCommandFromHandle } from './pdf-command.js';
 const mockExecFile = vi.mocked(execFile);
 const mockReaddir = vi.mocked(readdir);
 const mockReadFile = vi.mocked(readFile);
@@ -250,6 +262,43 @@ describe('pdf utilities', () => {
       }
     },
   );
+  it('propagates page-count cancellation instead of returning unknown', async () => {
+    const controller = new AbortController();
+    const cancelled = new Error('page-count-cancelled');
+    mockExecFile.mockImplementationOnce(
+      (_command: unknown, _args: unknown, options: unknown, cb: unknown) => {
+        expect(options).toMatchObject({ signal: controller.signal });
+        controller.abort(cancelled);
+        (cb as ExecCallback)(cancelled, '', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+    await expect(getPDFPageCount('/test.pdf', controller.signal)).rejects.toBe(
+      cancelled,
+    );
+  });
+
+  it('propagates pathname render cancellation after output cleanup', async () => {
+    const controller = new AbortController();
+    const cancelled = new Error('page-render-cancelled');
+    mockExecResult();
+    mockExecFile.mockImplementationOnce(
+      (_command: unknown, _args: unknown, options: unknown, cb: unknown) => {
+        expect(options).toMatchObject({ signal: controller.signal });
+        controller.abort(cancelled);
+        (cb as ExecCallback)(cancelled, '', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+    await expect(
+      renderPDFPagesToImages('/test.pdf', { signal: controller.signal }),
+    ).rejects.toBe(cancelled);
+    expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+      recursive: true,
+      force: true,
+    });
+    expect(mockReaddir).not.toHaveBeenCalled();
+  });
 
   describe('PDF budget policy helpers', () => {
     it('requires pages when pdfinfo reports more than the full-text page limit', () => {
@@ -718,6 +767,109 @@ describe('pdf utilities', () => {
       mockExecResult({ stderr: 'Syntax Error: Document is damaged', code: 1 });
       expectError(await renderPDFPagesToImages('/test.pdf'), 'corrupted');
     });
+
+    it.skipIf(!['linux', 'darwin'].includes(process.platform))(
+      'keeps the render result when descriptor cleanup fails',
+      async () => {
+        vi.mocked(execPDFCommandFromHandle).mockResolvedValue({
+          stdout: '',
+          stderr: '',
+          code: 0,
+          maxBufferExceeded: false,
+          timedOut: false,
+        });
+        vi.mocked(open).mockResolvedValue({
+          fd: 8,
+          stat: async () => ({
+            dev: 1,
+            ino: 2,
+            isDirectory: () => true,
+            isFile: () => false,
+          }),
+          close: async () => undefined,
+        } as unknown as FileHandle);
+        vi.mocked(lstat).mockResolvedValue({
+          dev: 1,
+          ino: 2,
+          isDirectory: () => true,
+        } as unknown as Awaited<ReturnType<typeof lstat>>);
+        mockReaddir.mockResolvedValue([] as never);
+        vi.mocked(rm).mockRejectedValueOnce(
+          Object.assign(new Error('EACCES'), { code: 'EACCES' }),
+        );
+
+        const result = await renderPDFPagesToImages({ fd: 3 } as FileHandle);
+
+        expect(result).toEqual({
+          success: false,
+          error: expect.stringMatching(/no image output/),
+        });
+        expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+          recursive: true,
+          force: true,
+        });
+      },
+    );
+
+    it.skipIf(!['linux', 'darwin'].includes(process.platform)).each([3, 4])(
+      'checks a descriptor page of %i bytes before reading against a 4-byte base64 ceiling',
+      async (size) => {
+        vi.mocked(execPDFCommandFromHandle).mockResolvedValue({
+          stdout: '',
+          stderr: '',
+          code: 0,
+          maxBufferExceeded: false,
+          timedOut: false,
+        });
+        const directory = {
+          fd: 8,
+          stat: async () => ({ dev: 1, ino: 2, isDirectory: () => true }),
+          close: vi.fn(async () => undefined),
+        };
+        const output = {
+          fd: 9,
+          stat: async () => ({ size, isFile: () => true }),
+          read: vi.fn(async (buffer: Buffer) => {
+            Buffer.from('abc').copy(buffer);
+            return { bytesRead: 3, buffer };
+          }),
+          close: vi.fn(async () => undefined),
+        };
+        vi.mocked(open)
+          .mockResolvedValueOnce(directory as unknown as FileHandle)
+          .mockResolvedValueOnce(output as unknown as FileHandle);
+        vi.mocked(lstat).mockResolvedValue({
+          dev: 1,
+          ino: 2,
+          isDirectory: () => true,
+        } as unknown as Awaited<ReturnType<typeof lstat>>);
+        mockReaddir.mockResolvedValueOnce(['page-1.jpg'] as never);
+        const input = { fd: 3, close: vi.fn() } as unknown as FileHandle;
+        const result = await renderPDFPagesToImages(input, {
+          maxTotalBase64Bytes: 4,
+        });
+        if (size === 3) {
+          expect(result).toEqual({
+            success: true,
+            images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
+            bytesTruncated: false,
+          });
+          expect(output.read).toHaveBeenCalledOnce();
+        } else {
+          expect(result).toMatchObject({ success: false, tooLarge: true });
+          expect(output.read).not.toHaveBeenCalled();
+        }
+        expect(output.close).toHaveBeenCalledOnce();
+        expect(directory.close).toHaveBeenCalledOnce();
+        expect(input.close).not.toHaveBeenCalled();
+        expect(mockReadFile).not.toHaveBeenCalled();
+        expect(readFileWithinBase64Limit).not.toHaveBeenCalled();
+        expect(rm).toHaveBeenCalledWith('/tmp/pdf-render-test', {
+          recursive: true,
+          force: true,
+        });
+      },
+    );
 
     it('errors when pdftoppm produces no images', async () => {
       mockRendered([]);

@@ -30,6 +30,7 @@ const sdkMock = vi.hoisted(() => {
       removePendingPrompt: vi.fn(),
       getPendingPrompts: vi.fn(),
       removeMidTurnMessage: vi.fn(),
+      sendMidTurnMessagesNow: vi.fn(),
     },
     injectedBatches: [] as Array<{
       sessionId: string;
@@ -292,6 +293,30 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       }
     },
   );
+
+  it('admits a message typed during a turn without asking to send it now', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('steer later');
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+        'steer later',
+        expect.objectContaining({ messageId: expect.any(String) }),
+      );
+      expect(sdkMock.actions.sendMidTurnMessagesNow).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
 
   it('still restores ordinary failed submissions beside a live draft', async () => {
     const harness = createHarness();
@@ -1436,6 +1461,72 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(harness.result().queuedPrompts).toEqual([]);
       expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
       expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('refreshes a row that send-now finds already gone from the queue', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [{ messageId: 'm-sent', text: 'send me now' }],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      const row = harness.result().queuedPrompts[0]!;
+      expect(row).toMatchObject({
+        midTurnState: 'queued',
+        midTurnMessageId: 'm-sent',
+      });
+
+      // Delivered at a tool boundary before the click reached the daemon.
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [],
+        settledMessageIds: ['m-sent'],
+        promotedMessageIds: [],
+      });
+      sdkMock.actions.sendMidTurnMessagesNow.mockResolvedValue({
+        requested: false,
+      });
+      await act(async () => harness.result().sendQueuedPromptNow(row.id));
+
+      expect(sdkMock.actions.sendMidTurnMessagesNow).toHaveBeenCalledTimes(1);
+      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('asks the daemon once while a send-now request is out', async () => {
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [{ messageId: 'm-urgent', text: 'urgent' }],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const answer = deferred<{ requested: boolean }>();
+    sdkMock.actions.sendMidTurnMessagesNow
+      .mockReturnValueOnce(answer.promise)
+      .mockResolvedValue({ requested: true });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      const row = harness.result().queuedPrompts[0]!;
+
+      let first!: Promise<void>;
+      act(() => {
+        first = harness.result().sendQueuedPromptNow(row.id);
+      });
+      await act(async () => harness.result().sendQueuedPromptNow(row.id));
+      expect(sdkMock.actions.sendMidTurnMessagesNow).toHaveBeenCalledTimes(1);
+
+      answer.resolve({ requested: true });
+      await act(async () => first);
+      // A later click asks again: new input may be waiting by then.
+      await act(async () => harness.result().sendQueuedPromptNow(row.id));
+      expect(sdkMock.actions.sendMidTurnMessagesNow).toHaveBeenCalledTimes(2);
     } finally {
       await harness.dispose();
     }

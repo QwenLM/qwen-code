@@ -59,12 +59,12 @@ import type { SessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/m
 import { parseSessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
-import {
-  managedExtensionRecordKey,
-  managedTaskId,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
-import { hostedTeamMembership } from './hosted-team-session.js';
+import {
+  hostedOpenTeamMembership,
+  hostedTeamMembership,
+} from './hosted-team-session.js';
 import {
   stripDisplayControlChars,
   truncateNotificationLabel,
@@ -453,9 +453,7 @@ export class HostedChildAgentSession {
 
   /** The task id a launch answered for one child run. */
   taskIdOf(childRunId: string): string {
-    return managedTaskId(
-      managedExtensionRecordKey(this.key.sessionId, 'child_run', childRunId),
-    );
+    return managedChildTaskId(this.key.sessionId, childRunId);
   }
 
   /** The child agent run one task id names, of any chain generation. */
@@ -669,6 +667,21 @@ export class HostedChildAgentSession {
         return {
           kind: 'refused',
           reason: `Child agent task ${headTask} ended (${head.run.state}: ${head.stopReason ?? 'unknown'}) and cannot receive messages; launch a new agent instead.`,
+        };
+      }
+      // H4e-b1: an open team's roster names one run of its member, so a
+      // continuation would run off the roster, unlabeled and unseen by
+      // team_delete; continued members come with H4e-b2. Only a launch
+      // joins, so a member's run is never itself a continuation. Once its
+      // team is deleted, a former member continues as a plain child.
+      const member = hostedOpenTeamMembership(
+        this.store.authority.extensionRecordsInDomain('team_state'),
+        head.childRunId,
+      );
+      if (member !== undefined) {
+        return {
+          kind: 'refused',
+          reason: `Child agent task ${headTask} ran as "${member.name}" of team "${member.teamName}" and has finished; a member of an open team cannot be continued yet. For more work, launch a new member with another name while the team takes members; once every member has ended, deleting the team would let this one be continued like any other child agent, but would give up the team's board.`,
         };
       }
       // A continuation is a launch: it owes the launch admission (H4d-a
@@ -1095,17 +1108,13 @@ export class HostedChildAgentSession {
         Buffer.from(
           JSON.stringify({
             text: childResultNotificationText({
-              taskId: managedTaskId(
-                managedExtensionRecordKey(
-                  this.key.sessionId,
-                  'child_run',
-                  childRunId,
-                ),
-              ),
+              taskId: this.taskIdOf(childRunId),
               description: params.description,
               text: (await this.store.resources.read(resultRef)).toString(
                 'utf8',
               ),
+              // A run keeps the label of the roster it joined, so a result
+              // accepted after its team was deleted still names its member.
               teammate: hostedTeamMembership(
                 this.store.authority.extensionRecordsInDomain('team_state'),
                 childRunId,
