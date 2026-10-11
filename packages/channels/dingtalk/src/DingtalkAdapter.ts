@@ -1773,32 +1773,31 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
-        if (failOnHttpError) {
-          throw new DingtalkCardRequestError(
-            `DingTalk reply send failed: HTTP ${resp.status} ${detail}`,
-            isRetryableDingtalkStatus(resp.status),
-          );
-        }
-      } else if (failOnHttpError) {
-        const payload = (await resp
-          .clone()
-          .json()
-          .catch(() => undefined)) as unknown;
-        const response =
-          payload && typeof payload === 'object'
-            ? (payload as Record<string, unknown>)
-            : undefined;
-        const value = response?.['errcode'] ?? response?.['code'];
-        if (value !== undefined && String(value) !== '0') {
-          const detail = sanitizeLogText(
-            String(response?.['errmsg'] ?? response?.['message'] ?? value),
-            300,
-          );
-          process.stderr.write(
-            `[DingTalk:${this.name}] sendMessage failed: ${detail}\n`,
-          );
-          throw new Error(`DingTalk reply send failed: ${detail}`);
-        }
+        throw new DingtalkCardRequestError(
+          `DingTalk reply send failed: HTTP ${resp.status} ${detail}`,
+          isRetryableDingtalkStatus(resp.status),
+        );
+      }
+      // DingTalk reports business failures as HTTP 200 with a nonzero errcode;
+      // either shape must stop the plan so the chunk is not silently dropped.
+      const resultPayload = (await resp
+        .clone()
+        .json()
+        .catch(() => undefined)) as unknown;
+      const resultBody =
+        resultPayload && typeof resultPayload === 'object'
+          ? (resultPayload as Record<string, unknown>)
+          : undefined;
+      const errcode = resultBody?.['errcode'] ?? resultBody?.['code'];
+      if (errcode !== undefined && String(errcode) !== '0') {
+        const detail = sanitizeLogText(
+          String(resultBody?.['errmsg'] ?? resultBody?.['message'] ?? errcode),
+          300,
+        );
+        process.stderr.write(
+          `[DingTalk:${this.name}] sendMessage failed: ${detail}\n`,
+        );
+        throw new Error(`DingTalk reply send failed: ${detail}`);
       }
       plan.nextChunk++;
     }

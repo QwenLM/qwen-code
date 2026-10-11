@@ -13596,6 +13596,56 @@ describe('DingtalkChannel reply delivery timeout', () => {
       ),
     ).rejects.toThrow('DingTalk session webhook unavailable');
   });
+
+  it('surfaces a reply chunk rejected with an errcode instead of skipping it', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let posts = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
+      posts += 1;
+      return Promise.resolve(
+        posts === 2
+          ? new Response(
+              JSON.stringify({ errcode: 400013, errmsg: 'too long' }),
+              {
+                status: 200,
+              },
+            )
+          : new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+      );
+    });
+
+    const error = await channel.sendMessage('cid123', 'x'.repeat(5000)).then(
+      () => {
+        throw new Error('expected the send to reject');
+      },
+      (err: unknown) => err,
+    );
+    expect((error as Error).message).toContain('too long');
+    expect((error as { plan: { nextChunk: number } }).plan.nextChunk).toBe(1);
+    expect(posts).toBe(2);
+  });
+
+  it('surfaces an HTTP error on the reply path instead of skipping the chunk', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let posts = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
+      posts += 1;
+      return Promise.resolve(
+        posts === 2
+          ? new Response('{"errcode":460101}', { status: 400 })
+          : new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+      );
+    });
+
+    await expect(
+      channel.sendMessage('cid123', 'x'.repeat(5000)),
+    ).rejects.toThrow('HTTP 400');
+    expect(posts).toBe(2);
+  });
 });
 
 describe('DingtalkChannel proactive send', () => {

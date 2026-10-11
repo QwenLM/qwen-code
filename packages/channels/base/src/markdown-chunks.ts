@@ -55,6 +55,15 @@ function chunkMarkdown(
         ).test(lines.at(-1)!))
     );
   };
+  // A fence nested in a quote or list keeps the container prefix on its
+  // closing line, so closure must be tested with those prefixes stripped.
+  const bareFenceSource = (node: Nodes) => {
+    const indent = Math.max(0, (node.position!.start.column ?? 1) - 1);
+    const stripped = source(node).replace(/^ {0,3}> ?/gm, '');
+    return indent
+      ? stripped.replace(new RegExp(`^ {0,${indent}}`, 'gm'), '')
+      : stripped;
+  };
 
   function fitEnd(value: string, budget: number): number {
     let low = 0;
@@ -125,7 +134,10 @@ function chunkMarkdown(
         if (whitespace) {
           if (size(value.slice(0, end + whitespace)) <= budget)
             end += whitespace;
-          else {
+          // Backing off matters only for newline-bearing runs, where the
+          // next piece would otherwise open with indentation and re-parse as
+          // a code block; backing off an intra-line run drops a character.
+          else if (/\n/u.test(value.slice(end, end + whitespace))) {
             let before = end;
             while (before && /\s/u.test(value[before - 1]!)) before--;
             if (before > 1)
@@ -209,7 +221,7 @@ function chunkMarkdown(
   let unfinishedFence = false;
   const collect = (node: Nodes) => {
     if (node.type === 'definition') definitions.push(node);
-    if (node.type === 'code' && !closedFence(source(node)))
+    if (node.type === 'code' && !closedFence(bareFenceSource(node)))
       unfinishedFence = true;
     if ('children' in node) node.children.forEach(collect);
   };
@@ -223,8 +235,16 @@ function chunkMarkdown(
     hard,
     targetLength - Math.min(size(suffix), Math.floor(targetLength / 2)),
   );
-  if (suffix && hard < size(`${fallbackNotice}\`\`\`text\n\n\`\`\``) + 4)
-    return plainFallback(text, maxLength);
+  const minimum = size(`${fallbackNotice}\`\`\`text\n\n\`\`\``) + 4;
+  // A body window below the floor degenerates into mostly-duplicated messages
+  // that each re-carry the suffix; degrade the whole document instead. A
+  // nested level whose inherited budget cannot hold its own wrapped fallback
+  // hands the source back to its parent, whose wider budget can degrade.
+  const floor = Math.max(minimum, Math.floor(targetLength / 2));
+  if (hard < floor) {
+    if (maxLength >= floor) return plainFallback(text, maxLength);
+    if (depth > 0) return [text];
+  }
 
   function inlineParts(node: Nodes, soft: number, limit: number): string[] {
     if (!('children' in node)) return plainFallback(source(node), limit);
@@ -307,12 +327,7 @@ function chunkMarkdown(
       const normalized = `${opening}\n${node.value}\n${fence}`;
       if (size(normalized) <= limit) {
         // Preserve a closed source block verbatim; close unfinished fences.
-        const indented = node.position!.start.column > 1;
-        return [
-          closedFence(raw) && !indented && size(raw) <= limit
-            ? raw
-            : normalized,
-        ];
+        return [closedFence(raw) && size(raw) <= limit ? raw : normalized];
       }
       if (size(opening + '\n\n' + fence) >= limit)
         return plainFallback(raw, limit);
@@ -382,7 +397,17 @@ function chunkMarkdown(
     }
     if (node.type === 'blockquote') {
       const body = raw.replace(/^ {0,3}> ?/gm, '');
-      const wrap = (piece: string) => piece.replace(/^(?!$)/gm, '> ');
+      // Blank quoted lines keep a bare marker: an unprefixed empty line would
+      // terminate the quote and tear a quoted code block apart.
+      const wrap = (piece: string) => {
+        const lines = piece.split('\n');
+        const last = lines.length - 1;
+        return lines
+          .map((line, i) =>
+            i === last && line === '' ? line : line === '' ? '>' : `> ${line}`,
+          )
+          .join('\n');
+      };
       return chunkMarkdown(
         body,
         { ...options, targetLength: soft, maxLength: limit },
@@ -407,7 +432,6 @@ function chunkMarkdown(
     previousEnd = node.position!.end.offset!;
     if (node.type === 'definition') continue;
     const raw = source(node);
-    const minimum = size(`${fallbackNotice}\`\`\`text\n\n\`\`\``) + 4;
     if (
       node.type === 'heading' &&
       size(headings + separator + raw) <=
@@ -453,6 +477,7 @@ function chunkMarkdown(
             ? ''
             : '\n\n';
       let next = (index === 0 ? head : '') + piece;
+      if (!current && joiner) next = joiner + next;
       const combined = current ? `${current}${joiner}${next}` : next;
       if (current && size(combined) > target) {
         if (index === 0) {
@@ -478,7 +503,11 @@ function chunkMarkdown(
       else headings = headingSeparator + headings;
       flush();
     }
-    current = current ? tail : headings;
+    current = current
+      ? tail
+      : size(headingSeparator + headings) <= hard
+        ? headingSeparator + headings
+        : headings;
   }
   if (!definitions.length && current) {
     const tail = text.slice(previousEnd);

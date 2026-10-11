@@ -113,6 +113,21 @@ describe('serve fast-path bundle check', () => {
     );
   });
 
+  it('keeps the Markdown chunk parser out of the pre-listen closure', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: [
+          'packages/cli/src/serve/run-qwen-serve.ts',
+          'packages/channels/base/dist/markdown-chunks.js',
+        ],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([
+      expect.objectContaining({ label: 'Markdown chunk parser' }),
+    ]);
+  });
+
   it('keeps the ACP startup profiler out of the pre-listen closure', () => {
     const metafile = makeMetafile({
       'dist/chunks/run-qwen-serve.js': output({
@@ -258,6 +273,7 @@ describe('serve fast-path bundle check', () => {
           'node_modules/.pnpm/@iarna+toml@2.2.5/node_modules/@iarna/toml/toml.js',
           'node_modules/chokidar/esm/index.js',
           'node_modules/fzf/dist/fzf.es.js',
+          'node_modules/.pnpm/remark-gfm@4.0.1/node_modules/remark-gfm/index.js',
         ],
       }),
     });
@@ -270,6 +286,7 @@ describe('serve fast-path bundle check', () => {
       '@iarna/toml vendor package',
       'chokidar vendor package',
       'fzf vendor package',
+      'Markdown parser runtime',
     ]);
     expect(offenders[0].importPath).toEqual([
       'dist/chunks/run-qwen-serve.js',

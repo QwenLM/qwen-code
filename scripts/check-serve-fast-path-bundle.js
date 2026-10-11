@@ -145,6 +145,11 @@ const FORBIDDEN_VENDOR_PACKAGES = [
   { label: 'chokidar vendor package', packageName: 'chokidar' },
   { label: '@iarna/toml vendor package', packageName: '@iarna/toml' },
   { label: 'fzf vendor package', packageName: 'fzf' },
+  // The markdown-chunks source entry above only matches the wrapper module;
+  // these are its parser runtime closure, so a rename or bypass still fails.
+  { label: 'Markdown parser runtime', packageName: 'unified' },
+  { label: 'Markdown parser runtime', packageName: 'remark-parse' },
+  { label: 'Markdown parser runtime', packageName: 'remark-gfm' },
 ];
 
 const FORBIDDEN_ACP_UI_PACKAGES = [

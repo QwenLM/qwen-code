@@ -295,11 +295,13 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
   });
 
   it('budgets oversized block separators without losing source text', () => {
-    for (const [gap, body] of [
-      [21_000, 4],
-      [19_000, 3000],
-    ]) {
-      const text = 'a'.repeat(4000) + '\n'.repeat(gap!) + 'x'.repeat(body!);
+    for (const [gap, body, tail] of [
+      [21_000, 4, ''],
+      [19_000, 3000, ''],
+      [21_000, 4, '\n\n# Tail\n'],
+    ] as const) {
+      const text =
+        'a'.repeat(4000) + '\n'.repeat(gap) + 'x'.repeat(body) + tail;
       const chunks = split(text);
       expect(
         chunks
@@ -327,6 +329,13 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
     }
   });
 
+  it('retains leading separators when the first block must split', () => {
+    const text = '\n\n\n' + 'x'.repeat(4000) + '\n\nTail paragraph.\n';
+    const chunks = split(text);
+    expect(chunks.join('')).toBe(text);
+    checkBudget(chunks, options);
+  });
+
   it('keeps the partial marker with the first long paragraph fragment', () => {
     for (const length of [3789, 3790, 5000]) {
       const text = '(partial)\n\n' + 'x'.repeat(length);
@@ -347,6 +356,8 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
     expect(split(tight).join('')).toBe(tight);
     for (const text of [
       '- ' + 'a'.repeat(10_000),
+      '- - ' + 'a'.repeat(10_000),
+      '1. - ' + 'a'.repeat(10_000),
       '- top\n' +
         Array.from(
           { length: 700 },
@@ -379,6 +390,35 @@ describe.each(['utf16', 'utf8'] as const)('Markdown chunks (%s)', (unit) => {
     checkBudget(deep, options);
   });
 
+  it('keeps quoted fenced code with blank lines inside one blockquote', () => {
+    const text =
+      '> intro ' +
+      'x'.repeat(1900) +
+      '\n>\n> ```js\n> const a = 1;\n>\n> const b = 2;\n> ```\n>\n> outro ' +
+      'y'.repeat(1900);
+    const chunks = split(text);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks)
+      expect(
+        parser
+          .parse(chunk)
+          .children.filter((node) => node.type === 'blockquote'),
+      ).toHaveLength(1);
+    expect(chunks.flatMap(code).join('')).toBe('const a = 1;\n\nconst b = 2;');
+    checkBudget(chunks, options);
+  });
+
+  it('degrades huge nested definition blocks instead of throwing or storming', () => {
+    for (const length of [19840, 19857, 19867, 19869, 19871]) {
+      const definition =
+        '[ref]: https://docs.example.com/' + 'a'.repeat(length);
+      const text = `> ${definition}\n>\n> body ${'b'.repeat(300)} [ref]`;
+      const chunks = split(text);
+      expect(chunks.length).toBeLessThan(50);
+      checkBudget(chunks, options);
+    }
+  });
+
   it('splits code near the target and retains oversized row headers in fallback text', () => {
     const chunks = split('```ts\n' + 'x\n'.repeat(15_000) + '```');
     for (const chunk of chunks)
@@ -399,6 +439,7 @@ it('preserves short messages and their original block separators', () => {
     '<div align="center">banner</div>\n\n## Details\nBody text.',
     '\n\nshort\r\nmessage\n',
     '# One\n\nshort\n\n# Two',
+    'Intro.\n\n> ```js\n> const a = 1;\n> ```\n\nSee [docs][d] now.\n\n[d]: https://example.com/d\n\nOutro.',
   ])
     expect(splitMarkdown(text, defaults)).toEqual([text]);
   expect(
@@ -412,6 +453,7 @@ it('preserves short messages and their original block separators', () => {
 it('keeps indented fenced code content intact when splitting is needed', () => {
   const text = 'intro '.repeat(700) + '\n\n   ```js\n   let a = 1;\n   ```';
   expect(splitMarkdown(text, defaults).flatMap(code)).toEqual(code(text));
+  expect(splitMarkdown(text, defaults).join('')).toBe(text);
 });
 
 it('retains heading boundaries in long documents that cannot take the short path', () => {
@@ -439,6 +481,14 @@ it('keeps short prose around a large inline element in the same message', () => 
   expect(splitMarkdown(text, defaults)).toEqual([text]);
 });
 
+it('hands an under-budget nested container back to its parent', () => {
+  const options = { targetLength: 100, maxLength: 200, unit: 'utf16' } as const;
+  for (const length of [92, 94, 96]) {
+    const text = '> [ref]: ' + 'u'.repeat(length) + '\n> ' + 'x'.repeat(150);
+    checkBudget(splitMarkdown(text, options), options);
+  }
+});
+
 it('rejects invalid caller-supplied budgets', () => {
   for (const options of [
     { ...defaults, targetLength: 0 },
@@ -455,6 +505,22 @@ it('prefers sentence boundaries close to the target', () => {
   const chunks = splitMarkdown(text, defaults);
   expect(chunks.join('')).toBe(text);
   for (const chunk of chunks.slice(0, -1)) expect(chunk).toMatch(/\. $/u);
+  const exact = 'a'.repeat(3799) + '. ' + 'b'.repeat(100);
+  const exactChunks = splitMarkdown(exact, defaults);
+  expect(exactChunks.join('')).toBe(exact);
+  expect(exactChunks[0]).toMatch(/\.$/u);
+});
+
+it('emits a fitting fence-line tail intact without pulling back to a boundary', () => {
+  const line = 'a'.repeat(23_900) + ' done. trailing words here';
+  const chunks = splitMarkdown('```ts\n' + line + '\n```', defaults);
+  expect(chunks.flatMap(code).join('')).toBe(line);
+  expect(chunks.at(-1)).toMatch(/ done\. trailing words here\n```$/u);
+  for (const chunk of chunks)
+    expect(
+      parser.parse(chunk).children.filter((node) => node.type === 'code'),
+    ).toHaveLength(1);
+  checkBudget(chunks);
 });
 
 it('honors the exact soft and hard boundaries', () => {
@@ -494,6 +560,18 @@ it('packs small sections and list items near the target instead of sending each 
   expect(
     splitMarkdown('# One\n\nshort\n\n# Two\n\nshort', defaults),
   ).toHaveLength(1);
+  const sections = Array.from(
+    { length: 200 },
+    (_, i) => `# H${i}\n\n${'a'.repeat(40)}`,
+  ).join('\n\n');
+  const packed = splitMarkdown(sections, defaults);
+  expect(packed.length).toBeGreaterThan(1);
+  expect(packed.length).toBeLessThan(20);
+  expect(
+    packed.flatMap((chunk) =>
+      nodes(chunk).filter((node) => node.type === 'heading'),
+    ),
+  ).toHaveLength(200);
   const items = Array.from(
     { length: 80 },
     (_, i) => `- ${i}: ${'a'.repeat(80)}`,
@@ -519,6 +597,10 @@ it('does not cut character references or escaped punctuation', () => {
     expect(chunks.join('')).toBe(text);
     expect(chunks.some((chunk) => chunk.includes(element))).toBe(true);
   }
+  const boundary = 'x'.repeat(3792) + '**b**&amp; rest of the message here';
+  const boundaryChunks = splitMarkdown(boundary, defaults);
+  expect(boundaryChunks.join('')).toBe(boundary);
+  expect(boundaryChunks.some((chunk) => chunk.includes('&amp;'))).toBe(true);
 });
 
 it('chooses fences that cannot close on code exposed by a long-line cut', () => {

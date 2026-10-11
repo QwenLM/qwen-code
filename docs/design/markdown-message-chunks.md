@@ -51,8 +51,11 @@ Short complete messages retain their exact source. Unfinished fences are still c
 
 Adapters reject a prefix that exhausts the soft budget, subtract valid prefix budgets before splitting, then add prefixes as before. DingTalk conservatively reserves the first-message mention on all content
 fragments but emits it only on the first. Delivery loops, send order, media
-extraction, failure propagation and resumption from the first unsent chunk remain
-unchanged. DingTalk proactive delivery additionally checks the UTF-8 length of the actual JSON `msgParam` (including title, continuation title, escaped text and source prefix). Only chunks over 15,000 bytes are repacked with a smaller structure-aware budget until every serialized payload fits. This conservative cap also applies to proactive direct messages. Dependencies are declared directly in channel-base with a synchronized
+extraction and resumption from the first unsent chunk remain unchanged. A session
+Webhook reply chunk that DingTalk rejects — an HTTP error or a nonzero `errcode`
+on HTTP 200 — now rejects the send with the delivery plan attached instead of
+being skipped silently, so a platform refusal is never mistaken for a delivered
+reply; the background retry path resumes that plan unchanged. DingTalk proactive delivery additionally checks the UTF-8 length of the actual JSON `msgParam` (including title, continuation title, escaped text and source prefix). Only chunks over 15,000 bytes are repacked with a smaller structure-aware budget until every serialized payload fits. This conservative cap also applies to proactive direct messages. Dependencies are declared directly in channel-base with a synchronized
 pnpm lockfile.
 
 ## Validation and acceptance
