@@ -2556,7 +2556,10 @@ export class HostedWorkspaceToolTurn {
           if (renewInFlight) return renewInFlight;
           const pending = (async () => {
             const writer = await this.publication!.owner.owner();
-            const failures: Error[] = [];
+            const failures: Array<{
+              binding: { settled: boolean };
+              error: Error;
+            }> = [];
             for (const saved of shellBindings.values()) {
               if (saved.settled) continue;
               try {
@@ -2573,17 +2576,24 @@ export class HostedWorkspaceToolTurn {
                 );
               } catch (cause) {
                 if (!saved.settled)
-                  failures.push(
-                    new Error(`${saved.publicationId}: ${String(cause)}`, {
-                      cause,
-                    }),
-                  );
+                  failures.push({
+                    binding: saved,
+                    error: new Error(
+                      `${saved.publicationId}: ${String(cause)}`,
+                      {
+                        cause,
+                      },
+                    ),
+                  });
               }
             }
-            if (failures.length)
+            const liveFailures = failures
+              .filter(({ binding }) => !binding.settled)
+              .map(({ error }) => error);
+            if (liveFailures.length)
               throw new AggregateError(
-                failures,
-                failures.map((failure) => failure.message).join('; '),
+                liveFailures,
+                liveFailures.map((failure) => failure.message).join('; '),
               );
           })();
           renewInFlight = pending.finally(() => {

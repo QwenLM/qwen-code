@@ -617,6 +617,7 @@ describe('Shell publication grant renewal', () => {
     'not_started',
     'in-flight',
     'timer-failure',
+    'rejection-before-settlement',
   ] as const)(
     'renews only live grants across %s and a delayed receipt',
     async (mode) => {
@@ -673,6 +674,15 @@ describe('Shell publication grant renewal', () => {
       const renewalGate = new Promise<void>((resolve) => {
         finishRenewal = resolve;
       });
+      let delayQueuedRenewal = false;
+      let startQueuedRenewal!: () => void;
+      const queuedRenewalStarted = new Promise<void>((resolve) => {
+        startQueuedRenewal = resolve;
+      });
+      let finishQueuedRenewal!: () => void;
+      const queuedRenewalGate = new Promise<void>((resolve) => {
+        finishQueuedRenewal = resolve;
+      });
       const bindings = new Map<
         string,
         { publicationId: string; executionCallId: string }
@@ -686,6 +696,8 @@ describe('Shell publication grant renewal', () => {
       broker.executeV3.mockImplementation(
         async (id, _payload, publicationId) => {
           if (id === 'shell-1') {
+            if (mode === 'rejection-before-settlement')
+              settled.add(publicationId);
             startExecution();
             await executionGate;
           }
@@ -718,6 +730,14 @@ describe('Shell publication grant renewal', () => {
                 'unavailable',
                 'Store down.',
               );
+          }
+          if (
+            grant.operation === 'renew' &&
+            delayQueuedRenewal &&
+            bindings.get(grant.publicationId)?.executionCallId === 'shell-2'
+          ) {
+            startQueuedRenewal();
+            await queuedRenewalGate;
           }
           if (grant.operation === 'renew' && settled.has(grant.publicationId))
             throw new ManagedSessionStoreHttpError(
@@ -797,7 +817,9 @@ describe('Shell publication grant renewal', () => {
         request.mockClear();
         delayRenewal = mode === 'in-flight';
         failRenewal = mode === 'timer-failure';
+        delayQueuedRenewal = mode === 'rejection-before-settlement';
         await vi.advanceTimersByTimeAsync(10_000);
+        if (delayQueuedRenewal) await queuedRenewalStarted;
         expect(renewalIds()).toEqual(
           delayRenewal ? [publicationIds[0]] : publicationIds,
         );
@@ -823,23 +845,37 @@ describe('Shell publication grant renewal', () => {
           await vi.advanceTimersByTimeAsync(0);
           expect.soft(renewalIds()).toEqual(publicationIds);
         }
-        request.mockClear();
-        await vi.advanceTimersByTimeAsync(20_000);
-        expect
-          .soft(renewalIds())
-          .toEqual([publicationIds[1], publicationIds[1]]);
-        expect
-          .soft(stderr)
-          .not.toHaveBeenCalledWith(
-            expect.stringContaining('Tool publication renewal failed'),
-          );
-        expect(broker.executeV3).toHaveBeenCalledOnce();
-        commitReceipt();
+        if (delayQueuedRenewal) {
+          commitReceipt();
+          await vi.waitFor(() => {
+            expect(broker.acknowledgeV3).toHaveBeenCalledOnce();
+          });
+          await vi.advanceTimersByTimeAsync(0);
+          expect(broker.executeV3).toHaveBeenCalledOnce();
+          finishQueuedRenewal();
+        } else {
+          request.mockClear();
+          await vi.advanceTimersByTimeAsync(20_000);
+          expect
+            .soft(renewalIds())
+            .toEqual([publicationIds[1], publicationIds[1]]);
+          expect(broker.executeV3).toHaveBeenCalledOnce();
+          commitReceipt();
+        }
         const responses = await execution;
         expect(responses.map((part) => part.functionResponse?.id)).toEqual(
           shellCalls.map((call) => call.callId),
         );
         expect(broker.executeV3).toHaveBeenCalledTimes(2);
+        if (delayQueuedRenewal)
+          expect(broker.acknowledgeV3.mock.calls.map(([id]) => id)).toEqual([
+            'shell-1',
+            'shell-2',
+          ]);
+        expect(broker.cancel).not.toHaveBeenCalled();
+        expect(stderr).not.toHaveBeenCalledWith(
+          expect.stringContaining('Tool publication renewal failed'),
+        );
         await turn.consumeResults();
         await turn.finish();
         expect(broker.release).toHaveBeenCalledOnce();
@@ -848,6 +884,7 @@ describe('Shell publication grant renewal', () => {
         settleExecution();
         commitReceipt();
         finishRenewal();
+        finishQueuedRenewal();
         await execution.catch(() => undefined);
         vi.useRealTimers();
       }
