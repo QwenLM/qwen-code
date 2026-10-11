@@ -770,7 +770,8 @@ export class ChatCompressionService {
           .getDebugLogger()
           .debug(
             `[chat-compression] output budget clamped to ${coldOutputBudget} ` +
-              `(estimated input ${getColdInputEstimate()}, window ${budgetWindow})`,
+              `(estimated input ${getColdInputEstimate()}, window ${budgetWindow}, ` +
+              `ceiling ${opts.observedServerCeiling ?? 'none'})`,
           );
       }
       return runSideQuery(config, {
@@ -872,7 +873,7 @@ export class ChatCompressionService {
             : !sharedRequestFits
               ? `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
                 `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
-                `window=${reactiveContextCeiling}`
+                `window=${contextLimit}, ceiling=${opts.observedServerCeiling ?? 'none'}`
               : 'payload-overflow recovery ships the slimmed cold path only';
       debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
     }

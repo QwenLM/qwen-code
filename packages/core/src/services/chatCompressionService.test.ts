@@ -49,6 +49,27 @@ vi.mock('../telemetry/uiTelemetry.js');
 vi.mock('../core/tokenLimits.js');
 vi.mock('../telemetry/loggers.js');
 
+/** Lines the service writes through its module-level COMPRESSION logger. */
+const compressionDebugLines = vi.hoisted(() => [] as string[]);
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...original,
+    createDebugLogger: (tag?: string) => {
+      const logger = original.createDebugLogger(tag);
+      return {
+        ...logger,
+        debug: (...args: unknown[]) => {
+          if (tag === 'COMPRESSION') {
+            compressionDebugLines.push(args.map(String).join(' '));
+          }
+        },
+      };
+    },
+  };
+});
+
 type CompressResult = Awaited<ReturnType<ChatCompressionService['compress']>>;
 
 /** Alternating user/model text turns, starting with the user. */
@@ -1754,6 +1775,10 @@ describe('ChatCompressionService.compress cache sharing', () => {
   const INFERRED_WINDOW = 1_000_000;
   const OBSERVED_CEILING = 262_144;
   const SERVER_REPORTED_ACTUAL = 279_935;
+  /** A distinct compaction model whose window exceeds the observed ceiling. */
+  const COMPACTION_WINDOW = 400_000;
+  /** A declared baseUrl other than the main model's, for an endpoint pin. */
+  const OTHER_ENDPOINT = 'https://other.example/v1';
 
   it('keeps reactive overflow recovery off the shared request when the server reports a lower ceiling (#13432)', async () => {
     // Every other canShareCache conjunct holds in this fixture: main model,
@@ -1820,6 +1845,94 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(
       coldInputEstimate + (request.config?.maxOutputTokens ?? 0),
     ).toBeLessThanOrEqual(OBSERVED_CEILING);
+  });
+
+  it('does not budget a cross-endpoint compaction pin against the main endpoint ceiling (#13432)', async () => {
+    // The ceiling was reported by the endpoint that rejected the MAIN request.
+    // A `\0`-pinned compaction model routes the side-query to a different
+    // declared baseUrl (#12760), so that server enforces its own limit: the
+    // main ceiling says nothing about it. Clamping anyway floors the budget at
+    // 1 once the slimmed payload exceeds the main ceiling, and the truncation
+    // guard then drops the summary — on every send, so the session can never
+    // be compacted. The receiving model's own window must govern here.
+    const chunk = 'x'.repeat(4_000);
+    const history = Array.from({ length: 300 }, (_, i) =>
+      i % 2
+        ? modelText(`chunk-${i} ${chunk}`)
+        : userText(`chunk-${i} ${chunk}`),
+    );
+    const { coldSpy, result } = await expectCold(
+      {
+        history,
+        compactionModel: `openai:compact-model\0${OTHER_ENDPOINT}`,
+        configuredModels: [
+          {
+            id: 'compact-model',
+            contextWindowSize: COMPACTION_WINDOW,
+            registryBaseUrl: OTHER_ENDPOINT,
+          },
+        ],
+        contextWindowSize: INFERRED_WINDOW,
+      },
+      {
+        originalTokenCount: SERVER_REPORTED_ACTUAL,
+        precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+        observedServerCeiling: OBSERVED_CEILING,
+      },
+    );
+    const request = coldSpy.mock.calls[0]![1] as {
+      contents: Content[];
+      systemInstruction?: string;
+      model?: string;
+      config?: { maxOutputTokens?: number };
+    };
+    const coldInputEstimate =
+      estimateContentTokens(request.contents) +
+      Math.ceil((request.systemInstruction ?? '').length / 4);
+    // Fixture guards: the payload must exceed the main ceiling (so clamping
+    // against it floors the budget) yet still fit the receiving model's window
+    // (so the too-small-window guard keeps the pin instead of coalescing).
+    expect(coldInputEstimate).toBeGreaterThan(OBSERVED_CEILING);
+    expect(coldInputEstimate + COMPACT_MAX_OUTPUT_TOKENS).toBeLessThanOrEqual(
+      COMPACTION_WINDOW,
+    );
+    expect(request.model).toBe(`openai:compact-model\0${OTHER_ENDPOINT}`);
+    expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+  });
+
+  it('labels the server-reported ceiling apart from the inferred window in the skip log (#13432)', async () => {
+    // The two numbers this PR separates must not collapse into one printed
+    // value. An inferred window of 262_144 with no server ceiling and an
+    // inferred window of 1_000_000 clamped by a server-reported 262_144 are
+    // different states with different causes, so the skip log has to say
+    // which one it is in.
+    const skipLog = async (
+      contextWindowSize: number,
+      observedServerCeiling: number | undefined,
+    ) => {
+      compressionDebugLines.length = 0;
+      await expectCold(
+        { contextWindowSize, lastPromptTokenCount: SERVER_REPORTED_ACTUAL },
+        {
+          originalTokenCount: SERVER_REPORTED_ACTUAL,
+          precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+          observedServerCeiling,
+        },
+      );
+      const line = compressionDebugLines.find((l) =>
+        l.includes('skipping cache sharing'),
+      );
+      expect(line).toBeDefined();
+      return line!;
+    };
+    const clamped = await skipLog(INFERRED_WINDOW, OBSERVED_CEILING);
+    const inferred = await skipLog(OBSERVED_CEILING, undefined);
+    expect(clamped).toContain(`window=${INFERRED_WINDOW}`);
+    expect(clamped).toContain(`ceiling=${OBSERVED_CEILING}`);
+    expect(inferred).toContain(`window=${OBSERVED_CEILING}`);
+    expect(inferred).toContain('ceiling=none');
+    expect(clamped).not.toBe(inferred);
   });
 });
 
