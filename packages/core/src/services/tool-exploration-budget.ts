@@ -43,7 +43,14 @@ export function getToolExplorationKind(
     registry.getAllToolNames(),
   );
   if (Array.isArray(resolved)) return undefined;
-  if (READ_ONLY_DISCOVERY_TOOLS.has(resolved ?? canonical)) return Kind.Read;
+  // Keyed on the registry's answer: `resolved` is `undefined` when the
+  // session never registered this name (LSP disabled, `--exclude-tools`
+  // removed `tool_search`), and a name the registry refuses must stay
+  // unclassified like every other unregistered name instead of being
+  // credited as progress.
+  if (resolved !== undefined && READ_ONLY_DISCOVERY_TOOLS.has(resolved)) {
+    return Kind.Read;
+  }
   return registry.getTool(resolved ?? canonical)?.kind;
 }
 

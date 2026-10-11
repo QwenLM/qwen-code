@@ -202,9 +202,19 @@ const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
  * Whether a stream event restarts the current attempt from scratch (the
  * failed attempt's partial output is discarded and re-streamed), so any
  * attempt-scoped observations recorded after the last committed round-trip
- * must be rolled back. Shared by every per-attempt counter — the loop
- * detector's guards and the exploration budget — so a new restart-style
- * event lands in all of them or none.
+ * must be rolled back. The client's stream loop consumes it for both of its
+ * attempt-scoped states — the exploration budget's phase and the loop-guard
+ * feed set (`modelRequestAccepted`/`hasToolCalls`/`loopGuardFedCallIds`) — so
+ * a new restart-style event lands in both of them or in neither.
+ *
+ * It is deliberately not consumed by the loop detector, which has no call
+ * site here: that module's own per-turn cap rollback stays `Retry`-only, and
+ * its `ModelFallback` early return in `checkAlwaysOnSafeties` classifies a
+ * fallback the opposite way on purpose (a fallback cannot have streamed
+ * calls, and clearing the detector's streak evidence per round-trip would
+ * silence the consecutive-identical and stagnation guards). A restart-style
+ * event added here does NOT propagate to the detector; add it there
+ * separately and justify it.
  */
 export function isAttemptRestartEvent(event: ServerLlmStreamEvent): boolean {
   return (

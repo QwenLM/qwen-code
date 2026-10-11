@@ -109,6 +109,25 @@ describe('ToolExplorationBudget', () => {
     expect(budget.takeReminder(2)).toBe(TOOL_EXPLORATION_REMINDER);
   });
 
+  it('leaves an unregistered read-only discovery name unclassified', () => {
+    // `lsp` is registered only when LSP is enabled and `tool_search` can be
+    // removed with `--exclude-tools`; a refused call still reaches record(),
+    // so a name the session never registered must not be credited as a read.
+    const registry = {
+      getAllToolNames: () => ['read_file'],
+      getTool: (name: string) =>
+        name === 'read_file' ? { kind: Kind.Read } : undefined,
+    } as unknown as ToolRegistry;
+    expect(getToolExplorationKind(registry, 'tool_search', {})).toBeUndefined();
+    expect(getToolExplorationKind(registry, 'lsp', {})).toBeUndefined();
+    expect(
+      getToolExplorationKind(registry, 'tool_call', {
+        name: 'tool_search',
+        arguments: {},
+      }),
+    ).toBeUndefined();
+  });
+
   it('leaves ambiguous case-insensitive registrations unclassified', () => {
     const registry = {
       getAllToolNames: () => ['READ_FILE', 'Read_File'],
