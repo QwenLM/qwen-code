@@ -300,6 +300,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
 export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
   'advisorModel',
   'advisorMaxUses',
+  'pluginConfigs',
 ] as const;
 
 /**

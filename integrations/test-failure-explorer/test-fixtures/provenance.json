@@ -1,0 +1,211 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-10T16:21:25.660Z",
+  "runnerVersion": "3.2.7",
+  "nodeVersion": "v24.14.1",
+  "command": "node integrations/test-failure-explorer/scripts/generate-fixtures.mjs",
+  "sanitization": {
+    "temporaryProjectRoot": "/fixture-workspace",
+    "repositoryRoot": "/fixture-repository",
+    "temporaryOutputDirectory": "/fixture-output",
+    "policy": "Recursively replace only generated absolute path prefixes in JSON string values. Keep reporter counts, states, timings, messages and stacks otherwise unchanged. Hash both original bytes and the committed sanitized JSON."
+  },
+  "sources": {
+    "duplicate-titles/duplicate.fixture.ts": "006022476434e15377caae20895e5a7152bc2d327549aeff8e0a6bef096c4ebd",
+    "file-error/import.fixture.ts": "2b7c05d774b51309dc9f994c9aef0078c01328bf5b7979356a8c1cad681338de",
+    "hostile-text/hostile.fixture.ts": "320cbf51a3782cc6e98ac8407757650b184c642a785c24bdf1e6746057a4a5e0",
+    "mixed/nested.fixture.ts": "09ccc49d9cb2eaff5ac3cf0cc556c2fd2355d913ecf44cef83ab60036f4da30a",
+    "mixed/second.fixture.ts": "b1b576b8e8358889d4a303e24f62bf315d7a36619da776d88be13134538eba96",
+    "no-tests/README.txt": "cdc27548b8ac6a96eeb01ea83faa0cf46841cba0398fa79eced83b052a42ffb9",
+    "statuses/statuses.fixture.ts": "4be7353ac41d8801224f8d3db6edd7060701f96338c131260881145cc277576a",
+    "unhandled/unhandled.fixture.ts": "23c7d2e723f63321f556adce2a05b4038605d7b90160406309309855132db1eb",
+    "vitest.config.mjs": "87106c2f92cba061d0c4b287a34c8799132862e2d34c03f392ea4269fe95dcd7"
+  },
+  "generatorSha256": "51414dd87e80e68f4787d3df3642e80058b49ace01ff4bc3cb68b18534631f5e",
+  "reports": [
+    {
+      "filename": "mixed.json",
+      "origin": "real-vitest-3.2.7",
+      "command": "/fixture-node /fixture-repository/node_modules/vitest/vitest.mjs run --root /fixture-workspace/mixed --config /fixture-workspace/vitest.config.mjs --reporter=default --reporter=json --outputFile.json=/fixture-output/mixed.json",
+      "exitCode": 1,
+      "rawSha256": "c548d13a155152cd2fb3d494b1f6e48fadbe5d922560ba50a3da2d4221f82fdc",
+      "sanitizedSha256": "b8e4971ea3bfcb49be21ce568f1881f39783c426d2dc95d879570bb64b10ad41",
+      "consoleSha256": "78652546118cbe3cb3b453becdae4f7d2af8699296db955c4e50056a2f6ce887",
+      "unhandledRejectionObserved": false,
+      "observed": {
+        "success": false,
+        "numTotalTestSuites": 4,
+        "numTotalTests": 4,
+        "numPassedTests": 3,
+        "numFailedTests": 1,
+        "numPendingTests": 0,
+        "numTodoTests": 0,
+        "fileEntries": 2,
+        "assertionStatuses": { "passed": 3, "failed": 1 },
+        "filesWithMessages": 0
+      }
+    },
+    {
+      "filename": "file-error.json",
+      "origin": "real-vitest-3.2.7",
+      "command": "/fixture-node /fixture-repository/node_modules/vitest/vitest.mjs run --root /fixture-workspace/file-error --config /fixture-workspace/vitest.config.mjs --reporter=default --reporter=json --outputFile.json=/fixture-output/file-error.json",
+      "exitCode": 1,
+      "rawSha256": "4c2730f86036b2bcb28df8b0df7316175ede3339abc5ad50833d57a3b409f92a",
+      "sanitizedSha256": "2dcc1efd755317ba04ba1a4057fc4ca85a37406815e818f1aa5b03325d9fb3df",
+      "consoleSha256": "7775e6dc5dbe8eb09dc8d75a87e03939bb858e1352c8fcd989092582810e8d14",
+      "unhandledRejectionObserved": false,
+      "observed": {
+        "success": false,
+        "numTotalTestSuites": 1,
+        "numTotalTests": 0,
+        "numPassedTests": 0,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "numTodoTests": 0,
+        "fileEntries": 1,
+        "assertionStatuses": {},
+        "filesWithMessages": 1
+      }
+    },
+    {
+      "filename": "statuses.json",
+      "origin": "real-vitest-3.2.7",
+      "command": "/fixture-node /fixture-repository/node_modules/vitest/vitest.mjs run --root /fixture-workspace/statuses --config /fixture-workspace/vitest.config.mjs --reporter=default --reporter=json --outputFile.json=/fixture-output/statuses.json",
+      "exitCode": 0,
+      "rawSha256": "38ee62c64e93cedc71fa6b9e9be150e32e175bded1d4670eba2fa6aa965e65db",
+      "sanitizedSha256": "4131531f15bcb51a567f4fc090adb8c6d99db3fe4d1779ec81b1cf2af2e873c8",
+      "consoleSha256": "032043706132c0d9631dd0852ea0ed7a7196834c48b854f44fd9dadc7940f3d2",
+      "unhandledRejectionObserved": false,
+      "observed": {
+        "success": true,
+        "numTotalTestSuites": 1,
+        "numTotalTests": 4,
+        "numPassedTests": 1,
+        "numFailedTests": 0,
+        "numPendingTests": 2,
+        "numTodoTests": 1,
+        "fileEntries": 1,
+        "assertionStatuses": { "passed": 1, "skipped": 2, "todo": 1 },
+        "filesWithMessages": 0
+      }
+    },
+    {
+      "filename": "no-tests-fail.json",
+      "origin": "real-vitest-3.2.7",
+      "command": "/fixture-node /fixture-repository/node_modules/vitest/vitest.mjs run --root /fixture-workspace/no-tests --config /fixture-workspace/vitest.config.mjs --reporter=default --reporter=json --outputFile.json=/fixture-output/no-tests-fail.json",
+      "exitCode": 1,
+      "rawSha256": "afad5d8b16644dade8a6af4f9900a34b81c838968b55d61780a634ec6671eede",
+      "sanitizedSha256": "fa77db1629f965b1c4e77f1830daae9063e2b2bcaf73b6aebeef029923dd2841",
+      "consoleSha256": "0ca041d18ba6bd0bac313866d0c7a29078c6f3fa63c13c4a40268d0b17c9ac17",
+      "unhandledRejectionObserved": false,
+      "observed": {
+        "success": false,
+        "numTotalTestSuites": 0,
+        "numTotalTests": 0,
+        "numPassedTests": 0,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "numTodoTests": 0,
+        "fileEntries": 0,
+        "assertionStatuses": {},
+        "filesWithMessages": 0
+      }
+    },
+    {
+      "filename": "no-tests-pass.json",
+      "origin": "real-vitest-3.2.7",
+      "command": "/fixture-node /fixture-repository/node_modules/vitest/vitest.mjs run --root /fixture-workspace/no-tests --config /fixture-workspace/vitest.config.mjs --reporter=default --reporter=json --outputFile.json=/fixture-output/no-tests-pass.json --passWithNoTests",
+      "exitCode": 0,
+      "rawSha256": "1fabb0bf3f6ded41270559b579b572088119a010fc8d5b1fe7efcacbc3804fef",
+      "sanitizedSha256": "3e0d3f3487f207d09b73fbac7c10f7b0aa3881d88a434af7143499915c5bb3cf",
+      "consoleSha256": "3909e5e1b8cb451c4871736da5f1c1e9339b062ebb43cf8711d23336b3703b74",
+      "unhandledRejectionObserved": false,
+      "observed": {
+        "success": true,
+        "numTotalTestSuites": 0,
+        "numTotalTests": 0,
+        "numPassedTests": 0,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "numTodoTests": 0,
+        "fileEntries": 0,
+        "assertionStatuses": {},
+        "filesWithMessages": 0
+      }
+    },
+    {
+      "filename": "unhandled.json",
+      "origin": "real-vitest-3.2.7",
+      "command": "/fixture-node /fixture-repository/node_modules/vitest/vitest.mjs run --root /fixture-workspace/unhandled --config /fixture-workspace/vitest.config.mjs --reporter=default --reporter=json --outputFile.json=/fixture-output/unhandled.json",
+      "exitCode": 1,
+      "rawSha256": "8768dc4805b2fc5fc90229776717f37273634271a478a2dcf57b0430df403231",
+      "sanitizedSha256": "d4604c44561b9ba853ec10d36ef0251dad59a38c801d6ad1230f9b5c6de59419",
+      "consoleSha256": "c5c07353a978825d59e33a5b75328a2723872a89a686387cdd784751f44930cb",
+      "unhandledRejectionObserved": true,
+      "observed": {
+        "success": true,
+        "numTotalTestSuites": 1,
+        "numTotalTests": 1,
+        "numPassedTests": 1,
+        "numFailedTests": 0,
+        "numPendingTests": 0,
+        "numTodoTests": 0,
+        "fileEntries": 1,
+        "assertionStatuses": { "passed": 1 },
+        "filesWithMessages": 0
+      }
+    },
+    {
+      "filename": "duplicate-titles.json",
+      "origin": "real-vitest-3.2.7",
+      "command": "/fixture-node /fixture-repository/node_modules/vitest/vitest.mjs run --root /fixture-workspace/duplicate-titles --config /fixture-workspace/vitest.config.mjs --reporter=default --reporter=json --outputFile.json=/fixture-output/duplicate-titles.json",
+      "exitCode": 1,
+      "rawSha256": "ba5b2d531e826dc2facb0b9fbbad812c19a402a73c3757234c2ea5fa9c5563d8",
+      "sanitizedSha256": "7fef661ec0043405d7ec6c38bb6d3afd0897fda3e034ebb1c736083ad980781b",
+      "consoleSha256": "0c1734d26fd133a47033bca10ef447e940ec567099b458aae9ca4a001df8b351",
+      "unhandledRejectionObserved": false,
+      "observed": {
+        "success": false,
+        "numTotalTestSuites": 2,
+        "numTotalTests": 2,
+        "numPassedTests": 0,
+        "numFailedTests": 2,
+        "numPendingTests": 0,
+        "numTodoTests": 0,
+        "fileEntries": 1,
+        "assertionStatuses": { "failed": 2 },
+        "filesWithMessages": 0
+      }
+    },
+    {
+      "filename": "hostile-text.json",
+      "origin": "real-vitest-3.2.7",
+      "command": "/fixture-node /fixture-repository/node_modules/vitest/vitest.mjs run --root /fixture-workspace/hostile-text --config /fixture-workspace/vitest.config.mjs --reporter=default --reporter=json --outputFile.json=/fixture-output/hostile-text.json",
+      "exitCode": 1,
+      "rawSha256": "95f799dfad2c5ad3fbe608daabc81faf3a5229fcdbb806f53923ca316c2c1167",
+      "sanitizedSha256": "6bce25d3155ebf77270254651475a50ca393d15492dd0d408d2d04804ed63d09",
+      "consoleSha256": "bfce0cf70b4337033802f969b0270002f140c3f76c243718277909f90abcf090",
+      "unhandledRejectionObserved": false,
+      "observed": {
+        "success": false,
+        "numTotalTestSuites": 1,
+        "numTotalTests": 1,
+        "numPassedTests": 0,
+        "numFailedTests": 1,
+        "numPendingTests": 0,
+        "numTodoTests": 0,
+        "fileEntries": 1,
+        "assertionStatuses": { "failed": 1 },
+        "filesWithMessages": 0
+      }
+    },
+    {
+      "filename": "duplicate-paths.derived.json",
+      "origin": "derived-not-a-real-run",
+      "source": "duplicate-titles.json",
+      "sourceSha256": "7fef661ec0043405d7ec6c38bb6d3afd0897fda3e034ebb1c736083ad980781b",
+      "sanitizedSha256": "4bc17b366a355f005024b68fcdd8fd4a216a2ceec5e7b4fcf79a584b93db46c2",
+      "transformation": "Duplicate the one testResults entry verbatim and double total/failed suite and test counters. No process execution or exit code is claimed for this derived sample."
+    }
+  ]
+}

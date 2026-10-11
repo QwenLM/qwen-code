@@ -132,6 +132,7 @@ describe('Hosted proxy header relay', () => {
       )
       .sort();
     expect(callers).toEqual([
+      'hosted-channel-fault-driver.ts',
       'hosted-latency-driver.ts',
       'hosted-process-crash-driver.ts',
       'hosted-shell-output-driver.ts',

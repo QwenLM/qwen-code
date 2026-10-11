@@ -732,6 +732,19 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).toHaveBeenCalled();
   });
 
+  it('refuses workspace pluginConfigs without persisting operator options', async () => {
+    const { app, persistSetting } = makeApp();
+    const response = await request(app)
+      .post('/workspace/settings')
+      .send({
+        scope: 'workspace',
+        key: 'pluginConfigs',
+        value: { example: { options: { greeting: 'injected' } } },
+      });
+    expect(response.status).toBe(400);
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
   describe('aux-model selector credential scrubbing', () => {
     // visionModel / imageModel / advisorModel / fastModel persist as
     // `authType:id\0baseUrl`; a userinfo-bearing baseUrl is a credential and

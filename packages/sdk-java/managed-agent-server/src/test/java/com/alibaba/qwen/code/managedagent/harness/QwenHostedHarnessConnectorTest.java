@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
@@ -1280,6 +1281,116 @@ class QwenHostedHarnessConnectorTest {
                 .isNull();
     }
 
+    // An approval-mode check that throws instead of answering (a store
+    // failure, or the interrupt an abandoned cancel send receives) confirms
+    // nothing: the ref the cold attach already cached is evicted, so the
+    // next verb re-loads and re-verifies it instead of taking it unchecked.
+    // The control plane records `default` and the Harness ref says `yolo`.
+    @Test
+    void anUnansweredApprovalModeCheckEvictsTheRefItMinted() {
+        DataAccessResourceFailureException unanswered =
+                new DataAccessResourceFailureException("interrupted");
+        Map<String, Object> cancel = Map.of("kind", "cancel",
+                "childRunId", "run-1");
+
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector connector =
+                approvalModeFixture(client, failingOnce(unanswered));
+        assertThatThrownBy(() -> connector.runChildOperation("tenant-a",
+                SESSION_ID, cancel)).isSameAs(unanswered);
+        assertThatThrownBy(() -> connector.runChildOperation("tenant-a",
+                SESSION_ID, cancel))
+                .hasMessageContaining("did not confirm the Session approval mode");
+        verify(client, times(2)).loadSession(any());
+        verify(client, never()).runChildOperation(any(), any());
+
+        // The recovery route caches its cold load the same way.
+        HostedHarnessClient recovering = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector recovery =
+                approvalModeFixture(recovering, failingOnce(unanswered));
+        assertThatThrownBy(() -> recovery.recoverManagedRuntime("tenant-a",
+                SESSION_ID, false)).isSameAs(unanswered);
+        assertThatThrownBy(() -> recovery.runChildOperation("tenant-a",
+                SESSION_ID, cancel))
+                .hasMessageContaining("did not confirm the Session approval mode");
+        verify(recovering, times(2)).loadSession(any());
+        verify(recovering, never()).runChildOperation(any(), any());
+    }
+
+    // Only the ref the failing call minted is evicted: one verified when
+    // it was attached stays cached when a later check throws, so a store
+    // blip costs no cold re-load. The ref and the record agree (`yolo`).
+    @Test
+    void anUnansweredApprovalModeCheckKeepsARefVerifiedEarlier() {
+        DataAccessResourceFailureException unanswered =
+                new DataAccessResourceFailureException("interrupted");
+        Map<String, Object> cancel = Map.of("kind", "cancel",
+                "childRunId", "run-1");
+
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector connector =
+                approvalModeFixture(client, failingSecond(unanswered));
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a",
+                SESSION_ID, true)).isSameAs(unanswered);
+        connector.runChildOperation("tenant-a", SESSION_ID, cancel);
+        verify(client, times(1)).loadSession(any());
+        verify(client).runChildOperation(any(), any());
+
+        HostedHarnessClient recovering = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector recovery =
+                approvalModeFixture(recovering, failingSecond(unanswered));
+        recovery.recoverManagedRuntime("tenant-a", SESSION_ID, false);
+        assertThatThrownBy(() -> recovery.recoverManagedRuntime("tenant-a",
+                SESSION_ID, false)).isSameAs(unanswered);
+        recovery.runChildOperation("tenant-a", SESSION_ID, cancel);
+        verify(recovering, times(1)).loadSession(any());
+        verify(recovering).runChildOperation(any(), any());
+    }
+
+    // The record says `default`; the check throws on the minting call.
+    private static ManagedActionStore failingOnce(RuntimeException unanswered) {
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID))
+                .thenThrow(unanswered).thenReturn("default");
+        return actions;
+    }
+
+    // The record says `yolo`; the check answers, then throws once.
+    private static ManagedActionStore failingSecond(
+            RuntimeException unanswered) {
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("yolo")
+                .thenThrow(unanswered).thenReturn("yolo");
+        return actions;
+    }
+
+    private QwenHostedHarnessConnector approvalModeFixture(
+            HostedHarnessClient client, ManagedActionStore actions) {
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("yolo");
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", "hosted-workspace-files/1");
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(
+                properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        return connector;
+    }
+
     // R4-13: each call site must fetch the client AFTER resolving the
     // attachment — the resolution runs a create/load round trip during
     // which an adoption can close and rebuild the client; a receiver
@@ -1971,9 +2082,169 @@ class QwenHostedHarnessConnectorTest {
                 .isInstanceOf(IllegalStateException.class);
     }
 
+    @Test
+    void closesTheLazyClientAndRejectsLateUse() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        connector.close();
+
+        verify(client).close();
+        assertThatThrownBy(() -> connector.closeSession("tenant-a",
+                SESSION_ID))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("closed");
+        verify(client, never()).closeSession(any(String.class));
+    }
+
+    @Test
+    void closeReleasesTheClientLockBeforeClosingTheClient()
+            throws Exception {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        CountDownLatch closing = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            closing.countDown();
+            finish.await();
+            return null;
+        }).when(client).close();
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        Thread shutdown = new Thread(connector::close);
+        shutdown.setDaemon(true);
+        shutdown.start();
+        assertThat(closing.await(10, TimeUnit.SECONDS)).isTrue();
+
+        // The client close awaits its executors for seconds; the clientLock
+        // must be free across it, or every client() caller and a repeated
+        // close() queue behind the full shutdown wait.
+        ReentrantLock lock = (ReentrantLock) ReflectionTestUtils.getField(
+                connector, "clientLock");
+        try {
+            assertThat(lock.tryLock(10, TimeUnit.SECONDS)).isTrue();
+            lock.unlock();
+        } finally {
+            finish.countDown();
+        }
+        shutdown.join(10_000);
+        assertThat(shutdown.isAlive()).isFalse();
+        verify(client).close();
+    }
+
+    @Test
+    void doesNotBuildAClientAfterClose() {
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+
+        connector.close();
+
+        // A late first call must fail before construction: building here
+        // would start executors and a heartbeat nothing ever closes.
+        assertThatThrownBy(() -> connector.submit("tenant-a", SESSION_ID,
+                "prompt", java.util.List.of(), "digest"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("closed");
+    }
+
+    @Test
+    void rejectsSchemelessBaseUrlsAtStartup() {
+        ManagedAgentProperties schemeless = properties();
+        schemeless.getHarness().setBaseUrl("localhost:4170");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(schemeless,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+
+        ManagedAgentProperties empty = properties();
+        empty.getHarness().setBaseUrl("");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(empty,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+
+        // An ftp URL carries a scheme and a host, so only the scheme
+        // allowlist rejects it.
+        ManagedAgentProperties ftp = properties();
+        ftp.getHarness().setBaseUrl("ftp://host:21");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(ftp,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+
+        // A hostless http URI parses with a null host, so only the host
+        // clause rejects it ("http://" itself is rejected by URI.create).
+        ManagedAgentProperties hostless = properties();
+        hostless.getHarness().setBaseUrl("http:///path");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(hostless,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+
+        // Credentials, a query, and a fragment are rejected by the client
+        // builder as well, so each fails here instead of lazily inside
+        // client() as an endless transient retry.
+        ManagedAgentProperties credentialed = properties();
+        credentialed.getHarness()
+                .setBaseUrl("https://user:token@127.0.0.1:4170");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(credentialed,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+
+        ManagedAgentProperties queried = properties();
+        queried.getHarness().setBaseUrl("http://127.0.0.1:4170/?v=1");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(queried,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+
+        ManagedAgentProperties fragmented = properties();
+        fragmented.getHarness().setBaseUrl("http://127.0.0.1:4170/#frag");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(fragmented,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+    }
+
+    @Test
+    void loadsOnceForRepeatedFreeAttachCalls() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(client.loadSession(any())).thenReturn(attached);
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        verify(client, times(1)).loadSession(any());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void unknownCreateOutcomeFallsBackToLoadAndPropagatesTheFullAttachment(boolean passive) {
+    void unknownCreateOutcomeFallsBackToLoadAndPropagatesTheFullAttachment(
+            boolean passive) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities =
                 mock(HostedHarnessCapabilities.class);

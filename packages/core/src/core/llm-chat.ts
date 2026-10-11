@@ -653,6 +653,23 @@ interface TryCompressOptions {
    * counts from double-counting the previous model output.
    */
   precomputedEffectiveTokens?: number;
+  /**
+   * Context ceiling the server itself reported when it rejected the request
+   * with a context-overflow error (#13432). Forwarded to the compression
+   * service so reactive sizing runs against that ceiling instead of the
+   * window inferred from the model id, which the error just contradicted.
+   * Deliberately not read back through `getObservedServerInputLimit`: that
+   * map is informational and is only recorded on the omni-media degrade path,
+   * so a plain text session never populates it.
+   */
+  observedServerCeiling?: number;
+  /**
+   * Whether `observedServerCeiling` bounds the window (`'total'`) or only the
+   * prompt/input allowance (`'input'`), from the wording that reported it.
+   * Forwarded so the service can refuse to size an output budget against a
+   * bound the server never stated on the window (#13876).
+   */
+  observedServerCeilingKind?: 'input' | 'total';
   /** Per-request overrides needed to preserve the main request cache prefix. */
   requestGenerationConfig?: GenerateContentConfig;
   /**
@@ -660,7 +677,9 @@ interface TryCompressOptions {
    * this instead of the active route, so an in-send compression never
    * re-adopts counts the active route retained while the request targets
    * another one (#9506). Omitted by between-sends callers (manual
-   * `/compress`), which compress the active route's state.
+   * `/compress`), which compress the active route's state. Forwarded to the
+   * compression service with `observedServerCeiling` so the ceiling only
+   * bounds a side-query that resolves to the route that reported it (#13876).
    */
   requestRouteKey?: string;
   /**
@@ -2736,6 +2755,9 @@ export class LlmChat {
       originalTokenCount,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
+      observedServerCeiling: options?.observedServerCeiling,
+      observedServerCeilingKind: options?.observedServerCeilingKind,
+      requestRouteKey: options?.requestRouteKey,
       requestGenerationConfig: options?.requestGenerationConfig,
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
@@ -4275,6 +4297,14 @@ export class LlmChat {
                         isEstimated: reactiveOriginalTokenCountIsEstimated,
                       },
                       precomputedEffectiveTokens: reactiveOriginalTokenCount,
+                      // The ceiling this very error reported. Sizing the
+                      // retry against the inferred window instead re-posts the
+                      // oversize history to the server that just rejected it
+                      // (#13432). `limitKind` says whether that number bounds
+                      // the window or only the prompt: an input bound cannot
+                      // size the output budget (#13876).
+                      observedServerCeiling: contextOverflow.limitTokens,
+                      observedServerCeilingKind: contextOverflow.limitKind,
                       requestGenerationConfig: params.config,
                       requestRouteKey,
                       trigger: 'auto',
