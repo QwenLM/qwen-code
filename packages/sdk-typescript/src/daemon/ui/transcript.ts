@@ -1231,6 +1231,7 @@ function upsertToolBlock(
       ? { parentToolCallId: event.parentToolCallId }
       : {}),
     ...(event.subagentType ? { subagentType: event.subagentType } : {}),
+    ...(event.agent ? { agent: event.agent } : {}),
     ...(parentBlockId ? { parentBlockId } : {}),
   };
   appendBlock(state, block);

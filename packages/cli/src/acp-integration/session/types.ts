@@ -77,6 +77,31 @@ export function hasFullSessionContext(
 }
 
 /**
+ * Which agent produced a frame.
+ *
+ * Mirrors the shape OpenAI's Responses multi-agent contract standardizes —
+ * every output item carries `agent: { agent_name }` with a path-style name
+ * (`/root`, `/root/security`) — so a client can attribute output and rebuild
+ * the tree without cross-frame association state. Field names stay camelCase
+ * to match this wire's existing `_meta` keys (`subagentType`,
+ * `parentToolCallId`); it is the shape that is borrowed, not the spelling.
+ */
+export interface AgentIdentity {
+  /** Path-style name from the session's root agent, e.g. `/root/security`. */
+  agentName: string;
+  /** 0 for the root agent, 1 for a direct subagent, and so on. */
+  depth: number;
+  kind: 'root' | 'subagent';
+}
+
+/** The identity of the agent a session's own frames come from. */
+export const ROOT_AGENT_IDENTITY: AgentIdentity = {
+  agentName: '/root',
+  depth: 0,
+  kind: 'root',
+};
+
+/**
  * Subagent metadata for tracking parent tool call context.
  */
 export interface SubagentMeta {
@@ -84,6 +109,28 @@ export interface SubagentMeta {
   parentToolCallId?: string;
   /** Type of subagent (from AgentParams.subagent_type) */
   subagentType?: string;
+  /** The agent that produced this frame. Absent means the root agent. */
+  agent?: AgentIdentity;
+}
+
+/**
+ * Derives a subagent's identity from the agent that spawned it.
+ *
+ * The name segment is the subagent type, which `SubagentValidator` already
+ * constrains to `^[\p{L}\p{N}_-]+$` — so it cannot contain `/` and the path
+ * stays unambiguous. An empty type degrades to `subagent` rather than
+ * producing a trailing slash.
+ */
+export function deriveSubagentIdentity(
+  subagentType: string,
+  parent: AgentIdentity = ROOT_AGENT_IDENTITY,
+): AgentIdentity {
+  const segment = subagentType.trim() || 'subagent';
+  return {
+    agentName: `${parent.agentName}/${segment}`,
+    depth: parent.depth + 1,
+    kind: 'subagent',
+  };
 }
 
 /**

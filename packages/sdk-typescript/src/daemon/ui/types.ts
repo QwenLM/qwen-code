@@ -109,7 +109,28 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   type: 'user.text.delta' | 'assistant.text.delta' | 'thought.text.delta';
   text: string;
   parentToolCallId?: string;
+  /**
+   * The agent that produced this frame, when it was not the session's root
+   * agent. Shape mirrors OpenAI's Responses multi-agent contract, where every
+   * output item carries `agent: { agent_name }` as a path (`/root/security`).
+   *
+   * Source: daemon stamps `_meta.agent` (see `SubAgentTracker` in the CLI).
+   */
+  agent?: DaemonAgentIdentity;
   meta?: DaemonTextDeltaMeta;
+}
+
+/**
+ * Path-style producer identity for one frame.
+ *
+ * `agentName` is the stable, human-readable path from the session's root
+ * agent; `depth` is 0 for the root. Clients can group by `agentName` without
+ * walking `parentToolCallId` chains, and can key policy on it.
+ */
+export interface DaemonAgentIdentity {
+  agentName: string;
+  depth: number;
+  kind: 'root' | 'subagent';
 }
 
 export interface DaemonInputReference {
@@ -319,6 +340,11 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
    * Source: daemon stamps `tool_call._meta.subagentType`.
    */
   subagentType?: string;
+  /**
+   * The agent that produced this tool call, when it was not the session's
+   * root agent. Same shape and source as `DaemonUiTextEvent.agent`.
+   */
+  agent?: DaemonAgentIdentity;
   details?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
@@ -1135,6 +1161,12 @@ export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
    * block came from a sub-agent delegation.
    */
   subagentType?: string;
+  /**
+   * The agent that produced this block, when it was not the session's root
+   * agent. Carried through from the event so renderers can attribute a block
+   * by path without walking `parentToolCallId` chains.
+   */
+  agent?: DaemonAgentIdentity;
   /**
    * `id` of the parent transcript block, populated by the reducer when
    * `parentToolCallId` matches a block already in state. Renderers can
