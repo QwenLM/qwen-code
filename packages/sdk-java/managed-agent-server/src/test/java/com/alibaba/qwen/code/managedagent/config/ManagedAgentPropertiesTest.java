@@ -147,10 +147,10 @@ class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 32 is the current field
+        // exceptions would go unchecked. 31 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(32);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(31);
     }
 
     @Test
@@ -437,14 +437,13 @@ class ManagedAgentPropertiesTest {
         // @Scheduled placeholders. A hand-maintained list goes stale the
         // next time the base adds one — it already falsified the sentence
         // once — so pin the sentence against a sweep of every
-        // ${qwen.managed-agent.*} schedule placeholder in the module: a
-        // cadence with no typed Duration field belongs in it (the startup
-        // warning cannot see it), and a typed one such as
-        // channels.scan-delay does not (the warning reads the field's
-        // written value, so the sentence would be false for it). The
-        // exact swept set is pinned too: a new placeholder cadence fails
-        // here until the README and this set are updated in the same
-        // change.
+        // ${qwen.managed-agent.*} schedule placeholder in the module: the
+        // sentence covers exactly the swept keys that have no typed
+        // Duration field — the startup warning cannot see those —
+        // while a typed cadence such as automation.scan-delay stays
+        // out. The exact swept set is pinned too: a new placeholder
+        // cadence fails here until the README and this set are updated
+        // in the same change.
         var swept = new java.util.TreeSet<String>();
         var placeholder = java.util.regex.Pattern.compile(
                 "\\$\\{(qwen\\.managed-agent\\.[^}:]+)");
@@ -691,10 +690,16 @@ class ManagedAgentPropertiesTest {
     @Test
     void droppedConfigSurfacesStayDropped() {
         // The kubernetes* and cliEntry blocks had no consumer; they come
-        // back only together with their provisioner/invocation. Dispatch's
-        // scanDelay is the third dropped surface: the cadence lives only
-        // in application.yml and the three @Scheduled placeholders.
+        // back only together with their provisioner/invocation. The
+        // Dispatch and Channels scanDelay fields are the other dropped
+        // surfaces: each cadence lives only in application.yml and its
+        // @Scheduled placeholders, which read a bare number as
+        // milliseconds — a typed field would only certify a unit the
+        // placeholder never reads.
         assertThat(ManagedAgentProperties.Dispatch.class
+                .getDeclaredFields()).noneMatch(field -> field.getName()
+                        .equals("scanDelay"));
+        assertThat(ManagedAgentProperties.Channels.class
                 .getDeclaredFields()).noneMatch(field -> field.getName()
                         .equals("scanDelay"));
         assertThat(ManagedAgentProperties.RuntimeBroker.class

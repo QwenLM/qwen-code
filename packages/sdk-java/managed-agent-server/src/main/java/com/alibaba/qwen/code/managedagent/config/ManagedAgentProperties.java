@@ -1170,11 +1170,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     /** H5b/H5c: the trusted channel adapter surface and its claim lease. */
     public static class Channels {
+        // No typed scan-delay field. The deployed default comes from
+        // application.yml (`channels.scan-delay: '30s'`); the same
+        // "${...channels.scan-delay:30s}" fallback drives
+        // ManagedChannelService.reconcile, and @Scheduled reads a bare
+        // number as milliseconds, not seconds.
         private boolean enabled;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration claimLease = Duration.ofMinutes(10);
-        @DurationUnit(ChronoUnit.SECONDS)
-        private Duration scanDelay = Duration.ofSeconds(30);
 
         public boolean isEnabled() {
             return enabled;
@@ -1190,14 +1193,6 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setClaimLease(Duration claimLease) {
             this.claimLease = claimLease;
-        }
-
-        public Duration getScanDelay() {
-            return scanDelay;
-        }
-
-        public void setScanDelay(Duration scanDelay) {
-            this.scanDelay = scanDelay;
         }
     }
 }

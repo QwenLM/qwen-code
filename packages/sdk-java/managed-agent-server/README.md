@@ -702,11 +702,12 @@ written value and warns on a bare integer — the shape of a stale
 milliseconds-style override — naming what the number binds as now (seconds)
 and what it would have bound before (milliseconds); a suffixed value never
 warns. Cadences bound through `@Scheduled` placeholders —
-`artifacts.projection-interval`, `child-relay.scan-delay`,
-`child-workspace.scan-delay`, `dispatch.scan-delay`,
-`events.replay-floor-interval` and `message-relay.scan-delay` — also
-read a bare number as milliseconds, and the startup warning cannot see
-them, so always write the suffix there.
+`artifacts.projection-interval`, `channels.scan-delay`,
+`child-relay.scan-delay`, `child-workspace.scan-delay`,
+`dispatch.scan-delay`, `events.replay-floor-interval` and
+`message-relay.scan-delay` — also read a bare number as milliseconds,
+and the startup warning cannot see them, so always write the suffix
+there.
 
 When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical
