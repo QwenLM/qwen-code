@@ -10711,6 +10711,63 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
+    it.each(['id', 'cwd'] as const)(
+      'lists the selected workspace over REST with an ACP transport (%s)',
+      async (selector) => {
+        const body = {
+          kind: 'list',
+          path: 'src',
+          entries: [],
+          truncated: false,
+        };
+        const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+        const transportFetch = vi.fn(async () => {
+          throw new Error('must use workspace REST');
+        });
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          token: 'list-token',
+          fetch,
+          transport: {
+            type: 'acp-http',
+            supportsReplay: true,
+            connected: true,
+            fetch: transportFetch,
+            async *subscribeEvents() {},
+            dispose() {},
+          },
+        });
+        const workspace =
+          selector === 'id'
+            ? client.workspaceById('workspace/id')
+            : client.workspaceByCwd('/tmp/work space');
+        await expect(workspace.dirList('src')).resolves.toEqual(body);
+        expect(transportFetch).not.toHaveBeenCalled();
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({
+          method: 'GET',
+          url: `http://daemon/workspaces/${selector === 'id' ? 'workspace%2Fid' : '%2Ftmp%2Fwork%20space'}/list?path=src`,
+          headers: { authorization: 'Bearer list-token' },
+        });
+      },
+    );
+
+    it('does not fall back to the primary directory when workspace listing is rejected', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(403, {
+          error: 'Workspace is not trusted.',
+          code: 'untrusted_workspace',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.workspaceById('removed-owner').dirList('.'),
+      ).rejects.toThrow();
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspaces/removed-owner/list?path=.',
+      ]);
+    });
+
     it('reads complete turn calls through encoded workspace REST without pagination', async () => {
       const body = {
         v: 1,

@@ -9,6 +9,7 @@ import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
 import {
   useConnection,
+  useWorkspace,
   type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
@@ -24,6 +25,7 @@ import {
   ExpandIcon,
   GaugeIcon,
   GlobeIcon,
+  FolderIcon as FilesIcon,
   ImageIcon,
   LayersIcon,
   WrenchIcon,
@@ -39,6 +41,8 @@ import {
 import { Skeleton } from '../ui/skeleton';
 import { Button } from '../ui/button';
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -121,12 +125,20 @@ import type { ContextUsageControls } from '../../hooks/useContextUsageControls';
 import { ContextUsagePanel } from './ContextUsagePanel';
 import {
   useArtifactWorkspaceTarget,
+  resolveArtifactWorkspaceOwner,
   type ArtifactWorkspaceActions,
 } from './useArtifactWorkspaceTarget';
 import {
   MonitorTaskDetail,
   ShellTaskDetail,
 } from '../messages/TasksStatusMessage';
+
+const WorkspaceFileBrowser = lazy(() =>
+  import('./WorkspaceFileBrowser').then((module) => ({
+    default: module.WorkspaceFileBrowser,
+  })),
+);
+const PierreFilePreview = lazy(() => import('./PierreFilePreview'));
 
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
 const FREQUENCIES: Frequency[] = [
@@ -154,6 +166,13 @@ export type ImageTabSource = {
 };
 
 export type ArtifactPanelTab =
+  | {
+      id: string;
+      kind: 'files';
+      title: string;
+      workspaceCwd: string;
+      workspaceId?: string;
+    }
   | (WebPreviewState & {
       id: string;
       kind: 'web_preview';
@@ -348,13 +367,14 @@ export type ArtifactPanelTab =
 
 type WorkspaceScopedArtifactPanelTab = Extract<
   ArtifactPanelTab,
-  { kind: 'review' | 'file' | 'artifact' | 'scheduled_task' }
+  { kind: 'review' | 'file' | 'files' | 'artifact' | 'scheduled_task' }
 >;
 
 function isWorkspaceScopedTab(
   tab: ArtifactPanelTab,
 ): tab is WorkspaceScopedArtifactPanelTab {
   return (
+    tab.kind === 'files' ||
     tab.kind === 'review' ||
     tab.kind === 'file' ||
     tab.kind === 'artifact' ||
@@ -407,7 +427,7 @@ interface ArtifactPanelProps {
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
   onOpenFilePreview: (
-    change: TurnOutputFileChange,
+    change: TurnOutputFileChange | string,
     workspaceCwd?: string,
     workspaceId?: string,
   ) => void;
@@ -424,6 +444,8 @@ interface ArtifactPanelProps {
    * than for any trajectory tab at all.
    */
   trajectoryTabId?: string;
+  onOpenFiles?: () => void;
+  onReferenceFile?: (path: string) => void;
   onOpenWebPreview?: () => void;
   onWebPreviewChange?: (tabId: string, state: WebPreviewState) => void;
   items?: readonly WebShellRightPanelItem[];
@@ -483,6 +505,64 @@ interface ArtifactPanelProps {
   onToggleFullscreen?: () => void;
 }
 
+function WorkspaceFilesPane({
+  tab,
+  workspaceCwd,
+  onOpenFilePreview,
+  onReferenceFile,
+}: {
+  tab: Extract<ArtifactPanelTab, { kind: 'files' }>;
+} & Pick<
+  ArtifactPanelProps,
+  'workspaceCwd' | 'onOpenFilePreview' | 'onReferenceFile'
+>) {
+  const { t } = useI18n();
+  const target = useArtifactWorkspaceTarget(tab.workspaceCwd);
+  const actions =
+    target?.workspaceId === tab.workspaceId ? target?.actions : undefined;
+  if (!actions) {
+    return (
+      <div className={styles.empty} role="alert">
+        {t('workspace.notFoundDescription')}
+      </div>
+    );
+  }
+  return (
+    <Suspense
+      fallback={<div className={styles.empty}>{t('common.loading')}</div>}
+    >
+      <WorkspaceFileBrowser
+        key={`${tab.workspaceCwd}:${tab.workspaceId ?? ''}`}
+        workspaceCwd={tab.workspaceCwd}
+        actions={actions}
+        onOpenPreview={(path) =>
+          onOpenFilePreview(path, tab.workspaceCwd, tab.workspaceId)
+        }
+        onReferenceFile={
+          tab.workspaceCwd === workspaceCwd ? onReferenceFile : undefined
+        }
+        renderPreview={(path, source, version) => (
+          <WorkspaceFilePreview
+            key={`${path}:${source}:${version}`}
+            workspacePath={path}
+            workspaceActions={actions}
+            previewKind={source ? 'source' : undefined}
+            sourceRenderer={(content) => (
+              <Suspense
+                fallback={
+                  <div className={styles.empty}>{t('common.loading')}</div>
+                }
+              >
+                <PierreFilePreview path={path} content={content} />
+              </Suspense>
+            )}
+          />
+        )}
+      />
+    </Suspense>
+  );
+}
+
 export function ArtifactPanel({
   contextUsageControls,
   artifacts,
@@ -504,6 +584,8 @@ export function ArtifactPanel({
   onOpenTerminal,
   onOpenTrajectory,
   trajectoryTabId,
+  onOpenFiles,
+  onReferenceFile,
   onOpenWebPreview,
   onWebPreviewChange,
   items = DEFAULT_RIGHT_PANEL_ITEMS,
@@ -535,6 +617,11 @@ export function ArtifactPanel({
   onToggleFullscreen,
 }: ArtifactPanelProps) {
   const { t } = useI18n();
+  const workspace = useWorkspace();
+  const filesOwner = resolveArtifactWorkspaceOwner(
+    workspace.capabilities,
+    workspaceCwd,
+  );
   const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string>();
   const sideTaskMenuCloseTimerRef = useRef<ReturnType<
@@ -600,9 +687,19 @@ export function ArtifactPanel({
     items.includes('trajectory') &&
     Boolean(onOpenTrajectory) &&
     !tabs.some((tab) => tab.id === trajectoryTabId);
+  const showFilesMenuItem =
+    items.includes('files') &&
+    Boolean(onOpenFiles) &&
+    !tabs.some(
+      (tab) =>
+        tab.kind === 'files' &&
+        tab.workspaceCwd === workspaceCwd &&
+        tab.workspaceId === filesOwner?.id,
+    );
   const showAddMenu =
     Boolean(activeTab) &&
-    (showReviewMenuItem ||
+    (showFilesMenuItem ||
+      showReviewMenuItem ||
       showSideTaskMenuItems ||
       showTerminalMenuItem ||
       showWebPreviewMenuItem ||
@@ -671,6 +768,8 @@ export function ArtifactPanel({
                   >
                     {getArtifactPanelTabKind(tab) === 'review' ? (
                       <TabReviewIcon />
+                    ) : tab.kind === 'files' ? (
+                      <FilesIcon className={styles.tabIconSvg} />
                     ) : tab.kind === 'workflow' ? (
                       <NetworkIcon
                         className={styles.tabIconSvg}
@@ -782,6 +881,14 @@ export function ArtifactPanel({
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-64">
+                {showFilesMenuItem && (
+                  <DropdownMenuItem onSelect={onOpenFiles}>
+                    <FilesIcon />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('files.title')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
                 {showReviewMenuItem && (
                   <DropdownMenuItem
                     disabled={!latestReviewAvailable || !onOpenLatestReview}
@@ -884,7 +991,9 @@ export function ArtifactPanel({
       </div>
       <div
         className={`${styles.body} ${
-          activeTab?.kind === 'side_task' ? styles.bodySideTask : ''
+          activeTab?.kind === 'side_task' || activeTab?.kind === 'files'
+            ? styles.bodySideTask
+            : ''
         }`.trim()}
       >
         {tabs
@@ -898,6 +1007,22 @@ export function ArtifactPanel({
               <WebPreviewPanel
                 state={tab}
                 onChange={(state) => onWebPreviewChange?.(tab.id, state)}
+              />
+            </div>
+          ))}
+        {tabs
+          .filter((tab) => tab.kind === 'files')
+          .map((tab) => (
+            <div
+              key={tab.id}
+              className="h-full"
+              hidden={tab.id !== activeTab?.id}
+            >
+              <WorkspaceFilesPane
+                tab={tab}
+                workspaceCwd={workspaceCwd}
+                onOpenFilePreview={onOpenFilePreview}
+                onReferenceFile={onReferenceFile}
               />
             </div>
           ))}
@@ -960,11 +1085,35 @@ export function ArtifactPanel({
             <Skeleton className="h-4 w-3/5" />
           </div>
         ) : activeTab?.kind === 'terminal' ||
-          activeTab?.kind === 'web_preview' ? null : !activeTab ? (
+          activeTab?.kind === 'web_preview' ||
+          activeTab?.kind === 'files' ? null : !activeTab ? (
           <div
             className={styles.emptyActions}
             data-testid="right-panel-empty-actions"
           >
+            {items.includes('files') && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                disabled={!onOpenFiles}
+                onClick={onOpenFiles}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <FilesIcon />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('files.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('files.description')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
             {items.includes('review') && (
               <button
                 type="button"
@@ -3437,7 +3586,9 @@ function WorkspaceFilePreview({
   previewKind,
   previewOnly,
   onLoadError,
+  sourceRenderer,
 }: {
+  sourceRenderer?: (content: string) => ReactNode;
   workspacePath: string;
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
@@ -3513,6 +3664,7 @@ function WorkspaceFilePreview({
   }
   return (
     <FileArtifactPreview
+      sourceRenderer={sourceRenderer}
       workspacePath={workspacePath}
       artifactVersion={artifactVersion}
       workspaceActions={workspaceActions}
@@ -3923,7 +4075,9 @@ function FileArtifactPreview({
   previewContent,
   previewOnly,
   onLoadError,
+  sourceRenderer,
 }: {
+  sourceRenderer?: (content: string) => ReactNode;
   workspacePath: string;
   artifactVersion?: string;
   workspaceActions: ArtifactWorkspaceActions;
@@ -3964,12 +4118,14 @@ function FileArtifactPreview({
       return undefined;
     }
     return () => view.destroy();
-  }, [content]);
+  }, [content, sourceRenderer]);
 
   return (
     <div className={styles.filePreviewWrap}>
       {content === null ? (
         !error && <div className={styles.empty}>Loading file...</div>
+      ) : sourceRenderer ? (
+        <div className={styles.codeMirrorFile}>{sourceRenderer(content)}</div>
       ) : (
         <div ref={hostRef} className={styles.codeMirrorFile} />
       )}

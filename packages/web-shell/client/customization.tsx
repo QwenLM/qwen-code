@@ -201,6 +201,7 @@ export interface WebShellChatHeaderOptions {
 }
 
 export type WebShellRightPanelItem =
+  | 'files'
   | 'review'
   | 'sideTask'
   | 'terminal'

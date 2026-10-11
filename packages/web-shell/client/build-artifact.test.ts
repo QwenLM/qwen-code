@@ -76,6 +76,26 @@ describe('build artifact — package boundary', () => {
     expect(bundle).not.toMatch(/DaemonSessionClient\s*\{/);
   });
 
+  it('bundles Pierre highlighter dependencies instead of resolving the host Shiki major', () => {
+    expect(readPackageJavascript()).not.toMatch(
+      /(?:from\s*|import\s*\()\s*["']@pierre\//,
+    );
+    const previews = readdirSync(DIST_DIR).filter((name) =>
+      /^PierreFilePreview-.*\.js$/.test(name),
+    );
+    expect(previews).toHaveLength(1);
+    const preview = readFileSync(resolve(DIST_DIR, previews[0]!), 'utf8');
+    expect(preview).not.toMatch(/from\s+["']shiki["']/);
+    expect(preview).toContain('createJavaScriptRegexEngine');
+    const hostHighlighter = readdirSync(DIST_DIR).find((name) =>
+      /^codeHighlighter-.*\.js$/.test(name),
+    );
+    expect(hostHighlighter).toBeDefined();
+    expect(readFileSync(resolve(DIST_DIR, hostHighlighter!), 'utf8')).toContain(
+      'from "shiki"',
+    );
+  });
+
   it('scopes every component CSS rule to a WebShell root', () => {
     const unscoped: string[] = [];
     postcss.parse(readInjectedCss()).walkRules((rule) => {
