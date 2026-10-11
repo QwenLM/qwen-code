@@ -378,6 +378,24 @@ export const SystemMessage = memo(function SystemMessage({
     return typeof value === 'number' ? value : undefined;
   };
   const taskStatus = stringField('status');
+  // Peer notices carry the producing teammate's structured identity
+  // (`data.agent`), persisted alongside `backgroundTask` for page refresh.
+  // Validated field-by-field rather than trusted: the payload crosses the
+  // daemon boundary.
+  const agentRecord =
+    typeof notificationData?.['agent'] === 'object' &&
+    notificationData['agent'] !== null
+      ? (notificationData['agent'] as Record<string, unknown>)
+      : undefined;
+  const teammateAgent =
+    typeof agentRecord?.['agentName'] === 'string' &&
+    typeof agentRecord['depth'] === 'number' &&
+    agentRecord['kind'] === 'teammate'
+      ? {
+          agentName: agentRecord['agentName'],
+          depth: agentRecord['depth'],
+        }
+      : undefined;
   const taskNotificationLabel =
     taskStatus === 'completed'
       ? t('system.taskCompleted')
@@ -466,6 +484,16 @@ export const SystemMessage = memo(function SystemMessage({
         >
           <TaskNotificationIcon aria-hidden="true" />
         </span>
+        {teammateAgent && (
+          <span
+            className="shrink-0 text-muted-foreground"
+            title={teammateAgent.agentName}
+          >
+            {t('background.teammate')}
+            <span aria-hidden="true"> · </span>
+            {teammateAgent.agentName}
+          </span>
+        )}
         <div
           className={`min-w-0 flex-1${taskI18nText ? ' truncate' : ''}`}
           title={taskI18nText}

@@ -570,6 +570,16 @@ export interface NotificationRecordPayload {
     kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
     toolUseId?: string;
     sourceTurnId?: string;
+    /**
+     * Producer identity for `peer` items: the teammate whose report this is.
+     * Persisted so replay attributes the message structurally, the same way
+     * the live wire's `_meta.agent` does, instead of parsing the text.
+     */
+    agent?: {
+      agentName: string;
+      depth: number;
+      kind: 'teammate' | 'subagent';
+    };
     /** Structured fields for i18n rendering (persisted for page refresh). */
     description?: string;
     commandLabel?: string;

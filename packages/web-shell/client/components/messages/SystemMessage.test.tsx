@@ -1031,6 +1031,47 @@ describe('background continuation', () => {
     },
   );
 
+  it('names the teammate from the persisted peer identity after reload', () => {
+    // Live frames carry `_meta.agent`; after a reload the identity only
+    // survives inside the persisted `backgroundTask` payload the replay
+    // restores — the bubble must attribute the message either way.
+    const container = render(
+      <SystemMessage
+        content="[team] security: found an injection"
+        variant="info"
+        source="background_notification"
+        data={{
+          kind: 'peer',
+          status: 'message',
+          taskId: 'teammate-message-1',
+          agent: {
+            agentName: '/root/security',
+            depth: 1,
+            kind: 'teammate',
+          },
+        }}
+      />,
+    );
+    expect(container.textContent).toContain('/root/security');
+    expect(container.querySelector('[title="/root/security"]')).not.toBeNull();
+  });
+
+  it('leaves a peer notice unattributed when no identity persisted', () => {
+    const container = render(
+      <SystemMessage
+        content="[team] security: found an injection"
+        variant="info"
+        source="background_notification"
+        data={{
+          kind: 'peer',
+          status: 'message',
+          taskId: 'teammate-message-1',
+        }}
+      />,
+    );
+    expect(container.textContent).not.toContain('/root/');
+  });
+
   it('renders an Agent Team peer report without a task-completion label', () => {
     // A teammate report arrives as a `kind: 'peer'` background notification
     // with `status: 'message'` — neither a task outcome nor a kind the i18n

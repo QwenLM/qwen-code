@@ -536,6 +536,7 @@ describe('Session', () => {
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     recordNotificationStrict: ReturnType<typeof vi.fn>;
+    recordBackgroundTaskCompleted: ReturnType<typeof vi.fn>;
     recordExternalAgentRecordStrict: ReturnType<typeof vi.fn>;
     findExternalAgentRecord: ReturnType<typeof vi.fn>;
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
@@ -926,6 +927,7 @@ describe('Session', () => {
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
+      recordBackgroundTaskCompleted: vi.fn(),
       recordExternalAgentRecordStrict: vi.fn().mockResolvedValue({
         uuid: 'record-1',
         timestamp: '2026-10-06T01:02:03.000Z',
@@ -1282,6 +1284,26 @@ describe('Session', () => {
         depth: 1,
         kind: 'teammate',
       });
+
+      // The persisted completion record carries the same identity, so replay
+      // attributes the message after a reload instead of dropping to text.
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordBackgroundTaskCompleted,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            backgroundTask: expect.objectContaining({
+              taskId: (peer!._meta?.['backgroundTask'] as { taskId: string })
+                .taskId,
+              agent: {
+                agentName: '/root/security',
+                depth: 1,
+                kind: 'teammate',
+              },
+            }),
+          }),
+        ),
+      );
 
       // The decisive half: the report reaches the leader's model, not merely
       // the client's transcript. A sink that only buffered locally would pass

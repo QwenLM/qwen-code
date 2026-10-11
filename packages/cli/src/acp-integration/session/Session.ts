@@ -1640,6 +1640,22 @@ export interface BackgroundNotificationQueueItem {
   };
 }
 
+/**
+ * Narrows a notification producer's identity to the kinds persistence keeps.
+ * The root agent never produces a background notification, but the queue's
+ * type is the broad `AgentIdentity`, and `NotificationRecordPayload`'s
+ * `backgroundTask.agent` accepts only the kinds that can be attributed.
+ */
+function persistedNotificationAgent(agent: AgentIdentity): {
+  agentName: string;
+  depth: number;
+  kind: 'teammate' | 'subagent';
+} {
+  return agent.kind === 'teammate'
+    ? { agentName: agent.agentName, depth: agent.depth, kind: 'teammate' }
+    : { agentName: agent.agentName, depth: agent.depth, kind: 'subagent' };
+}
+
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   continuesTodoStopGuardWorkChain: boolean;
   persisted?: true;
@@ -10854,6 +10870,10 @@ export class Session implements SessionContext {
               depth: 1,
               kind: 'teammate' as const,
             },
+            // The turn-start row renders `label ?? kind`, so a teammate
+            // report without a label reads as the generic "peer" after
+            // reload; the sender names it.
+            label: sender,
           }
         : {}),
       continuesTodoStopGuardWorkChain: false,
@@ -10887,6 +10907,7 @@ export class Session implements SessionContext {
         depth: 1,
         kind: 'teammate',
       },
+      label: change.name,
       continuesTodoStopGuardWorkChain: false,
     });
   }
@@ -11138,6 +11159,9 @@ export class Session implements SessionContext {
         status: item.status,
         kind: item.kind,
         toolUseId: item.toolUseId,
+        ...(item.agent
+          ? { agent: persistedNotificationAgent(item.agent) }
+          : {}),
         ...item.structured,
       },
     });
@@ -11490,6 +11514,9 @@ export class Session implements SessionContext {
             kind: item.kind,
             toolUseId: item.toolUseId,
             sourceTurnId: item.sourceTurnId,
+            ...(item.agent
+              ? { agent: persistedNotificationAgent(item.agent) }
+              : {}),
             ...item.structured,
           });
       }
@@ -11889,6 +11916,9 @@ export class Session implements SessionContext {
                 status: item.status,
                 kind: item.kind,
                 toolUseId: item.toolUseId,
+                ...(item.agent
+                  ? { agent: persistedNotificationAgent(item.agent) }
+                  : {}),
                 ...item.structured,
               },
             );
