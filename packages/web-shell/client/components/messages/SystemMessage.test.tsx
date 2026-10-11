@@ -1030,4 +1030,30 @@ describe('background continuation', () => {
       ).toBe(`Background task ${status}`);
     },
   );
+
+  it('renders an Agent Team peer report without a task-completion label', () => {
+    // A teammate report arrives as a `kind: 'peer'` background notification
+    // with `status: 'message'` — neither a task outcome nor a kind the i18n
+    // table covers. The status guard must short-circuit before any
+    // `notification.peer.*` key is looked up, and the notice must fall through
+    // to the neutral default instead of claiming a completion.
+    const container = render(
+      <SystemMessage
+        content="[team] security: found an injection"
+        variant="info"
+        source="background_task_completed"
+        data={{
+          kind: 'peer',
+          status: 'message',
+          taskId: 'teammate-message-1',
+        }}
+      />,
+    );
+    expect(container.textContent).toContain(
+      '[team] security: found an injection',
+    );
+    expect(container.textContent).not.toContain('notification.peer');
+    expect(container.textContent).not.toContain('Background task completed');
+    expect(container.querySelector('[data-tone="neutral"]')).not.toBeNull();
+  });
 });

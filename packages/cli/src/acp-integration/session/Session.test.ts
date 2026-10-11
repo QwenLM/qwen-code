@@ -1129,6 +1129,11 @@ describe('Session', () => {
       // Threaded into resolveDeferredToolCall so the ACP bridge applies the
       // same depth-gated AgentTool re-admission as the terminal scheduler.
       getMaxSubagentDepth: vi.fn().mockReturnValue(5),
+      // Agent Team defaults off so every suite that does not care about it
+      // keeps the team sink unattached; the sink suite flips it per test.
+      isAgentTeamEnabled: vi.fn().mockReturnValue(false),
+      getTeamManager: vi.fn().mockReturnValue(null),
+      onTeamManagerChange: vi.fn(),
     } as unknown as Config;
 
     mockClient = {
@@ -1171,6 +1176,188 @@ describe('Session', () => {
       mockClient,
       mockSettings,
     );
+  });
+
+  describe('Agent Team leader sink', () => {
+    function makeFakeTeamManager() {
+      const listeners = new Map<string, Set<(event: never) => void>>();
+      const manager = {
+        leaderCallback: null as
+          | ((modelText: string, displayText: string) => void)
+          | null,
+        subscribedTypes: [] as string[],
+        setLeaderMessageCallback(
+          cb: ((modelText: string, displayText: string) => void) | null,
+        ) {
+          manager.leaderCallback = cb;
+        },
+        getEventEmitter: () => ({
+          on(type: string, fn: (event: never) => void) {
+            manager.subscribedTypes.push(type);
+            const set = listeners.get(type) ?? new Set();
+            set.add(fn);
+            listeners.set(type, set);
+          },
+          off(type: string, fn: (event: never) => void) {
+            listeners.get(type)?.delete(fn);
+          },
+        }),
+        emit(type: string, payload: unknown) {
+          for (const fn of [...(listeners.get(type) ?? [])]) {
+            (fn as (event: unknown) => void)(payload);
+          }
+        },
+        listenerCount(type: string) {
+          return listeners.get(type)?.size ?? 0;
+        },
+      };
+      return manager;
+    }
+
+    function sentPeerNotifications() {
+      return vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter(
+          (update) =>
+            (update._meta?.['backgroundTask'] as { kind?: string } | undefined)
+              ?.kind === 'peer',
+        );
+    }
+
+    it('delivers a teammate report as a peer notification instead of consuming it into a void', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      // The sink adopts the manager that already existed at construction and
+      // registers for teammate approvals.
+      expect(manager.leaderCallback).not.toBeNull();
+      expect(manager.subscribedTypes).toEqual(['teammate_approval_request']);
+
+      manager.leaderCallback?.(
+        '<teammate_message from="security">found an injection</teammate_message>',
+        '[team] security: found an injection',
+      );
+
+      await vi.waitFor(() => expect(sentPeerNotifications()).toHaveLength(1));
+      const [peer] = sentPeerNotifications();
+      expect(peer).toMatchObject({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '[team] security: found an injection' },
+      });
+      expect(
+        (peer!._meta?.['backgroundTask'] as { taskId: string }).taskId,
+      ).toMatch(/^teammate-message-\d+$/);
+
+      // The decisive half: the report reaches the leader's model, not merely
+      // the client's transcript. A sink that only buffered locally would pass
+      // the assertions above while the leader stayed asleep until the next
+      // user prompt.
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      await vi.waitFor(() =>
+        expect(sendMessageStream.mock.calls.length).toBeGreaterThanOrEqual(1),
+      );
+      const prompted = sendMessageStream.mock.calls
+        .map((call) =>
+          ((call[1] as { message?: Array<{ text?: string }> }).message ?? [])
+            .map((part) => part.text ?? '')
+            .join('\n'),
+        )
+        .join('\n');
+      expect(prompted).toContain(
+        '<teammate_message from="security">found an injection</teammate_message>',
+      );
+
+      session.dispose();
+      // dispose must retract the sink, or a stale manager keeps pushing into a
+      // session that no longer exists.
+      expect(manager.leaderCallback).toBeNull();
+      expect(manager.listenerCount('teammate_approval_request')).toBe(0);
+    });
+
+    it('routes a teammate tool approval to the client instead of emitting into a void', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      let offeredId: string | undefined;
+      let promptedTitle: string | undefined;
+      vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+        async (params) => {
+          const request = params as unknown as {
+            options: Array<{ optionId: string }>;
+            toolCall: { title: string };
+          };
+          offeredId = request.options[0]!.optionId;
+          promptedTitle = request.toolCall.title;
+          return {
+            outcome: { outcome: 'selected', optionId: offeredId },
+          } as never;
+        },
+      );
+      const respond = vi.fn(async (..._args: unknown[]) => {});
+
+      manager.emit('teammate_approval_request', {
+        teammateName: 'security',
+        toolName: 'write_file',
+        toolInput: { path: '/test.ts' },
+        confirmationDetails: {
+          type: 'edit',
+          title: 'Edit file',
+          fileName: '/test.ts',
+          filePath: '/test.ts',
+          fileDiff: '',
+          originalContent: 'old',
+          newContent: 'new',
+        },
+        timestamp: 1,
+        respond,
+      });
+
+      await vi.waitFor(() => expect(respond).toHaveBeenCalled());
+      expect(promptedTitle).toContain('security');
+      expect(respond.mock.calls[0]![0]).toBe(offeredId);
+      session.dispose();
+    });
+
+    it('leaves the sink unattached when the team feature is disabled', () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(false);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      expect(manager.leaderCallback).toBeNull();
+      expect(manager.listenerCount('teammate_approval_request')).toBe(0);
+      session.dispose();
+    });
   });
 
   describe('session agent records', () => {

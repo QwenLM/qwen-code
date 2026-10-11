@@ -458,6 +458,7 @@ import {
   unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
+import { attachTeamSink } from './teamSink.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
@@ -1610,7 +1611,15 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  /**
+   * `peer` is a message from another agent session — today an Agent Team
+   * teammate's report to its leader. Core already models the kind end to end
+   * (`GROUP_ORDER.peer`, `droppedNoun` → "cross-session message", the
+   * `hasPeerLoss` accounting, and `background-turn-context`), and like `cron`
+   * it names no task the model could go and read, so a dropped one is a real
+   * loss rather than a pointer to a registry entry.
+   */
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   todoWorkChainId?: string;
   label?: string;
@@ -2325,6 +2334,11 @@ export class Session implements SessionContext {
   private unsubscribeChatRecordingFailure?: () => void;
   private unsubscribeApprovalModeChange?: () => void;
   private unsubscribeRequestLifecycle?: () => void;
+  /** Detaches the Agent Team leader sink installed by `#registerTeamSink`. */
+  private detachTeamSink?: () => void;
+  /** Session lifetime for an in-flight teammate approval request. */
+  private readonly teamSinkAbort = new AbortController();
+  private teammateMessageSeq = 0;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
@@ -2586,6 +2600,7 @@ export class Session implements SessionContext {
 
     this.#bindGoalRuntime();
     this.#registerBackgroundNotificationCallbacks();
+    this.#registerTeamSink();
     this.#registerSubSessionSpawner();
     this.#registerCurrentSessionScheduledTaskCreator();
     this.config
@@ -4681,6 +4696,9 @@ export class Session implements SessionContext {
     this.unsubscribeApprovalModeChange = undefined;
     this.unsubscribeRequestLifecycle?.();
     this.unsubscribeRequestLifecycle = undefined;
+    this.detachTeamSink?.();
+    this.detachTeamSink = undefined;
+    this.teamSinkAbort.abort(SESSION_DISPOSE_ABORT_REASON);
     this.requestLifecycleExecutions.clear();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
@@ -10770,6 +10788,51 @@ export class Session implements SessionContext {
       'Cron jobs and loop wakeups disabled for the rest of this session due to token limit. Restart the session to re-enable.',
       'Failed to emit cron-disabled diagnostic',
     );
+  }
+
+  /**
+   * Agent Team: attach the leader sink so teammate reports reach the model and
+   * teammate tool approvals reach the client.
+   *
+   * Team tool registration is gated on `Config.isAgentTeamEnabled()`, which
+   * knows nothing about the host, so without this an ACP-hosted session
+   * advertises `team_create`, a model uses it, and the coordination never comes
+   * back: `TeamManager.pollLeaderInbox()` returns before consuming when no
+   * callback is attached, so the leader is never woken, and
+   * `TEAMMATE_APPROVAL_REQUEST` is emitted with no listener, so a blocked
+   * teammate is neither approved nor cancelled.
+   *
+   * Reports enter the background notification queue as `peer` items, which
+   * reuses the existing idle wake: ACP has no TUI-style idle hook, and
+   * `#enqueueBackgroundNotification` ends by draining. `peer` is deliberately
+   * not given task-registry semantics — like `cron`, it names no task the model
+   * could go and read, so core accounts a dropped one as a real loss.
+   */
+  #registerTeamSink(): void {
+    if (!this.config.isAgentTeamEnabled?.()) return;
+    this.detachTeamSink = attachTeamSink({
+      config: this.config,
+      sessionId: this.sessionId,
+      signal: this.teamSinkAbort.signal,
+      injectLeaderMessage: (modelText, displayText) =>
+        this.#enqueueTeammateMessage(modelText, displayText),
+      requestPermission: (params, signal) =>
+        this.#requestPermissionQueued(params, signal),
+    });
+  }
+
+  #enqueueTeammateMessage(modelText: string, displayText: string): void {
+    if (this.disposed || this.closing) return;
+    this.#enqueueBackgroundNotification({
+      kind: 'peer',
+      // Unique per message: the public `enqueueBackgroundNotification` dedupes
+      // on `taskId`, and teammate reports must never collapse into one another.
+      taskId: `teammate-message-${++this.teammateMessageSeq}`,
+      status: 'message',
+      modelText,
+      displayText,
+      continuesTodoStopGuardWorkChain: false,
+    });
   }
 
   #registerBackgroundNotificationCallbacks(): void {
