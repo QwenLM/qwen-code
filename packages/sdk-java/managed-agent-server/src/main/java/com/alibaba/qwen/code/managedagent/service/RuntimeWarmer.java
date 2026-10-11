@@ -36,4 +36,13 @@ public interface RuntimeWarmer {
             String targetCwdRelative) {
         throw WorkspaceExecutionStore.unavailable();
     }
+
+    /**
+     * The child Workspace capability of the isolation slice (#13753 I1),
+     * or null when this host cannot create a child Workspace: it is off
+     * by default and needs a control plane that mounts the storage.
+     */
+    default ChildWorkspaceProvider childWorkspaces() {
+        return null;
+    }
 }

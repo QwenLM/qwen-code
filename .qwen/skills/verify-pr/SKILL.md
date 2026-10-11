@@ -237,6 +237,25 @@ Read the diff and metadata, then write down — in the report — the PR's
 secondary claims. Budget by value:
 
 1. **A/B load-bearing proof of the central claim** (always, ~half the budget).
+   When the diff changes how a Turn is cancelled, parked, taken over,
+   recovered, approved or retried, name the scenario axes before choosing
+   the A/B instrument, whether or not that code is the central claim; if it
+   is not, it gets its own A/B as a secondary claim. Take the axes from
+   _Parameterise scenarios_ under wire-oracle harnesses, and note the
+   setting the author's tests use on each. The A/B must also run at least
+   one other setting, even when the instrument is the PR's own test files:
+   copy the author's new test and change only that setting, such as parking
+   Turn 2 after Turn 1 completed. The report lists each axis with the
+   settings that ran; the rest go under _Not covered_. Measured example: a
+   cancel fix settled a parked Turn only when it was the Session's first.
+   In a before/after re-run of this skill on that head, neither arm named
+   the axis. One ran the PR's own tests on base and head; the other built
+   cells that all parked the first Turn of a fresh Session. The author's
+   test, changed only to park Turn 2, failed there with
+   `expected 409 to be 200`. A third arm had this rule keyed to the central
+   claim; it named Harness generation adoption as the claim, so the rule
+   never applied, although it mutated the cancellation-load branches. The
+   trigger is therefore the diff, not the claim.
 2. **One or two wire-oracle harnesses** on the changed surface.
 3. **Targeted gates**: tests/typecheck of the affected workspace(s) only.
 4. **Capture the A/B and the matrix as they print** — one command each,
@@ -990,6 +1009,19 @@ unproven green gate is an assumption, not a measurement.
 main" is only credible when the failing test _files and names_ are
 byte-identical on both sides; show that comparison and the deltas
 (`+9 passing, +0 failing`), not just the totals.
+
+**Attribute a red on the merge before blaming the PR.** In the lane the tree
+is the merge, so a test can fail there and pass at the PR head because the
+base tip changed a file it reads. Before attributing such a failure, run the
+test at `HEAD^2` too (a scratch worktree with `node_modules` linked in) and
+diff the files it reads between `HEAD^2` and `HEAD`. Red only on the merge,
+with a base-side change to those inputs, is a semantic merge conflict. It is
+still a finding, because the merge is what lands, but name the base-side
+change as the cause and measure the fix on the merged tree. Measured example:
+a CI-shape test that a PR added failed on the merge with
+`expected 112 to be 104`, because `main` had raised one step ceiling from 12
+to 20 minutes. At the PR head it passed 13/13 and the PR's CI was green, yet
+both arms of a before/after re-run blamed the PR's arithmetic.
 
 **When the PR's base is far behind, verify the merge, not only the PR.** A
 clean A/B on a stale base says nothing about what lands. Do a trial merge

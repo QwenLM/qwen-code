@@ -8,6 +8,7 @@ import {
   type ChildAgentRun,
   type ChildAgentStopReason,
   type ChildCompletion,
+  type ChildSessionRun,
   type ChildWorkspaceMode,
 } from './managed-child-run-record.js';
 import type { ChildAcceptance } from './managed-child-acceptance-record.js';
@@ -47,9 +48,13 @@ export const MANAGED_CHILD_LIMITS = Object.freeze({
   maxResultBytes: 64 * 1024,
 } as const);
 
-/** The only workspace isolation policy the first runtime slice admits. */
+/**
+ * The workspace isolation policies a launch may name. `worktree` (#13753
+ * I2) also needs a host that serves child Workspaces; `snapshot` waits for
+ * I3.
+ */
 export const MANAGED_CHILD_ADMITTED_WORKSPACE_MODES: readonly ChildWorkspaceMode[] =
-  Object.freeze(['shared']);
+  Object.freeze(['shared', 'worktree']);
 
 export interface ChildLaunchEnvelope {
   readonly description: string;
@@ -167,10 +172,15 @@ export function admitChildLaunch(params: {
   readonly launchedInScope: number;
   readonly envelopeBytes: number;
   readonly workspaceMode: ChildWorkspaceMode;
+  /** The control plane serves child Workspaces, so `worktree` can run. */
+  readonly childWorkspaces: boolean;
   readonly sameDefinition: boolean;
 }): ChildAdmission {
   if (params.closing) return { admitted: false, reason: 'closing' };
-  if (!MANAGED_CHILD_ADMITTED_WORKSPACE_MODES.includes(params.workspaceMode)) {
+  if (
+    !MANAGED_CHILD_ADMITTED_WORKSPACE_MODES.includes(params.workspaceMode) ||
+    (params.workspaceMode === 'worktree' && !params.childWorkspaces)
+  ) {
     return { admitted: false, reason: 'workspace_mode' };
   }
   if (!params.sameDefinition) {
@@ -206,6 +216,7 @@ export function childLaunchBody(params: {
   readonly rootSessionId: string;
   readonly completion: ChildCompletion;
   readonly inputRef: ManagedSessionDurableRef;
+  readonly workspaceMode: ChildWorkspaceMode;
   readonly workingDirectory: string;
   readonly executionCallId: string;
   readonly definition: DefinitionPin;
@@ -218,7 +229,7 @@ export function childLaunchBody(params: {
     depth: 1,
     completion: params.completion,
     inputRef: params.inputRef,
-    workspaceMode: 'shared',
+    workspaceMode: params.workspaceMode,
     workingDirectory: params.workingDirectory,
     childSessionId: null,
     predecessorChildRunId: null,
@@ -239,6 +250,42 @@ export function childLaunchBody(params: {
       runtime: null,
       delivery: Object.freeze({ target: 'session', state: 'planned' }),
     }),
+  });
+}
+
+/**
+ * `continueChildRun` (H4d): the launch intent of a new run that continues a
+ * completed one. It keeps the predecessor's kind, scope, tree, workspace and
+ * definition — the commit-time rules refuse anything else — and carries its
+ * own launch input, the continuation's first prompt. A completed predecessor
+ * was dispatched, so it carries its definition pin. The producer still owes
+ * the launch admission (closing, quotas) before it commits.
+ */
+export function childContinuationBody(
+  predecessor: ChildSessionRun,
+  params: {
+    readonly childRunId: string;
+    readonly completion: ChildCompletion;
+    readonly inputRef: ManagedSessionDurableRef;
+    readonly executionCallId: string;
+  },
+): ChildSessionRun {
+  const launch = childLaunchBody({
+    childRunId: params.childRunId,
+    ownerScopeId: predecessor.ownerScopeId,
+    rootSessionId: predecessor.rootSessionId,
+    completion: params.completion,
+    inputRef: params.inputRef,
+    workspaceMode: predecessor.workspaceMode,
+    workingDirectory: predecessor.workingDirectory,
+    executionCallId: params.executionCallId,
+    definition: predecessor.run.definition!,
+  });
+  return Object.freeze({
+    ...launch,
+    kind: predecessor.kind,
+    depth: predecessor.depth,
+    predecessorChildRunId: predecessor.childRunId,
   });
 }
 
