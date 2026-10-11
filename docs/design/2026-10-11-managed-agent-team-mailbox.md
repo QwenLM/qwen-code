@@ -2,7 +2,7 @@
 
 [English](2026-10-11-managed-agent-team-mailbox.md) | [简体中文](2026-10-11-managed-agent-team-mailbox.zh-CN.md)
 
-Status: design. This is the second runtime slice of **H4e** of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380), tracked by [#13745](https://github.com/QwenLM/qwen-code/issues/13745). It builds on H4e-a ([team record contract](2026-10-10-managed-agent-teams.md), #13811), H4e-b1 ([lead-side team runtime](2026-10-10-managed-agent-team-lead-runtime.md), #13824, enabled by #13846) and H4d-b ([Session message runtime](2026-10-10-managed-session-message-runtime.md), #13822). It answers H4e-a open questions 1, 2 and 4, and H4e-b1 open question 3. It also re-scopes H4e-b2 and H4e-b3 from the H4e-b1 design: see decisions 1, 7 and 8 below.
+Status: implemented, except the physical acceptance pass on a real Hosted stack (decision 10), which runs before this change merges. This is the second runtime slice of **H4e** of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380), tracked by [#13745](https://github.com/QwenLM/qwen-code/issues/13745). It builds on H4e-a ([team record contract](2026-10-10-managed-agent-teams.md), #13811), H4e-b1 ([lead-side team runtime](2026-10-10-managed-agent-team-lead-runtime.md), #13824, enabled by #13846) and H4d-b ([Session message runtime](2026-10-10-managed-session-message-runtime.md), #13822). It answers H4e-a open questions 1, 2 and 4, and H4e-b1 open question 3. It also re-scopes H4e-b2 and H4e-b3 from the H4e-b1 design: see decisions 1, 7 and 8 below.
 
 ## Problem and scope
 
@@ -194,7 +194,7 @@ The facts below are from `main` at `66ddb151cb`, which includes #13846 (merged a
 
    One batch runs its calls in order, so the send is committed before `task_update` runs, but nothing keeps the member running until then. The relay commits and settles a child's result while the lead's Turn runs, and the two funnels share no lock across a batch. A member that the send continued, or that was running and read the message, can therefore complete between the two calls. The owner rule covers that with one notion, work given in this Turn:
    - **A Turn** is one prompt id. It spans all of its model rounds, and a Turn resumed after an interruption is the same Turn.
-   - **Work given in this Turn.** A member was given work in this Turn when an earlier call of the same Turn committed, for its chain, either a continuation that has not been proven never to have started, or an outbound message to the chain head that was not cancelled or rejected. Both name the sending call's key as their `executionCallId`, which is one of this Turn's call keys, so the lead's records decide it.
+   - **Work given in this Turn.** A member was given work in this Turn when an earlier call of the same Turn committed, for its chain, either a continuation that has not been proven never to have started, or an outbound message to one of the chain's started runs that was not cancelled or rejected (a message to a continuation that never started is cancelled and never arrives). Both name the sending call's key as their `executionCallId`, which is one of this Turn's call keys, so the lead's records decide it.
    - **Accepted.** Such a member may be set as the owner of an open task whether its head still runs or has completed since. The send gave the work, so the board records who has it, and the lead sets the status `completed` when the report arrives.
    - **Still refused.** A member whose head failed, was cancelled after it started, is stopping, or completed after a stop request is refused, as decision 2 counts it ended.
 
@@ -291,6 +291,7 @@ To a running member, step 1 is an outbound `session_message` to the head, and H4
 
 ## Files affected
 
+- `packages/cli/src/serve/hosted-member-chain.ts` (new): the pure reads the funnels share — the chain index (root, head, newest continuation), the open team's member of a run, the member view, work given in this Turn, the preamble and its replay form, and the broadcast ids.
 - `packages/cli/src/serve/hosted-child-agent-session.ts`:
   - lifting #13846's refusal to continue an open team's member;
   - the preamble on a member's continuation envelope, and the replay check that admits it;
@@ -311,7 +312,6 @@ To a running member, step 1 is an outbound `session_message` to the head, and H4
   - the member preamble in a named launch's admission;
   - the PostToolUse dispatch evidence over base and broadcast ids.
 - `packages/cli/src/serve/hosted-runtime-recovery.ts`: the probes and answers of decision 9.
-- `packages/cli/src/serve/hosted-harness-session.ts`: the team funnel handed to the message funnel.
 - Tests beside each file. These #13846 tests flip on purpose:
   - the refusal to continue a finished member (`hosted-workspace-tool-turn.team.test.ts`);
   - the `to` refusal that points at task ids (`hosted-workspace-tool-turn.team.test.ts`);

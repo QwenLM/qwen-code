@@ -61,10 +61,13 @@ import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
+import { hostedTeamMembership } from './hosted-team-session.js';
 import {
-  hostedOpenTeamMembership,
-  hostedTeamMembership,
-} from './hosted-team-session.js';
+  HostedChildChains,
+  hostedOpenTeamChainMember,
+  isSentInstruction,
+  teamMemberPreamble,
+} from './hosted-member-chain.js';
 import {
   stripDisplayControlChars,
   truncateNotificationLabel,
@@ -565,9 +568,12 @@ export class HostedChildAgentSession {
         const envelope = decodeChildLaunchEnvelope(
           await this.store.resources.read(continued.inputRef),
         );
+        // H4e-b2 decision 5: a member's continuation opens with its
+        // preamble, whose presence follows the team and may have changed
+        // since, so the committed instruction is read for its form.
         if (
           continued.predecessorChildRunId === null ||
-          envelope.prompt !== params.text
+          !isSentInstruction(envelope.prompt, params.text)
         ) {
           throw new ManagedSessionConflictError(
             `Child run ${params.continuationRunId} was launched with different evidence.`,
@@ -586,6 +592,23 @@ export class HostedChildAgentSession {
           reason: `No child agent task ${params.taskId} was launched by this Session.`,
         };
       }
+      // H4e-b2 decision 2: a run of an open team member's chain is that
+      // member, and every continuation of it opens its instruction with
+      // the member preamble (decision 5).
+      const member = hostedOpenTeamChainMember(
+        this.store.authority.extensionRecordsInDomain('team_state'),
+        new HostedChildChains(
+          this.store.authority.extensionRecordsInDomain('child_run'),
+        ),
+        run.childRunId,
+      );
+      const instruction =
+        member === undefined
+          ? params.text
+          : teamMemberPreamble({
+              name: member.name,
+              teamName: member.team.name,
+            }) + params.text;
       // The bound is the smaller carrier: the continuation's launch
       // envelope, built from the chain's own description and definition,
       // which no later state changes — so a running and a completed task
@@ -597,7 +620,7 @@ export class HostedChildAgentSession {
       try {
         envelope = encodeChildLaunchEnvelope({
           description: launch.description,
-          prompt: params.text,
+          prompt: instruction,
           definition: launch.definition,
         });
       } catch (cause) {
@@ -669,19 +692,14 @@ export class HostedChildAgentSession {
           reason: `Child agent task ${headTask} ended (${head.run.state}: ${head.stopReason ?? 'unknown'}) and cannot receive messages; launch a new agent instead.`,
         };
       }
-      // H4e-b1: an open team's roster names one run of its member, so a
-      // continuation would run off the roster, unlabeled and unseen by
-      // team_delete; continued members come with H4e-b2. Only a launch
-      // joins, so a member's run is never itself a continuation. Once its
-      // team is deleted, a former member continues as a plain child.
-      const member = hostedOpenTeamMembership(
-        this.store.authority.extensionRecordsInDomain('team_state'),
-        head.childRunId,
-      );
-      if (member !== undefined) {
+      // H4e-b2 decision 2: a member of an active team is continued like
+      // any child, and the roster follows its chain. A closing team admits
+      // no new work while it drains (H4e-a decision 8); once its team is
+      // deleted, a former member continues as a plain child.
+      if (member !== undefined && member.team.lifecycle !== 'active') {
         return {
           kind: 'refused',
-          reason: `Child agent task ${headTask} ran as "${member.name}" of team "${member.teamName}" and has finished; a member of an open team cannot be continued yet. For more work, launch a new member with another name while the team takes members; once every member has ended, deleting the team would let this one be continued like any other child agent, but would give up the team's board.`,
+          reason: `Child agent task ${headTask} ran as "${member.name}" of team "${member.team.name}", which is closing and takes no new work. Finish it with team_delete.`,
         };
       }
       // A continuation is a launch: it owes the launch admission (H4d-a
@@ -735,7 +753,18 @@ export class HostedChildAgentSession {
    * creation idempotency the control plane derives from this record can
    * never diverge from it.
    */
-  async admit(params: ChildAgentLaunchParams): Promise<{
+  async admit(
+    params: ChildAgentLaunchParams & {
+      /**
+       * H4e-b2 decision 5: the prompt the model sent, when `prompt` opens
+       * with a member preamble. A replay accepts a committed prompt that is
+       * the sent one alone or behind one well-formed preamble block, since
+       * whether the launch carries one follows a team that may have changed
+       * since, and goes on with the committed envelope as it is.
+       */
+      readonly sentPrompt?: string;
+    },
+  ): Promise<{
     readonly inputRef: ManagedSessionDurableRef;
     readonly envelope: ChildLaunchEnvelope;
   }> {
@@ -744,11 +773,13 @@ export class HostedChildAgentSession {
       prompt: params.prompt,
       definition: params.definition,
     };
-    const bytes = encodeChildLaunchEnvelope(envelope);
     // A restated launch names the same record: identical evidence is the
     // replay — anything else conflicts, never a second child chain.
     const existing = this.record(params.childRunId);
     if (existing !== undefined) {
+      const committedBytes = await this.store.resources.read(existing.inputRef);
+      const committed = decodeChildLaunchEnvelope(committedBytes);
+      const sentPrompt = params.sentPrompt ?? params.prompt;
       const sameEvidence =
         existing.ownerScopeId === params.ownerScopeId &&
         existing.rootSessionId === params.rootSessionId &&
@@ -757,17 +788,18 @@ export class HostedChildAgentSession {
         existing.workingDirectory === params.workingDirectory &&
         existing.run.executionCallId === params.executionCallId &&
         isDeepStrictEqual(existing.run.definition, params.definition) &&
-        isDeepStrictEqual(
-          await this.store.resources.read(existing.inputRef),
-          bytes,
-        );
+        committed.description === params.description &&
+        isDeepStrictEqual(committed.definition, params.definition) &&
+        (committed.prompt === params.prompt ||
+          isSentInstruction(committed.prompt, sentPrompt));
       if (!sameEvidence) {
         throw new ManagedSessionConflictError(
           `Child run ${params.childRunId} was launched with different evidence.`,
         );
       }
-      return { inputRef: existing.inputRef, envelope };
+      return { inputRef: existing.inputRef, envelope: committed };
     }
+    const bytes = encodeChildLaunchEnvelope(envelope);
     const inputRef = await this.store.resources.publish('managed-input', bytes);
     await this.commit(
       params.childRunId,
@@ -1115,10 +1147,20 @@ export class HostedChildAgentSession {
               ),
               // A run keeps the label of the roster it joined, so a result
               // accepted after its team was deleted still names its member.
-              teammate: hostedTeamMembership(
-                this.store.authority.extensionRecordsInDomain('team_state'),
-                childRunId,
-              )?.name,
+              // H4e-b2 decision 6: a continuation is labeled through its
+              // chain root while that root is on the open team's roster.
+              teammate:
+                hostedTeamMembership(
+                  this.store.authority.extensionRecordsInDomain('team_state'),
+                  childRunId,
+                )?.name ??
+                hostedOpenTeamChainMember(
+                  this.store.authority.extensionRecordsInDomain('team_state'),
+                  new HostedChildChains(
+                    this.store.authority.extensionRecordsInDomain('child_run'),
+                  ),
+                  childRunId,
+                )?.name,
               ...(workspace === undefined ? {} : { workspace }),
             }),
           }),

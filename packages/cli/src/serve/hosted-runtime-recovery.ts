@@ -44,6 +44,7 @@ import {
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
   hostedAgentBackgroundStartedText,
+  hostedBroadcastCommitted,
   hostedChildRunIdFor,
   hostedMessageContinuedText,
   hostedMessageToChildText,
@@ -53,6 +54,7 @@ import {
   journaledToolResultIds,
   truncateHostedGlobResponse,
 } from './hosted-workspace-tool-turn.js';
+import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import {
   endHostedAction,
   readHostedActionOptions,
@@ -551,7 +553,37 @@ function sentMessageText(
       input.children!.taskIdOf(continued.childRunId),
     );
   }
-  return undefined;
+  // H4e-b2 decision 9: a broadcast commits each recipient under its own
+  // position's ids. Every position is probed whatever the journaled
+  // arguments say, since a hook may have rewritten the input that ran.
+  if (input.children === undefined) return undefined;
+  const reached = hostedBroadcastCommitted({
+    authority: input.session.authority,
+    children: input.children,
+    messages: input.messages,
+    senderSessionId: input.session.authority.sessionHeader.sessionKey.sessionId,
+    promptId: input.promptId,
+    callId,
+  });
+  if (reached.length === 0) return undefined;
+  const team = input.session.authority
+    .extensionRecordsInDomain('team_state')
+    .map((entry) => parseTeamState(entry.record))
+    .find((each) => each.lifecycle !== 'deleted');
+  const missed = (team?.members ?? [])
+    .filter((_, index) => !reached.some((each) => each.position === index + 1))
+    .map((member) => member.name);
+  return (
+    `The broadcast was interrupted after it reached ${reached.length} member${reached.length === 1 ? '' : 's'}; do not send it to them again.\n` +
+    reached
+      .map(
+        (each) => `- ${each.name ?? `position ${each.position}`}: ${each.text}`,
+      )
+      .join('\n') +
+    (missed.length > 0
+      ? `\nIt did not reach: ${missed.join(', ')}. Send to those members by name if they still need it.`
+      : '')
+  );
 }
 
 /** The interruption every settle or resume route below names. */

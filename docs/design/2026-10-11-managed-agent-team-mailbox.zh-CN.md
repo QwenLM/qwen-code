@@ -2,7 +2,7 @@
 
 [English](2026-10-11-managed-agent-team-mailbox.md) | [简体中文](2026-10-11-managed-agent-team-mailbox.zh-CN.md)
 
-状态:设计。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4e** 中第二个运行时切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13745](https://github.com/QwenLM/qwen-code/issues/13745) 跟踪。它建立在 H4e-a([团队记录契约](2026-10-10-managed-agent-teams.zh-CN.md),#13811)、H4e-b1([lead 一侧的团队运行时](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md),#13824,由 #13846 启用)与 H4d-b([Session 消息运行时](2026-10-10-managed-session-message-runtime.zh-CN.md),#13822)之上。它回答 H4e-a 的开放问题 1、2 与 4,以及 H4e-b1 的开放问题 3。它还调整了 H4e-b1 设计中 H4e-b2 与 H4e-b3 的范围:见下文决策 1、7 与 8。
+状态:已实现,但在真实 Hosted 环境上的实机验收(决策 10)尚待进行,将在本变更合入前完成。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4e** 中第二个运行时切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13745](https://github.com/QwenLM/qwen-code/issues/13745) 跟踪。它建立在 H4e-a([团队记录契约](2026-10-10-managed-agent-teams.zh-CN.md),#13811)、H4e-b1([lead 一侧的团队运行时](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md),#13824,由 #13846 启用)与 H4d-b([Session 消息运行时](2026-10-10-managed-session-message-runtime.zh-CN.md),#13822)之上。它回答 H4e-a 的开放问题 1、2 与 4,以及 H4e-b1 的开放问题 3。它还调整了 H4e-b1 设计中 H4e-b2 与 H4e-b3 的范围:见下文决策 1、7 与 8。
 
 ## 问题与范围
 
@@ -194,7 +194,7 @@ H4e-b1 设计把 H4e-b2 规划为五个部分,并启用 `team_message`:
 
    同一批次按顺序运行其调用,所以 `task_update` 运行前发送已经提交,但没有任何东西让成员一直运行到那时。relay 会在 lead 的 Turn 运行期间提交并结算 child 的结果,两个 funnel 也没有覆盖整个批次的共同锁。因此被这次发送续跑的成员,或正在运行并读到这条消息的成员,可能在两次调用之间就已完成。owner 规则用一个概念覆盖这种情况,即本 Turn 已交付的工作:
    - **Turn** 就是一个 prompt id。它覆盖其所有模型回合,中断后恢复的 Turn 也是同一个 Turn。
-   - **本 Turn 已交付的工作。** 若同一 Turn 中更早的调用为某成员的链提交了一个未被证明从未启动的续跑,或一条发往链头、未被取消也未被拒绝的 outbound 消息,该成员就在本 Turn 被交付了工作。两者都以发送调用的键作为 `executionCallId`,它是本 Turn 的某个调用键,所以 lead 的记录就能判定。
+   - **本 Turn 已交付的工作。** 若同一 Turn 中更早的调用为某成员的链提交了一个未被证明从未启动的续跑,或一条发往该链上已启动的某个 run、未被取消也未被拒绝的 outbound 消息(发往从未启动的续跑的消息会被取消,永远不会到达),该成员就在本 Turn 被交付了工作。两者都以发送调用的键作为 `executionCallId`,它是本 Turn 的某个调用键,所以 lead 的记录就能判定。
    - **接受。** 无论这样的成员的链头仍在运行还是已经完成,它都可以被设为开放任务的 owner。发送已经交付了工作,所以任务板记录谁拥有它;汇报到达时,lead 把状态设为 `completed`。
    - **仍被拒绝。** 链头失败、启动后被取消、正在停止,或请求停止后才完成的成员被拒绝,因为决策 2 把它算作已结束。
 
@@ -291,6 +291,7 @@ lead 发给成员 `alpha` 的消息,`alpha` 的第一个 run `r1` 已完成:
 
 ## 受影响的文件
 
+- `packages/cli/src/serve/hosted-member-chain.ts`(新增):各 funnel 共用的纯读取逻辑——链索引(链根、链头、最新续跑)、某个 run 所属的开启中团队成员、成员视图、本 Turn 已交付的工作、前言及其重放形式,以及广播 id。
 - `packages/cli/src/serve/hosted-child-agent-session.ts`:
   - 撤销 #13846 对续跑开启中团队成员的拒绝;
   - 成员续跑信封上的前言,以及接纳它的重放检查;
@@ -311,7 +312,6 @@ lead 发给成员 `alpha` 的消息,`alpha` 的第一个 run `r1` 已完成:
   - 具名 launch 准入中的成员前言;
   - 基于基础 id 与广播 id 的 PostToolUse 派发证据。
 - `packages/cli/src/serve/hosted-runtime-recovery.ts`:决策 9 的查找与作答。
-- `packages/cli/src/serve/hosted-harness-session.ts`:把团队 funnel 交给消息 funnel。
 - 各文件旁的测试。以下 #13846 的测试有意翻转:
   - 拒绝续跑已完成成员的测试(`hosted-workspace-tool-turn.team.test.ts`);
   - 指向 task id 的 `to` 拒绝(`hosted-workspace-tool-turn.team.test.ts`);
