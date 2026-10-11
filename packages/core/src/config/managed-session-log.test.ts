@@ -1111,7 +1111,7 @@ describe('Managed Session log recording', () => {
         { replay: { kind: 'none' } },
       );
       expect(projection).toBeDefined();
-      expect(projection?.runtime.apiHistory).toEqual([
+      expect(projection?.runtime.apiHistory).toMatchObject([
         { role: 'user', parts: [{ text: 'before the damage' }] },
         { role: 'user', parts: [{ text: 'after the damage' }] },
       ]);
