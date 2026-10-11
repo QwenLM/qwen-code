@@ -7,11 +7,18 @@
 import { describe, expect, it } from 'vitest';
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import {
+  teamJoinBody,
+  teamLifecycleBody,
+  teamOpenBody,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
+import {
   broadcastMessageId,
   broadcastRunId,
+  hasPlanModeBlock,
   hostedCallKey,
   hostedPromptKey,
   isSentInstruction,
+  memberPlanModeRequired,
   teamMemberPreamble,
 } from './hosted-member-chain.js';
 
@@ -58,6 +65,118 @@ describe('the member preamble (H4e-b2 decision 5)', () => {
       `${sent}\n${teamMemberPreamble(alice)}`,
     ])
       expect(isSentInstruction(committed, sent)).toBe(false);
+  });
+});
+
+describe('plan mode (H4e-b3a, decisions 5 and 9)', () => {
+  const alice = { name: 'alice', teamName: 'review' };
+
+  it('composes the attribute into the preamble and the form still matches', () => {
+    const required = teamMemberPreamble(alice, true);
+    expect(required).toContain(' plan-mode="required">');
+    expect(required).not.toContain('exit_plan_mode');
+    const sent = 'fix the tests';
+    expect(isSentInstruction(required + sent, sent)).toBe(true);
+    expect(isSentInstruction(teamMemberPreamble(alice) + sent, sent)).toBe(
+      true,
+    );
+    expect(isSentInstruction(required + 'other', sent)).toBe(false);
+  });
+
+  it('reads the attribute only on an unescaped well-formed line', () => {
+    expect(hasPlanModeBlock('')).toBe(false);
+    expect(hasPlanModeBlock(teamMemberPreamble(alice))).toBe(false);
+    expect(hasPlanModeBlock(teamMemberPreamble(alice, true))).toBe(true);
+    // A continuation's history is XML-escaped, so only the run's own
+    // instruction matches.
+    const history =
+      '&lt;team-member name="alice" team="review" plan-mode="required"&gt;';
+    expect(hasPlanModeBlock(history)).toBe(false);
+    expect(
+      hasPlanModeBlock(`${history}\n${teamMemberPreamble(alice, true)}more`),
+    ).toBe(true);
+    // Unknown names or a mistyped keyword never arm it.
+    expect(
+      hasPlanModeBlock(
+        '<team-member name="Alice" team="review" plan-mode="required">\n',
+      ),
+    ).toBe(false);
+  });
+
+  it('holds plan mode until an approved plan of the member exists', () => {
+    const team = teamJoinBody(
+      teamOpenBody({
+        teamId: 'prompt:team',
+        name: 'review',
+        leadSessionId: 'lead',
+      }),
+      {
+        name: 'alice',
+        childRunId: 'run-1',
+        planModeRequired: true,
+      },
+    );
+    const refOf = {
+      resourceId: 'plan-1',
+      kind: 'managed-team-content',
+      schemaVersion: 1,
+      byteLength: 4,
+      digest: 'd'.repeat(64),
+    };
+    const runOf = (state: string) => ({
+      state,
+      reason: null,
+      definition: null,
+      executionCallId: null,
+      effectId: null,
+      dispatchId: null,
+      deliveryId: null,
+      execution: null,
+      runtime: null,
+      delivery: null,
+    });
+    const planOf = (over: Record<string, unknown> = {}) => ({
+      record: {
+        teamId: 'prompt:team',
+        requestId: 'request-1',
+        member: 'alice',
+        planRevision: 1,
+        planRef: refOf,
+        decision: null,
+        feedbackRef: null,
+        run: runOf('waiting'),
+        ...over,
+      },
+    });
+    // No roster flag, nothing to read.
+    expect(memberPlanModeRequired(team, [], 'bob')).toBe(false);
+    expect(memberPlanModeRequired(team, [], 'alice')).toBe(true);
+    // Waiting and rejected plans keep the mode; approval lifts it.
+    expect(memberPlanModeRequired(team, [planOf()], 'alice')).toBe(true);
+    expect(
+      memberPlanModeRequired(
+        team,
+        [planOf({ decision: 'rejected', run: runOf('settled') })],
+        'alice',
+      ),
+    ).toBe(true);
+    expect(
+      memberPlanModeRequired(
+        team,
+        [
+          planOf({
+            decision: 'approved',
+            feedbackRef: refOf,
+            run: runOf('settled'),
+          }),
+        ],
+        'alice',
+      ),
+    ).toBe(false);
+    // Plan mode is a rule of an open team only.
+    expect(
+      memberPlanModeRequired(teamLifecycleBody(team, 'deleted'), [], 'alice'),
+    ).toBe(false);
   });
 });
 

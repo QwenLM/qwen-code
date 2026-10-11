@@ -2459,6 +2459,10 @@ describe('Hosted Harness no-tool session', () => {
       const teams = new HostedTeamSession(
         { authority: managed.authority, resources: managed.resources },
         key,
+        new HostedChildAgentSession(
+          { authority: managed.authority, resources: managed.resources },
+          key,
+        ),
       );
       await teams.run(
         'team_create',
@@ -5851,7 +5855,7 @@ describe('Hosted Harness no-tool session', () => {
           resources: managed.resources,
         };
         const children = new HostedChildAgentSession(store, key);
-        const teams = new HostedTeamSession(store, key);
+        const teams = new HostedTeamSession(store, key, children);
         await teams.run('team_create', { team_name: 'review' }, 'p:team');
         const member = teams.admitMember('alice');
         await children.admit({
@@ -9896,6 +9900,8 @@ describe('Hosted Harness no-tool session', () => {
       // H4e-b1: with the team domains enabled, so are its team tools.
       'team_create',
       'team_delete',
+      // H4e-b3a: the lead stops a member itself.
+      'request_shutdown',
       'task_create',
       'task_update',
       'task_list',
@@ -9957,6 +9963,8 @@ describe('Hosted Harness no-tool session', () => {
       // H4e-b1: with the team domains enabled, so are its team tools.
       'team_create',
       'team_delete',
+      // H4e-b3a: the lead stops a member itself.
+      'request_shutdown',
       'task_create',
       'task_update',
       'task_list',

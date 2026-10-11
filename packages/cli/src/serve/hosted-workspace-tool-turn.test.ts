@@ -3323,6 +3323,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
     'team_create',
     'task_create',
     'task_update',
+    'request_shutdown',
   ]);
   const declared = [
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),

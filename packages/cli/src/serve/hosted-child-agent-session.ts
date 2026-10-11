@@ -67,6 +67,7 @@ import {
   hostedOpenTeamChainMember,
   hostedRouteDetails,
   isSentInstruction,
+  memberPlanModeRequired,
   teamMemberPreamble,
   type HostedRouteDetails,
 } from './hosted-member-chain.js';
@@ -653,10 +654,20 @@ export class HostedChildAgentSession {
       const instruction =
         member === undefined
           ? params.text
-          : teamMemberPreamble({
-              name: member.name,
-              teamName: member.team.name,
-            }) + params.text;
+          : // H4e-b3 decision 9: plan mode follows the roster entry until an
+            // approved plan of this member exists; team_plan stays disabled
+            // here, so the read only ever sees a b3d journal's records.
+            teamMemberPreamble(
+              {
+                name: member.name,
+                teamName: member.team.name,
+              },
+              memberPlanModeRequired(
+                member.team,
+                this.store.authority.extensionRecordsInDomain('team_plan'),
+                member.name,
+              ),
+            ) + params.text;
       // The bound is the smaller carrier: the continuation's launch
       // envelope, built from the chain's own description and definition,
       // which no later state changes — so a running and a completed task

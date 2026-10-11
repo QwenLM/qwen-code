@@ -440,12 +440,21 @@ async function answerAbandonedTurnCalls(input: {
     input.promptId,
     records,
   );
-  const owed = new Map<string, { name: string; messageId: string }>();
+  const owed = new Map<
+    string,
+    { name: string; messageId: string; args: Record<string, unknown> }
+  >();
   for (const record of records.filter((entry) => entry.type === 'assistant'))
     for (const part of record.message?.parts ?? []) {
       const call = part.functionCall;
       if (call?.id && call.name && !answered.has(call.id) && !owed.has(call.id))
-        owed.set(call.id, { name: call.name, messageId: record.uuid });
+        owed.set(call.id, {
+          name: call.name,
+          messageId: record.uuid,
+          // H4e-b3 decision 14: request_shutdown's committed evidence is
+          // read off the member its `to` names.
+          args: call.args ?? {},
+        });
     }
   let answeredNow = 0;
   for (const [functionCallId, call] of owed) {
@@ -481,7 +490,7 @@ async function answerAbandonedTurnCalls(input: {
       const committed =
         input.teams !== undefined &&
         HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
-        input.teams.committedBy(call.name, callKey);
+        input.teams.committedBy(call.name, callKey, call.args);
       if (
         !committed &&
         (uncommitted === 'none' ||

@@ -800,6 +800,7 @@ describe('team members over Session messages (H4e-b2)', () => {
         resources: parent.session.resources,
       },
       parent.session.authority.sessionHeader.sessionKey,
+      parent.children,
     );
     await teams.run('team_create', { team_name: 'review' }, 'prompt:call-team');
     return { ...parent, teams };

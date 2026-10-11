@@ -17,6 +17,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import {
   MANAGED_TEAM_LIMITS,
+  parseTeamPlan,
   parseTeamState,
   type TeamState,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
@@ -86,18 +87,74 @@ const PREAMBLE_BODY =
   'You are a member of this team. Your parent, the agent that launched you, is the team leader. Your result is your answer to the last instruction you receive: if another message from the leader arrives after you have answered, your answer to it becomes your whole result, so answer it in full and repeat anything from your earlier answers the leader still needs. To ask the leader something, use send_message with to "parent"; its reply reaches you after you have answered, as your next instruction. You cannot message other members or edit the team\'s task board.';
 
 /**
+ * H4e-b3 decision 5: what the body adds for a plan-mode run, in the
+ * build before b3d — it never names `exit_plan_mode`, which this build
+ * does not declare.
+ */
+const PLAN_MODE_BODY =
+  ' You are in plan mode until the leader approves your plan: your calls may only read, and the decision arrives as your next instruction.';
+
+/**
  * Decision 5: the fixed text every instruction of a member's chain opens
  * with. Names are sanitized to `[a-z0-9-]`, so they need no escaping.
+ * H4e-b3 decision 5: the open tag carries `plan-mode="required"` while
+ * the member's runs are plan-required (decision 9's composition rule).
  */
-export function teamMemberPreamble(member: {
-  readonly name: string;
-  readonly teamName: string;
-}): string {
-  return `<team-member name="${member.name}" team="${member.teamName}">\n${PREAMBLE_BODY}\n</team-member>\n\n`;
+export function teamMemberPreamble(
+  member: {
+    readonly name: string;
+    readonly teamName: string;
+  },
+  planMode: boolean = false,
+): string {
+  const attribute = planMode ? ' plan-mode="required"' : '';
+  const body = planMode ? PREAMBLE_BODY + PLAN_MODE_BODY : PREAMBLE_BODY;
+  return `<team-member name="${member.name}" team="${member.teamName}"${attribute}>\n${body}\n</team-member>\n\n`;
 }
 
 const PREAMBLE_FORM =
-  /^<team-member name="[a-z0-9]+(?:-[a-z0-9]+)*" team="[a-z0-9]+(?:-[a-z0-9]+)*">\n[^<]*\n<\/team-member>\n\n/;
+  /^<team-member name="[a-z0-9]+(?:-[a-z0-9]+)*" team="[a-z0-9]+(?:-[a-z0-9]+)*"(?: plan-mode="required")?>\n[^<]*\n<\/team-member>\n\n/;
+
+/**
+ * Decision 9: the plan-mode attribute, read more widely than the member
+ * preamble's form — any unescaped block that carries it restricts the
+ * run, whatever its body says. A continuation's history is XML-escaped
+ * (`&lt;`), so a literal tag is always the run's own block; matching the
+ * opening tag alone, without the body's form, also fails closed on a
+ * block whose body this build would not recognize.
+ */
+const PLAN_MODE_TAG =
+  /<team-member name="[a-z0-9]+(?:-[a-z0-9]+)*" team="[a-z0-9]+(?:-[a-z0-9]+)*" plan-mode="required">/;
+
+/** Whether a run's first input carries an unescaped plan-mode block. */
+export function hasPlanModeBlock(text: string): boolean {
+  return PLAN_MODE_TAG.test(text);
+}
+
+/**
+ * Decision 9's composition rule: whether a member's next run composes in
+ * plan mode — its roster entry is plan-required and the lead holds no
+ * approved plan of that member of that team yet. `team_plan` stays
+ * disabled until b3d, so nothing here commits; the read keeps plan mode
+ * on a b3d journal reopened by this build (decision 5's rollback floor).
+ */
+export function memberPlanModeRequired(
+  team: TeamState,
+  plans: ReadonlyArray<{ readonly record: unknown }>,
+  memberName: string,
+): boolean {
+  if (team.lifecycle === 'deleted') return false;
+  const member = team.members.find((each) => each.name === memberName);
+  if (member === undefined || !member.planModeRequired) return false;
+  return !plans.some((entry) => {
+    const plan = parseTeamPlan(entry.record);
+    return (
+      plan.teamId === team.teamId &&
+      plan.member === memberName &&
+      plan.decision === 'approved'
+    );
+  });
+}
 
 /**
  * Decision 5's replay evidence: whether a committed instruction is the

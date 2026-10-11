@@ -448,7 +448,27 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'team_create',
   'task_create',
   'task_update',
+  'request_shutdown',
 ];
+
+/**
+ * H4e-b3 decision 9 (b3a): what a run in plan mode still admits. This
+ * build declares neither `task_list` for a member (b3b) nor
+ * `exit_plan_mode` (b3d), so the list holds only the reads a member
+ * already has, plus its message to the leader.
+ */
+const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
+  'read_file',
+  'glob',
+  'send_message',
+]);
+
+/**
+ * The b3a plan-mode refusal, worded for a build without `exit_plan_mode`
+ * (decision 5): it says the run may only read and never names it.
+ */
+const HOSTED_PLAN_MODE_REFUSAL =
+  'This run is in plan mode until the leader approves its plan: only read_file, glob and send_message to the leader are admitted. The decision arrives as your next instruction.';
 
 /**
  * H4b: launch one child Session from the Session's own definition. The
@@ -1085,6 +1105,11 @@ export class HostedWorkspaceToolTurn {
   private readonly childConsumption: (childRunId: string) => void;
   private readonly messages?: HostedSessionMessageSession;
   private readonly teams?: HostedTeamSession;
+  /**
+   * H4e-b3 decisions 5/9: this run's first input carried an unescaped
+   * `plan-mode="required"` preamble (assembly read it off the journal).
+   */
+  private readonly memberPlanMode: boolean;
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -1128,6 +1153,11 @@ export class HostedWorkspaceToolTurn {
       };
       messages?: HostedSessionMessageSession;
       teams?: HostedTeamSession;
+      /**
+       * H4e-b3 decisions 5/9: this run's first input carried an unescaped
+       * `plan-mode="required"` preamble; its calls admit reads only.
+       */
+      memberPlanMode?: boolean;
     },
   ) {
     this.mcp = extras?.mcp;
@@ -1144,6 +1174,7 @@ export class HostedWorkspaceToolTurn {
       extras?.childAgents?.queueConsumption ?? (() => undefined);
     this.messages = extras?.messages;
     this.teams = extras?.teams;
+    this.memberPlanMode = extras?.memberPlanMode === true;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -1880,7 +1911,13 @@ export class HostedWorkspaceToolTurn {
         let messageAdmitted = false;
         const team =
           mcpInput === undefined && HOSTED_TEAM_TOOL_NAMES.includes(call.name);
-        if (mcpInput) {
+        // H4e-b3 decision 9: a run whose first input carried an unescaped
+        // plan-mode preamble admits reads only; every other call is
+        // refused before it runs, ahead of any per-tool arm below.
+        if (this.memberPlanMode && !HOSTED_PLAN_MODE_READS.has(call.name)) {
+          validationError = HOSTED_PLAN_MODE_REFUSAL;
+          input = { ...call.args };
+        } else if (mcpInput) {
           input = { ...mcpInput.input };
         } else if (isShell) {
           const args = call.args;
@@ -3862,8 +3899,15 @@ export class HostedWorkspaceToolTurn {
     // H4e-b2 decision 5: a member's launch prompt opens with its preamble,
     // part of the envelope and so of its bound. A replay goes on with the
     // committed envelope, whose preamble may follow a team changed since.
+    // H4e-b3 decision 9: the plan-mode attribute follows the roster entry —
+    // a fresh join has none in this build; a re-driven launch reads it.
     const launchPrompt =
-      member === undefined ? prompt : teamMemberPreamble(member) + prompt;
+      member === undefined
+        ? prompt
+        : teamMemberPreamble(
+            member,
+            joining ? false : this.teams!.memberPlanMode(member),
+          ) + prompt;
     // The envelope bound is enforced by the admission's byte_limit
     // refusal — but the encoder throws a size error before that branch
     // can ever answer. Translate the throw into the same refusal: an
