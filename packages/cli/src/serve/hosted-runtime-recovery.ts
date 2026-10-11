@@ -949,8 +949,10 @@ export async function fillParkedRoundAgentGaps(input: {
             callId,
             text,
             fits,
-            await childWorkspaceAnswerSuffix(record, acceptance, (ref) =>
-              input.managed.resources.read(ref),
+            await childWorkspaceAnswerSuffix(
+              record?.kind === 'child_agent' ? record : undefined,
+              acceptance,
+              (ref) => input.managed.resources.read(ref),
             ),
           );
           if (foldOwed) {

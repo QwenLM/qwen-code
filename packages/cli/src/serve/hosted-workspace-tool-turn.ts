@@ -3173,7 +3173,12 @@ export class HostedWorkspaceToolTurn {
         }
         if (request.workflow) {
           responses.push(
-            ...(await this.acceptChildWorkflow(request, model, signal)),
+            ...(await this.acceptChildWorkflow(
+              request,
+              model,
+              signal,
+              messageId,
+            )),
           );
           continue;
         }
@@ -4239,6 +4244,7 @@ export class HostedWorkspaceToolTurn {
     },
     model: string,
     signal: AbortSignal,
+    modelMessageId: string,
   ): Promise<Part[]> {
     if (signal.aborted) {
       const skipped = convertToFunctionErrorResponse(
@@ -4291,7 +4297,7 @@ export class HostedWorkspaceToolTurn {
         return refused;
       }
     }
-    await children.admitWorkflow({
+    const launched = await children.admitWorkflow({
       childRunId,
       ownerScopeId: key.sessionId,
       rootSessionId: key.sessionId,
@@ -4304,6 +4310,22 @@ export class HostedWorkspaceToolTurn {
     });
     this.agentDispatched.add(request.call.callId);
     if (!request.agentBackground) {
+      // The durable wait (#13708), parked exactly as acceptChildAgent parks
+      // it: without it a Harness restart declines this Turn with
+      // unresolved_after_settle while the child keeps running.
+      await this.harness.commitAwaitAgent(
+        [
+          {
+            childRunId,
+            functionCallId: request.call.callId,
+            toolName: request.call.name,
+            modelMessageId,
+            consumed: false,
+          },
+        ],
+        { turnId: this.promptId, promptId: this.promptId },
+        { attemptId: modelMessageId, routeRef: launched.inputRef },
+      );
       return await this.awaitChildToolResult(
         children,
         request,

@@ -117,11 +117,12 @@ function call(
 function createTurn(
   depth = 0,
   hooksMountHeld = false,
+  harness?: ReturnType<typeof createManagedHarnessHandle>,
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
-    createManagedHarnessHandle(session),
+    harness ?? createManagedHarnessHandle(session),
     'prompt',
     async (type, messageParts, model, identity) => {
       const uuid = identity?.uuid ?? randomUUID();
@@ -651,6 +652,24 @@ it('answers an over-size envelope with the byte_limit refusal, not recovery', as
   );
 });
 
+it('refuses args outside the canonical JSON range before any record commits', async () => {
+  // args.v = 5e-324 is the exact value the real stack looped on: admitted
+  // there, it wedged the relay mid-creation (R1-7); the same single walk
+  // refuses it here, a subnormal nested anywhere in the tree alike.
+  for (const args of [{ v: 5e-324 }, { v: { nested: [1e-320] } }]) {
+    const responses = await executeWorkflow(
+      createTurn(),
+      call({ script: SCRIPT, args }),
+    );
+    expect(JSON.stringify(responses)).toContain(
+      'Hosted workflow args carry a number outside the canonical JSON range.',
+    );
+    expect(
+      session.authority.extensionRecordsInDomain('child_run'),
+    ).toHaveLength(0);
+  }
+});
+
 it('commits a pinned workflow launch and names it in the answer', async () => {
   const turn = createTurn();
   const responses = await executeWorkflow(
@@ -841,4 +860,50 @@ it('answers a failed workflow child as an ended run, never a wait forever', asyn
   // tool's own serialized name instead of the run-over answer.
   expect(JSON.stringify(responses)).toContain('Workflow child');
   expect(JSON.stringify(responses)).toContain('child_failed');
+});
+
+it('parks the foreground workflow wait before it waits, exactly as the agent arm', async () => {
+  const harness = createManagedHarnessHandle(session);
+  const commitAwaitAgent = vi.spyOn(harness, 'commitAwaitAgent');
+  const turn = createTurn(0, false, harness);
+  const childRunId = `prompt:call-1`;
+  const driving = (async () => {
+    for (;;) {
+      if (children.record(childRunId) !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await children.dispatchStarted(childRunId, {
+      dispatchId: 'dispatch-1',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach(childRunId, '550e8400-e29b-41d4-a716-446655440001');
+    await children.settleCompleted(childRunId, {
+      result: Buffer.from('workflow answer 2', 'utf8'),
+      receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+    });
+    await children.accept(childRunId);
+  })();
+  const responses = (
+    await Promise.all([
+      executeWorkflow(turn, call({ script: SCRIPT, run_in_background: false })),
+      driving,
+    ])
+  )[0];
+  expect(JSON.stringify(responses)).toContain('workflow answer 2');
+  // The durable wait (#13708) the agent arm parks: a Harness restart while
+  // the parent waits must re-enter the wait from this checkpoint, not
+  // decline the Turn with unresolved_after_settle.
+  expect(commitAwaitAgent).toHaveBeenCalledWith(
+    [
+      {
+        childRunId,
+        functionCallId: 'call-1',
+        toolName: 'workflow',
+        modelMessageId: expect.any(String),
+        consumed: false,
+      },
+    ],
+    { turnId: 'prompt', promptId: 'prompt' },
+    { attemptId: expect.any(String), routeRef: expect.anything() },
+  );
 });

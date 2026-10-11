@@ -110,6 +110,12 @@ export interface WorkflowRunnerOptions {
    * host starts itself is not the model's and is left unrestricted.
    */
   restrictNestedScriptPaths?: boolean;
+  /**
+   * Refuse every nested `workflow()` resolution, by name or path. Set by a
+   * host whose launch pinned exactly one script (the managed workflow
+   * child): any nested resolution would run bytes the pin never examined.
+   */
+  refuseNestedWorkflows?: boolean;
 }
 
 /**
@@ -754,6 +760,11 @@ export class WorkflowRunner {
             emitter,
             budget,
             resolveSavedWorkflow: async (ref) => {
+              if (options.refuseNestedWorkflows === true) {
+                throw new Error(
+                  'workflow(): nested workflow runs are unavailable here; this run executes only its pinned script.',
+                );
+              }
               // A model call in a name-only session runs no script it cannot
               // name, nested or not. Any other malformed ref falls through to
               // the resolver's own type error.

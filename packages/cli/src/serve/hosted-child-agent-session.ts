@@ -553,6 +553,10 @@ export class HostedChildAgentSession {
     const record = head && this.record(head.childRunId);
     if (record === undefined)
       throw new Error(`Child run ${run.childRunId} has no chain head.`);
+    if (record.kind !== 'child_agent')
+      throw new Error(
+        `Child run ${run.childRunId} chains back to a workflow run.`,
+      );
     return record;
   }
 
@@ -667,7 +671,8 @@ export class HostedChildAgentSession {
         from.predecessorChildRunId !== null
       ) {
         const predecessor = this.record(from.predecessorChildRunId);
-        if (predecessor === undefined) break;
+        if (predecessor === undefined || predecessor.kind !== 'child_agent')
+          break;
         from = predecessor;
       }
       // H4e-b2 decision 2: a run of an open team member's chain is that

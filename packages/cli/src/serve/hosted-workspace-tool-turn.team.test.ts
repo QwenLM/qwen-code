@@ -433,7 +433,9 @@ it('keeps team tools out of a foreground child batch', async () => {
       'call-child',
     ),
   ]);
-  expect(answer).toContain('cannot share a batch with a non-agent tool');
+  expect(answer).toContain(
+    'cannot share a batch with a tool other than agent or workflow',
+  );
   expect(children.record('prompt:call-child')).toBeUndefined();
 });
 
