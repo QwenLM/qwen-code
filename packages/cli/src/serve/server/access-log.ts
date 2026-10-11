@@ -35,9 +35,10 @@ export const ACCESS_LOG_CONTROLLER_LOCAL = 'accessLogController';
 export const ACCESS_LOG_REJECT_LOCAL = 'accessLogPreAuthReject';
 
 /**
- * res.locals keys a route helper sets when it rejects a request with an
- * `{error, code}` body: without these the access log records the status but
- * never the branch that produced it.
+ * res.locals keys an entity that rejects a request with an `{error, code}`
+ * body — a route helper's `error()` or app-level middleware such as the
+ * Hosted Harness contract gate: without these the access log records the
+ * status but never the branch that produced it.
  */
 export const ACCESS_LOG_ERROR_CODE_LOCAL = 'accessLogErrorCode';
 export const ACCESS_LOG_ERROR_REASON_LOCAL = 'accessLogErrorReason';
