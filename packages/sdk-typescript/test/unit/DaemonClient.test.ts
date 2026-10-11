@@ -7288,6 +7288,35 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('sendMidTurnMessagesNow', () => {
+    it('POSTs to the encoded session with client identity', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { requested: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.sendMidTurnMessagesNow('s/1', { clientId: 'client-1' }),
+      ).resolves.toEqual({ requested: true });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s%2F1/mid-turn-messages/send-now',
+      );
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[0]?.headers['content-type']).toBe('application/json');
+      expect(calls[0]?.body).toBe('{}');
+    });
+
+    it('surfaces an older daemon without the route as an error', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.sendMidTurnMessagesNow('s1')).rejects.toThrow();
+    });
+  });
+
   describe('setWorkspaceToolEnabled (#4175 Wave 4 PR 17)', () => {
     it('POSTs the enabled flag and URL-encodes the tool name', async () => {
       const { fetch, calls } = recordingFetch(() =>
