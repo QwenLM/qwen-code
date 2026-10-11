@@ -650,3 +650,147 @@ it('keeps hard budgets when a character reference exceeds the remaining soft spa
   expect(unicode.join('')).toBe('\\😀'.repeat(10));
   checkBudget(unicode);
 });
+
+describe('round-5 review regressions', () => {
+  const walk = (node: Nodes, fn: (node: Nodes) => void) => {
+    fn(node);
+    if ('children' in node) node.children.forEach((child) => walk(child, fn));
+  };
+
+  it('does not throw when a newline back-off meets a surrogate pair', () => {
+    for (const unit of ['utf16', 'utf8'] as const) {
+      const options: MarkdownChunkOptions = { ...defaults, unit };
+      for (const tail of ['😀\nrest', '😀\n    rest']) {
+        const text = '`' + 'x'.repeat(3794) + '`' + tail;
+        const chunks = splitMarkdown(text, options);
+        expect(chunks.join('')).toBe(text);
+        checkBudget(chunks, options);
+      }
+    }
+  });
+
+  it('keeps an intra-line whitespace run from opening an indented code block', () => {
+    for (const unit of ['utf16', 'utf8'] as const) {
+      const options: MarkdownChunkOptions = { ...defaults, unit };
+      const text = 'x'.repeat(3796) + ' '.repeat(8) + 'tail words. '.repeat(40);
+      const chunks = splitMarkdown(text, options);
+      expect(chunks.join('')).toBe(text);
+      expect(parser.parse(chunks[1]!).children[0]!.type).toBe('paragraph');
+      checkBudget(chunks, options);
+    }
+  });
+
+  it('keeps an indented fence intact when a neighbour forces the split', () => {
+    for (const unit of ['utf16', 'utf8'] as const) {
+      const options: MarkdownChunkOptions = { ...defaults, unit };
+      const value = 'x'.repeat(4000);
+      const text = 'short\n\n   ```js\n   ' + value + '\n   ```';
+      const chunks = splitMarkdown(text, options);
+      expect(chunks.join('')).toBe(text);
+      expect(code(chunks[1]!)).toEqual([value]);
+      checkBudget(chunks, options);
+    }
+  });
+
+  it('separates a fence from an info string starting with the fence character', () => {
+    for (const unit of ['utf16', 'utf8'] as const) {
+      const options: MarkdownChunkOptions = { ...defaults, unit };
+      const chunks = splitMarkdown('```~\n```a', options);
+      expect(chunks).toHaveLength(1);
+      expect(code(chunks[0]!)).toEqual(['```a']);
+      const oversized =
+        '```~\n' +
+        ('```a\n' + 'x'.repeat(100) + '\n').repeat(200) +
+        '```\n\nSee [r1].\n\n[r1]: https://docs.example.com/x';
+      const parts = splitMarkdown(oversized, options);
+      expect(parts.length).toBeGreaterThan(1);
+      for (const chunk of parts)
+        expect(nodes(chunk).some((node) => node.type === 'definition')).toBe(
+          true,
+        );
+      checkBudget(parts, options);
+    }
+  });
+
+  it('keeps a fenced block inside an oversized task item as code', () => {
+    for (const unit of ['utf16', 'utf8'] as const) {
+      const options: MarkdownChunkOptions = { ...defaults, unit };
+      const text =
+        '- [x] intro ' +
+        'p'.repeat(3760) +
+        '\n\n      ```js\n      const x = 1;\n      ```\n\n      trailing text here\n';
+      const chunks = splitMarkdown(text, options);
+      let jsCode = 0;
+      for (const chunk of chunks)
+        walk(parser.parse(chunk), (node) => {
+          if (node.type === 'code' && node.lang === 'js') jsCode++;
+          if (node.type === 'text') expect(node.value).not.toContain('```');
+        });
+      expect(jsCode).toBeGreaterThan(0);
+      checkBudget(chunks, options);
+    }
+  });
+
+  it('keeps sibling items after an oversized inline element out of its fences', () => {
+    for (const unit of ['utf16', 'utf8'] as const) {
+      const options: MarkdownChunkOptions = { ...defaults, unit };
+      const text =
+        'Summary line here.\n\n- See ![chart](data:image/png;base64,' +
+        'a'.repeat(24_000) +
+        ') for details.\n- second item that is short\n- third item that is short\n';
+      const chunks = splitMarkdown(text, options);
+      let siblingItems = 0;
+      for (const chunk of chunks)
+        walk(parser.parse(chunk), (node) => {
+          if (node.type === 'code') {
+            expect(node.value).not.toContain('for details');
+            expect(node.value).not.toContain('second item');
+            expect(node.value).not.toContain('third item');
+          }
+          if (node.type === 'listItem') {
+            let itemText = '';
+            walk(node, (child) => {
+              if (child.type === 'text') itemText += child.value;
+            });
+            if (itemText.includes('second item that is short')) siblingItems++;
+          }
+        });
+      expect(siblingItems).toBeGreaterThan(0);
+      checkBudget(chunks, options);
+    }
+  });
+
+  it('degrades to plain text when a fence plus notice cannot fit the budget', () => {
+    for (const unit of ['utf16', 'utf8'] as const) {
+      const options: MarkdownChunkOptions = { ...defaults, unit };
+      for (const run of [1860, 9957]) {
+        const text =
+          'lead ' +
+          '`'.repeat(run) +
+          ' ' +
+          '~'.repeat(run) +
+          ' tail\n\n' +
+          'para '.repeat(200) +
+          '\n\n[ref]: https://docs.example.com/' +
+          'a'.repeat(19_960);
+        const chunks = splitMarkdown(text, options);
+        expect(chunks.length).toBeLessThan(50);
+        expect(chunks.join('')).toBe(text);
+        checkBudget(chunks, options);
+      }
+    }
+  });
+
+  it('splits a huge GFM table without a quadratic parse', () => {
+    const rows = Array.from(
+      { length: 20_000 },
+      (_, i) => `| row${i} | ${'x'.repeat(40)} |`,
+    ).join('\n');
+    const text = `| a | b |\n|---|---|\n${rows}\n`;
+    const start = Date.now();
+    const chunks = splitMarkdown(text, defaults);
+    expect(Date.now() - start).toBeLessThan(10_000);
+    expect(chunks.join('')).toBe(text);
+    checkBudget(chunks, defaults);
+  });
+});

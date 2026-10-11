@@ -134,17 +134,22 @@ function chunkMarkdown(
         if (whitespace) {
           if (size(value.slice(0, end + whitespace)) <= budget)
             end += whitespace;
-          // Backing off matters only for newline-bearing runs, where the
-          // next piece would otherwise open with indentation and re-parse as
-          // a code block; backing off an intra-line run drops a character.
-          else if (/\n/u.test(value.slice(end, end + whitespace))) {
+          // Back off only when the run would open a continuation line with
+          // four spaces or a tab, which re-parses as an indented code block;
+          // backing off a harmless run could cut a character reference.
+          else if (
+            /(?:^|\n)(?: {4}|\t)/u.test(value.slice(end, end + whitespace))
+          ) {
             let before = end;
             while (before && /\s/u.test(value[before - 1]!)) before--;
-            if (before > 1)
-              end = fitEnd(
-                value.slice(0, before),
-                size(value.slice(0, before)) - 1,
-              );
+            if (before > 1) {
+              const head = value.slice(0, before);
+              const reduced = size(head) - 1;
+              // A reduced budget too small for the first code point would
+              // throw out of fitEnd; keep the wider cut instead.
+              if (reduced >= size(String.fromCodePoint(head.codePointAt(0)!)))
+                end = fitEnd(head, reduced);
+            }
           }
         }
       }
@@ -177,12 +182,18 @@ function chunkMarkdown(
   ): string[] {
     const overhead = size(`${notice}${opening}\n\n${closing}`);
     const budget = limit - overhead;
-    if (budget <= 0)
+    // A budget below the smallest wrapped fallback is a caller error.
+    if (budget <= 0 && limit < minimum)
       throw new RangeError('Markdown budget cannot contain a code fence');
     const preferred = Math.min(
       budget,
       Math.max(unit === 'utf8' ? 4 : 2, soft - overhead),
     );
+    // A fence whose wrapper dwarfs its payload degenerates into one
+    // near-empty message per few characters; past a bound the source goes
+    // out as bare text rather than storming wrappers or throwing.
+    if (preferred <= 0 || Math.ceil(size(value) / preferred) > 256)
+      return splitText(value, Math.max(unit === 'utf8' ? 4 : 2, soft));
     const parts: string[] = [];
     let current = '';
     for (const line of value.match(/[^\n]*\n|[^\n]+$/gu) ?? []) {
@@ -216,6 +227,10 @@ function chunkMarkdown(
   }
 
   if (depth >= 16) return plainFallback(text, maxLength);
+  // remark-gfm parses GFM tables in quadratic time; past a bound, split
+  // linearly instead of blocking the channel daemon's send path on the parse.
+  if (size(text) > 100_000)
+    return splitText(text, Math.max(unit === 'utf8' ? 4 : 2, targetLength));
   const tree = parser.parse(text);
   const definitions: Definition[] = [];
   let unfinishedFence = false;
@@ -323,7 +338,11 @@ function chunkMarkdown(
     if (node.type === 'code') {
       const info = `${node.lang ?? ''}${node.meta ? ` ${node.meta}` : ''}`;
       const fence = fenceFor(node.value, info);
-      const opening = fence + info;
+      // A separator keeps an info string starting with the fence character
+      // from extending the opening run beyond the closing fence.
+      const opening = info.startsWith(fence[0]!)
+        ? `${fence} ${info}`
+        : fence + info;
       const normalized = `${opening}\n${node.value}\n${fence}`;
       if (size(normalized) <= limit) {
         // Preserve a closed source block verbatim; close unfinished fences.
@@ -376,12 +395,24 @@ function chunkMarkdown(
           itemText,
         )!;
         const prefix = marker[0];
-        const indent = ' '.repeat(marker[1]!.length);
+        // Continuation lines sit at the item's content column, which for a
+        // task item includes the checkbox (prefix), not just the bullet.
+        const indent = ' '.repeat(prefix.length);
+        const bareIndent = ' '.repeat(marker[1]!.length);
         const body = itemText
           .slice(prefix.length)
           .replace(new RegExp(`^ {1,${indent.length}}`, 'gm'), '');
         const wrap = (piece: string) => {
           const nested = /^(?:[-+*]|\d+[.)])\s/u.test(piece);
+          // A piece that opens a block construct cannot stay on the marker
+          // line (only paragraph text can follow a marker); give it its own
+          // line under the bare bullet and drop the checkbox, which is only
+          // recognized inline.
+          if (!nested && /^(?:`{3,}|~{3,}|#{1,6}(?:\s|$)|>|\|)/u.test(piece))
+            return (
+              `${marker[1]!.trimEnd()}\n${bareIndent}` +
+              piece.replace(/\n/g, `\n${bareIndent}`)
+            );
           const head = nested ? `${prefix.trimEnd()}\n${indent}` : prefix;
           return head + piece.replace(/\n/g, `\n${indent}`);
         };
@@ -389,10 +420,16 @@ function chunkMarkdown(
           body,
           { ...options, targetLength: soft, maxLength: limit },
           depth + 1,
-          (value) => (value ? size(wrap(value)) : 0),
+          // Continuation pieces emit with a leading newline; reserve it.
+          (value) => (value ? size(wrap(value)) + 1 : 0),
         ).map(wrap);
         if (gap) pieces[0] = gap + pieces[0];
-        return pieces;
+        // Continuation pieces of a chunked item open with the marker and no
+        // leading newline; without their own line break a piece can fuse
+        // with the previous piece's last line, breaking a fence or marker.
+        return pieces.map((piece, pieceIndex) =>
+          pieceIndex === 0 ? piece : `\n${piece}`,
+        );
       });
     }
     if (node.type === 'blockquote') {
@@ -481,7 +518,11 @@ function chunkMarkdown(
       const combined = current ? `${current}${joiner}${next}` : next;
       if (current && size(combined) > target) {
         if (index === 0) {
-          if (size(current + joiner) <= target) current += joiner;
+          // A joiner ending in spaces or tabs carries the next block's
+          // indentation; keep it with that block instead of flushing it
+          // with the current chunk.
+          if (size(current + joiner) <= target && !/[ \t]$/u.test(joiner))
+            current += joiner;
           else next = joiner + next;
         }
         flush();
