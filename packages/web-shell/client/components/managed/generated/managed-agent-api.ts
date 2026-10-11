@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grants); archive and unarchive follow their separate retention capabilities after reliable Workspace close; delete supports either L3 idle ACTIVE files Sessions or L2 CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same submit/rename admission rule; it does not gate cancellation. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission with public Session creation: the fixed server-owned profile for the built-in qwen-code agent, and the profile selected by a stored definition's single allowlisted hosted_profile tools entry for a definition-pinned Session. Any caller holding the OPERATOR role may submit later Turns and rename the Session under the same opt-in, while the Workspace registry row stays ACTIVE and still backs the binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session on the frozen execution profile or pinned to a stored definition; Workspace close follows its separate close capability and lifecycle admission; the same caller may cancel a running Turn (its delivery re-checks no grant it needs survives the cancellation), and the Session's own liveness keeps OPERATOR access even when its Workspace's background-exit observation closes some other bound Session; cancel is always allowed for its own running Turn even outside the Workspace files opt-in. A definition-pinned Session keeps its pinned revision's tool profile, model and instructions for its whole life, and a replay of the create command reuses the original pin; a WebShell Session inherits its Workspace's default Workspace selection when the request omits one. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -546,7 +546,7 @@ export interface components {
             /** @default false */
             actions: boolean;
             /**
-             * @description True when the caller may submit later Turns of this Workspace-bound Session or rename it: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE and still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is an active qwen-code Session on the frozen execution profile. Cancelling only aborts work already running, so an OPERATOR caller may cancel a running Turn even when this is false; the capability does not gate cancellation. False for every other caller and for unbound Sessions, which do not use it.
+             * @description True when the caller may submit later Turns of this Workspace-bound Session or rename it: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE and still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session or a Session pinned to a stored definition (both on the Workspace's frozen execution profile). Cancelling only aborts work already running, so an OPERATOR caller may cancel a running Turn even when this is false; the capability does not gate cancellation. False for every other caller and for unbound Sessions, which do not use it.
              * @default false
              */
             workspaceTurns: boolean;
@@ -664,6 +664,8 @@ export interface components {
                 replay_floor_sequence?: number | null;
                 /** Format: int64 */
                 snapshot_through_sequence?: number | null;
+                /** @description Names the definition field that cannot take effect on 409 agent_definition_unsupported; other errors may omit this field. */
+                field?: string;
             };
         };
         /**
