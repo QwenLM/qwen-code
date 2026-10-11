@@ -356,6 +356,23 @@ function store() {
   };
 }
 
+// The journal records a wake turn's settle before the turn's in-memory
+// latch releases (session.active clears in the settle's finally), while the
+// close route gates on the latch — wait out the gap or DELETE can still
+// race 409 hosted_turn_active under load.
+async function waitForActiveTurnRelease(server: Server, clientId: string) {
+  await vi.waitFor(
+    async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(false);
+    },
+    { timeout: 15_000, interval: 100 },
+  );
+}
+
 async function mcpApp(unknownConfigure = false, serverIds = ['demo']) {
   const requests: ManagedMcpControl[] = [];
   const replies = new Map<string, ManagedMcpOperationView>();
@@ -1906,6 +1923,7 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 15_000, interval: 100 },
     );
+    await waitForActiveTurnRelease(server, loaded.body.clientId as string);
     expect(
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
@@ -1957,6 +1975,7 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 15_000, interval: 100 },
     );
+    await waitForActiveTurnRelease(server, loaded.body.clientId as string);
     expect(
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
