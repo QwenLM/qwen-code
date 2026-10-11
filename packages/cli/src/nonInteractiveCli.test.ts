@@ -3514,6 +3514,123 @@ describe('runNonInteractive', () => {
     expect(finalize).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { name: 'success', jsonSchema: undefined, exitCode: 0 },
+    {
+      name: 'missing structured output',
+      jsonSchema: { type: 'object' },
+      exitCode: 1,
+    },
+  ])(
+    'emits $name before pending memory tasks settle, but waits before returning',
+    async ({ jsonSchema, exitCode }) => {
+      setupMetricsMock();
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      (mockConfig.getJsonSchema as Mock).mockReturnValue(jsonSchema);
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Answer' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+      let resolveMemory!: (count: number) => void;
+      let rejectMemory!: (error: Error) => void;
+      const firstMemoryTask = new Promise<number>((resolve) => {
+        resolveMemory = resolve;
+      });
+      const secondMemoryTask = new Promise<number>((_resolve, reject) => {
+        rejectMemory = reject;
+      });
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValueOnce([
+        firstMemoryTask,
+        secondMemoryTask,
+      ]);
+      const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      const emitResult = vi.spyOn(adapter, 'emitResult');
+      const returned = vi.fn();
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-memory-order',
+        { adapter },
+      ).then((code) => {
+        returned();
+        return code;
+      });
+
+      try {
+        await vi.waitFor(() => expect(emitResult).toHaveBeenCalledOnce());
+        expect(emitResult).toHaveBeenCalledWith(
+          expect.objectContaining({ isError: exitCode !== 0 }),
+        );
+        expect(returned).not.toHaveBeenCalled();
+        resolveMemory(1);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(returned).not.toHaveBeenCalled();
+        rejectMemory(new Error('background memory task failed'));
+        expect(await run).toBe(exitCode);
+        expect(emitResult).toHaveBeenCalledOnce();
+      } finally {
+        resolveMemory(0);
+        rejectMemory(new Error('release pending test task'));
+        await run;
+      }
+    },
+  );
+
+  it('waits for pending memory tasks when terminal result delivery fails', async () => {
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+    let resolveMemory!: (count: number) => void;
+    const memoryTask = new Promise<number>((resolve) => {
+      resolveMemory = resolve;
+    });
+    mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValueOnce([
+      memoryTask,
+    ]);
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+    const deliveryError = new Error('terminal result write failed');
+    const emitResult = vi
+      .spyOn(adapter, 'emitResult')
+      .mockImplementation(() => {
+        throw deliveryError;
+      });
+    const returned = vi.fn();
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-memory-delivery-failure',
+      { adapter },
+    ).catch((error: unknown) => {
+      returned();
+      return error;
+    });
+
+    try {
+      await vi.waitFor(() => expect(emitResult).toHaveBeenCalledOnce());
+      expect(returned).not.toHaveBeenCalled();
+      resolveMemory(1);
+      expect(await run).toBe(deliveryError);
+    } finally {
+      resolveMemory(0);
+      await run;
+    }
+  });
+
   it('should handle a single tool call and respond', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerLlmStreamEvent = {
@@ -9390,12 +9507,35 @@ describe('runNonInteractive', () => {
         responseParts: [{ text: 'ok' }],
       });
 
-      const exitCode = await runNonInteractive(
+      let resolveMemory!: (count: number) => void;
+      const memoryTask = new Promise<number>((resolve) => {
+        resolveMemory = resolve;
+      });
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValueOnce([
+        memoryTask,
+      ]);
+      const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      const emitResult = vi.spyOn(adapter, 'emitResult');
+      const returned = vi.fn();
+      const run = runNonInteractive(
         mockConfig,
         mockSettings,
         'Watch the logs',
         'prompt-drain-struct',
-      );
+        { adapter },
+      ).then((code) => {
+        returned();
+        return code;
+      });
+
+      try {
+        await vi.waitFor(() => expect(emitResult).toHaveBeenCalledOnce());
+        expect(returned).not.toHaveBeenCalled();
+      } finally {
+        resolveMemory(1);
+        await run;
+      }
+      const exitCode = await run;
 
       // The drain turn captured structured_output → success exit, not the
       // "Model produced plain text..." failure path.

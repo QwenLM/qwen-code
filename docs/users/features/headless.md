@@ -231,6 +231,8 @@ Output (streaming as events occur):
 
 When combined with `--include-partial-messages`, additional stream events are emitted in real-time (message_start, content_block_delta, etc.) for real-time UI updates.
 
+At the normal turn-completion boundary, JSON and stream-JSON results are emitted before waiting for pending managed memory tasks. The run still waits for those tasks before returning, so a one-shot process may remain alive after its `result`, and a persistent stream-JSON session may wait before processing the next message. This preserves the existing pre-exit wait for memory writes; no timeout is introduced.
+
 For JSON and stream-JSON output, textual `tool_result.content` values are
 bounded to 65,536 UTF-8 bytes after JSON string serialization. Oversized
 values are emitted as deterministic head/tail previews. The same bound applies
