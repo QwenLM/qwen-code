@@ -1643,6 +1643,35 @@ const timer = setInterval(() => {
     ).toBe(true);
   });
 
+  it('refuses an unfittable confirmation whose envelope exceeds the wire limit', async () => {
+    await begin();
+    const ref = reference(
+      await prepare('run_shell_command', { command: 'echo hello\n' }, 'exec'),
+    );
+    const limit = managedRuntimeProviderLimit('confirmation');
+    const mcpConfirmation: Record<string, unknown> = {
+      type: 'mcp',
+      title: 'Call Tool',
+      serverName: 'mcp-server',
+      toolName: '',
+      toolDisplayName: 'Tool',
+    };
+    const padding = limit - Buffer.byteLength(JSON.stringify(mcpConfirmation));
+    mcpConfirmation.toolName = 'x'.repeat(padding);
+    expect(Buffer.byteLength(JSON.stringify(mcpConfirmation))).toBe(limit);
+    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockReturnValue(
+      mcpConfirmation as unknown as ReturnType<
+        ManagedToolRuntime['confirmation']
+      >,
+    );
+    const response = await post({ kind: 'confirmation', reference: ref });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      code: 'managed_runtime_provider_too_large',
+      error: 'Managed Runtime provider response exceeds its body size limit.',
+    });
+  });
+
   it('refuses an unfitted manifest whose envelope exceeds the wire limit', async () => {
     await acquire();
     const manifest = await control<ReturnType<ManagedToolRuntime['manifest']>>({

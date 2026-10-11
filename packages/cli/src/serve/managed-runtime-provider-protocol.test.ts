@@ -1304,6 +1304,30 @@ describe('managed-runtime-provider/1', () => {
         parseManagedRuntimeProviderResult(confirmation, infoDetails, session),
       ).toEqual(infoDetails);
     });
+
+    it('leaves an oversized mcp confirmation untouched because variant-required fields cannot be cut', () => {
+      const mcpDetails = {
+        type: 'mcp',
+        title: 'Call Tool',
+        serverName: 'mcp-server',
+        toolName: 'tool_' + 'x'.repeat(budget * 2),
+        toolDisplayName: 'Tool',
+      };
+      const initial = JSON.stringify(mcpDetails);
+      const fitted = fitManagedRuntimeProviderResult(
+        confirmation,
+        mcpDetails,
+        budget,
+      );
+      expect(fitted).toBe(mcpDetails);
+      expect(JSON.stringify(mcpDetails)).toBe(initial);
+      expect(
+        Buffer.byteLength(JSON.stringify(mcpDetails), 'utf8'),
+      ).toBeGreaterThan(budget);
+      expect(
+        parseManagedRuntimeProviderResult(confirmation, mcpDetails, session),
+      ).toEqual(mcpDetails);
+    });
   });
 });
 
