@@ -40,6 +40,13 @@ public interface RuntimeBindingRepository {
     RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
             RuntimeSessionRecord expected);
 
+    /** Atomically releases one original Session and its holder under a live drain claim and persisted stop receipt. */
+    default RuntimeSessionRecord completeStoppedSessionRelease(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected, RuntimeBindingRecord claim) {
+        throw new RuntimeBrokerException(501, "runtime_stopped_release_unavailable",
+                "Runtime repository does not support stopped Session release", false);
+    }
+
     /**
      * Moves the Session to RELEASING in one decision with the no-active-
      * execution check, under the same Session row lock admission takes, so
