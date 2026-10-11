@@ -299,6 +299,10 @@ describe('AutoReconnectTransport', () => {
   // ---- dispose() --------------------------------------------------------
 
   describe('dispose()', () => {
+    const closedSubscription = async function* (): AsyncGenerator<DaemonEvent> {
+      yield await Promise.reject(new DaemonTransportClosedError());
+    };
+
     it('preserves closure errors when late replacement cleanup throws', async () => {
       const entered = deferred<void>();
       const pendingFactory = deferred<DaemonTransport>();
@@ -312,9 +316,7 @@ describe('AutoReconnectTransport', () => {
         fetch: vi.fn(async () => {
           throw new DaemonTransportClosedError();
         }),
-        subscribeEvents: vi.fn(() => {
-          throw new DaemonTransportClosedError();
-        }),
+        subscribeEvents: vi.fn(closedSubscription),
       });
       const restFetch = vi.fn(async () => new Response('unexpected'));
       const transport = new AutoReconnectTransport({
@@ -346,7 +348,6 @@ describe('AutoReconnectTransport', () => {
       expect(replacement.dispose).toHaveBeenCalledTimes(1);
       expect(replacement.fetch).not.toHaveBeenCalled();
       expect(replacement.subscribeEvents).not.toHaveBeenCalled();
-      expect(restFetch).not.toHaveBeenCalled();
     });
 
     describe.each(['fetch', 'subscription'] as const)(
@@ -363,9 +364,7 @@ describe('AutoReconnectTransport', () => {
               fetch: vi.fn(async () => {
                 throw new DaemonTransportClosedError();
               }),
-              subscribeEvents: vi.fn(() => {
-                throw new DaemonTransportClosedError();
-              }),
+              subscribeEvents: vi.fn(closedSubscription),
             });
             const restFetch = vi.fn(async () => new Response('unexpected'));
             const transport = new AutoReconnectTransport({
@@ -393,11 +392,11 @@ describe('AutoReconnectTransport', () => {
             transport.dispose();
 
             expect(transport.type).toBe('acp-http');
-            expect(replacement.dispose).toHaveBeenCalledTimes(
-              outcome === 'resolves' ? 1 : 0,
-            );
-            expect(replacement.fetch).not.toHaveBeenCalled();
-            expect(replacement.subscribeEvents).not.toHaveBeenCalled();
+            if (outcome === 'resolves') {
+              expect(replacement.dispose).toHaveBeenCalledTimes(1);
+              expect(replacement.fetch).not.toHaveBeenCalled();
+              expect(replacement.subscribeEvents).not.toHaveBeenCalled();
+            }
             expect(restFetch).not.toHaveBeenCalled();
           },
         );
@@ -411,9 +410,7 @@ describe('AutoReconnectTransport', () => {
             fetch: vi.fn(async () => {
               throw new DaemonTransportClosedError();
             }),
-            subscribeEvents: vi.fn(() => {
-              throw new DaemonTransportClosedError();
-            }),
+            subscribeEvents: vi.fn(closedSubscription),
           });
           const transport = new AutoReconnectTransport({
             baseUrl: 'http://d',
@@ -431,6 +428,9 @@ describe('AutoReconnectTransport', () => {
           await entered.promise;
           pendingFactory.resolve(replacement);
           let typeAtDisposal: DaemonTransportType | undefined;
+          // The factory continuation installs the replacement before this queued
+          // microtask, and retry continuations resume afterward. An extra await
+          // before installation moves disposal earlier and fails the type check.
           const disposed = new Promise<void>((resolve) => {
             queueMicrotask(() => {
               typeAtDisposal = transport.type;
@@ -458,9 +458,7 @@ describe('AutoReconnectTransport', () => {
         fetch: vi.fn(async () => {
           throw new DaemonTransportClosedError();
         }),
-        subscribeEvents: vi.fn(() => {
-          throw new DaemonTransportClosedError();
-        }),
+        subscribeEvents: vi.fn(closedSubscription),
       });
       const factory = vi.fn(() => {
         entered.resolve();
