@@ -246,15 +246,6 @@ public final class ToolPublicationStore {
             require(equalHash(suppliedHash, (String) current.get("token_hash"))
                     && "OPEN".equals(current.get("state")) && current.get("expires_at") != null,
                     "Publication grant changed or expired");
-            // The grant expiry is min(writer lease, activation horizon), so a
-            // real activation lapse expires the grant on the same clock and
-            // this check runs before the activation deferral below.
-            if (((Number) current.get("expires_at")).longValue() <= nowEpoch) {
-                if (deferActivationLapse) {
-                    throw new ActivationLapsedException();
-                }
-                require(false, "Publication grant changed or expired");
-            }
         }
         require(row.digest().equals(current.get("binding_digest"))
                 && row.binding().equals(current.get("binding_json"))
@@ -267,6 +258,15 @@ public final class ToolPublicationStore {
                 && ((Number) head.get("writer_live")).intValue() == 1 && "READY".equals(head.get("recovery_status"))
                 && ((Number) head.get("activation_epoch")).longValue() == binding.get("activationEpoch").longValue(),
                 "Original Session owner is fenced");
+        // The grant expiry is min(writer lease, activation horizon), so a
+        // real activation lapse expires the grant on the same clock and
+        // this check runs before the activation deferral below.
+        if (access != Access.SETTLE && ((Number) current.get("expires_at")).longValue() <= nowEpoch) {
+            if (deferActivationLapse) {
+                throw new ActivationLapsedException();
+            }
+            require(false, "Publication grant changed or expired");
+        }
         long activationUntil;
         // The stamp says which journal revision the columns were written
         // from; a pre-V36 binary's commit bumps journal_revision without

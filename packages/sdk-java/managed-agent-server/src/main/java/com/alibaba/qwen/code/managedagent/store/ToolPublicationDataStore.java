@@ -537,6 +537,11 @@ public final class ToolPublicationDataStore {
 
     private static ApiException permanentVerificationFailure(RuntimeException error) {
         if (error instanceof ApiException api) {
+            if (List.of("managed_tool_publication_busy", "managed_tool_publication_claim_lost",
+                    "managed_tool_publication_claim_expired", "managed_tool_publication_operation_expired")
+                    .contains(api.getCode())) {
+                return null;
+            }
             return api.getStatus().is4xxClientError() || api.getStatus() == HttpStatus.INSUFFICIENT_STORAGE ? api : null;
         }
         if (error instanceof IllegalArgumentException) {
@@ -598,9 +603,7 @@ public final class ToolPublicationDataStore {
             }
             boolean liveClaim = rows.getFirst().claimUntil() != null && rows.getFirst().claimUntil().after(current);
             ApiException failure = permanentVerificationFailure(error);
-            if (liveClaim && failure != null && !List.of("managed_tool_publication_busy", "managed_tool_publication_claim_lost",
-                    "managed_tool_publication_claim_expired", "managed_tool_publication_operation_expired")
-                    .contains(failure.getCode())) {
+            if (liveClaim && failure != null) {
                 return recordVerificationFailure(task.scope(), task.publicationId(), task.operationId(), failure);
             }
             deferVerification(task.scope(), task.publicationId(), task.operationId(), current,

@@ -5,6 +5,9 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITE
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.spy;
 
 import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
@@ -35,6 +38,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.springframework.http.HttpStatus;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -438,6 +443,51 @@ public class ToolPublicationAsyncVerificationTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"true,managed_tool_publication_busy", "false,managed_tool_publication_busy",
+            "true,managed_tool_publication_claim_lost", "false,managed_tool_publication_claim_lost",
+            "true,managed_tool_publication_claim_expired", "false,managed_tool_publication_claim_expired",
+            "true,managed_tool_publication_operation_expired", "false,managed_tool_publication_operation_expired"})
+    void transientVerificationErrorsRetryBeforeAndAfterClaim(boolean beforeClaim, String code) {
+        publish("retry", 0, "bytes");
+        var error = new ApiException(HttpStatus.CONFLICT, code, "Temporary contention");
+        if (beforeClaim) {
+            var grants = spy(fixture.store);
+            doThrow(error).doCallRealMethod().when(grants)
+                    .producerVerificationBindingLocked(anyString(), anyString(), anyString(), anyString());
+            data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
+                    Duration.ofSeconds(10), Duration.ofSeconds(2),
+                    new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
+        } else {
+            bucket.readFailure = error;
+        }
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("retry").path("state").asText()).isEqualTo("PENDING");
+        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM qwen_tool_publication", String.class))
+                .isEqualTo("retry");
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+                Timestamp.class)).isNotNull();
+        assertThat(data.verifyNextOperation()).isFalse();
+        due("retry");
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("retry").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(bucket.puts).hasValue(1);
+    }
+
+    @Test
+    void lostSlotBeforeClaimCanRetryAfterTheSlotIsRestored() {
+        publish("slot", 0, "bytes");
+        fixture.jdbc.update("UPDATE qwen_tool_publication SET active_operation_id = 'other'");
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("slot").path("state").asText()).isEqualTo("PENDING");
+        assertThat(bucket.opens).hasValue(0);
+        fixture.jdbc.update("UPDATE qwen_tool_publication SET active_operation_id = 'slot'");
+        due("slot");
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("slot").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(bucket.puts).hasValue(1);
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"temporary", "denied"})
     void expiredAttemptDefersInsteadOfImmediatelyReclaiming(String failure) throws Exception {
         publish("retry", 0, "bytes");
@@ -760,18 +810,27 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(status("finish").path("state").asText()).isEqualTo("FAILED");
     }
 
-    @Test
-    void fencedAcceptedWorkFailsWithoutReadingAndStatusDoesNotReviveOrRenewIt() {
+    @ParameterizedTest
+    @ValueSource(strings = {"lease", "takeover"})
+    void fencedAcceptedWorkFailsWithoutReadingAndStatusDoesNotReviveOrRenewIt(String cause) {
         publish("fenced", 0, "bytes");
         Timestamp deadline = fixture.jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation",
                 Timestamp.class);
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = ?",
-                Timestamp.valueOf("2000-01-01 00:00:00"));
+        Timestamp expired = Timestamp.valueOf("2000-01-01 00:00:00");
+        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = ?", expired);
+        fixture.jdbc.update("UPDATE qwen_tool_publication SET expires_at = ?", expired.getTime());
+        if ("takeover".equals(cause)) {
+            fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_id = 'other',"
+                    + " writer_generation = writer_generation + 1, writer_lease_until = ?",
+                    new Timestamp(System.currentTimeMillis() + 60000));
+        }
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
         }
         assertThat(status("fenced").path("state").asText()).isEqualTo("FAILED");
         assertThat(bucket.opens).hasValue(0);
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+                Timestamp.class)).isNull();
         for (int i = 0; i < 10; i++) status("fenced");
         assertThat(fixture.jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation", Timestamp.class))
                 .isEqualTo(deadline);
