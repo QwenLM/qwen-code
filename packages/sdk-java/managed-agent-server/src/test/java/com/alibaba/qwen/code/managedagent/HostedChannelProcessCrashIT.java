@@ -303,6 +303,12 @@ class HostedChannelProcessCrashIT {
                     assertThat(support.claimRows(tenant, channelId))
                             .as("the cold start mints no second claim")
                             .isEqualTo(1);
+                    assertThat(support.deliveryProjection(tenant, sessionId,
+                            deliveryId).get("delivery_state"))
+                            .as("the cold start replays nothing")
+                            .isEqualTo("unknown");
+                    assertThat(support.ledger(tenant, channelId, deliveryId)
+                            .get("state")).isEqualTo("unknown");
                 } finally {
                     if (driver.isAlive()) {
                         driver.destroyForcibly();
@@ -336,6 +342,7 @@ class HostedChannelProcessCrashIT {
                 assertThat(results.path("sends"))
                         .as("at most one physical send across the bounce")
                         .hasSize(1);
+                HostedChannelGateSupport.assertSendsTo(results);
                 assertThat(HostedChannelGateSupport.relayCount(results,
                         "receipt", true)).isEqualTo(1);
                 String sessionId = support.channelSession(tenant, channelId);
@@ -373,8 +380,10 @@ class HostedChannelProcessCrashIT {
                         deliveryId).get("delivery_state"))
                         .as("the lease settles the unknown outcome")
                         .isEqualTo("unknown");
-                assertThat(support.resultsOf(caseDir, "pull-terminate-1")
-                        .path("sends")).hasSize(1);
+                JsonNode terminated = support.resultsOf(caseDir,
+                        "pull-terminate-1");
+                assertThat(terminated.path("sends")).hasSize(1);
+                HostedChannelGateSupport.assertSendsTo(terminated);
                 JsonNode cold = support.drive(caseDir, "resume-cold", base);
                 HostedChannelGateSupport.assertSendsEmpty(cold,
                         "a cold adapter never auto-resends");
@@ -417,6 +426,7 @@ class HostedChannelProcessCrashIT {
                 }
                 JsonNode results = support.resultsOf(caseDir, "pull-1");
                 assertThat(results.path("sends")).hasSize(1);
+                HostedChannelGateSupport.assertSendsTo(results);
                 JsonNode record = support.deliveryRecord(tenant, sessionId,
                         deliveryId);
                 assertThat(record.path("run").path("delivery").path("state")

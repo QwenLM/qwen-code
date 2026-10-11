@@ -681,11 +681,12 @@ class HostedChannelFaultGatesIT {
                 assertThat(HostedChannelGateSupport.relayCount(results,
                         "inbound", true)).as("the lost admission fired")
                         .isEqualTo(1);
-                assertThat(HostedChannelGateSupport.relayCount(results,
-                        "inbound", false))
+                assertThat(HostedChannelGateSupport.relayCountOk(results,
+                        "inbound"))
                         .as("the adapter re-drove after the loss")
                         .isGreaterThanOrEqualTo(1);
                 assertThat(results.path("sends")).hasSize(1);
+                HostedChannelGateSupport.assertSendsTo(results);
                 String sessionId = support.channelSession(tenant, channelId);
                 Map<String, Object> route = support.routeRow(tenant,
                         channelId);
@@ -706,8 +707,9 @@ class HostedChannelFaultGatesIT {
                 assertThat(HostedChannelGateSupport.relayCount(results, "claim",
                         true)).as("the carrying claim answer was destroyed")
                         .isEqualTo(1);
-                assertThat(HostedChannelGateSupport.relayCount(results, "claim",
-                        false)).as("the adapter kept re-asking the outbox")
+                assertThat(HostedChannelGateSupport.relayCountOk(results,
+                        "claim"))
+                        .as("the adapter kept re-asking the outbox")
                         .isGreaterThanOrEqualTo(2);
                 HostedChannelGateSupport.assertSendsEmpty(results,
                         "a lost dispatch answer never sends");
@@ -737,11 +739,12 @@ class HostedChannelFaultGatesIT {
                         Map.of("dropVerb", "receipt"));
                 assertThat(HostedChannelGateSupport.relayCount(results,
                         "receipt", true)).isEqualTo(1);
-                assertThat(HostedChannelGateSupport.relayCount(results,
-                        "receipt", false))
+                assertThat(HostedChannelGateSupport.relayCountOk(results,
+                        "receipt"))
                         .as("the report re-drove, never the send")
                         .isGreaterThanOrEqualTo(1);
                 assertThat(results.path("sends")).hasSize(1);
+                HostedChannelGateSupport.assertSendsTo(results);
                 String sessionId = support.channelSession(tenant, channelId);
                 String deliveryId = results.path("admissionInputIds").get(0)
                         .asText() + ":reply";
@@ -783,8 +786,9 @@ class HostedChannelFaultGatesIT {
                 support.drive(caseDir, "pull", base, Map.of("expectDelivery",
                         false));
                 JsonNode pull = support.resultsOf(caseDir, "pull-1");
-                assertThat(HostedChannelGateSupport.relayCount(pull, "claim",
-                        false)).as("the outbox pull reached the control plane")
+                assertThat(HostedChannelGateSupport.relayCountOk(pull,
+                        "claim"))
+                        .as("the outbox pull reached the control plane")
                         .isGreaterThanOrEqualTo(1);
                 HostedChannelGateSupport.assertSendsEmpty(pull,
                         "a settled cancellation never sends");
@@ -817,6 +821,7 @@ class HostedChannelFaultGatesIT {
                     JsonNode results = support.resultsOf(caseDir,
                             "pull-parked-1");
                     assertThat(results.path("sends")).hasSize(1);
+                    HostedChannelGateSupport.assertSendsTo(results);
                     JsonNode record = support.deliveryRecord(tenant, sessionId,
                             deliveryId);
                     assertThat(record.path("run").path("delivery")
@@ -869,8 +874,10 @@ class HostedChannelFaultGatesIT {
                     assertThat(support.deliveryProjection(tenant, sessionId,
                             deliveryId).get("delivery_state"))
                             .isEqualTo("unknown");
-                    assertThat(support.resultsOf(caseDir, "pull-terminate-1")
-                            .path("sends")).hasSize(1);
+                    JsonNode terminated = support.resultsOf(caseDir,
+                            "pull-terminate-1");
+                    assertThat(terminated.path("sends")).hasSize(1);
+                    HostedChannelGateSupport.assertSendsTo(terminated);
                 } finally {
                     if (driver.isAlive()) {
                         driver.destroyForcibly();
@@ -993,6 +1000,7 @@ class HostedChannelFaultGatesIT {
                         Map.of("smtpMode", "accept-timeout"));
                 assertThat(results.path("sends"))
                         .as("the ambiguous send is never retried").hasSize(1);
+                HostedChannelGateSupport.assertSendsTo(results);
                 assertThat(results.path("receipts").get(0).path("outcome")
                         .asText()).isEqualTo("unknown");
                 String sessionId = support.channelSession(tenant, channelId);
@@ -1039,6 +1047,7 @@ class HostedChannelFaultGatesIT {
                 JsonNode terminated = support.resultsOf(caseDir,
                         "pull-terminate-1");
                 assertThat(terminated.path("sends")).hasSize(1);
+                HostedChannelGateSupport.assertSendsTo(terminated);
                 Map<String, Object> originalRow = support.ledger(tenant,
                         channelId, deliveryId);
                 JsonNode cold = support.drive(caseDir, "resume-cold", base);
@@ -1054,6 +1063,7 @@ class HostedChannelFaultGatesIT {
                 assertThat(resent.path("resent").path("resentFrom").asText())
                         .isEqualTo(deliveryId);
                 assertThat(resent.path("sends")).hasSize(1);
+                HostedChannelGateSupport.assertSendsTo(resent);
                 assertThat(resent.path("sends").get(0).path("messageId")
                         .asText()).isNotEqualTo(terminated.path("sends").get(0)
                         .path("messageId").asText());
@@ -1103,6 +1113,7 @@ class HostedChannelFaultGatesIT {
                     assertThat(settled.path("sends"))
                             .as("recovery re-reads identity; nothing re-sends")
                             .hasSize(1);
+                    HostedChannelGateSupport.assertSendsTo(settled);
                     JsonNode record = support.deliveryRecord(tenant, sessionId,
                             deliveryId);
                     assertThat(record.path("segments")).hasSize(1);
@@ -1162,8 +1173,9 @@ class HostedChannelFaultGatesIT {
                     assertThat(modelCallsFor(fault))
                             .as("the replay never re-runs the turn")
                             .isEqualTo(1);
-                    assertThat(support.drive(caseDir, "pull", base)
-                            .path("sends")).hasSize(1);
+                    JsonNode replayed = support.drive(caseDir, "pull", base);
+                    assertThat(replayed.path("sends")).hasSize(1);
+                    HostedChannelGateSupport.assertSendsTo(replayed);
                     assertThat(((Number) support.routeProjection(tenant,
                             sessionId).get("revision")).intValue())
                             .isEqualTo(1);
@@ -1177,6 +1189,7 @@ class HostedChannelFaultGatesIT {
                             Map.of("exitAfterFirstReceiptError", true));
                     assertThat(first.path("receiptErrors").asInt()).isEqualTo(1);
                     assertThat(first.path("sends")).hasSize(1);
+                    HostedChannelGateSupport.assertSendsTo(first);
                     assertThat(output).contains(
                             "java.sql.SQLException: FG7B_delivery-commit");
                     String sessionId = support.channelSession(tenant,

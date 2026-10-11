@@ -21,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 // harness fixtures stay per-class, the FG6 self-containment convention.
 class HostedChannelGateSupport {
     private static final ObjectMapper JSON = new ObjectMapper();
+    static final String SENDER = "alice@fg7.fixture";
     private final JdbcTemplate jdbc;
     private final String node;
     private final Path repoRoot;
@@ -141,6 +142,15 @@ class HostedChannelGateSupport {
         assertThat(results.path("sends").isEmpty()).as(label).isTrue();
     }
 
+    /** Every physical send of a gate went to the scripted recipient. */
+    static void assertSendsTo(JsonNode results) {
+        for (JsonNode send : results.path("sends")) {
+            assertThat(send.path("to").asText())
+                    .as("the reply went to the scripted recipient")
+                    .contains(SENDER);
+        }
+    }
+
     static String safeRead(Path file) {
         try {
             return Files.readString(file);
@@ -154,6 +164,22 @@ class HostedChannelGateSupport {
         for (JsonNode relay : results.path("relays")) {
             if (verb.equals(relay.path("verb").asText())
                     && relay.path("dropped").asBoolean() == dropped) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * A positive control counts only healthy answers: the proxy records
+     * the status of every relay, and a 4xx/5xx is not adapter liveness.
+     */
+    static int relayCountOk(JsonNode results, String verb) {
+        int count = 0;
+        for (JsonNode relay : results.path("relays")) {
+            if (verb.equals(relay.path("verb").asText())
+                    && !relay.path("dropped").asBoolean()
+                    && relay.path("status").asInt() < 400) {
                 count++;
             }
         }
@@ -174,7 +200,7 @@ class HostedChannelGateSupport {
         base.put("internalUrl", "http://127.0.0.1:" + internalPort);
         base.put("stateDir", stateDir.toString());
         base.put("mailboxAddress", "agent@fg7.fixture");
-        base.put("sender", "alice@fg7.fixture");
+        base.put("sender", SENDER);
         base.put("subject", "fg7-" + fault);
         base.put("bodyText", "please answer fg7-" + fault);
         return base;

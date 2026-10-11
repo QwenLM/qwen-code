@@ -3,7 +3,9 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.service.ManagedChannelService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -91,21 +93,30 @@ public final class HostedChannelCrashFixtureMain {
         HttpServer control = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", 0), 0);
         control.createContext("/control/reconcile", exchange -> {
-            spring.getBean(ManagedChannelService.class).reconcile();
-            exchange.sendResponseHeaders(204, -1);
+            try {
+                spring.getBean(ManagedChannelService.class).reconcile();
+                exchange.sendResponseHeaders(204, -1);
+            } catch (RuntimeException failure) {
+                respondFailure(exchange, failure);
+            }
             exchange.close();
         });
         control.createContext("/control/expire", exchange -> {
-            String query = exchange.getRequestURI().getQuery();
-            Map<String, String> params = new HashMap<>();
-            for (String entry : query.split("&")) {
-                String[] pair = entry.split("=", 2);
-                params.put(pair[0], pair.length > 1 ? pair[1] : "");
+            try {
+                String query = exchange.getRequestURI().getQuery();
+                Map<String, String> params = new HashMap<>();
+                for (String entry : query.split("&")) {
+                    String[] pair = entry.split("=", 2);
+                    params.put(pair[0], pair.length > 1 ? pair[1] : "");
+                }
+                jdbc.update(
+                        "UPDATE qwen_managed_channel_claim SET claimed_at = 0"
+                                + " WHERE tenant_id = ? AND channel_id = ?",
+                        params.get("tenant"), params.get("channel"));
+                exchange.sendResponseHeaders(204, -1);
+            } catch (RuntimeException failure) {
+                respondFailure(exchange, failure);
             }
-            jdbc.update("UPDATE qwen_managed_channel_claim SET claimed_at = 0"
-                    + " WHERE tenant_id = ? AND channel_id = ?",
-                    params.get("tenant"), params.get("channel"));
-            exchange.sendResponseHeaders(204, -1);
             exchange.close();
         });
         control.start();
@@ -117,5 +128,15 @@ public final class HostedChannelCrashFixtureMain {
         Files.move(ready, root.resolve("ready.json"),
                 StandardCopyOption.ATOMIC_MOVE,
                 StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    // A generic 204 would read as success while the fix is in this log; the
+    // IT's control() helper surfaces the body as the failure message.
+    private static void respondFailure(HttpExchange exchange,
+            RuntimeException failure) throws IOException {
+        byte[] body = String.valueOf(failure)
+                .getBytes(StandardCharsets.UTF_8);
+        exchange.sendResponseHeaders(500, body.length);
+        exchange.getResponseBody().write(body);
     }
 }
