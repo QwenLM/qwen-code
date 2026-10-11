@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,6 +48,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class HostedPublicWorkspaceIT {
     private static final String TOKEN = "g0-local-fixture";
@@ -750,7 +752,9 @@ class HostedPublicWorkspaceIT {
                 .path("error").path("code").asText()).isEqualTo("unsupported_feature");
         Map<String, Object> unsupportedAgent = new java.util.LinkedHashMap<>(denied);
         unsupportedAgent.put("agent_id", "another-agent");
-        assertUnavailable(request("POST", "/v1/agents/sessions", unsupportedAgent, "unsupported-agent", "actor", 409));
+        // D8b: only qwen-code or a stored definition's agent may be admitted.
+        assertThat(request("POST", "/v1/agents/sessions", unsupportedAgent, "unsupported-agent", "actor", 404)
+                .path("error").path("code").asText()).isEqualTo("agent_not_found");
         Map<String, Object> unknown = new java.util.LinkedHashMap<>(denied);
         unknown.put("workspace", Map.of("workspace_id", "unknown"));
         request("POST", "/v1/agents/sessions", unknown, "unknown", "actor", 404);
@@ -871,6 +875,8 @@ class HostedPublicWorkspaceIT {
             Map<String, Object> body = web ? Map.of("sessionId", session, "actionId", id, "idempotencyKey", id,
                     "requestId", "d6b-action", "response", response) : response;
             assertThat(request("POST", route, body, id, "reader", 403).at("/error/code").asText()).isEqualTo("action_forbidden");
+            // The live Harness retains this approval while the dispatcher's attachment cache is cold.
+            ((Map<?, ?>) ReflectionTestUtils.getField(spring.getBean(HarnessConnector.class), "attachments")).clear();
             // The first approval of each session is answered by a second
             // OPERATOR who is not the Session owner (R1's handoff); the
             // rest by the owner, so both responder paths stay covered. The
