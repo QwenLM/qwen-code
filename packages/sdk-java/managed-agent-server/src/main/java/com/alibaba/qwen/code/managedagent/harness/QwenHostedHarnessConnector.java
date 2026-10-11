@@ -576,15 +576,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void runMessageOperation(String tenantId, String sessionId,
-            Map<String, Object> body) {
+    public Map<String, Object> runMessageOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
         try {
             // A receipt admits an input and wakes a turn in its target, and
             // the consume reconciliation reloads a Session whose wake pump
             // then runs the waiting input: both drive new work, so they take
             // the automation relay's Workspace checks. The sender's own
-            // steps are journal writes. Every verb re-attaches a Session a
-            // prior control-plane process attached, since the relay's
+            // steps are journal writes, and H4e-b3's command verbs (a body
+            // naming commandId) commit no input and never start work, so
+            // they keep the same journal admission as the sender's steps
+            // without the Workspace view. Every verb re-attaches a Session
+            // a prior control-plane process attached, since the relay's
             // ledger outlives that process.
             Object kind = body.get("kind");
             if ("stop".equals(kind)) {
@@ -592,15 +595,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 // load can adopt a new generation, which closes the old one.
                 HarnessSessionRef ref = messageStopAttachment(tenantId,
                         sessionId);
-                client().runMessageOperation(ref, body);
-                return;
+                return client().runMessageOperation(ref, body);
             }
             if ("receive".equals(kind) || "consume".equals(kind)) {
                 requireReadyForNewWork(tenantId, sessionId, false);
             }
             reattachTakenOver(tenantId, sessionId);
             HarnessSessionRef ref = attachment(tenantId, sessionId, true);
-            client().runMessageOperation(ref, body);
+            return client().runMessageOperation(ref, body);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;

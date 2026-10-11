@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.store.SessionMessageRelayStore.Pending
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
@@ -43,6 +44,17 @@ class SessionMessageRelayStoreTest {
 
     private void message(String sessionId, String messageId, String state,
             String body) {
+        extension("session_message", sessionId, messageId, state, body);
+    }
+
+    /** A member's outbound command entry, as the open team tools commit it. */
+    private void command(String sessionId, String commandId, String state,
+            String body) {
+        extension("session_command", sessionId, commandId, state, body);
+    }
+
+    private void extension(String domain, String sessionId, String recordId,
+            String state, String body) {
         String resource = "resource-" + IDS.incrementAndGet();
         resource(sessionId, resource, body.getBytes(StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO qwen_managed_session_extension_record"
@@ -50,11 +62,10 @@ class SessionMessageRelayStoreTest {
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " delivery_target, delivery_state, created_at)"
-                        + " VALUES ('scope', ?, ?, 'workspace', ?,"
-                        + " 'session_message', ?, 'h', 1, ?, 'session', ?,"
-                        + " ?)",
-                sessionId + "/" + messageId, TENANT, sessionId, messageId,
-                resource, state, IDS.incrementAndGet());
+                        + " VALUES ('scope', ?, ?, 'workspace', ?, ?, ?,"
+                        + " 'h', 1, ?, 'session', ?, ?)",
+                sessionId + "/" + recordId, TENANT, sessionId, domain,
+                recordId, resource, state, IDS.incrementAndGet());
     }
 
     private static String outbound(String route, String childRunId) {
@@ -176,9 +187,33 @@ class SessionMessageRelayStoreTest {
         assertThat(store.findPendingMessages("owner-b", 1_000, 50).stream()
                 .map(PendingMessage::messageId))
                 .doesNotContain("msg_waiting");
-        assertThat(store.deliveryState(TENANT, target, "msg_receipt"))
-                .isEqualTo("accepted");
-        assertThat(store.deliveryState(TENANT, target, "msg_none")).isNull();
+        assertThat(
+                store.deliveryState(TENANT, target, "session_message",
+                        "msg_receipt")).isEqualTo("accepted");
+        assertThat(store.deliveryState(TENANT, target, "session_message",
+                "msg_none")).isNull();
+    }
+
+    @Test
+    void discoversCommandsAndMessagesOfOneSenderWithTheirDomains() {
+        String sender = UUID.randomUUID().toString();
+        message(sender, "msg_planned", "planned", outbound("to_child", "r"));
+        command(sender, "cmd_handover", "planned",
+                "{\"route\":\"to_parent\"}");
+        command(sender, "cmd_executing", "accepting",
+                "{\"route\":\"to_parent\"}");
+        command(sender, "cmd_finished", "consumed",
+                "{\"route\":\"to_parent\"}");
+        Map<String, String> page = new java.util.HashMap<>();
+        for (PendingMessage entry : store.findPendingMessages("owner-a",
+                1_000, 50))
+            if (entry.tenantId().equals(TENANT)
+                    && entry.senderSessionId().equals(sender))
+                page.put(entry.messageId(), entry.domain());
+        assertThat(page).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "msg_planned", "session_message",
+                "cmd_handover", "session_command",
+                "cmd_executing", "session_command"));
     }
 
     @Test

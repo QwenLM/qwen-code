@@ -21,6 +21,7 @@ import {
   type TeamState,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import type { ManagedSessionDomain } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { assertManagedSessionDomainEnabled } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 // H4e-b2 of #12827: what a team adds on top of H4d-b's Session messages —
 // a member is its continuation chain, every run of that chain opens its
@@ -82,22 +83,61 @@ export function broadcastMessageId(params: {
     .slice(0, 32)}`;
 }
 
-const PREAMBLE_BODY =
-  'You are a member of this team. Your parent, the agent that launched you, is the team leader. Your result is your answer to the last instruction you receive: if another message from the leader arrives after you have answered, your answer to it becomes your whole result, so answer it in full and repeat anything from your earlier answers the leader still needs. To ask the leader something, use send_message with to "parent"; its reply reaches you after you have answered, as your next instruction. You cannot message other members or edit the team\'s task board.';
+const PREAMBLE_BODY_HEAD =
+  'You are a member of this team. Your parent, the agent that launched you, is the team leader. Your result is your answer to the last instruction you receive: if another message from the leader arrives after you have answered, your answer to it becomes your whole result, so answer it in full and repeat anything from your earlier answers the leader still needs. To ask the leader something, use send_message with to "parent"; its reply reaches you after you have answered, as your next instruction. ';
+
+const PREAMBLE_TAIL_NO_COMMANDS =
+  "You cannot message other members or edit the team's task board.";
+const PREAMBLE_TAIL_WITH_COMMANDS = 'You cannot message other members.';
 
 /**
- * Decision 5: the fixed text every instruction of a member's chain opens
- * with. Names are sanitized to `[a-z0-9-]`, so they need no escaping.
+ * H4e-b3 decision 5: the wording follows what the member can do, not the
+ * batch that ships it — once `session_command` is enabled, the body stops
+ * saying the member cannot edit the board. The build carries member
+ * messages (b3c) before the messaging sentence lifts.
  */
 export function teamMemberPreamble(member: {
   readonly name: string;
   readonly teamName: string;
 }): string {
-  return `<team-member name="${member.name}" team="${member.teamName}">\n${PREAMBLE_BODY}\n</team-member>\n\n`;
+  let commandsEnabled = false;
+  try {
+    assertManagedSessionDomainEnabled('session_command');
+    commandsEnabled = true;
+  } catch {
+    commandsEnabled = false;
+  }
+  const body =
+    PREAMBLE_BODY_HEAD +
+    (commandsEnabled ? PREAMBLE_TAIL_WITH_COMMANDS : PREAMBLE_TAIL_NO_COMMANDS);
+  return `<team-member name="${member.name}" team="${member.teamName}">\n${body}\n</team-member>\n\n`;
 }
 
 const PREAMBLE_FORM =
   /^<team-member name="[a-z0-9]+(?:-[a-z0-9]+)*" team="[a-z0-9]+(?:-[a-z0-9]+)*">\n[^<]*\n<\/team-member>\n\n/;
+
+/**
+ * b3b decision 5: whether one run's first input declares member tools —
+ * its instruction part opens with a well-formed preamble block, read
+ * after a launch's `[description]` and its blank line, or after a
+ * continuation's `Your next instruction:` marker (history before it is
+ * escaped, so only the run's own block can match). A misread only ever
+ * hides the tools: admission is the lead's, not the declaration's.
+ */
+export function firstInputOpensWithMemberPreamble(firstInput: string): boolean {
+  const marker = 'Your next instruction:';
+  const at = firstInput.lastIndexOf(marker);
+  if (at >= 0) {
+    return PREAMBLE_FORM.test(
+      firstInput.slice(at + marker.length).replace(/^\s+/, ''),
+    );
+  }
+  const wrapped = /^\[[\s\S]*?\]\n\n/.exec(firstInput);
+  if (wrapped !== null) {
+    return PREAMBLE_FORM.test(firstInput.slice(wrapped[0].length));
+  }
+  return PREAMBLE_FORM.test(firstInput);
+}
 
 /**
  * Decision 5's replay evidence: whether a committed instruction is the

@@ -27,6 +27,7 @@ export const HARNESS_CHECKPOINT_PHASES = [
   'await_action',
   'await_runtime',
   'await_agent',
+  'await_command',
   'results_ready',
   'turn_settled',
 ] as const;
@@ -233,6 +234,36 @@ export interface HarnessAgentWaitGroup {
   readonly runs: readonly HarnessAgentWaitRun[];
 }
 
+/**
+ * One member command call this Turn waits on (H4e-b3). The wait rides its
+ * own group rather than `tools.items`, same lifetime rule as the agent
+ * wait: the durable evidence is the command's outbox identity plus the
+ * call's journal identity, and a resume re-derives the round from the
+ * journal itself, so no call-site position is carried. `folded` marks the
+ * reply fold done; the call stays listed — never filtered out — until a
+ * later all-folded group is replaced by a new command wait or the Turn
+ * ends, so a second crash re-enters idempotently.
+ */
+export interface HarnessCommandWaitRun {
+  readonly commandId: string;
+  readonly functionCallId: string;
+  readonly toolName: string;
+  readonly modelMessageId: string;
+  readonly folded: boolean;
+}
+
+/**
+ * The parked member-command waits of one Turn (safety point:
+ * await_command). `holdsWorkspaceMount` answers whether the Turn keeps the
+ * Workspace mount it took in an earlier batch, so a resumed wait takes the
+ * Runtime lease back when it did — `execute` never needs the mount, so
+ * holding it through the wait cannot deadlock with the leader.
+ */
+export interface HarnessCommandWaitGroup {
+  readonly runs: readonly HarnessCommandWaitRun[];
+  readonly holdsWorkspaceMount: boolean;
+}
+
 export interface HarnessOutputGroup {
   readonly llmContentRef: ManagedSessionDurableRef | null;
   readonly physicalStatus: string | null;
@@ -264,6 +295,7 @@ export interface HarnessCheckpointV1 {
   readonly runtime: HarnessRuntimeGroup | null;
   readonly approval: HarnessApprovalGroup | null;
   readonly agentWait: HarnessAgentWaitGroup | null;
+  readonly commandWait: HarnessCommandWaitGroup | null;
   readonly output: HarnessOutputGroup;
   readonly followUp: HarnessFollowUpGroup;
 }
@@ -301,6 +333,7 @@ const ROOT_KEYS = [
   'runtime',
   'approval',
   'agentWait',
+  'commandWait',
   'output',
   'followUp',
 ] as const;
@@ -963,6 +996,70 @@ function parseAgentWait(
   return { runs };
 }
 
+function parseCommandWaitRun(
+  value: ManagedSessionJsonValue,
+  label: string,
+): HarnessCommandWaitRun {
+  const record = object(value, label);
+  assertNoUnknownKeys(
+    record,
+    ['commandId', 'functionCallId', 'toolName', 'modelMessageId', 'folded'],
+    label,
+  );
+  if (typeof record['folded'] !== 'boolean') {
+    fail(`${label}.folded must be a boolean.`);
+  }
+  return {
+    commandId: assertManagedSessionStableId(
+      record['commandId'],
+      `${label}.commandId`,
+    ),
+    functionCallId: assertManagedSessionStableId(
+      record['functionCallId'],
+      `${label}.functionCallId`,
+    ),
+    toolName: assertManagedSessionStableId(
+      record['toolName'],
+      `${label}.toolName`,
+    ),
+    modelMessageId: assertManagedSessionStableId(
+      record['modelMessageId'],
+      `${label}.modelMessageId`,
+    ),
+    folded: record['folded'],
+  };
+}
+
+function parseCommandWait(
+  value: ManagedSessionJsonValue | undefined,
+): HarnessCommandWaitGroup | null {
+  // Checkpoints committed before this group existed carry no key at all;
+  // their writers could not have minted a command wait, so absent means
+  // null — the same mixed-version rule as the agent wait.
+  if (value === null || value === undefined) return null;
+  const record = object(value, 'commandWait');
+  assertNoUnknownKeys(record, ['runs', 'holdsWorkspaceMount'], 'commandWait');
+  const runs = jsonArray(record['runs'], 'commandWait.runs').map(
+    (item, index) => parseCommandWaitRun(item, `commandWait.runs[${index}]`),
+  );
+  if (runs.length === 0) {
+    fail('command wait requires at least one run.');
+  }
+  uniqueIds(
+    runs.map((run) => run.commandId),
+    'commandWait.runs.commandId',
+  );
+  uniqueIds(
+    runs.map((run) => run.functionCallId),
+    'commandWait.runs.functionCallId',
+  );
+  const mount = record['holdsWorkspaceMount'];
+  if (typeof mount !== 'boolean') {
+    fail('commandWait.holdsWorkspaceMount must be a boolean.');
+  }
+  return { runs, holdsWorkspaceMount: mount };
+}
+
 function parseParentHistory(
   value: ManagedSessionJsonValue | undefined,
 ): HarnessOutputGroup['parentHistory'] {
@@ -1116,6 +1213,9 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     if (checkpoint.agentWait !== null) {
       fail('before_model cannot carry an agent wait.');
     }
+    if (checkpoint.commandWait !== null) {
+      fail('before_model cannot carry a command wait.');
+    }
     return;
   }
 
@@ -1145,6 +1245,13 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     ) {
       fail('model_output_committed cannot carry an unconsumed agent wait.');
     }
+    // Same rule for a folded command wait (H4e-b3).
+    if (
+      checkpoint.commandWait !== null &&
+      checkpoint.commandWait.runs.some((run) => !run.folded)
+    ) {
+      fail('model_output_committed cannot carry an unfolded command wait.');
+    }
     return;
   }
 
@@ -1164,6 +1271,9 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     if (checkpoint.agentWait !== null) {
       fail('await_action cannot carry an agent wait.');
     }
+    if (checkpoint.commandWait !== null) {
+      fail('await_action cannot carry a command wait.');
+    }
     return;
   }
 
@@ -1176,6 +1286,9 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     }
     if (checkpoint.agentWait !== null) {
       fail('await_runtime cannot carry an agent wait.');
+    }
+    if (checkpoint.commandWait !== null) {
+      fail('await_runtime cannot carry a command wait.');
     }
     return;
   }
@@ -1201,6 +1314,35 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     if (inFlightTools || dispatchRuntime) {
       fail('await_agent cannot carry in-flight Runtime work.');
     }
+    if (checkpoint.commandWait !== null) {
+      fail('await_agent cannot carry a command wait.');
+    }
+    return;
+  }
+
+  // The command wait (H4e-b3): a member's batch parked on the leader's
+  // replies. It obeys the same exclusions as the agent wait, and may keep
+  // the Workspace mount only as a flag — the mount is the Turn's, taken in
+  // an earlier batch, so it never shows as in-flight Runtime work here.
+  if (phase === 'await_command') {
+    if (
+      checkpoint.commandWait === null ||
+      checkpoint.commandWait.runs.length === 0
+    ) {
+      fail('await_command requires the command wait runs.');
+    }
+    if (checkpoint.commandWait.runs.every((run) => run.folded)) {
+      fail('await_command cannot keep an all-folded command wait.');
+    }
+    if (checkpoint.approval?.state === 'requested') {
+      fail('await_command cannot keep a requested approval.');
+    }
+    if (inFlightTools || dispatchRuntime) {
+      fail('await_command cannot carry in-flight Runtime work.');
+    }
+    if (checkpoint.agentWait !== null) {
+      fail('await_command cannot carry an agent wait.');
+    }
     return;
   }
 
@@ -1217,6 +1359,9 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     if (checkpoint.agentWait !== null) {
       fail('results_ready cannot carry an agent wait.');
     }
+    if (checkpoint.commandWait !== null) {
+      fail('results_ready cannot carry a command wait.');
+    }
     return;
   }
 
@@ -1224,10 +1369,11 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     inFlightTools ||
     dispatchRuntime ||
     checkpoint.approval?.state === 'requested' ||
-    checkpoint.agentWait !== null
+    checkpoint.agentWait !== null ||
+    checkpoint.commandWait !== null
   ) {
     fail(
-      'turn_settled cannot carry in-flight tools, a requested approval, or an agent wait.',
+      'turn_settled cannot carry in-flight tools, a requested approval, an agent wait, or a command wait.',
     );
   }
 }
@@ -1247,6 +1393,7 @@ function parseHarnessCheckpointObject(
     runtime: parseRuntime(record['runtime']),
     approval: parseApproval(record['approval']),
     agentWait: parseAgentWait(record['agentWait']),
+    commandWait: parseCommandWait(record['commandWait']),
     output: parseOutput(record['output']),
     followUp: parseFollowUp(record['followUp']),
   };
@@ -1280,6 +1427,22 @@ export function harnessCheckpointIsAgentWait(
     checkpoint.continuation.phase === 'await_agent' ||
     (checkpoint.continuation.phase === 'model_output_committed' &&
       checkpoint.agentWait !== null)
+  );
+}
+
+/**
+ * The checkpoint carries a live command wait (H4e-b3): still outstanding
+ * at `await_command`, or the same wait a breath past its last fold at
+ * `model_output_committed` with the all-folded group carried. Recovery and
+ * the route's phase gate share this predicate, never their own copies.
+ */
+export function harnessCheckpointIsCommandWait(
+  checkpoint: HarnessCheckpointV1,
+): boolean {
+  return (
+    checkpoint.continuation.phase === 'await_command' ||
+    (checkpoint.continuation.phase === 'model_output_committed' &&
+      checkpoint.commandWait !== null)
   );
 }
 
@@ -1336,8 +1499,22 @@ export function encodeHarnessCheckpointV1(
   // Mixed-version compat (#13708): a pre-`agentWait` reader rejects
   // unknown root keys, and an absent key parses as null on both sides —
   // so the key rides only the checkpoints that actually carry the group.
+  // `commandWait` (H4e-b3) follows the same rule, so a pre-b3b Harness
+  // never meets a checkpoint it cannot read until the phase is used.
+  if (checkpoint.agentWait === null && checkpoint.commandWait === null) {
+    const {
+      agentWait: _agentWait,
+      commandWait: _commandWait,
+      ...rest
+    } = checkpoint;
+    return Buffer.from(JSON.stringify(rest), 'utf8');
+  }
   if (checkpoint.agentWait === null) {
     const { agentWait: _omitted, ...rest } = checkpoint;
+    return Buffer.from(JSON.stringify(rest), 'utf8');
+  }
+  if (checkpoint.commandWait === null) {
+    const { commandWait: _omitted, ...rest } = checkpoint;
     return Buffer.from(JSON.stringify(rest), 'utf8');
   }
   return Buffer.from(JSON.stringify(checkpoint), 'utf8');
@@ -1445,6 +1622,7 @@ export function createInitialHarnessCheckpoint(input: {
     runtime: null,
     approval: null,
     agentWait: null,
+    commandWait: null,
     output: {
       llmContentRef: null,
       physicalStatus: null,
@@ -1502,6 +1680,7 @@ export function createNextTurnReadyHarnessCheckpoint(input: {
     runtime: null,
     approval: null,
     agentWait: null,
+    commandWait: null,
     output: {
       llmContentRef: null,
       physicalStatus: null,
@@ -1545,6 +1724,7 @@ export function createAwaitActionHarnessCheckpoint(input: {
     runtime: input.previous.runtime,
     approval: input.approval,
     agentWait: null,
+    commandWait: null,
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -1577,6 +1757,14 @@ export function createAwaitAgentHarnessCheckpoint(input: {
   ) {
     throw new ManagedSessionRecordError(
       'await_agent cannot replace an unfinished agent wait.',
+    );
+  }
+  if (
+    input.previous.commandWait !== null &&
+    input.previous.commandWait.runs.some((run) => !run.folded)
+  ) {
+    throw new ManagedSessionRecordError(
+      'await_agent cannot replace an unfinished command wait.',
     );
   }
   if (
@@ -1615,6 +1803,157 @@ export function createAwaitAgentHarnessCheckpoint(input: {
     runtime: input.previous.runtime,
     approval: null,
     agentWait: input.agentWait,
+    commandWait: null,
+    output: input.previous.output,
+    followUp: input.previous.followUp,
+  };
+}
+
+/**
+ * The command-wait safety point (H4e-b3): one or more member command calls
+ * of the batch are parked on the leader's replies. The relay owns their
+ * execution; the next model request stays blocked until every call is
+ * folded from the journal. A carried all-folded group from the previous
+ * wait is replaced — its folds are already durable in the journal — while
+ * any unfolded call makes the replacement a conflict. `holdsWorkspaceMount`
+ * tells a resumed wait whether it owes the Turn's Runtime lease back.
+ */
+export function createAwaitCommandHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+  readonly attempt: HarnessAttemptGroup | null;
+  readonly commandWait: HarnessCommandWaitGroup;
+}): HarnessCheckpointV1 {
+  if (input.previous.approval?.state === 'requested') {
+    throw new ManagedSessionRecordError(
+      'await_command cannot keep a requested approval.',
+    );
+  }
+  if (
+    input.previous.commandWait !== null &&
+    input.previous.commandWait.runs.some((run) => !run.folded)
+  ) {
+    throw new ManagedSessionRecordError(
+      'await_command cannot replace an unfinished command wait.',
+    );
+  }
+  if (
+    input.previous.agentWait !== null &&
+    input.previous.agentWait.runs.some((run) => !run.consumed)
+  ) {
+    throw new ManagedSessionRecordError(
+      'await_command cannot replace an unfinished agent wait.',
+    );
+  }
+  if (
+    input.previous.tools?.items.some((item) => item.state === 'in_progress')
+  ) {
+    throw new ManagedSessionRecordError(
+      'await_command cannot carry in-flight Runtime work.',
+    );
+  }
+  const attempt = input.attempt ?? input.previous.attempt;
+  if (attempt === null) {
+    throw new ManagedSessionRecordError('await_command requires the attempt.');
+  }
+  if (input.commandWait.runs.length === 0) {
+    throw new ManagedSessionRecordError(
+      'await_command requires at least one run.',
+    );
+  }
+  return {
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: {
+      phase: 'await_command',
+      pendingEventIds: [],
+    },
+    attempt,
+    tools: input.previous.tools,
+    runtime: input.previous.runtime,
+    approval: null,
+    agentWait: null,
+    commandWait: input.commandWait,
+    output: input.previous.output,
+    followUp: input.previous.followUp,
+  };
+}
+
+/**
+ * Marks one parked command call folded after its reply committed. The
+ * wait's phase stays `await_command` while calls remain; with every call
+ * folded the continuation advances to `model_output_committed` — the folded
+ * replies owe the next model round, and the all-folded group rides along
+ * so a second crash re-enters idempotently.
+ */
+export function createConsumedCommandWaitHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+  readonly commandId: string;
+}): HarnessCheckpointV1 {
+  if (input.previous.continuation.phase !== 'await_command') {
+    throw new ManagedSessionRecordError(
+      'folded command wait requires an await_command checkpoint.',
+    );
+  }
+  if (input.previous.commandWait === null) {
+    throw new ManagedSessionRecordError(
+      'folded command wait requires the command wait runs.',
+    );
+  }
+  const waited = input.previous.commandWait.runs.find(
+    (run) => run.commandId === input.commandId,
+  );
+  if (waited === undefined) {
+    throw new ManagedSessionRecordError(
+      `await_command has no run ${input.commandId}.`,
+    );
+  }
+  if (waited.folded) {
+    throw new ManagedSessionRecordError(
+      `command wait run ${input.commandId} is already folded.`,
+    );
+  }
+  const runs = input.previous.commandWait.runs.map((run) =>
+    run.commandId === input.commandId ? { ...run, folded: true } : run,
+  );
+  const allFolded = runs.every((run) => run.folded);
+  return {
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: {
+      phase: allFolded ? 'model_output_committed' : 'await_command',
+      pendingEventIds: [],
+    },
+    attempt: input.previous.attempt,
+    tools: input.previous.tools,
+    runtime: input.previous.runtime,
+    approval: null,
+    agentWait: null,
+    commandWait: {
+      runs,
+      holdsWorkspaceMount: input.previous.commandWait.holdsWorkspaceMount,
+    },
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -1681,6 +2020,7 @@ export function createConsumedAgentWaitHarnessCheckpoint(input: {
     runtime: input.previous.runtime,
     approval: null,
     agentWait: { runs },
+    commandWait: null,
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -1724,6 +2064,7 @@ export function createAwaitRuntimeHarnessCheckpoint(input: {
     runtime: input.runtime,
     approval: null,
     agentWait: null,
+    commandWait: null,
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -1800,6 +2141,7 @@ export function createResultsReadyHarnessCheckpoint(input: {
     },
     approval: null,
     agentWait: null,
+    commandWait: null,
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -1850,6 +2192,7 @@ export function createTurnSettledHarnessCheckpoint(input: {
     runtime: input.previous.runtime,
     approval: null,
     agentWait: null,
+    commandWait: null,
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -1937,6 +2280,7 @@ export function createConsumedRuntimeResultsHarnessCheckpoint(input: {
     runtime: input.previous.runtime,
     approval: null,
     agentWait: null,
+    commandWait: null,
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -1967,6 +2311,15 @@ export function createModelOutputCommittedHarnessCheckpoint(input: {
       'model_output_committed cannot carry an unconsumed agent wait.',
     );
   }
+  const carriedCommands = input.previous.commandWait ?? null;
+  if (
+    carriedCommands !== null &&
+    carriedCommands.runs.some((run) => !run.folded)
+  ) {
+    throw new ManagedSessionRecordError(
+      'model_output_committed cannot carry an unfolded command wait.',
+    );
+  }
   return {
     identity: {
       ...input.previous.identity,
@@ -1987,6 +2340,7 @@ export function createModelOutputCommittedHarnessCheckpoint(input: {
     runtime: input.previous.runtime,
     approval: null,
     agentWait: input.previous.agentWait,
+    commandWait: input.previous.commandWait,
     output: input.previous.output,
     followUp: input.previous.followUp,
   };

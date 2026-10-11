@@ -111,7 +111,8 @@ public class SessionMessageRelay {
         // entry since, so the delivery and the body it decides by are the
         // ones committed now.
         SessionMessageRelayStore.CurrentRecord current = store.currentRecord(
-                row.tenantId(), row.senderSessionId(), row.messageId());
+                row.tenantId(), row.senderSessionId(), pending.domain(),
+                row.messageId());
         if (current == null) {
             return;
         }
@@ -130,7 +131,8 @@ public class SessionMessageRelay {
                         ? body.path("targetSessionId").textValue() : null;
                 boolean delivered = "accepted".equals(current.deliveryState())
                         || target != null && store.deliveryState(
-                                row.tenantId(), target, row.messageId()) != null;
+                                row.tenantId(), target, "session_message",
+                                row.messageId()) != null;
                 store.classify(row, owner, delivered ? "done" : "orphaned",
                         senderStatus == null ? "sender session is gone"
                                 : "sender session is " + senderStatus,
@@ -150,15 +152,19 @@ public class SessionMessageRelay {
                         now + LEASE_MS, now);
                 return;
             }
-            switch (current.deliveryState()) {
-                case "planned" -> handover(row, body, now);
-                case "accepting", "unknown" -> deliver(row, body,
-                        target(body), now);
-                case "accepted" -> awaitConsumption(row, body, now);
-                default -> store.classify(row, owner, "done", null, now);
+            if ("session_command".equals(pending.domain())) {
+                workCommand(row, body, current, now);
+            } else {
+                switch (current.deliveryState()) {
+                    case "planned" -> handover(row, body, now);
+                    case "accepting", "unknown" -> deliver(row, body,
+                            target(body), now);
+                    case "accepted" -> awaitConsumption(row, body, now);
+                    default -> store.classify(row, owner, "done", null, now);
+                }
             }
         } catch (RuntimeException error) {
-            defer(row, error, now);
+            defer(row, pending.domain(), error, now);
         }
     }
 
@@ -287,7 +293,7 @@ public class SessionMessageRelay {
     private void deliver(MessageRow row, JsonNode body, String target,
             long now) {
         String inputId = inputIdOf(row.messageId());
-        if (store.deliveryState(row.tenantId(), target,
+        if (store.deliveryState(row.tenantId(), target, "session_message",
                 row.messageId()) == null) {
             if (!"ACTIVE".equals(records.sessionStatus(row.tenantId(),
                     target))) {
@@ -370,7 +376,7 @@ public class SessionMessageRelay {
     private void awaitConsumption(MessageRow row, JsonNode body, long now) {
         String target = target(body);
         if ("consumed".equals(store.deliveryState(row.tenantId(), target,
-                row.messageId()))) {
+                "session_message", row.messageId()))) {
             senderOperation(row, "consumed", Map.of());
             store.classify(row, owner, "done", null, now);
             return;
@@ -425,6 +431,131 @@ public class SessionMessageRelay {
                 operation);
     }
 
+    private void senderCommandOperation(MessageRow row, String kind,
+            Map<String, Object> fields) {
+        Map<String, Object> operation = new LinkedHashMap<>();
+        operation.put("operationId", UUID.randomUUID().toString());
+        operation.put("commandId", row.messageId());
+        operation.put("kind", kind);
+        operation.putAll(fields);
+        harness.runMessageOperation(row.tenantId(), row.senderSessionId(),
+                operation);
+    }
+
+    /**
+     * H4e-b3: the command pass. `planned` fixes the parent of the member's
+     * lineage; `accepting` and `unknown` drive the leader's `execute`,
+     * whose settled reply is then copied back with `answered`. A command
+     * never walks `consume` — the parked tool call reads its own reply.
+     * The leader's own `session_command_refused` is terminal and rejects
+     * the entry at once; every other 4xx is a retryable blocked Session —
+     * the closing and recovery gates the design's route table already
+     * carries, which the relay defers without spending an attempt. One
+     * sender's commands pass strictly in order: an older unclassified one
+     * keeps a newer one waiting, so a write the member reads after a
+     * timeout can never land behind a later command of the same run.
+     */
+    private void workCommand(MessageRow row, JsonNode body,
+            SessionMessageRelayStore.CurrentRecord current, long now) {
+        if (store.olderOpenCommand(row.tenantId(), row.senderSessionId(),
+                row.messageId())) {
+            store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                    now + LEASE_MS, now);
+            return;
+        }
+        String state = current.deliveryState();
+        String target = body.path("targetSessionId").isTextual()
+                ? body.path("targetSessionId").textValue()
+                : null;
+        if ("planned".equals(state)) {
+            SessionMessageRelayStore.Lineage lineage = store.lineage(
+                    row.tenantId(), row.senderSessionId());
+            if (lineage == null) {
+                // A command came only from a lineage Session, so a missing
+                // one cannot be proven undeliverable: wait, never reject.
+                store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                        now + LEASE_MS, now);
+                return;
+            }
+            if (!body.required("childRunId").asText().equals(
+                    lineage.parentChildRunId())) {
+                throw new IllegalStateException(
+                        "sender's recorded lineage does not name run "
+                                + body.required("childRunId").asText());
+            }
+            target = lineage.parentSessionId();
+            if (!"ACTIVE".equals(records.sessionStatus(row.tenantId(),
+                    target))) {
+                senderCommandOperation(row, "cancelled", Map.of());
+                store.classify(row, owner, "done",
+                        "parent session is not active", now);
+                return;
+            }
+            senderCommandOperation(row, "handover",
+                    Map.of("targetSessionId", target));
+            store.advance(row, owner, "relaying", target, now,
+                    now + LEASE_MS, now);
+        }
+        if (target == null) {
+            throw new IllegalStateException(
+                    "a handed-over command names no target");
+        }
+        if (!"ACTIVE".equals(records.sessionStatus(row.tenantId(), target))) {
+            // A executed write may have landed: never say it did not.
+            senderCommandOperation(row, "unknown", Map.of());
+            store.classify(row, owner, "unknown",
+                    "target session closed before the execution", now);
+            return;
+        }
+        JsonNode argsRef = body.required("argsRef");
+        byte[] args = records.readResourceBytes(row.tenantId(),
+                argsRef.required("resourceId").asText());
+        if (args == null) {
+            throw new IllegalStateException(
+                    "command arguments are not readable yet");
+        }
+        Map<String, Object> execute = new LinkedHashMap<>();
+        execute.put("operationId", UUID.randomUUID().toString());
+        execute.put("commandId", row.messageId());
+        execute.put("kind", "execute");
+        execute.put("commandKind", body.required("kind").asText());
+        execute.put("route", "to_parent");
+        execute.put("childRunId", body.required("childRunId").asText());
+        execute.put("senderSessionId", row.senderSessionId());
+        execute.put("argsBase64", Base64.getEncoder().encodeToString(args));
+        execute.put("argsDigest", body.required("argsDigest").asText());
+        Map<String, Object> settled;
+        try {
+            settled = harness.runMessageOperation(row.tenantId(), target,
+                    execute);
+        } catch (DaemonHttpException error) {
+            if ("session_command_refused".equals(error.getErrorCode())) {
+                // The lead cannot accept the command at all: rejected, and
+                // never re-executed.
+                senderCommandOperation(row, "rejected", Map.of());
+                store.classify(row, owner, "done", error.getMessage(), now);
+                return;
+            }
+            if ("hosted_commands_unavailable".equals(error.getErrorCode())
+                    || "hosted_turn_recovery_required"
+                            .equals(error.getErrorCode())
+                    || "hosted_session_closing".equals(error.getErrorCode())
+                    || "session_command_blocked".equals(error.getErrorCode())) {
+                // A blocked or closing lead is a wait, not a failure — the
+                // attempt budget is for real faults. A sender whose run
+                // has not attached yet waits the same way: the control
+                // plane's attach commit may trail this execute.
+                store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                        now + LEASE_MS, now);
+                return;
+            }
+            throw error;
+        }
+        Object reply = settled.get("reply");
+        senderCommandOperation(row, "answered", Map.of("reply", reply));
+        store.classify(row, owner, "done", null, now);
+    }
+
     /**
      * A failed step counts an attempt. Past the bound the relay gives up,
      * but first ends the entry on its sender, so nothing still reads it as
@@ -433,7 +564,8 @@ public class SessionMessageRelay {
      * its receipt exists and otherwise unknown. A give-up whose sender
      * step faltered owes it and retries, never classifying over it.
      */
-    private void defer(MessageRow row, RuntimeException error, long now) {
+    private void defer(MessageRow row, String domain,
+            RuntimeException error, long now) {
         if (row.attempts() + 1 >= MAX_ATTEMPTS) {
             try {
                 // The failed step may have moved the entry (a handover that
@@ -441,9 +573,51 @@ public class SessionMessageRelay {
                 // committed now.
                 SessionMessageRelayStore.CurrentRecord latest =
                         store.currentRecord(row.tenantId(),
-                                row.senderSessionId(), row.messageId());
+                                row.senderSessionId(), domain,
+                                row.messageId());
                 String state = latest == null ? null : latest.deliveryState();
-                if ("planned".equals(state)) {
+                if ("session_command".equals(domain)) {
+                    // H4e-b3: never handed over is cancelled, as a message's
+                    // is. A handed-over command is answered from the
+                    // leader's own receipt when that committed — the reply
+                    // never gets paraphrased — and otherwise unknown.
+                    if ("planned".equals(state)) {
+                        senderCommandOperation(row, "cancelled", Map.of());
+                    } else if (latest != null
+                            && !"cancelled".equals(state)) {
+                        JsonNode body = readJson(records.readResource(
+                                row.tenantId(), latest.recordResourceId()),
+                                "command body");
+                        String target = body.path("targetSessionId")
+                                .isTextual()
+                                        ? body.path("targetSessionId")
+                                                .textValue()
+                                        : null;
+                        SessionMessageRelayStore.CurrentRecord receipt =
+                                target == null ? null
+                                        : store.currentRecord(row.tenantId(),
+                                                target, domain,
+                                                row.messageId());
+                        if (receipt != null) {
+                            JsonNode receiptBody = readJson(
+                                    records.readResource(row.tenantId(),
+                                            receipt.recordResourceId()),
+                                    "command receipt");
+                            JsonNode replyRef = receiptBody
+                                    .required("replyRef");
+                            JsonNode reply = readJson(
+                                    records.readResource(row.tenantId(),
+                                            replyRef.required("resourceId")
+                                                    .asText()),
+                                    "command reply");
+                            senderCommandOperation(row, "answered",
+                                    Map.of("reply", mapper
+                                            .convertValue(reply, Map.class)));
+                        } else {
+                            senderCommandOperation(row, "unknown", Map.of());
+                        }
+                    }
+                } else if ("planned".equals(state)) {
                     senderOperation(row, "cancelled", Map.of());
                 } else if ("accepting".equals(state)
                         || "unknown".equals(state)) {
@@ -451,7 +625,7 @@ public class SessionMessageRelay {
                             row.tenantId(), latest.recordResourceId()),
                             "message body");
                     if (store.deliveryState(row.tenantId(), target(body),
-                            row.messageId()) != null) {
+                            domain, row.messageId()) != null) {
                         senderOperation(row, "accepted",
                                 Map.of("inputId", inputIdOf(row.messageId())));
                     } else if ("accepting".equals(state)) {
@@ -465,9 +639,9 @@ public class SessionMessageRelay {
             }
             store.classify(row, owner, "unknown", error.getMessage(), now);
             LOG.warn("session message relay gives up tenant={} sender={}"
-                            + " message={} after={} failure={}",
-                    row.tenantId(), row.senderSessionId(), row.messageId(),
-                    row.attempts(), error.getMessage());
+                            + " domain={} message={} after={} failure={}",
+                    row.tenantId(), row.senderSessionId(), domain,
+                    row.messageId(), row.attempts(), error.getMessage());
             return;
         }
         long delay = Math.min(MAX_BACKOFF_MS,

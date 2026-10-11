@@ -104,6 +104,10 @@ import {
   type SessionMessage,
 } from './managed-session-message-record.js';
 import {
+  parseSessionCommand,
+  type SessionCommand,
+} from './managed-session-command-record.js';
+import {
   MANAGED_TEAM_LEADER,
   parseTeamMessage,
   parseTeamPlan,
@@ -1624,6 +1628,13 @@ export class LocalManagedSessionAuthority {
           );
         }
       }
+      if (request.domain === 'session_command' && request.input !== undefined) {
+        // H4e-b3: a command is answered by the leader, never by waking a
+        // model, so no revision of it ever carries an input.
+        throw new ManagedSessionConflictError(
+          'A session command never carries an input.',
+        );
+      }
       // Refused before publishing, so a retry loop leaves no body behind.
       this.assertCommandWritable(command);
       this.assertExpectedSequence(command);
@@ -2426,6 +2437,42 @@ export class LocalManagedSessionAuthority {
         }
       }
     }
+    if (domain === 'session_command') {
+      // H4e-b3: each journal proves what it holds. The leader's receipt
+      // binds to a child run of its own journal; a member's own lineage
+      // lives with the control plane, whose store checks the outbound side.
+      const command = parsed.record as SessionCommand;
+      const self = this.sessionKey.sessionId;
+      if (
+        command.direction === 'outbound' &&
+        command.senderSessionId !== self
+      ) {
+        reject('Outbound session command must be sent by this Session.');
+      }
+      if (command.direction === 'inbound') {
+        if (command.targetSessionId !== self) {
+          reject('Inbound session command must be addressed to this Session.');
+        }
+        const named = this.extensionRecord('child_run', command.childRunId);
+        const child =
+          named === undefined ? undefined : parseChildRun(named.record);
+        if (child === undefined || !isChildSessionRun(child)) {
+          reject(
+            'Session command must name a child Session run of this Session.',
+          );
+        }
+        if (child.childSessionId === null) {
+          reject(
+            'Session command from a child arrives only once its run attached.',
+          );
+        }
+        if (command.senderSessionId !== child.childSessionId) {
+          reject(
+            'Session command from a child must come from the Session its run attached.',
+          );
+        }
+      }
+    }
     if (domain === 'team_state') {
       // H4e: a team lives in its lead's journal, and each member joins as a
       // live child Session run of the lead that no other team lists.
@@ -2814,6 +2861,9 @@ export class LocalManagedSessionAuthority {
       refs = [acceptance.contentRef, acceptance.terminalReceiptRef];
     } else if (domain === 'session_message') {
       refs = [parseSessionMessage(record).contentRef];
+    } else if (domain === 'session_command') {
+      const command = parseSessionCommand(record);
+      refs = [command.argsRef, command.replyRef];
     } else if (domain === 'team_task') {
       const task = parseTeamTask(record);
       refs = [task.descriptionRef, task.metadataRef];

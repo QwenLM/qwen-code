@@ -58,6 +58,8 @@ class SessionMessageRelayTest {
         volatile String refuseKind;
         volatile String refuseCode;
         volatile String refuseSecondKind;
+        /** The settled body a verb comes back with (the execute reply). */
+        volatile Object reply;
         volatile boolean available = true;
 
         @Override
@@ -98,14 +100,15 @@ class SessionMessageRelayTest {
         }
 
         @Override
-        public void runMessageOperation(String tenantId, String sessionId,
-                Map<String, Object> body) {
+        public Map<String, Object> runMessageOperation(String tenantId,
+                String sessionId, Map<String, Object> body) {
             if (refuseKind != null && refuseKind.equals(body.get("kind"))
                     || refuseSecondKind != null
                             && refuseSecondKind.equals(body.get("kind"))) {
                 throw refusal(refuseCode);
             }
             calls.add(new Call(sessionId, Map.copyOf(body)));
+            return reply == null ? Map.of() : Map.of("reply", reply);
         }
 
         static DaemonHttpException refusal(String code) {
@@ -131,7 +134,7 @@ class SessionMessageRelayTest {
         row = new AtomicReference<>(new MessageRow(TENANT, PARENT, MESSAGE,
                 null, "relaying", "owner", 31_000L, 0, 0, null));
         pending = new AtomicReference<>(new PendingMessage(TENANT, PARENT,
-                MESSAGE, "planned", "resource-message"));
+                MESSAGE, "session_message", "planned", "resource-message"));
         when(store.findPendingMessages(anyString(), anyLong(),
                 Mockito.anyInt())).thenAnswer(ignored -> List.of(pending.get()));
         when(store.claim(anyString(), anyString(), anyString(), anyString(),
@@ -168,7 +171,7 @@ class SessionMessageRelayTest {
                     return null;
                 }).when(store).defer(any(MessageRow.class), anyString(),
                         anyLong(), any(), anyLong(), anyLong());
-        when(store.currentRecord(anyString(), anyString(), anyString()))
+        when(store.currentRecord(anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(ignored -> new SessionMessageRelayStore
                         .CurrentRecord(pending.get().deliveryState(),
                                 "resource-message"));
@@ -345,7 +348,7 @@ class SessionMessageRelayTest {
     void routesAChildMessageToItsRecordedParent() {
         row.set(new MessageRow(TENANT, CHILD, MESSAGE, null, "relaying",
                 "owner", 31_000L, 0, 0, null));
-        pending.set(new PendingMessage(TENANT, CHILD, MESSAGE, "planned",
+        pending.set(new PendingMessage(TENANT, CHILD, MESSAGE, "session_message", "planned",
                 "resource-message"));
         body("to_parent", CHILD, null);
         when(store.lineage(TENANT, CHILD))
@@ -374,7 +377,7 @@ class SessionMessageRelayTest {
     void leavesAStoppedChildsOwnMessageToItsClose() {
         row.set(new MessageRow(TENANT, CHILD, MESSAGE, null, "relaying",
                 "owner", 31_000L, 0, 0, null));
-        pending.set(new PendingMessage(TENANT, CHILD, MESSAGE, "planned",
+        pending.set(new PendingMessage(TENANT, CHILD, MESSAGE, "session_message", "planned",
                 "resource-message"));
         body("to_parent", CHILD, null);
         when(store.lineage(TENANT, CHILD))
@@ -397,7 +400,7 @@ class SessionMessageRelayTest {
     void handsOverAStoppedChildsMessageOnceNoMessageWorkIsOwed() {
         row.set(new MessageRow(TENANT, CHILD, MESSAGE, null, "relaying",
                 "owner", 31_000L, 0, 0, null));
-        pending.set(new PendingMessage(TENANT, CHILD, MESSAGE, "planned",
+        pending.set(new PendingMessage(TENANT, CHILD, MESSAGE, "session_message", "planned",
                 "resource-message"));
         body("to_parent", CHILD, null);
         when(store.lineage(TENANT, CHILD))
@@ -413,10 +416,10 @@ class SessionMessageRelayTest {
     // start the message its stop is settling: it waits for the close.
     @Test
     void neverReloadsAStoppedRunsChildToConsume() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepted",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepted",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
-        when(store.deliveryState(TENANT, CHILD, MESSAGE))
+        when(store.deliveryState(TENANT, CHILD, "session_message", MESSAGE))
                 .thenReturn("accepted");
         childRun("running", CHILD, true);
         childOwesMessageWork(1);
@@ -431,7 +434,7 @@ class SessionMessageRelayTest {
 
     @Test
     void holdsAChildMessageThatItsParentCannotTakeYet() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepting",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepting",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
         harness.refuseKind = "receive";
@@ -445,7 +448,7 @@ class SessionMessageRelayTest {
 
     @Test
     void rejectsAMessageItsTargetRefusesForGood() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepting",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepting",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
         harness.refuseKind = "receive";
@@ -457,10 +460,10 @@ class SessionMessageRelayTest {
 
     @Test
     void replaysACommittedReceiptWithoutAnotherInput() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepting",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepting",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
-        when(store.deliveryState(TENANT, CHILD, MESSAGE))
+        when(store.deliveryState(TENANT, CHILD, "session_message", MESSAGE))
                 .thenReturn("accepted");
         relay.scan();
         assertThat(kinds()).containsExactly("accepted");
@@ -472,17 +475,17 @@ class SessionMessageRelayTest {
     // sender's last step follows the receipt.
     @Test
     void advancesTheSenderOnlyOnceTheTargetConsumed() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepted",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepted",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
-        when(store.deliveryState(TENANT, CHILD, MESSAGE))
+        when(store.deliveryState(TENANT, CHILD, "session_message", MESSAGE))
                 .thenReturn("accepted");
         relay.scan();
         assertThat(kinds()).containsExactly("consume");
         assertThat(harness.calls.getFirst().sessionId()).isEqualTo(CHILD);
         verify(store).scheduleRetry(any(MessageRow.class), anyString(),
                 anyLong(), anyLong(), anyLong());
-        when(store.deliveryState(TENANT, CHILD, MESSAGE))
+        when(store.deliveryState(TENANT, CHILD, "session_message", MESSAGE))
                 .thenReturn("consumed");
         relay.scan();
         assertThat(kinds()).containsExactly("consume", "consumed");
@@ -491,10 +494,10 @@ class SessionMessageRelayTest {
 
     @Test
     void waitsForAMessageNotReadYetWithoutSpendingAnAttempt() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepted",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepted",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
-        when(store.deliveryState(TENANT, CHILD, MESSAGE))
+        when(store.deliveryState(TENANT, CHILD, "session_message", MESSAGE))
                 .thenReturn("accepted");
         harness.refuseKind = "consume";
         harness.refuseCode = "session_message_not_ready";
@@ -505,10 +508,10 @@ class SessionMessageRelayTest {
 
     @Test
     void finishesAMessageWhoseReadingTurnEndedIncomplete() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepted",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepted",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
-        when(store.deliveryState(TENANT, CHILD, MESSAGE))
+        when(store.deliveryState(TENANT, CHILD, "session_message", MESSAGE))
                 .thenReturn("accepted");
         harness.refuseKind = "consume";
         harness.refuseCode = "session_message_record";
@@ -520,7 +523,7 @@ class SessionMessageRelayTest {
     // A target's store fault answers 503: retried, never a rejection.
     @Test
     void retriesATargetStoreFaultInsteadOfRejecting() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepting",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepting",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
         harness.refuseKind = "receive";
@@ -535,7 +538,7 @@ class SessionMessageRelayTest {
     // anywhere: retried, never rejected over a session named "null".
     @Test
     void neverDeliversAHandedOverMessageWithoutItsTarget() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepting",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepting",
                 "resource-message"));
         body("to_child", PARENT, null);
         relay.scan();
@@ -555,7 +558,7 @@ class SessionMessageRelayTest {
     // child going away.
     @Test
     void rejectsAHandedOverMessageWhoseRunIsBeingStopped() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepting",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepting",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
         childRun("running", CHILD, true);
@@ -567,10 +570,10 @@ class SessionMessageRelayTest {
     // The receipt landed before the sender closed: delivered, not orphaned.
     @Test
     void finishesAReceivedMessageWhoseSenderClosedBeforeItsAcceptance() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepting",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepting",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
-        when(store.deliveryState(TENANT, CHILD, MESSAGE))
+        when(store.deliveryState(TENANT, CHILD, "session_message", MESSAGE))
                 .thenReturn("accepted");
         when(records.sessionStatus(TENANT, PARENT)).thenReturn("CLOSED");
         relay.scan();
@@ -580,10 +583,10 @@ class SessionMessageRelayTest {
 
     @Test
     void neverWidensAnUnconsumedMessageOfAClosedTarget() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepted",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepted",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
-        when(store.deliveryState(TENANT, CHILD, MESSAGE))
+        when(store.deliveryState(TENANT, CHILD, "session_message", MESSAGE))
                 .thenReturn("accepted");
         when(records.sessionStatus(TENANT, CHILD)).thenReturn("CLOSED");
         relay.scan();
@@ -604,12 +607,220 @@ class SessionMessageRelayTest {
     // stays the consumption truth.
     @Test
     void finishesADeliveredMessageWhoseSenderClosed() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepted",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepted",
                 "resource-message"));
         when(records.sessionStatus(TENANT, PARENT)).thenReturn("CLOSED");
         relay.scan();
         assertThat(harness.calls).isEmpty();
         assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    /** One outbound command as the member's funnel commits it. */
+    private void commandBody(String kind, Object target) {
+        String targetJson = target == null ? "null"
+                : "\"" + target + "\"";
+        when(records.readResource(TENANT, "resource-message")).thenReturn(
+                "{\"direction\":\"outbound\",\"route\":\"to_parent\","
+                        + "\"childRunId\":\"run-1\",\"kind\":\"" + kind
+                        + "\",\"commandId\":\"" + MESSAGE
+                        + "\",\"argsRef\":{\"resourceId\":\"resource-args\"},"
+                        + "\"argsDigest\":\"a1\",\"targetSessionId\":"
+                        + targetJson + "}");
+    }
+
+    private PendingMessage commandPending(String state) {
+        return new PendingMessage(TENANT, PARENT, MESSAGE, "session_command",
+                state, "resource-message");
+    }
+
+    // H4e-b3: a command does handover → execute → answered, never consume:
+    // the parked tool call reads its own reply from the journal.
+    @Test
+    void carriesACommandFromHandoverThroughExecuteToItsReply() {
+        pending.set(commandPending("planned"));
+        commandBody("board_write", null);
+        when(store.lineage(TENANT, PARENT))
+                .thenReturn(new Lineage(CHILD, "run-1"));
+        when(records.readResourceBytes(TENANT, "resource-args"))
+                .thenReturn(CONTENT);
+        harness.reply = Map.of("outcome", "answered", "text", "done");
+        relay.scan();
+        assertThat(kinds()).containsExactly("handover", "execute",
+                "answered");
+        assertThat(harness.calls.get(0).sessionId()).isEqualTo(PARENT);
+        assertThat(harness.calls.get(0).body()).containsEntry("commandId",
+                MESSAGE);
+        Call execute = harness.calls.get(1);
+        assertThat(execute.sessionId()).isEqualTo(CHILD);
+        assertThat(execute.body()).containsEntry("commandKind", "board_write")
+                .containsEntry("route", "to_parent")
+                .containsEntry("childRunId", "run-1")
+                .containsEntry("senderSessionId", PARENT)
+                .containsEntry("argsDigest", "a1")
+                .containsEntry("argsBase64",
+                        Base64.getEncoder().encodeToString(CONTENT));
+        assertThat(harness.calls.get(2).sessionId()).isEqualTo(PARENT);
+        assertThat(harness.calls.get(2).body().get("reply"))
+                .isEqualTo(Map.of("outcome", "answered", "text", "done"));
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(row.get().attempts()).isZero();
+    }
+
+    // The leader's own session_command_refused is terminal: rejected,
+    // never re-executed.
+    @Test
+    void rejectsACommandItsLeaderRefusesForGood() {
+        pending.set(commandPending("accepting"));
+        commandBody("board_write", CHILD);
+        when(records.readResourceBytes(TENANT, "resource-args"))
+                .thenReturn(CONTENT);
+        harness.refuseKind = "execute";
+        harness.refuseCode = "session_command_refused";
+        relay.scan();
+        assertThat(kinds()).containsExactly("rejected");
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    // A blocked or closing lead is a wait, not a failure: retried without
+    // spending an attempt.
+    @Test
+    void defersABlockedLeaderWithoutSpendingAnAttempt() {
+        pending.set(commandPending("accepting"));
+        commandBody("board_read", CHILD);
+        when(records.readResourceBytes(TENANT, "resource-args"))
+                .thenReturn(CONTENT);
+        harness.refuseKind = "execute";
+        harness.refuseCode = "hosted_turn_recovery_required";
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+        assertThat(row.get().state()).isEqualTo("relaying");
+    }
+
+    @Test
+    void defersAClosingLeaderWithoutSpendingAnAttempt() {
+        pending.set(commandPending("accepting"));
+        commandBody("board_read", CHILD);
+        when(records.readResourceBytes(TENANT, "resource-args"))
+                .thenReturn(CONTENT);
+        harness.refuseKind = "execute";
+        harness.refuseCode = "hosted_session_closing";
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+    }
+
+    // The sender's run has not attached yet: the control plane's attach
+    // commit may trail this execute — a wait, never a rejection.
+    @Test
+    void defersACommandWhoseSenderHasNotAttachedYet() {
+        pending.set(commandPending("accepting"));
+        commandBody("board_read", CHILD);
+        when(records.readResourceBytes(TENANT, "resource-args"))
+                .thenReturn(CONTENT);
+        harness.refuseKind = "execute";
+        harness.refuseCode = "session_command_blocked";
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+        assertThat(row.get().state()).isEqualTo("relaying");
+    }
+
+    // One sender's commands pass strictly in order: an older unclassified
+    // one keeps a newer one waiting.
+    @Test
+    void holdsAYoungerCommandBehindAnUnclassifiedOlderOne() {
+        pending.set(commandPending("planned"));
+        commandBody("board_write", null);
+        when(store.olderOpenCommand(TENANT, PARENT, MESSAGE))
+                .thenReturn(true);
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+        verify(store).scheduleRetry(any(MessageRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+    }
+
+    @Test
+    void cancelsACommandWhoseParentClosedBeforeTheHandover() {
+        pending.set(commandPending("planned"));
+        commandBody("board_write", null);
+        when(store.lineage(TENANT, PARENT))
+                .thenReturn(new Lineage(CHILD, "run-1"));
+        when(records.sessionStatus(TENANT, CHILD)).thenReturn("CLOSED");
+        relay.scan();
+        assertThat(kinds()).containsExactly("cancelled");
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    // A give-up answers a handed-over command from the leader's own
+    // receipt — the reply, never a paraphrase.
+    @Test
+    void givesUpAHandedOverCommandFromItsReceipt() {
+        pending.set(commandPending("accepting"));
+        commandBody("board_write", CHILD);
+        harness.refuseKind = "execute";
+        harness.refuseCode = "session_command_failed";
+        row.set(new MessageRow(TENANT, PARENT, MESSAGE, CHILD, "relaying",
+                "owner", 31_000L, 63, 0, null));
+        when(store.currentRecord(anyString(), anyString(), anyString(),
+                anyString()))
+                .thenAnswer(invocation -> PARENT
+                        .equals(invocation.getArgument(1))
+                                ? new SessionMessageRelayStore.CurrentRecord(
+                                        "accepting", "resource-message")
+                                : new SessionMessageRelayStore.CurrentRecord(
+                                        "consumed", "resource-receipt"));
+        when(records.readResource(TENANT, "resource-receipt")).thenReturn(
+                "{\"direction\":\"inbound\",\"replyRef\":{\"resourceId\":"
+                        + "\"resource-reply\"}}");
+        when(records.readResource(TENANT, "resource-reply")).thenReturn(
+                "{\"outcome\":\"answered\",\"text\":\"says\"}");
+        relay.scan();
+        assertThat(kinds()).containsExactly("answered");
+        assertThat(harness.calls.getFirst().body().get("reply"))
+                .isEqualTo(Map.of("outcome", "answered", "text", "says"));
+        assertThat(row.get().state()).isEqualTo("unknown");
+    }
+
+    @Test
+    void givesUpAHandedOverCommandWithoutItsReceiptAsUnknown() {
+        pending.set(commandPending("accepting"));
+        commandBody("board_write", CHILD);
+        harness.refuseKind = "execute";
+        harness.refuseCode = "session_command_failed";
+        row.set(new MessageRow(TENANT, PARENT, MESSAGE, CHILD, "relaying",
+                "owner", 31_000L, 63, 0, null));
+        when(store.currentRecord(anyString(), anyString(), anyString(),
+                anyString()))
+                .thenAnswer(invocation -> PARENT
+                        .equals(invocation.getArgument(1))
+                                ? new SessionMessageRelayStore.CurrentRecord(
+                                        "accepting", "resource-message")
+                                : null);
+        relay.scan();
+        assertThat(kinds()).containsExactly("unknown");
+        assertThat(row.get().state()).isEqualTo("unknown");
+    }
+
+    // A give-up answers a never-handed command as cancelled on its sender.
+    @Test
+    void givesUpAPlannedCommandAsCancelledOnItsSender() {
+        pending.set(commandPending("planned"));
+        commandBody("board_write", null);
+        when(store.lineage(TENANT, PARENT))
+                .thenReturn(new Lineage(CHILD, "run-1"));
+        harness.refuseKind = "handover";
+        harness.refuseCode = "session_command_failed";
+        when(store.currentRecord(anyString(), anyString(), anyString(),
+                anyString()))
+                .thenAnswer(invocation -> new SessionMessageRelayStore
+                        .CurrentRecord("planned", "resource-message"));
+        row.set(new MessageRow(TENANT, PARENT, MESSAGE, null, "relaying",
+                "owner", 31_000L, 63, 0, null));
+        relay.scan();
+        assertThat(kinds()).containsExactly("cancelled");
+        assertThat(row.get().state()).isEqualTo("unknown");
     }
 
     // A give-up ends the entry on its sender first, so nothing reads it as
@@ -629,7 +840,7 @@ class SessionMessageRelayTest {
 
     @Test
     void givesUpAHandedOverMessageAsUnknownOnItsSender() {
-        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "accepting",
+        pending.set(new PendingMessage(TENANT, PARENT, MESSAGE, "session_message", "accepting",
                 "resource-message"));
         body("to_child", PARENT, CHILD);
         harness.refuseKind = "receive";
@@ -648,7 +859,7 @@ class SessionMessageRelayTest {
     @Test
     void givesUpFromTheEntryAsTheFailedStepLeftIt() {
         body("to_child", PARENT, CHILD);
-        when(store.currentRecord(anyString(), anyString(), anyString()))
+        when(store.currentRecord(anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(ignored -> new SessionMessageRelayStore
                         .CurrentRecord(kinds().contains("handover")
                                 ? "accepting" : "planned",

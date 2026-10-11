@@ -1,0 +1,1144 @@
+{
+  "contract": "managed-session-command-record/1",
+  "keys": [
+    "argsDigest",
+    "argsRef",
+    "childRunId",
+    "commandId",
+    "direction",
+    "kind",
+    "replyDigest",
+    "replyRef",
+    "route",
+    "run",
+    "senderSessionId",
+    "targetSessionId"
+  ],
+  "fixedKeys": [
+    "argsDigest",
+    "argsRef",
+    "childRunId",
+    "commandId",
+    "direction",
+    "kind",
+    "route",
+    "senderSessionId"
+  ],
+  "templates": {
+    "outbound": {
+      "argsDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "argsRef": {
+        "resourceId": "args-1",
+        "kind": "managed-command-args",
+        "schemaVersion": 1,
+        "byteLength": 42,
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "childRunId": "run-1",
+      "commandId": "cmd_00000000000000000000000000000001",
+      "direction": "outbound",
+      "kind": "board_write",
+      "replyDigest": null,
+      "replyRef": null,
+      "route": "to_parent",
+      "run": {
+        "state": "settled",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-task-update-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": {
+          "target": "session",
+          "state": "planned"
+        }
+      },
+      "senderSessionId": "session-member",
+      "targetSessionId": null
+    },
+    "inbound": {
+      "argsDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "argsRef": {
+        "resourceId": "args-copy-1",
+        "kind": "managed-command-args",
+        "schemaVersion": 1,
+        "byteLength": 42,
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "childRunId": "run-1",
+      "commandId": "cmd_00000000000000000000000000000001",
+      "direction": "inbound",
+      "kind": "board_write",
+      "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "replyRef": {
+        "resourceId": "reply-1",
+        "kind": "managed-command-reply",
+        "schemaVersion": 1,
+        "byteLength": 53,
+        "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "route": "to_parent",
+      "run": {
+        "state": "settled",
+        "reason": null,
+        "definition": null,
+        "executionCallId": null,
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": {
+          "target": "session",
+          "state": "consumed"
+        }
+      },
+      "senderSessionId": "session-member",
+      "targetSessionId": "session-lead"
+    }
+  },
+  "cases": [
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-start",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-board-read",
+      "patch": {
+        "kind": "board_read"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-member-message",
+      "patch": {
+        "kind": "member_message"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-plan-submit",
+      "patch": {
+        "kind": "plan_submit"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-args-at-bound",
+      "patch": {
+        "argsRef": {
+          "byteLength": 65536
+        }
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-args-empty",
+      "patch": {
+        "argsRef": {
+          "byteLength": 0
+        }
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-accepting",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-accepted",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-consumed",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-unknown",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-rejected",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "rejected"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-cancelled-unresolved",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "extra-key",
+      "patch": {
+        "extra": "x"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "direction-unknown",
+      "patch": {
+        "direction": "sideways"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command direction must be outbound or inbound"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "route-to-child",
+      "patch": {
+        "route": "to_child"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command route must be to_parent"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "kind-unknown",
+      "patch": {
+        "kind": "board_delete"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command kind must be one of"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "run-with-definition",
+      "patch": {
+        "run": {
+          "definition": {
+            "definitionId": "agent-1",
+            "definitionRevision": 1,
+            "definitionDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command run must be purely logical"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "run-admitted",
+      "patch": {
+        "run": {
+          "state": "admitted"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command run must be settled"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "run-without-delivery",
+      "patch": {
+        "run": {
+          "delivery": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command delivery must be a session delivery"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "command-id-empty",
+      "patch": {
+        "commandId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "commandId must be a non-empty string"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "child-run-id-empty",
+      "patch": {
+        "childRunId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "childRunId must be a non-empty string"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "sender-not-text",
+      "patch": {
+        "senderSessionId": 7
+      },
+      "valid": false,
+      "start": false,
+      "error": "senderSessionId must be a non-empty string"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "args-over-bound",
+      "patch": {
+        "argsRef": {
+          "byteLength": 65537
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command arguments exceed 65536 bytes"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "args-digest-mismatch",
+      "patch": {
+        "argsDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command argsDigest must name the arguments' digest"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "reply-ref-without-digest",
+      "patch": {
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command names its reply as a pair, or not at all"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "reply-digest-mismatch",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command replyDigest must name the reply's digest"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "reply-over-bound",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 65537,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command reply exceeds 65536 bytes"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-target-is-sender",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-member"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command cannot address its own sender"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-without-call",
+      "patch": {
+        "run": {
+          "executionCallId": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session command run must name its commanding call"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-claimed-without-target",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session command must fix its target once its delivery is claimed"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-accepted-without-reply",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session command names its reply exactly once accepted"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-reply-while-planned",
+      "patch": {
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session command names its reply exactly once accepted"
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-reply-after-rejection",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "rejected"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Outbound session command names its reply exactly once accepted"
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-start",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-board-read",
+      "patch": {
+        "kind": "board_read"
+      },
+      "valid": false,
+      "start": false,
+      "error": "reads commit nothing"
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-member-message",
+      "patch": {
+        "kind": "member_message"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-plan-submit",
+      "patch": {
+        "kind": "plan_submit"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-with-call",
+      "patch": {
+        "run": {
+          "executionCallId": "call-task-update-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Inbound session command run must name no call"
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-accepted",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Inbound session command opens consumed"
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-without-target",
+      "patch": {
+        "targetSessionId": null
+      },
+      "valid": false,
+      "start": false,
+      "error": "Inbound session command must name its target"
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-without-reply",
+      "patch": {
+        "replyRef": null,
+        "replyDigest": null
+      },
+      "valid": false,
+      "start": false,
+      "error": "Inbound session command opens with its reply"
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-target-is-sender",
+      "patch": {
+        "targetSessionId": "session-member"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Session command cannot address its own sender"
+    }
+  ],
+  "successors": [
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-claim",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-retarget",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-other"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-answer",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-answer-without-reply",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-consume",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-reply-changed",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-2",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "replyDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-cancel",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-claim-unknown",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-unknown-accepted",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-reject",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "rejected"
+          }
+        },
+        "targetSessionId": "session-lead"
+      },
+      "valid": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-reject-after-answer",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "rejected"
+          }
+        },
+        "targetSessionId": "session-lead",
+        "replyRef": {
+          "resourceId": "reply-1",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "replyDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-restated",
+      "before": {},
+      "after": {},
+      "valid": true
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-args-changed",
+      "before": {},
+      "after": {
+        "argsRef": {
+          "resourceId": "args-2",
+          "kind": "managed-command-args",
+          "schemaVersion": 1,
+          "byteLength": 42,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "argsDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-command-changed",
+      "before": {},
+      "after": {
+        "commandId": "cmd_00000000000000000000000000000002"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-kind-changed",
+      "before": {},
+      "after": {
+        "kind": "board_read"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-route-changed",
+      "before": {},
+      "after": {
+        "route": "to_child"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-sender-changed",
+      "before": {},
+      "after": {
+        "senderSessionId": "session-other"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "outbound",
+      "id": "outbound-call-changed",
+      "before": {},
+      "after": {
+        "run": {
+          "executionCallId": "call-2"
+        }
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-restated",
+      "before": {},
+      "after": {},
+      "valid": true
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-reply-changed",
+      "before": {},
+      "after": {
+        "replyRef": {
+          "resourceId": "reply-2",
+          "kind": "managed-command-reply",
+          "schemaVersion": 1,
+          "byteLength": 53,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "replyDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-target-changed",
+      "before": {},
+      "after": {
+        "targetSessionId": "session-other"
+      },
+      "valid": false
+    },
+    {
+      "domain": "session_command",
+      "template": "inbound",
+      "id": "inbound-delivery-regress",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        }
+      },
+      "valid": false
+    }
+  ]
+}

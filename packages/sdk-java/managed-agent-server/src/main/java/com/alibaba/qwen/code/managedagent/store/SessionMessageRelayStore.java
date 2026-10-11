@@ -17,9 +17,12 @@ public class SessionMessageRelayStore {
     /** The failed steps after which the relay gives an entry up. */
     public static final int MAX_ATTEMPTS = 64;
 
-    /** One outbox entry the delivery-pending index surfaced. */
+    /** One outbox entry the delivery-pending index surfaced. H4e-b3 adds
+     * the domain: command entries share every field and never collide
+     * with message ids, which would duplicate across the ledger. */
     public record PendingMessage(String tenantId, String senderSessionId,
-            String messageId, String deliveryState, String recordResourceId) {
+            String messageId, String domain, String deliveryState,
+            String recordResourceId) {
     }
 
     /** One relay ledger row. */
@@ -38,17 +41,23 @@ public class SessionMessageRelayStore {
             String recordResourceId) {
     }
 
+    /** The domains this ledger drives: H4d-b's channel and H4e-b3's. */
+    private static final List<String> DOMAINS = List.of("session_message",
+            "session_command");
+
     // The entries still owing a handover. Only outbox entries reach these
-    // states (a receipt opens accepted), and a terminal ledger row means
-    // the relay already finished with the entry.
+    // states (a receipt opens accepted; a command receipt opens consumed),
+    // and a terminal ledger row means the relay already finished with the
+    // entry. The query's domain binds one channel: session_message, or
+    // H4e-b3's session_command, which discovery drives independently.
     private static final String HANDOVER_SQL =
-            "SELECT r.tenant_id, r.session_id, r.record_id, r.delivery_state,"
-                    + " r.record_resource_id"
+            "SELECT r.tenant_id, r.session_id, r.record_id, r.domain,"
+                    + " r.delivery_state, r.record_resource_id"
                     + " FROM qwen_managed_session_extension_record r"
                     + " LEFT JOIN qwen_managed_session_message_relay l"
                     + " ON l.sender_session_id = r.session_id"
                     + " AND l.message_id = r.record_id"
-                    + " WHERE r.domain = 'session_message'"
+                    + " WHERE r.domain = ?"
                     + " AND r.delivery_state IN ('planned', 'accepting',"
                     + " 'unknown')"
                     + " AND (l.state IS NULL OR l.state NOT IN ('done',"
@@ -66,8 +75,8 @@ public class SessionMessageRelayStore {
     // still `relaying` over an accepted entry lost its advance after the
     // sender's step committed; it waits like a `delivered` one.
     private static final String AWAITING_SQL =
-            "SELECT r.tenant_id, r.session_id, r.record_id, r.delivery_state,"
-                    + " r.record_resource_id"
+            "SELECT r.tenant_id, r.session_id, r.record_id, r.domain,"
+                    + " r.delivery_state, r.record_resource_id"
                     + " FROM qwen_managed_session_message_relay l"
                     + " JOIN qwen_managed_session_extension_record r"
                     + " ON r.tenant_id = l.tenant_id"
@@ -89,13 +98,17 @@ public class SessionMessageRelayStore {
     }
 
     /** The owed-work page for one worker: due, not terminal, and never
-     * leased to another worker. */
+     * leased to another worker. Messages take their accepted reads from
+     * the awaiting queue; commands never — their pass ends at answered. */
     public List<PendingMessage> findPendingMessages(String workerId, long now,
             int limit) {
         List<PendingMessage> page = new java.util.ArrayList<>(jdbc.query(
-                HANDOVER_SQL, this::pending, now, now, workerId, limit));
+                HANDOVER_SQL, this::pending, "session_message", now, now,
+                workerId, limit));
         page.addAll(jdbc.query(AWAITING_SQL, this::pending, now, now,
                 workerId, limit));
+        page.addAll(jdbc.query(HANDOVER_SQL, this::pending,
+                "session_command", now, now, workerId, limit));
         return page;
     }
 
@@ -103,6 +116,7 @@ public class SessionMessageRelayStore {
             throws java.sql.SQLException {
         return new PendingMessage(result.getString("tenant_id"),
                 result.getString("session_id"), result.getString("record_id"),
+                result.getString("domain"),
                 result.getString("delivery_state"),
                 result.getString("record_resource_id"));
     }
@@ -111,28 +125,28 @@ public class SessionMessageRelayStore {
      * worker that claimed it: the page's own snapshot can be a revision
      * behind, and a body without the target it fixed reads wrong. */
     public CurrentRecord currentRecord(String tenantId, String sessionId,
-            String messageId) {
+            String domain, String messageId) {
         List<CurrentRecord> rows = jdbc.query(
                 "SELECT delivery_state, record_resource_id FROM"
                         + " qwen_managed_session_extension_record"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND domain = 'session_message' AND record_id = ?",
+                        + " AND domain = ? AND record_id = ?",
                 (result, row) -> new CurrentRecord(
                         result.getString("delivery_state"),
                         result.getString("record_resource_id")),
-                tenantId, sessionId, messageId);
+                tenantId, sessionId, domain, messageId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
     /** One record's delivery state as committed now, in any journal. */
     public String deliveryState(String tenantId, String sessionId,
-            String messageId) {
+            String domain, String messageId) {
         List<String> rows = jdbc.query(
                 "SELECT delivery_state FROM qwen_managed_session_extension_record"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND domain = 'session_message' AND record_id = ?",
+                        + " AND domain = ? AND record_id = ?",
                 (result, row) -> result.getString("delivery_state"),
-                tenantId, sessionId, messageId);
+                tenantId, sessionId, domain, messageId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -147,6 +161,24 @@ public class SessionMessageRelayStore {
                         result.getString("parent_child_run_id")),
                 tenantId, sessionId);
         return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    /** Whether an older command of the same sender is still unclassified:
+     * one sender's commands pass strictly in order. */
+    public boolean olderOpenCommand(String tenantId, String senderSessionId,
+            String commandId) {
+        return !jdbc.query("SELECT l.message_id FROM"
+                        + " qwen_managed_session_message_relay l"
+                        + " JOIN qwen_managed_session_extension_record r"
+                        + " ON r.tenant_id = l.tenant_id"
+                        + " AND r.session_id = l.sender_session_id"
+                        + " AND r.domain = 'session_command'"
+                        + " AND r.record_id = l.message_id"
+                        + " WHERE l.tenant_id = ? AND l.sender_session_id = ?"
+                        + " AND l.message_id < ?"
+                        + " AND l.state NOT IN ('done', 'unknown', 'orphaned')",
+                (result, row) -> result.getString(1), tenantId,
+                senderSessionId, commandId).isEmpty();
     }
 
     /** Insert-or-claim: returns the row this worker now owns, or null when

@@ -110,6 +110,7 @@ export const MANAGED_SESSION_DOMAINS = [
   'team_message',
   'team_plan',
   'session_message',
+  'session_command',
   'session_metadata',
   'file_history',
   'session_source',
@@ -142,6 +143,8 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     // H4e-b1: a lead's team and its task board.
     'team_state',
     'team_task',
+    // H4e-b3: produced by member board tools and the control plane's relay.
+    'session_command',
   ];
 
 /**

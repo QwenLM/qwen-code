@@ -7,15 +7,18 @@
 import { randomUUID } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import type {
   HarnessAgentWaitRun,
+  HarnessCommandWaitRun,
   HarnessRunAuthorization,
   HarnessToolItem,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   HARNESS_MODEL_START_PHASES,
   harnessCheckpointIsAgentWait,
+  harnessCheckpointIsCommandWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import {
@@ -35,6 +38,10 @@ import {
   type HostedChildAgentSession,
 } from './hosted-child-agent-session.js';
 import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import {
+  sessionCommandEvidenceText,
+  type HostedSessionCommandSession,
+} from './hosted-session-command-session.js';
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import {
   HOSTED_TEAM_TOOL_NAMES,
@@ -89,7 +96,7 @@ export interface HostedRuntimeRecoveryExecution {
 }
 
 export interface HostedRuntimeRecoveryReport {
-  phase: 'await_runtime' | 'await_agent' | 'results_ready';
+  phase: 'await_runtime' | 'await_agent' | 'await_command' | 'results_ready';
   checkpointId: string;
   activationId: string;
   executions: HostedRuntimeRecoveryExecution[];
@@ -968,6 +975,196 @@ export async function fillParkedRoundAgentGaps(input: {
 }
 
 /**
+ * The command wait's cancellation settlement (H4e-b3 decision 14): every
+ * outstanding wait run is answered by what its own journal committed —
+ * an accepted entry's reply; a planned entry cancelled and told as not
+ * sent; a handed-over one told it reached the leader with its reply still
+ * missing and a write possibly landed; rejected, cancelled and unknown
+ * said so — or the checkpoint moves past the wait with no terminal
+ * record stranding the Turn. The settle's conflict is the relay race's
+ * own evidence: once it loses, the journal is re-read and answered as it
+ * committed. The journaled set keeps a replayed cancel silent. Shared by
+ * the cancel/close path and the interrupted-turn settle.
+ */
+export async function settleCancelledCommandWaitRuns(input: {
+  managed: ManagedSession;
+  sessionId: string;
+  promptId: string;
+  cwd: string;
+  runs: readonly HarnessCommandWaitRun[];
+  commands: HostedSessionCommandSession;
+}): Promise<void> {
+  const harness = createManagedHarnessHandle(input.managed);
+  const journaled = await journaledToolResultIds(input.managed, input.promptId);
+  for (const run of input.runs) {
+    let parts: Part[] | undefined;
+    for (let attempt = 0; attempt < 4 && parts === undefined; attempt += 1) {
+      const record = input.commands.command(run.commandId);
+      const state =
+        record === undefined
+          ? 'planned'
+          : (record.run.delivery?.state ?? 'planned');
+      if (state === 'accepted' || state === 'consumed') {
+        const reply = await input.commands.readReply(run.commandId);
+        if (reply === null) continue;
+        parts =
+          reply.outcome === 'answered'
+            ? convertToFunctionResponse(run.toolName, run.functionCallId, [
+                { text: reply.text },
+              ])
+            : convertToFunctionErrorResponse(
+                run.toolName,
+                run.functionCallId,
+                [],
+                reply.text,
+              );
+        continue;
+      }
+      try {
+        if (record !== undefined && state === 'planned') {
+          await input.commands.settle(run.commandId, 'cancelled');
+        } else if (state === 'accepting') {
+          await input.commands.settle(run.commandId, 'unknown');
+        }
+      } catch (cause) {
+        if (cause instanceof ManagedSessionConflictError) continue;
+        throw cause;
+      }
+      parts = convertToFunctionErrorResponse(
+        run.toolName,
+        run.functionCallId,
+        [],
+        sessionCommandEvidenceText(
+          // The accepted/consumed arm above folded already; what remains
+          // of the delivery vocabulary is exactly the settle-relevant five.
+          state as
+            | 'planned'
+            | 'accepting'
+            | 'rejected'
+            | 'cancelled'
+            | 'unknown',
+        ),
+      );
+    }
+    if (parts === undefined)
+      throw new Error(`Session command ${run.commandId} never settled.`);
+    if (!journaled.has(run.functionCallId))
+      await input.managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: run.modelMessageId,
+        sessionId: input.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts },
+      });
+    await harness.resolveAwaitCommand(run.commandId);
+  }
+}
+
+/**
+ * The gap fill of a parked command round (H4e-b3 decision 4): a command
+ * batch parks with some calls of its last assistant round never reached
+ * by the dead loop — the checkpoint names every admitted command call,
+ * so the only gaps are the journal-only siblings (`send_message` to
+ * `"parent"`), which fill from what committed, and anything validation
+ * refused, which never ran. A call named by the checkpoint is never a
+ * gap: its fold and its replay-safe marks belong to the wait-arm channel
+ * (settle / resume). Shared by the cancel/close path and the
+ * interrupted-turn settle.
+ */
+export async function fillParkedRoundCommandGaps(input: {
+  managed: ManagedSession;
+  sessionId: string;
+  promptId: string;
+  cwd: string;
+  /** The never-admitted sibling's answer wording, caller-named. */
+  gapText: string;
+  commands: HostedSessionCommandSession;
+  children?: HostedChildAgentSession;
+  messages?: HostedSessionMessageSession;
+}): Promise<number> {
+  const authorization = await input.managed.authority
+    .harnessRunAuthorization()
+    .catch(() => undefined);
+  const waitRuns =
+    authorization?.status === 'runnable'
+      ? (authorization.checkpoint.commandWait?.runs ?? [])
+      : [];
+  const namedRounds = new Set(waitRuns.map((run) => run.modelMessageId));
+  const waitedCalls = new Set(waitRuns.map((run) => run.functionCallId));
+  const projected = await input.managed.sink.project();
+  const assistant = projected
+    .filter(
+      (entry) =>
+        entry.daemonPromptId === input.promptId &&
+        entry.type === 'assistant' &&
+        entry.message?.parts?.some((part) => part.functionCall) &&
+        namedRounds.has(entry.uuid),
+    )
+    .at(-1);
+  if (assistant === undefined) return 0;
+  const journaled = await journaledToolResultIds(
+    input.managed,
+    input.promptId,
+    projected,
+  );
+  let filled = 0;
+  for (const part of assistant.message?.parts ?? []) {
+    const callId = part.functionCall?.id;
+    const name = part.functionCall?.name;
+    if (typeof callId !== 'string' || typeof name !== 'string') continue;
+    if (waitedCalls.has(callId)) continue;
+    const foldOwed = !journaled.has(callId);
+    const sent =
+      name === 'send_message'
+        ? await sentMessageText(
+            {
+              session: input.managed,
+              promptId: input.promptId,
+              children: input.children,
+              messages: input.messages,
+            },
+            callId,
+            hostedChildRunIdFor(input.promptId, callId),
+          )
+        : undefined;
+    let parts: Part[] | undefined;
+    if (sent !== undefined) {
+      parts = convertToFunctionResponse(name, callId, [{ text: sent }]);
+    } else {
+      parts = convertToFunctionErrorResponse(
+        name,
+        callId,
+        [],
+        ['task_list', 'task_create', 'task_update'].includes(name)
+          ? sessionCommandEvidenceText('planned')
+          : input.gapText,
+      );
+    }
+    if (foldOwed) {
+      await input.managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: assistant.uuid,
+        sessionId: input.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        model: 'recovered',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts },
+      });
+      filled += 1;
+    }
+    journaled.add(callId);
+  }
+  return filled;
+}
+
+/**
  * H5/F5 follow-up: the Runtime-facing settlement of an interrupted Turn
  * ahead of its terminal record. A Turn that died inside a tool call parked
  * its checkpoint in `await_runtime`, and a terminal record advances the
@@ -1013,6 +1210,8 @@ export async function settleInterruptedTurnRuntime(input: {
   teams?: HostedTeamSession;
   /** H4d-b: the message funnel that tells which send_message committed. */
   messages?: HostedSessionMessageSession;
+  /** H4e-b3: the command funnel that tells a command's committed evidence. */
+  commands?: HostedSessionCommandSession;
 }): Promise<HostedInterruptedTurnRuntime> {
   const authorization = await input.session.authority.harnessRunAuthorization();
   // Only a committed, readable checkpoint — or the durable absence of any
@@ -1115,6 +1314,37 @@ export async function settleInterruptedTurnRuntime(input: {
         messages: input.messages,
         signal: settleFillAbort.signal,
         consume: input.consume,
+      });
+    }
+    if (harnessCheckpointIsCommandWait(authorization.checkpoint)) {
+      // H4e-b3 decision 14: no Runtime executions exist to stop either —
+      // each outstanding command run answers by what its own journal
+      // committed, the resolve moves the checkpoint past the wait, and
+      // the round's never-reached calls pair off from the same journal.
+      if (input.commands === undefined)
+        throw new Error('Command wait checkpoint has no command funnel.');
+      const outstanding = (
+        authorization.checkpoint.commandWait?.runs ?? []
+      ).filter((run) => !run.folded);
+      if (outstanding.length > 0) {
+        await settleCancelledCommandWaitRuns({
+          managed: input.session,
+          sessionId: input.sessionId,
+          promptId: input.promptId,
+          cwd: input.cwd,
+          runs: outstanding,
+          commands: input.commands,
+        });
+      }
+      await fillParkedRoundCommandGaps({
+        managed: input.session,
+        sessionId: input.sessionId,
+        promptId: input.promptId,
+        cwd: input.cwd,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+        commands: input.commands,
+        children: input.children,
+        messages: input.messages,
       });
     }
   }
@@ -1361,6 +1591,31 @@ export async function recoverHostedRuntimeTurn(input: {
             runtimeSessionId: hostedRuntimeSessionId(promptId),
             outcome: 'known',
             status: { state: run.consumed ? 'settled' : 'executing' },
+          })),
+        },
+      });
+    }
+    // H4e-b3: the command wait classifies exactly like the agent wait —
+    // a folded run reads as settled, an outstanding one as executing, and
+    // its reply is the relay's durable evidence, so every outcome is
+    // known. No Runtime lease is owed on this load either: the wait owns
+    // no Broker binding; the mount the checkpoint names a Turn took in an
+    // earlier batch returns with its resume, not with the report.
+    if (harnessCheckpointIsCommandWait(checkpoint)) {
+      return recovered({
+        promptId,
+        acquiredRuntime: false,
+        report: {
+          phase: 'await_command',
+          checkpointId: checkpoint.identity.checkpointId,
+          activationId: session.activation.activationId,
+          executions: (checkpoint.commandWait?.runs ?? []).map((run) => ({
+            functionCallId: run.functionCallId,
+            toolName: run.toolName,
+            executionCallId: run.commandId,
+            runtimeSessionId: hostedRuntimeSessionId(promptId),
+            outcome: 'known',
+            status: { state: run.folded ? 'settled' : 'executing' },
           })),
         },
       });

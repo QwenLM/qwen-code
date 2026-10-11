@@ -56,7 +56,10 @@ import {
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import type { HarnessAgentWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import type {
+  HarnessAgentWaitRun,
+  HarnessCommandWaitRun,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   ManagedSessionStoreHttpError,
@@ -93,11 +96,15 @@ import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/mana
 import { MANAGED_SESSION_MESSAGE_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { sanitizeName } from '@qwen-code/qwen-code-core/agents/team/teamHelpers.js';
 import {
+  ACTIVE_FORM_CHARS,
+  DESCRIPTION_CHARS,
   HOSTED_TEAM_TOOLS,
   HOSTED_TEAM_TOOL_NAMES,
   HostedTeamRefusal,
   hostedTeamArgumentError,
   hostedTeamMembership,
+  SUBJECT_CHARS,
+  TASK_STATUSES,
   type HostedTeamMembership,
   type HostedTeamSession,
 } from './hosted-team-session.js';
@@ -114,6 +121,7 @@ import {
   HostedChildChains,
   broadcastMessageId,
   broadcastRunId,
+  firstInputOpensWithMemberPreamble,
   hostedCallKey,
   hostedPromptKey,
   hostedRouteDetails,
@@ -121,6 +129,13 @@ import {
   neverStartedPhrase,
   teamMemberPreamble,
 } from './hosted-member-chain.js';
+import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
+import type { SessionCommandKind } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-record.js';
+import {
+  SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
+  sessionCommandEvidenceText,
+  type HostedSessionCommandSession,
+} from './hosted-session-command-session.js';
 import { MANAGED_TEAM_LEADER } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
@@ -283,6 +298,24 @@ function sessionMessageAdmissionsEnabled(): boolean {
     return false;
   }
 }
+
+// H4e-b3: the member board tools exist only while the session_command
+// domain is enabled for commits.
+function sessionCommandAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('session_command');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * H4e-b3 decision 4: a command's wait bound, measured from the outbound
+ * entry's own commit — well inside the Turn deadline and the relay's
+ * inactivity bound.
+ */
+export const COMMAND_WAIT_MS = 120_000;
 
 // H4e-b1: the team tools, and the agent tool's `name`, exist only while
 // both lead-side team domains are enabled for commits.
@@ -831,6 +864,134 @@ export const HOSTED_SEND_MESSAGE_TO_PARENT_TOOL: FunctionDeclaration = {
 };
 
 /**
+ * H4e-b3 decision 6: a member's board read, as a `board_read` command to
+ * its leader. The schema mirrors the lead's `task_list` exactly.
+ */
+export const HOSTED_MEMBER_TASK_LIST_TOOL: FunctionDeclaration = {
+  name: 'task_list',
+  description:
+    'List your team board, optionally filtered, followed by each member with the state of its current run — the board and the roster as your leader holds them. Board changes are not pushed to you: read the board again when you need the current state.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      status: {
+        type: 'string',
+        enum: ['pending', 'in_progress', 'completed'],
+        description: 'Filter by task status.',
+      },
+      owner: {
+        type: 'string',
+        description: 'Filter by owner name.',
+      },
+      blockedBy: {
+        type: 'string',
+        description: 'Filter for tasks still blocked by this task number.',
+      },
+    },
+    additionalProperties: false,
+  },
+};
+
+/** H4e-b3 decision 6: a member's task creation, as a `board_write` command. */
+export const HOSTED_MEMBER_TASK_CREATE_TOOL: FunctionDeclaration = {
+  name: 'task_create',
+  description:
+    'Create a pending task on your team board. The leader records it and answers with the new task number. Members are not told about board changes: put new work for another member in your final answer, or ask the leader to hand it out.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      subject: {
+        type: 'string',
+        maxLength: SUBJECT_CHARS,
+        description: 'Short title for the task.',
+      },
+      description: {
+        type: 'string',
+        maxLength: DESCRIPTION_CHARS,
+        description: 'Detailed description of the task.',
+      },
+      activeForm: {
+        type: 'string',
+        maxLength: ACTIVE_FORM_CHARS,
+        description: 'Present tense label for UI (e.g., "Running tests").',
+      },
+      metadata: {
+        type: 'object',
+        description: 'Optional arbitrary metadata.',
+      },
+    },
+    required: ['subject', 'description'],
+    additionalProperties: false,
+  },
+};
+
+/** H4e-b3 decision 6: a member's task revision, as a `board_write` command. */
+export const HOSTED_MEMBER_TASK_UPDATE_TOOL: FunctionDeclaration = {
+  name: 'task_update',
+  description:
+    'Update a board task: status, owner, subject, description, active form, metadata or dependencies; set status to "deleted" to remove it. Status, owner, subject and description change only on a task you own or that has no owner, and edges only reach such tasks; activeForm and metadata change on any task; owner may be only your own name or "" to unassign, and moving an unowned task to in_progress makes you its owner. A task in progress needs an owner. The answer is the revised task, or the refusal.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      taskId: {
+        type: 'string',
+        description: 'Number of the task to update, as "3" or "#3".',
+      },
+      status: {
+        type: 'string',
+        enum: TASK_STATUSES,
+        description: 'New task status.',
+      },
+      owner: {
+        type: 'string',
+        description:
+          'New owner: your own name, or an empty string to unassign.',
+      },
+      subject: {
+        type: 'string',
+        maxLength: SUBJECT_CHARS,
+        description: 'Updated task title.',
+      },
+      description: {
+        type: 'string',
+        maxLength: DESCRIPTION_CHARS,
+        description: 'Updated task description.',
+      },
+      activeForm: {
+        type: 'string',
+        maxLength: ACTIVE_FORM_CHARS,
+        description: 'Present tense label for UI.',
+      },
+      metadata: {
+        type: 'object',
+        description: 'Metadata to merge. Set a key to null to delete it.',
+      },
+      addBlocks: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Numbers of the tasks this task blocks.',
+      },
+      addBlockedBy: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Numbers of the tasks that block this task.',
+      },
+    },
+    required: ['taskId'],
+    additionalProperties: false,
+  },
+};
+
+export const HOSTED_MEMBER_BOARD_TOOLS: readonly FunctionDeclaration[] = [
+  HOSTED_MEMBER_TASK_LIST_TOOL,
+  HOSTED_MEMBER_TASK_CREATE_TOOL,
+  HOSTED_MEMBER_TASK_UPDATE_TOOL,
+];
+
+export const HOSTED_MEMBER_COMMAND_TOOL_NAMES: readonly string[] =
+  HOSTED_MEMBER_BOARD_TOOLS.map((tool) => tool.name!);
+
+/**
  * H4e-b1: the agent tool of a Session whose team tools are declared. With
  * `name`, the child is a member of the Session's active team.
  */
@@ -1085,6 +1246,16 @@ export class HostedWorkspaceToolTurn {
   private readonly childConsumption: (childRunId: string) => void;
   private readonly messages?: HostedSessionMessageSession;
   private readonly teams?: HostedTeamSession;
+  /** H4e-b3: the member's command funnel to its parent, beside its messages. */
+  private readonly commands?: HostedSessionCommandSession;
+  /** b3b: whether this Session's run carries a member preamble (once read). */
+  private memberPreamble?: boolean;
+  /** b3b: the member board vocabulary declared, refreshed per declarations. */
+  private readonly commandToolNames = new Set<string>();
+  /** b3b decision 4: batches of this Turn whose command park committed. */
+  private readonly commandParks = new Set<string>();
+  /** b3b decision 4: a command call of this Turn timed out (decision 4's lock). */
+  private commandTimedOut = false;
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -1128,6 +1299,7 @@ export class HostedWorkspaceToolTurn {
       };
       messages?: HostedSessionMessageSession;
       teams?: HostedTeamSession;
+      commands?: HostedSessionCommandSession;
     },
   ) {
     this.mcp = extras?.mcp;
@@ -1144,6 +1316,7 @@ export class HostedWorkspaceToolTurn {
       extras?.childAgents?.queueConsumption ?? (() => undefined);
     this.messages = extras?.messages;
     this.teams = extras?.teams;
+    this.commands = extras?.commands;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -1250,6 +1423,16 @@ export class HostedWorkspaceToolTurn {
           ? [HOSTED_SEND_MESSAGE_TO_PARENT_TOOL]
           : []),
     ];
+    // H4e-b3: a member's board tools are its commands to the leader,
+    // declared only on a lineage Session whose run's first input carries
+    // its member preamble (decision 5) — a convenience beside the lead's
+    // own admission of every command.
+    this.commandToolNames.clear();
+    if (await this.memberCommandsDeclared()) {
+      this.advertised.push(...HOSTED_MEMBER_BOARD_TOOLS);
+      for (const tool of HOSTED_MEMBER_BOARD_TOOLS)
+        if (tool.name !== undefined) this.commandToolNames.add(tool.name);
+    }
     return this.advertised;
   }
 
@@ -1265,6 +1448,66 @@ export class HostedWorkspaceToolTurn {
     return this.childDepth === 0 && childAgentAdmissionsEnabled()
       ? 'parent'
       : undefined;
+  }
+
+  /**
+   * b3b decision 5: the member board tools ride the command channel, and
+   * only a lineage Session whose run's first input opens with a
+   * well-formed member preamble declares them.
+   */
+  private async memberCommandsDeclared(): Promise<boolean> {
+    if (this.commands?.lineage === undefined) return false;
+    if (!sessionCommandAdmissionsEnabled()) return false;
+    this.memberPreamble ??= await this.firstInputHasMemberPreamble();
+    return this.memberPreamble;
+  }
+
+  /**
+   * The member marker (decision 5): this Session's own first accepted
+   * input's text, checked for the run's preamble block. Anything
+   * unreadable hides the tools — it never grants them.
+   */
+  private async firstInputHasMemberPreamble(): Promise<boolean> {
+    const authority = this.session.authority;
+    const first = authority
+      .eventsInSequenceRange(1, authority.committedSequence)
+      .find((event) => event.kind === 'input.accepted');
+    const contentRef = first?.payload['contentRef'];
+    if (contentRef === undefined) return false;
+    const ref = assertManagedSessionDurableRef(
+      contentRef,
+      'member launch input',
+    );
+    if (ref.kind !== 'managed-input') return false;
+    try {
+      const parsed: unknown = JSON.parse(
+        (await this.session.resources.read(ref)).toString('utf8'),
+      );
+      // The admission committers write the launch envelope as an
+      // OpenAI message-content array; a plain {text} envelope rides
+      // the same gate for the test-path fixtures.
+      let text: string | undefined;
+      if (Array.isArray(parsed)) {
+        const part = parsed.find(
+          (each): each is { type: string; text: string } =>
+            typeof each === 'object' &&
+            each !== null &&
+            (each as Record<string, unknown>)['type'] === 'text' &&
+            typeof (each as Record<string, unknown>)['text'] === 'string',
+        );
+        text = part?.text;
+      } else if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        typeof (parsed as Record<string, unknown>)['text'] === 'string'
+      ) {
+        text = (parsed as Record<string, unknown>)['text'] as string;
+      }
+      if (text === undefined) return false;
+      return firstInputOpensWithMemberPreamble(text);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1878,8 +2121,15 @@ export class HostedWorkspaceToolTurn {
         let agentAdmitted = false;
         let agentBackground = true;
         let messageAdmitted = false;
+        // b3b: on a member Session the board vocabulary is its command
+        // channel's, never the lead funnel's — the two never meet on one
+        // profile, but a name collision must route to the command arm.
+        const command =
+          mcpInput === undefined && this.commandToolNames.has(call.name);
         const team =
-          mcpInput === undefined && HOSTED_TEAM_TOOL_NAMES.includes(call.name);
+          !command &&
+          mcpInput === undefined &&
+          HOSTED_TEAM_TOOL_NAMES.includes(call.name);
         if (mcpInput) {
           input = { ...mcpInput.input };
         } else if (isShell) {
@@ -2200,6 +2450,9 @@ export class HostedWorkspaceToolTurn {
             validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
           }
           input = teamForm ? hostedTeamMessageInput(args) : { ...args };
+        } else if (command) {
+          validationError = this.commandArgumentError(call, source);
+          input = { ...call.args };
         } else if (team) {
           validationError = hostedTeamArgumentError(call.name, call.args);
           input = { ...call.args };
@@ -2249,6 +2502,7 @@ export class HostedWorkspaceToolTurn {
           agentBackground,
           message: mcpInput === undefined && messageAdmitted,
           team,
+          command,
         };
       });
     };
@@ -2313,7 +2567,10 @@ export class HostedWorkspaceToolTurn {
       !this.acquired &&
       requests.some(
         (request) =>
-          request.agent !== true && request.message !== true && !request.team,
+          request.agent !== true &&
+          request.message !== true &&
+          !request.team &&
+          request.command !== true,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -2570,9 +2827,11 @@ export class HostedWorkspaceToolTurn {
         if (refusals[ordinal] !== undefined) continue;
         // A child-agent launch has no Runtime execution to reserve: the
         // control plane's relay owns its side effect, so it never enters
-        // the Broker pipeline below. Nor does a session message or a team
-        // tool, which commit only to this Session's journal.
-        if (request.agent || request.message || request.team) continue;
+        // the Broker pipeline below. Nor does a session message, a team
+        // tool, or a session command, which commit only to this Session's
+        // journal.
+        if (request.agent || request.message || request.team || request.command)
+          continue;
         if (request.mcp) {
           const renewed = this.mcp!.toolInput(
             request.call.name,
@@ -2925,6 +3184,27 @@ export class HostedWorkspaceToolTurn {
         renewTimer.unref();
       }
       const responses: Part[] = [];
+      // b3b decision 4: the batch's command park names every command call
+      // that survived validation; the first of them commits the checkpoint.
+      const commandRuns: HarnessCommandWaitRun[] = requests.flatMap(
+        (request, index) =>
+          request.command && refusals[index] === undefined
+            ? [
+                {
+                  commandId: sessionCommandId({
+                    senderSessionId:
+                      this.session.authority.sessionHeader.sessionKey.sessionId,
+                    promptKey: hostedPromptKey(this.promptId),
+                    callId: request.call.callId,
+                  }),
+                  functionCallId: request.call.callId,
+                  toolName: request.call.name,
+                  modelMessageId: messageId,
+                  folded: false,
+                },
+              ]
+            : [],
+      );
       for (const [index, request] of requests.entries()) {
         const refused = refusal(index);
         if (refused) {
@@ -2941,6 +3221,17 @@ export class HostedWorkspaceToolTurn {
         if (request.message) {
           responses.push(
             ...(await this.acceptSessionMessage(request, model, signal)),
+          );
+          continue;
+        }
+        if (request.command) {
+          responses.push(
+            ...(await this.acceptSessionCommand(
+              request,
+              model,
+              signal,
+              commandRuns,
+            )),
           );
           continue;
         }
@@ -4082,6 +4373,411 @@ export class HostedWorkspaceToolTurn {
     }
     await this.commit('tool_result', parts, model);
     return parts;
+  }
+
+  /**
+   * H4e-b3 decision 4 and 6: one member board command's argument check,
+   * and the batch rule — a command call shares its batch only with other
+   * command calls and with the journal-only `send_message` to `"parent"`,
+   * since a command parks the Turn while the leader answers.
+   */
+  private commandArgumentError(
+    call: ToolCallRequestInfo,
+    batch: readonly ToolCallRequestInfo[],
+  ): string | undefined {
+    const keys: Record<string, readonly string[]> = {
+      task_list: ['status', 'owner', 'blockedBy'],
+      task_create: ['subject', 'description', 'activeForm', 'metadata'],
+      task_update: [
+        'taskId',
+        'status',
+        'owner',
+        'subject',
+        'description',
+        'activeForm',
+        'metadata',
+        'addBlocks',
+        'addBlockedBy',
+      ],
+    };
+    const unsupported = Object.keys(call.args).find(
+      (key) => !keys[call.name]?.includes(key),
+    );
+    if (unsupported !== undefined)
+      return `Hosted ${call.name} received unsupported argument ${JSON.stringify(unsupported)}.`;
+    if (
+      batch.some(
+        (other) =>
+          other !== call &&
+          !this.commandToolNames.has(other.name) &&
+          other.name !== 'send_message',
+      )
+    )
+      return `Hosted ${call.name} cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run board commands in their own batch or beside send_message to "parent".`;
+    if (call.name === 'task_create') {
+      if (
+        typeof call.args['subject'] !== 'string' ||
+        !(call.args['subject'] as string).trim()
+      )
+        return 'Hosted task_create requires a nonempty subject.';
+      if (
+        typeof call.args['description'] !== 'string' ||
+        !(call.args['description'] as string).trim()
+      )
+        return 'Hosted task_create requires a nonempty description.';
+    }
+    if (
+      call.name === 'task_update' &&
+      (typeof call.args['taskId'] !== 'string' ||
+        !(call.args['taskId'] as string).trim())
+    )
+      return 'Hosted task_update requires the taskId of the task to update.';
+    if (
+      call.args['status'] !== undefined &&
+      !TASK_STATUSES.includes(call.args['status'] as string)
+    )
+      return `Hosted ${call.name} status must be one of ${TASK_STATUSES.join(', ')}.`;
+    return undefined;
+  }
+
+  /**
+   * H4e-b3 decision 4: one member board command. Before the batch's first
+   * command call runs, the Turn commits the `await_command` checkpoint
+   * naming every command call of the batch; each call then commits its
+   * outbound entry and polls its own journal for the reply, as
+   * `await_agent` does for a child's acceptance, never holding the funnel
+   * chain the relay's `handover` and `answered` commit on. The wait ends
+   * at the reply, at 2 minutes from the entry's own commit, or with the
+   * Turn; once one call of the Turn timed out, every later command call
+   * of it refuses at once.
+   */
+  private async acceptSessionCommand(
+    request: { call: ToolCallRequestInfo },
+    model: string,
+    signal: AbortSignal,
+    batchRuns: readonly HarnessCommandWaitRun[],
+  ): Promise<Part[]> {
+    const { name, callId, args } = request.call;
+    const commands = this.commands;
+    if (commands === undefined)
+      throw new Error('A member command call has no command funnel.');
+    const kind: SessionCommandKind =
+      name === 'task_list' ? 'board_read' : 'board_write';
+    const key = this.session.authority.sessionHeader.sessionKey;
+    const commandId = sessionCommandId({
+      senderSessionId: key.sessionId,
+      promptKey: hostedPromptKey(this.promptId),
+      callId,
+    });
+    // Before this batch's first command call runs, the park names every
+    // command call of the batch. Batch siblings replay the same run set;
+    // a fully folded earlier batch left no durable wait, and a later
+    // batch of this Turn parks afresh under its own run set.
+    const parkKey = batchRuns.map((run) => run.commandId).join(':');
+    if (!this.commandParks.has(parkKey)) {
+      const argsRef = await this.session.resources.publish(
+        'managed-command-args',
+        Buffer.from(JSON.stringify(args), 'utf8'),
+      );
+      await this.harness.commitAwaitCommand(
+        batchRuns,
+        { turnId: this.promptId, promptId: this.promptId },
+        {
+          holdsWorkspaceMount: this.acquired,
+          attempt: {
+            attemptId: batchRuns[0]?.modelMessageId ?? this.promptId,
+            routeRef: argsRef,
+          },
+        },
+      );
+      this.commandParks.add(parkKey);
+    }
+    const answer = async (text: string, failed: boolean): Promise<Part[]> => {
+      const parts = failed
+        ? convertToFunctionErrorResponse(name, callId, [], text)
+        : convertToFunctionResponse(name, callId, [{ text }]);
+      await this.commit('tool_result', parts, model);
+      return parts;
+    };
+    if (this.commandTimedOut) {
+      const parts = await answer(SESSION_COMMAND_LEADER_UNANSWERING_TEXT, true);
+      // The locked run still folds, or the Turn's wait never completes —
+      // its answer rides the batch the same as a call that ran.
+      await this.harness.resolveAwaitCommand(commandId);
+      return parts;
+    }
+    if (signal.aborted) {
+      return answer('The turn was cancelled before this tool call ran.', true);
+    }
+    try {
+      await commands.runCommand({
+        commandId,
+        kind,
+        args: { ...args },
+        executionCallId: this.childRunIdFor(callId),
+        closing: this.session.authority.currentActivation?.phase !== 'active',
+      });
+    } catch (cause) {
+      // byte_limit and budget_exhausted are the funnel's member-facing
+      // refusals; a store fault is recovery's, never the call's answer.
+      if (cause instanceof ManagedSessionRecordError) {
+        return answer(cause.message, true);
+      }
+      throw cause;
+    }
+    // The bound measures from the entry's own commit, so a resumed wait
+    // keeps what is left instead of a fresh 2 minutes.
+    const anchor = commands.outboundCommittedAt(commandId) ?? Date.now();
+    const deadline = anchor + COMMAND_WAIT_MS;
+    for (;;) {
+      if (signal.aborted) {
+        const parts = await this.answerCommandByJournal(
+          commands,
+          request,
+          commandId,
+          model,
+        );
+        await this.harness.resolveAwaitCommand(commandId);
+        return parts;
+      }
+      const record = commands.command(commandId);
+      const state = record?.run.delivery?.state;
+      if (state === 'accepted' || state === 'consumed') {
+        const reply = await commands.readReply(commandId);
+        if (reply !== null) {
+          const parts = await this.commitCommandReply(
+            request,
+            reply.text,
+            reply.outcome === 'refused',
+            model,
+          );
+          await commands.commitConsumed(commandId);
+          await this.harness.resolveAwaitCommand(commandId);
+          return parts;
+        }
+      }
+      if (
+        state === 'rejected' ||
+        state === 'cancelled' ||
+        state === 'unknown'
+      ) {
+        const parts = await this.answerCommandByJournal(
+          commands,
+          request,
+          commandId,
+          model,
+        );
+        await this.harness.resolveAwaitCommand(commandId);
+        return parts;
+      }
+      if (Date.now() >= deadline) {
+        this.commandTimedOut = true;
+        const parts = await this.answerCommandByJournal(
+          commands,
+          request,
+          commandId,
+          model,
+        );
+        await this.harness.resolveAwaitCommand(commandId);
+        return parts;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  /**
+   * Decision 14: the command call's answer by what its journal committed.
+   * A planned entry is cancelled and answered as not sent; a handed-over
+   * one says the command reached the leader and a write may have taken
+   * effect; rejected, cancelled and unknown are said so, with a reply
+   * that landed mid-race still read. The settle's conflict is the race's
+   * own evidence, so once it loses the journal is re-read and answered.
+   */
+  private async answerCommandByJournal(
+    commands: HostedSessionCommandSession,
+    request: { call: Pick<ToolCallRequestInfo, 'name' | 'callId'> },
+    commandId: string,
+    model: string,
+    journaled?: ReadonlySet<string>,
+  ): Promise<Part[]> {
+    const { name, callId } = request.call;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const record = commands.command(commandId);
+      const state = record?.run.delivery?.state ?? 'planned';
+      if (state === 'accepted' || state === 'consumed') {
+        const reply = await commands.readReply(commandId);
+        if (reply !== null) {
+          const parts = await this.commitCommandReply(
+            request,
+            reply.text,
+            reply.outcome === 'refused',
+            model,
+            journaled,
+          );
+          await commands.commitConsumed(commandId);
+          return parts;
+        }
+        continue;
+      }
+      try {
+        if (state === 'planned') await commands.settle(commandId, 'cancelled');
+        if (state === 'accepting') await commands.settle(commandId, 'unknown');
+      } catch (cause) {
+        if (cause instanceof ManagedSessionConflictError) continue;
+        throw cause;
+      }
+      const parts = convertToFunctionErrorResponse(
+        name,
+        callId,
+        [],
+        sessionCommandEvidenceText(
+          // The accepted/consumed arm above returned already; what remains
+          // of the delivery vocabulary is exactly the settle-relevant five.
+          state as
+            | 'planned'
+            | 'accepting'
+            | 'rejected'
+            | 'cancelled'
+            | 'unknown',
+        ),
+      );
+      if (!journaled?.has(callId))
+        await this.commit('tool_result', parts, model);
+      return parts;
+    }
+    throw new Error(`Session command ${commandId} never settled.`);
+  }
+
+  /** A long board answer folds to the inline bound, as the team tools'. */
+  private async commitCommandReply(
+    request: { call: Pick<ToolCallRequestInfo, 'name' | 'callId'> },
+    text: string,
+    failed: boolean,
+    model: string,
+    journaled?: ReadonlySet<string>,
+  ): Promise<Part[]> {
+    const { name, callId } = request.call;
+    const make = (each: string): Part[] =>
+      failed
+        ? convertToFunctionErrorResponse(name, callId, [], each)
+        : convertToFunctionResponse(name, callId, [{ text: each }]);
+    let parts = make(text);
+    for (
+      let head = Math.floor(text.length / 2);
+      !this.messageFitsInline('tool_result', parts, model);
+      head = Math.floor(head / 2)
+    ) {
+      if (head === 0) throw new Error('Command answer cannot be recorded.');
+      parts = make(
+        text.slice(0, head) +
+          '\n… (truncated to fit the Session record; narrow task_list with its filters)',
+      );
+    }
+    if (!journaled?.has(callId)) await this.commit('tool_result', parts, model);
+    return parts;
+  }
+
+  /**
+   * The recovered arm of the command wait (decision 4): re-enter the poll
+   * the dead owner's acceptSessionCommand ran, for every run the
+   * checkpoint still owes, with what is left of the bound measured from
+   * the entry's own commit. A restart lost the Turn's in-memory mount,
+   * so the lease the checkpoint's flag names comes back first, and the
+   * journaled set keeps a replayed fold silent — the consume and the
+   * resolve are themselves replay-safe and must still run so the wait
+   * leaves its consumed marker.
+   */
+  async resumeCommandWaitRuns(
+    runs: readonly HarnessCommandWaitRun[],
+    holdsWorkspaceMount: boolean,
+    model: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const commands = this.commands;
+    if (commands === undefined)
+      throw new Error('Recovered command wait has no command funnel.');
+    if (holdsWorkspaceMount && !this.acquired) {
+      await this.acquire(false, signal);
+    }
+    const journaled = await journaledToolResultIds(this.session, this.promptId);
+    for (const run of runs) {
+      if (run.folded) continue;
+      const request = {
+        call: { name: run.toolName, callId: run.functionCallId },
+      };
+      const anchor = commands.outboundCommittedAt(run.commandId) ?? Date.now();
+      const deadline = anchor + COMMAND_WAIT_MS;
+      for (;;) {
+        if (this.commandTimedOut) {
+          const locked = convertToFunctionErrorResponse(
+            run.toolName,
+            run.functionCallId,
+            [],
+            SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
+          );
+          if (!journaled.has(run.functionCallId))
+            await this.commit('tool_result', locked, model);
+          await this.harness.resolveAwaitCommand(run.commandId);
+          break;
+        }
+        if (signal.aborted) {
+          await this.answerCommandByJournal(
+            commands,
+            request,
+            run.commandId,
+            model,
+            journaled,
+          );
+          await this.harness.resolveAwaitCommand(run.commandId);
+          break;
+        }
+        const record = commands.command(run.commandId);
+        const state = record?.run.delivery?.state;
+        if (state === 'accepted' || state === 'consumed') {
+          const reply = await commands.readReply(run.commandId);
+          if (reply !== null) {
+            await this.commitCommandReply(
+              request,
+              reply.text,
+              reply.outcome === 'refused',
+              model,
+              journaled,
+            );
+            await commands.commitConsumed(run.commandId);
+            await this.harness.resolveAwaitCommand(run.commandId);
+            break;
+          }
+        }
+        if (
+          state === 'rejected' ||
+          state === 'cancelled' ||
+          state === 'unknown'
+        ) {
+          await this.answerCommandByJournal(
+            commands,
+            request,
+            run.commandId,
+            model,
+            journaled,
+          );
+          await this.harness.resolveAwaitCommand(run.commandId);
+          break;
+        }
+        if (Date.now() >= deadline) {
+          this.commandTimedOut = true;
+          await this.answerCommandByJournal(
+            commands,
+            request,
+            run.commandId,
+            model,
+            journaled,
+          );
+          await this.harness.resolveAwaitCommand(run.commandId);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
   }
 
   /**
