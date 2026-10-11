@@ -12,6 +12,7 @@ public final class CreateHarnessSession {
     private final Long approvalTimeoutMs;
     private final Map<String, Object> agentDefinition;
     private final Map<String, Object> lineage;
+    private final boolean suppressChildAgents;
     private final boolean childWorkspaces;
 
     private CreateHarnessSession(Builder builder) {
@@ -23,6 +24,7 @@ public final class CreateHarnessSession {
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
         this.agentDefinition = builder.agentDefinition;
         this.lineage = builder.lineage;
+        this.suppressChildAgents = builder.suppressChildAgents;
         this.childWorkspaces = builder.childWorkspaces;
     }
 
@@ -47,6 +49,9 @@ public final class CreateHarnessSession {
         if (toolProfile != null) {
             result.put("toolProfile", toolProfile);
         }
+        if (suppressChildAgents) {
+            result.put("suppressChildAgents", true);
+        }
         if (approvalTimeoutMs != null) {
             result.put("approvalTimeoutMs", approvalTimeoutMs);
         }
@@ -70,6 +75,7 @@ public final class CreateHarnessSession {
         private Long approvalTimeoutMs;
         private Map<String, Object> agentDefinition;
         private Map<String, Object> lineage;
+        private boolean suppressChildAgents;
         private boolean childWorkspaces;
 
         /**
@@ -129,6 +135,12 @@ public final class CreateHarnessSession {
 
         public Builder toolProfile(String toolProfile) {
             this.toolProfile = toolProfile;
+            return this;
+        }
+
+        /** Public Shell admission keeps the private Shell lane's child agent tool off this Session. */
+        public Builder suppressChildAgents() {
+            this.suppressChildAgents = true;
             return this;
         }
 

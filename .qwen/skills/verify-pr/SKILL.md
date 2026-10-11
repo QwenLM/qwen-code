@@ -240,8 +240,9 @@ secondary claims. Budget by value:
    When the diff changes how a Turn is cancelled, parked, taken over,
    recovered, approved or retried, name the scenario axes before choosing
    the A/B instrument, whether or not that code is the central claim; if it
-   is not, it gets its own A/B as a secondary claim. Take the axes from
-   _Parameterise scenarios_ under wire-oracle harnesses, and note the
+   is not, it gets its own A/B as a secondary claim, which takes one of the
+   harness slots in item 2 rather than time from the central A/B. Take the
+   axes from _Parameterise scenarios_ under wire-oracle harnesses, and note the
    setting the author's tests use on each. The A/B must also run at least
    one other setting, even when the instrument is the PR's own test files:
    copy the author's new test and change only that setting, such as parking

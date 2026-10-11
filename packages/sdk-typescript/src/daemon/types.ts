@@ -4496,6 +4496,14 @@ export interface DaemonRemoveMidTurnMessageResult {
 }
 
 /**
+ * `requested` is true when user messages were waiting in the mid-turn queue
+ * and the agent was asked to deliver them now; false when none were waiting.
+ */
+export interface DaemonSendMidTurnMessagesNowResult {
+  requested: boolean;
+}
+
+/**
  * One entry still waiting in the daemon's mid-turn queue (projection of the
  * bridge's `MidTurnQueueEntry`). The queue is session-global. `content` carries
  * any image blocks attached to the message, so a refreshed client

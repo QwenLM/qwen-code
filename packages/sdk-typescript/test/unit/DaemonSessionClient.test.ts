@@ -2162,6 +2162,31 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('forwards send-now for queued mid-turn messages with clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { requested: false }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.sendMidTurnMessagesNow()).resolves.toEqual({
+      requested: false,
+    });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/mid-turn-messages/send-now',
+    );
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('maps pending prompt HTTP failures through DaemonClient errors', async () => {
     const { fetch } = recordingFetch(() =>
       jsonResponse(404, { error: 'not found' }),

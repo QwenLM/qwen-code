@@ -861,6 +861,94 @@ describe('hosted child wait recovery (#13708)', () => {
     },
   );
 
+  // A started worktree orphan that failed tells the parent to inspect its
+  // Workspace; a shared one, or one that never started, adds nothing.
+  it.each([
+    ['worktree', true, false, true],
+    ['worktree', true, true, true],
+    ['worktree', false, false, false],
+    ['shared', true, false, false],
+  ] as const)(
+    'an ended admitted %s orphan (started: %s, cancelled: %s) folds the workspace line: %s',
+    async (workspaceMode, started, cancelled, line) => {
+      await parkWedged(true);
+      const orphanRunId = `${PROMPT_ID}:call-2`;
+      const first = await open('boot-2', false);
+      try {
+        const consumption: string[] = [];
+        await settleTheChild(first);
+        await resumeTurn(first, consumption).resumeAgentWaitRuns(
+          [{ ...waitRun, functionCallId: 'call-1' }],
+          'recovered',
+          new AbortController().signal,
+        );
+        await childrenOf(first).admit({
+          childRunId: orphanRunId,
+          ownerScopeId: SESSION_ID,
+          rootSessionId: SESSION_ID,
+          completion: 'tool',
+          description: 'second audit',
+          prompt: 'review two',
+          definition: {
+            definitionId: 'hosted-agent/hosted-workspace-files/1',
+            definitionRevision: 1,
+            definitionDigest:
+              first.authority.sessionHeader.definitionRef.digest,
+          },
+          workspaceMode,
+          workingDirectory: '.',
+          executionCallId: orphanRunId,
+        });
+        if (started) {
+          await childrenOf(first).dispatchStarted(orphanRunId, {
+            dispatchId: 'dispatch-2',
+            runtime: { runtimeBindingId: 'binding-2', generation: '1' },
+          });
+          await childrenOf(first).attach(orphanRunId, 'child-session-2');
+        }
+        if (cancelled)
+          await childrenOf(first).settleCancelled(orphanRunId, { started });
+        else
+          await childrenOf(first).settleFailed(orphanRunId, {
+            stopReason: started ? 'child_failed' : 'creation_failed',
+            reason: null,
+            started,
+          });
+      } finally {
+        await first.close();
+      }
+      const replacement = await open('boot-3', false);
+      try {
+        await fillParkedRoundAgentGaps({
+          managed: replacement,
+          sessionId: SESSION_ID,
+          promptId: PROMPT_ID,
+          cwd: root,
+          gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+          children: childrenOf(replacement),
+        });
+        const projected = await replacement.sink.project();
+        const callTwo = JSON.stringify(
+          toolResultEntries(projected).find((entry) =>
+            entry.message?.parts?.some(
+              (part) => part.functionResponse?.id === 'call-2',
+            ),
+          )?.message?.parts,
+        );
+        expect(callTwo).toContain(
+          cancelled ? 'Child agent run cancelled' : 'Child agent run failed',
+        );
+        if (line)
+          expect(callTwo).toContain(
+            "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
+          );
+        else expect(callTwo).not.toContain('[child workspace]');
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
   it('an oversized admitted-orphan answer folds with the truncation marker, never as an error', async () => {
     await parkWedged(true);
     const orphanRunId = `${PROMPT_ID}:call-2`;
