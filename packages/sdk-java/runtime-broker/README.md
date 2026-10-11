@@ -87,13 +87,19 @@ retired generations. The embedding owns scheduling and supplies same-connection
 reference checks for its own tables. Each sweep bounds binding checks, child
 checks and total deletions; retain its returned cursor between ticks. It preserves
 operator-recovery records, active children, physical-stop evidence requirements,
-slots and admission fences. See [JDBC retention](../../../docs/design/runtime-broker-jdbc-retention.md)
+slots and admission fences. In the managed server, publication and CSI worker ACK
+references retain their execution and its parent session and binding, including
+COLLECTED publications; unreferenced siblings may be removed.
+See [JDBC retention](../../../docs/design/runtime-broker-jdbc-retention.md)
 for eligibility and the managed-server opt-in configuration (disabled by default,
 30-day age, 100-row batches and one-minute delay). Standalone embeddings must
 also serialize new external references with the original binding lock.
 
-Enabling retention limits historical receipts and idempotent retries to the
-retained window. After records are removed, callers must not reuse expired
+Enabling retention allows eligible, unreferenced historical records to be deleted
+once they age past `max-age`; it does not guarantee deletion by that age.
+Publication and CSI worker ACK references in the managed server retain executions
+and their parent sessions and bindings regardless of age, including COLLECTED
+publications. After records are removed, callers must not reuse expired
 Runtime Session identifiers or idempotency keys. A missing execution is not
 permission to replay it. No permanent execution-key tombstone is retained.
 

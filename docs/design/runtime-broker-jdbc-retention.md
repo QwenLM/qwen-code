@@ -32,7 +32,7 @@ Add indexes for binding state/time/ID, tenant/state and embedding reference keys
 
 ## Retention contract and rollout
 
-Enabling retention makes historical receipts and idempotency guarantees finite. After deletion, existing missing-record behavior applies; callers must not reuse expired runtime-session IDs or idempotency keys. No permanent execution tombstones are added.
+Enabling retention allows eligible, unreferenced historical records to be deleted once they age past max-age; it does not guarantee deletion by that age. Publication and CSI worker ACK references retain executions and their parent sessions and bindings regardless of age, including COLLECTED publications. Unreferenced siblings may be removed. After deletion, existing missing-record behavior applies; callers must not reuse expired runtime-session IDs or idempotency keys. No permanent execution tombstones are added.
 
 Deploy V66 after the existing V65 stream-capture migration with retention disabled, and verify upgrades from V65 preserve existing terminal receipts. Enable only after every instance uses the new publication locking protocol. Observe scan/deletion/skip counts, duration and failures. Disable retention before reverting to older writers. Disabling stops future cleanup but cannot restore deleted records.
 

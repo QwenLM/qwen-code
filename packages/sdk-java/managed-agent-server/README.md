@@ -797,7 +797,10 @@ stop evidence remain retained. Binding slots and generation counters, placement
 guards, harness drains and storage fences remain durable. Successful ticks log
 scanned, skipped and deleted counts and duration; failures retry on the next tick.
 
-Enabling retention makes historical receipts and idempotency guarantees finite.
+Enabling retention allows eligible, unreferenced historical records to be deleted
+once they age past `max-age`; it does not guarantee deletion by that age.
+Publication and CSI ACK references retain executions and their parent sessions and
+bindings regardless of age, including COLLECTED publications.
 After cleanup, existing missing-record responses apply. Callers must not reuse
 expired Runtime Session IDs or idempotency keys. Deploy Flyway V66 and the code
 with cleanup disabled, upgrade every publication writer to the new locking
