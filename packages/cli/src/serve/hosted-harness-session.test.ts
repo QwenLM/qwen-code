@@ -86,6 +86,7 @@ import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 import {
   HostedToolRecoveryRequiredError,
+  HostedWorkspaceBusyTimeoutError,
   hostedRuntimeSessionId,
   HostedWorkspaceToolTurn,
 } from './hosted-workspace-tool-turn.js';
@@ -6138,6 +6139,56 @@ describe('Hosted Harness no-tool session', () => {
       );
     },
   );
+
+  it('records a terminal turn_error, not a silent park, when the Workspace mount wait fails the turn', async () => {
+    // #13800 W2: the bounded queue's named expiry classifies as an ordinary
+    // turn failure — a terminal turn_error record, the Session neither
+    // blocked nor parked, so a leaked or long-held mount degrades exactly
+    // one waiting turn.
+    state.model.mockImplementationOnce(async () => {
+      throw new HostedWorkspaceBusyTimeoutError();
+    });
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'read gone' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    const transcript = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(transcript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'turn_error', promptId: PROMPT_ID }),
+      ]),
+    );
+    const status = await headers(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(status.body.recoveryBlocked).toBe(false);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
 
   type DetachedFamily = 'child_run' | 'monitor_run';
 

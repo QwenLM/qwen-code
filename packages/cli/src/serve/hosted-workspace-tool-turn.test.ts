@@ -44,6 +44,7 @@ import {
 import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
+  HostedWorkspaceBusyTimeoutError,
   HOSTED_WORKSPACE_FILE_TOOLS,
   HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_INPUT_PREVIEW_TOOLS,
@@ -144,6 +145,7 @@ function createTurn(
   shell = false,
   approval?: { mode: HostedApprovalMode; timeoutMs?: number },
   hooks?: HostedHookSession,
+  extras?: { acquireBusyBudgetMs?: number },
 ) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -163,7 +165,7 @@ function createTurn(
       },
       waiters,
     },
-    { hooks },
+    { ...extras, hooks },
   );
 }
 const calls = ['read_file', 'edit'].map((name, index) => ({
@@ -1595,19 +1597,35 @@ it('hands back only the Workspace mount on the recovery-block path', async () =>
   expect(broker.releaseMount).toHaveBeenCalledOnce();
 });
 
-it('keeps the block verdict deliverable when the mount handback fails, and does not spin forever', async () => {
+it('keeps the block verdict deliverable when the mount handback fails, and keeps the handback owed until it lands', async () => {
   await turn.execute(calls, parts, 'model', new AbortController().signal);
   broker.releaseMount.mockRejectedValue(
     new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
   );
-  // The failure is logged, never thrown: the recovery-block verdict must
-  // still reach the Session.
-  await expect(turn.releaseForRecoveryBlock()).resolves.toBeUndefined();
-  expect(broker.releaseMount).toHaveBeenCalledOnce();
-  // Bounded: the handback retries twice for unsettled work, then the
-  // mount stays honestly owed.
-  await turn.blockMountRetry;
-  expect(broker.releaseMount).toHaveBeenCalledTimes(3);
+  vi.useFakeTimers();
+  try {
+    // The failure is logged, never thrown: the recovery-block verdict must
+    // still reach the Session.
+    await expect(turn.releaseForRecoveryBlock()).resolves.toBeUndefined();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    // Owed until it lands: the cadence keeps asking on a widening backoff
+    // and then a steady one-minute tail instead of dropping the debt after
+    // two gaps — the freeze stays honest while the turn's work is unproven.
+    for (const [gap, calls] of [
+      [1000, 2],
+      [3000, 3],
+      [5000, 4],
+      [10000, 5],
+      [30000, 6],
+      [60000, 7],
+      [60000, 8],
+    ] as const) {
+      await vi.advanceTimersByTimeAsync(gap);
+      expect(broker.releaseMount).toHaveBeenCalledTimes(calls);
+    }
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it('hands the mount back once a busy refusal settles', async () => {
@@ -1625,10 +1643,66 @@ it('hands the mount back once a busy refusal settles', async () => {
 
 it('makes one logged attempt for a non-busy handback failure without retrying', async () => {
   await turn.execute(calls, parts, 'model', new AbortController().signal);
-  broker.releaseMount.mockRejectedValue(new TypeError('fetch failed'));
+  // A terminal refusal — the Broker no longer holds the Session — stops
+  // the chain: waiting settles nothing.
+  broker.releaseMount.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(503, 'runtime_reconciliation_required'),
+  );
   await turn.releaseForRecoveryBlock();
   expect(broker.releaseMount).toHaveBeenCalledOnce();
-  expect(turn.blockMountRetry).toBeUndefined();
+  await turn.blockMountRetry;
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+});
+
+it('re-sends the handback when the first answer never arrived', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  broker.releaseMount
+    .mockRejectedValueOnce(new TypeError('fetch failed'))
+    .mockResolvedValue(undefined);
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  // A lost reply decided nothing, and the holder-conditioned clear is
+  // idempotent, so the chain re-sends on the cadence until it lands.
+  await turn.blockMountRetry;
+  expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+});
+
+it('delivers the block verdict without waiting out a hung handback', async () => {
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  let rejectFirst!: (cause: unknown) => void;
+  broker.releaseMount
+    .mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectFirst = reject;
+        }),
+    )
+    .mockResolvedValue(undefined);
+  vi.useFakeTimers();
+  try {
+    const verdict = turn.releaseForRecoveryBlock();
+    await vi.advanceTimersByTimeAsync(2000);
+    // The verdict proceeded on its own short bound, not on the Broker's
+    // 30s fetch timeout; the attempt itself is still alive in the chain.
+    await expect(verdict).resolves.toBeUndefined();
+    expect(broker.releaseMount).toHaveBeenCalledOnce();
+    rejectFirst(new TypeError('fetch failed'));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(broker.releaseMount).toHaveBeenCalledTimes(2);
+    await turn.blockMountRetry;
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('attempts the holder-conditioned clear even when the turn never reached its acquire', async () => {
+  // Whether the turn holds anything is the store's call, not a turn-local
+  // flag's: a turn blocked before any acquire gets the no-op answer, while
+  // a claim committed under a lost reply — or the takeover branch's
+  // original identity — is handed back the same way.
+  await turn.releaseForRecoveryBlock();
+  expect(broker.releaseMount).toHaveBeenCalledOnce();
+  await turn.blockMountRetry;
 });
 
 it('hands the mount back even when the acquire answer was lost after the grant', async () => {
@@ -1839,6 +1913,25 @@ it('keeps polling across repeated workspace_busy refusals until the mount frees'
   expect(broker.acquire).toHaveBeenCalledTimes(3);
   expect(broker.release).toHaveBeenCalledOnce();
   expect(log).toHaveBeenCalledTimes(1);
+});
+
+it('fails the waiting turn with a named busy timeout past the queue budget', async () => {
+  turn = createTurn(false, undefined, undefined, { acquireBusyBudgetMs: 300 });
+  broker.acquire.mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+  );
+  // #13800 W2: the bounded queue converts a leaked or long-held mount into
+  // one waiting turn's named terminal failure instead of a silent park —
+  // removing the cap spins this test into its own timeout.
+  const started = Date.now();
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedWorkspaceBusyTimeoutError);
+  expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+  // The queue kept asking until the budget expired — and the waiting turn
+  // never held anything, so nothing releases.
+  expect(broker.acquire.mock.calls.length).toBeGreaterThan(1);
+  expect(broker.release).not.toHaveBeenCalled();
 });
 
 it('cancels a queued workspace_busy acquisition with the turn', async () => {

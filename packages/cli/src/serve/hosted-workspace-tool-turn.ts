@@ -125,6 +125,21 @@ export {
 };
 
 const ACQUIRE_BUSY_POLL_MS = 250;
+// The turn-execution queue's total wait behind another Session's mount: a
+// genuinely live holder outlives any single poll, but a leaked or stuck
+// hold must degrade into one waiting turn's named failure — never an
+// unbounded silent park.
+const ACQUIRE_BUSY_BUDGET_MS = 300_000;
+// The owed handback's cadence: a quick backoff for the common late settle,
+// then a steady one-minute tail — the chain stays owed until the handback
+// lands, every timer unref'd so a blocked Session never holds the daemon's
+// event loop open, and every attempt re-reads the Broker's gate, never
+// bypasses it.
+const BLOCK_MOUNT_RETRY_GAPS_MS = [1000, 3000, 5000, 10000, 30000, 60000];
+// The block verdict never waits out a slow Broker round-trip: it proceeds
+// once the first handback attempt settles or this bound passes, whichever
+// is first — the attempt itself keeps running inside the retry chain.
+const RELEASE_MOUNT_VERDICT_BOUND_MS = 2000;
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -434,6 +449,20 @@ export class HostedToolRecoveryRequiredError extends Error {
   }
 }
 
+// A waiting turn's named terminal failure (#13800 W2): the mount it queues
+// behind stayed held past the wait budget, so this turn — and only this
+// turn — fails instead of parking the Session's prompt silently and
+// unboundedly. The waiting turn holds nothing, so no recovery block and no
+// handback apply.
+export class HostedWorkspaceBusyTimeoutError extends Error {
+  readonly code = 'workspace_busy_timeout' as const;
+  constructor() {
+    super(
+      'The Workspace mount stayed held by another Session past the wait budget.',
+    );
+  }
+}
+
 export class HostedWorkspaceToolTurn {
   hookStopReason?: string;
   private readonly broker: HostedWorkspaceBroker;
@@ -467,6 +496,7 @@ export class HostedWorkspaceToolTurn {
   private readonly childAgents?: HostedChildAgentSession;
   private readonly childDepth: number;
   private readonly childConsumption: (childRunId: string) => void;
+  private readonly acquireBusyBudgetMs: number;
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -506,6 +536,7 @@ export class HostedWorkspaceToolTurn {
         readonly depth: number;
         readonly queueConsumption: (childRunId: string) => void;
       };
+      acquireBusyBudgetMs?: number;
     },
   ) {
     this.mcp = extras?.mcp;
@@ -519,6 +550,8 @@ export class HostedWorkspaceToolTurn {
     this.childDepth = extras?.childAgents?.depth ?? 0;
     this.childConsumption =
       extras?.childAgents?.queueConsumption ?? (() => undefined);
+    this.acquireBusyBudgetMs =
+      extras?.acquireBusyBudgetMs ?? ACQUIRE_BUSY_BUDGET_MS;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -663,6 +696,11 @@ export class HostedWorkspaceToolTurn {
                 originalId,
               );
         await original.warm();
+        // The claim commits under the ORIGINAL turn's identity: remember
+        // the broker that actually acquires before the attempt, so the
+        // recovery-block handback can target it — this.broker's identity
+        // never held that mount.
+        this.mountOwner = original;
         await original.acquire();
         const state = await original.fileHistory({
           kind: 'raw-file-history',
@@ -699,10 +737,10 @@ export class HostedWorkspaceToolTurn {
     signal?: AbortSignal,
   ): Promise<void> {
     this.uncertain = true;
-    this.acquireAttempted = true;
     let waitAborted = false;
     try {
       let queued = false;
+      let queueExpiresAt = 0;
       for (;;) {
         try {
           if (this.hooks && !this.mcp) await this.hooks.acquire();
@@ -726,9 +764,15 @@ export class HostedWorkspaceToolTurn {
             throw cause;
           if (!queued) {
             queued = true;
+            queueExpiresAt = Date.now() + this.acquireBusyBudgetMs;
             writeStderrLineSafe(
               `qwen serve: Hosted Harness turn ${this.promptId} waits for the Workspace mount held by another Session.`,
             );
+          } else if (Date.now() >= queueExpiresAt) {
+            // #13800 W2: the bound fails the WAITING turn with a named
+            // reason — it never takes the mount from a genuinely live
+            // holder, and the Session stays usable for the next prompt.
+            throw new HostedWorkspaceBusyTimeoutError();
           }
           try {
             await waitForTurn(
@@ -783,7 +827,11 @@ export class HostedWorkspaceToolTurn {
       if (
         (!this.acquired &&
           (isRetryableWorkspaceAcquisition(cause) || waitAborted)) ||
-        cause instanceof HostedFileHistoryRefusedError
+        cause instanceof HostedFileHistoryRefusedError ||
+        // Every acquire attempt was a definite refusal, so the expired queue
+        // provably holds nothing and stays an ordinary named failure — never
+        // a recovery block.
+        cause instanceof HostedWorkspaceBusyTimeoutError
       ) {
         this.uncertain = false;
         throw cause;
@@ -3624,43 +3672,66 @@ export class HostedWorkspaceToolTurn {
   // recovery fleet, so this is releaseMount(), never the RELEASED-forever
   // full release(). The Hook lane's shared acquisition and the MCP lane's
   // session-scoped mount own their release discipline, so only the plain
-  // lane releases here. The handback runs on an attempted, unsettled
-  // acquire too: a reply lost after the Broker committed the claim holds
-  // the mount exactly like a settled grant, and the store's
-  // holder-conditioned clear is a no-op when nothing was granted — while
-  // a turn that never reached acquire provably holds nothing and never
-  // calls out. A failed release is logged, never thrown: the block verdict
-  // must still reach the Session. A busy mount means this turn's
-  // executions are still unproven — the fleet's freeze, honestly kept —
-  // so the handback retries on a bounded cadence for when those rows
-  // settle; a Session whose work never settles keeps its freeze, and the
-  // LOST family sweeps anything longer.
+  // lane releases here. Whether the turn holds anything is the store's
+  // call, not a turn-local flag's: the clear is holder-conditioned, so a
+  // turn that provably holds nothing gets a no-op answer, while a reply
+  // lost after the Broker committed the claim — or a takeover branch that
+  // claimed under the original turn's identity — holds the mount exactly
+  // like a settled grant and is handed back the same way. A failed release
+  // is logged, never thrown: the block verdict must still reach the
+  // Session, and it never waits out a slow Broker — the first attempt is
+  // awaited only up to RELEASE_MOUNT_VERDICT_BOUND_MS, the retry chain
+  // carries the rest. A busy mount means this turn's executions are still
+  // unproven — the fleet's freeze, honestly kept — so the handback stays
+  // owed until it lands, retrying on the BLOCK_MOUNT_RETRY_GAPS_MS cadence
+  // for when those rows settle; a Session whose work never settles keeps
+  // its freeze, and the LOST family sweeps anything longer.
   blockMountRetry?: Promise<void>;
   private releasedForBlock = false;
-  private acquireAttempted = false;
+  private mountOwner?: HostedWorkspaceBroker;
 
   async releaseForRecoveryBlock(): Promise<void> {
     if (this.mcp || this.hooks || this.releasedForBlock) return;
-    if (!this.acquired && !this.acquireAttempted) return;
-    if (await this.attemptMountHandback())
-      this.blockMountRetry = (async () => {
-        for (const gap of [1000, 3000]) {
-          await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, gap);
-            timer.unref();
-          });
-          if (this.releasedForBlock) return;
-          if (!(await this.attemptMountHandback())) return;
-        }
-      })();
+    if (this.blockMountRetry) return;
+    const owner = this.mountOwner ?? this.broker;
+    const first = this.attemptMountHandback(owner);
+    this.blockMountRetry = (async () => {
+      let again = await first;
+      for (let attempts = 0; again && !this.releasedForBlock; attempts++) {
+        const gap =
+          BLOCK_MOUNT_RETRY_GAPS_MS[
+            Math.min(attempts, BLOCK_MOUNT_RETRY_GAPS_MS.length - 1)
+          ];
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, gap);
+          timer.unref();
+        });
+        if (this.releasedForBlock) return;
+        again = await this.attemptMountHandback(owner);
+      }
+    })();
+    await Promise.race([
+      first,
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, RELEASE_MOUNT_VERDICT_BOUND_MS);
+        timer.unref();
+      }),
+    ]);
   }
 
-  // Answers whether another attempt is worth scheduling: only the busy
-  // refusal, whose unsettled executions settle on their own clock. A
-  // transport failure or a terminal refusal settles nothing by waiting.
-  private async attemptMountHandback(): Promise<boolean> {
+  // Answers whether another attempt is worth scheduling. The store's clear
+  // is holder-conditioned and therefore idempotent, so a reply that decided
+  // nothing earns a re-send: a transport failure (the answer never
+  // arrived), the Broker's own internal-error fallback (a transient fault
+  // on its side), and the busy refusal whose unsettled executions settle on
+  // their own clock. A terminal refusal — a crossed identity, an
+  // unavailable Workspace, a Session the Broker no longer holds — stops
+  // the chain: waiting settles nothing.
+  private async attemptMountHandback(
+    owner: HostedWorkspaceBroker,
+  ): Promise<boolean> {
     try {
-      await this.broker.releaseMount();
+      await owner.releaseMount();
       this.acquired = false;
       this.releasedForBlock = true;
       return false;
@@ -3668,10 +3739,10 @@ export class HostedWorkspaceToolTurn {
       writeStderrLineSafe(
         `qwen serve: Hosted Harness turn ${this.promptId} could not release the Workspace mount after its recovery block: ${String(cause)}`,
       );
+      if (!(cause instanceof HostedWorkspaceBrokerRejection)) return true;
       return (
-        cause instanceof HostedWorkspaceBrokerRejection &&
-        cause.status === 409 &&
-        cause.code === 'runtime_session_busy'
+        (cause.status === 409 && cause.code === 'runtime_session_busy') ||
+        (cause.status === 500 && cause.code === 'runtime_broker_internal_error')
       );
     }
   }

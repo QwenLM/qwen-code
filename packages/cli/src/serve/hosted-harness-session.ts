@@ -668,20 +668,6 @@ function isReleasedOrReleasingAdoptRefusal(cause: unknown): boolean {
   );
 }
 
-/** Any of the three recovery-required families that parks a Session blocked. */
-function isHostedRecoveryRequiredError(
-  cause: unknown,
-): cause is
-  | HostedToolRecoveryRequiredError
-  | HostedMcpRecoveryRequiredError
-  | HostedHookRecoveryRequiredError {
-  return (
-    cause instanceof HostedToolRecoveryRequiredError ||
-    cause instanceof HostedMcpRecoveryRequiredError ||
-    cause instanceof HostedHookRecoveryRequiredError
-  );
-}
-
 /**
  * The full aftermath of a wake turn that died inside its attempt, keyed
  * on the journal and the checkpoint — never on which settle ran before it:
@@ -2307,7 +2293,7 @@ async function executeHostedTurn(
             result.model,
           );
         } catch (cause) {
-          if (isHostedRecoveryRequiredError(cause)) throw cause;
+          if (monitorWakeNeedsRecovery(cause)) throw cause;
           const outcome = settledTurnOutcome(abort);
           state = outcome.state;
           stopReason = outcome.stopReason;
@@ -2382,7 +2368,7 @@ async function executeHostedTurn(
     // on the same storage (#13800). finish() kept it for the uncertain
     // case; the block transition is exactly where the turn proves it will
     // never replay, so this is where the exclusion ends.
-    if (isHostedRecoveryRequiredError(cause))
+    if (monitorWakeNeedsRecovery(cause))
       await toolTurn?.releaseForRecoveryBlock();
     throw cause;
   }
@@ -4531,7 +4517,7 @@ export function registerHostedHarnessSessionRoutes(
         );
         settled = true;
       } catch (cause) {
-        if (isHostedRecoveryRequiredError(cause)) {
+        if (monitorWakeNeedsRecovery(cause)) {
           if (admitted) session.blocked = true;
           else if (!res.headersSent)
             error(res, 503, 'hosted_mcp_recovery_required');

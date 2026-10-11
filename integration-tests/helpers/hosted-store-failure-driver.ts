@@ -177,7 +177,7 @@ const proxy = createServer(async (req, res) => {
       // #13800: the recovery-blocked turn hands its mount back here; only
       // two refusals are legitimate — a transient 409 runtime_session_busy
       // while the turn's own dying operation still reads active (settled
-      // by the bounded handback retries), and a 503
+      // by the owed handback retries), and a 503
       // runtime_reconciliation_required when the turn's full release
       // already evicted the Runtime Session (non-resident mount residue
       // belongs to the LOST family's own sweep).
