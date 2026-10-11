@@ -685,6 +685,32 @@ class HostedHarnessClientTest {
                 "\"cancellationTakeover\":true"));
     }
 
+    // #13753 I2: the child Workspace capability describes the host, so it
+    // rides every create and load, survives the lifecycle copy, and is
+    // absent unless the control plane serves child Workspaces.
+    @Test
+    void carriesTheChildWorkspaceCapabilityOnlyWhenEnabled() {
+        CreateHarnessSession.Builder create = CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID)
+                .approvalMode(DaemonApprovalMode.DEFAULT);
+        assertFalse(create.build().toJson().containsKey("childWorkspaces"));
+        assertEquals(Boolean.TRUE,
+                create.childWorkspaces(true).build().toJson().get("childWorkspaces"));
+        LoadHarnessSession load = new LoadHarnessSession(SESSION_ID, null, true);
+        assertFalse(load.toJson().containsKey("childWorkspaces"));
+        assertFalse(load.withChildWorkspaces(false).toJson().containsKey("childWorkspaces"));
+        LoadHarnessSession enabled = load.withChildWorkspaces(true);
+        assertEquals(Boolean.TRUE, enabled.toJson().get("childWorkspaces"));
+        assertEquals(Boolean.TRUE, enabled.toJson().get("passiveManagedRuntimeRecovery"));
+        Map<String, Object> lifecycle = enabled.forLifecycle("op-1", 3).toJson();
+        assertEquals(Boolean.TRUE, lifecycle.get("childWorkspaces"));
+        assertNotNull(lifecycle.get("lifecycleAuthority"));
+        Map<String, Object> reversed = load.forLifecycle("op-1", 3)
+                .withChildWorkspaces(true).toJson();
+        assertEquals(Boolean.TRUE, reversed.get("childWorkspaces"));
+        assertEquals(lifecycle.get("lifecycleAuthority"), reversed.get("lifecycleAuthority"));
+    }
+
     @Test
     void parsesAnAgentWaitRuntimeRecovery() {
         server.createContext("/session/" + SESSION_ID + "/load",
@@ -1014,6 +1040,40 @@ class HostedHarnessClientTest {
         client.close();
 
         assertEquals(0, deleted.get());
+    }
+
+    @Test
+    void refusesVersionedTitleBeforeSendingToAnOlderHarness() {
+        createSessionRoute();
+        AtomicInteger writes = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
+            writes.incrementAndGet();
+            sendSessionJson(exchange, 200, "{}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(DaemonProtocolException.class, () -> client.updateSessionTitle(session, "A", 1));
+        }
+        assertEquals(0, writes.get());
+    }
+
+    @Test
+    void sendsAndChecksTheDurableTitleRevision() {
+        createSessionRoute();
+        server.removeContext("/capabilities");
+        server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
+                capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                        "\"hostedHarness\":{\"titleProtocolVersion\":1,"), false));
+        AtomicReference<String> body = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
+            body.set(readBody(exchange));
+            sendSessionJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID
+                    + "\",\"persisted\":true,\"managedRenameRevision\":\"7\"}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            client.updateSessionTitle(createSession(client), "A", 7);
+        }
+        assertTrue(body.get().contains("\"managedRenameRevision\":\"7\""));
     }
 
     @Test

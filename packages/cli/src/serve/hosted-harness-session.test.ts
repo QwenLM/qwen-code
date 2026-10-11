@@ -113,6 +113,7 @@ import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { LocalShellStreamCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-stream-capture.js';
 import { monitorWakeNeedsRecovery } from './hosted-monitor-wake-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedSessionMessageSession } from './hosted-session-message-session.js';
 import { HostedTeamSession } from './hosted-team-session.js';
 
 const wakeDeps = vi.hoisted(() => ({
@@ -122,7 +123,6 @@ const wakeDeps = vi.hoisted(() => ({
 const domainEnablement = vi.hoisted(() => ({
   childRun: false,
   monitorRun: false,
-  teams: false,
 }));
 
 vi.mock(
@@ -139,7 +139,6 @@ vi.mock(
       ) => {
         if (domain === 'child_run' && domainEnablement.childRun) return;
         if (domain === 'monitor_run' && domainEnablement.monitorRun) return;
-        if (domain.startsWith('team_') && domainEnablement.teams) return;
         actual.assertManagedSessionDomainEnabled(domain);
       },
       // H4b: record commits gate per kind, beside the admission mock.
@@ -2409,7 +2408,6 @@ describe('Hosted Harness no-tool session', () => {
   // its tool_result landed: the aftermath answers it from its record before
   // the Turn settles, so the next Turn's model is never told to retry it.
   it('answers a committed team call of a crashed wake Turn from its record', async () => {
-    domainEnablement.teams = true;
     const inputId = await prewriteAutomationCrashedTurnSession();
     const key = {
       tenantId: 'tenant',
@@ -2499,7 +2497,6 @@ describe('Hosted Harness no-tool session', () => {
         'committed its team change',
       );
     } finally {
-      domainEnablement.teams = false;
       await managed.close().catch(() => undefined);
     }
   });
@@ -4458,6 +4455,7 @@ describe('Hosted Harness no-tool session', () => {
           definitionDigest:
             managed.authority.sessionHeader.definitionRef.digest,
         },
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: 'run-1',
       });
@@ -5181,11 +5179,629 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  // H4d-b: a parent with one attached child run, built through the real
+  // funnels; `build` then commits the message state under test.
+  async function prewriteMessageSession(
+    build: (sides: {
+      children: HostedChildAgentSession;
+      messages: HostedSessionMessageSession;
+      managed: Awaited<ReturnType<typeof openManagedSession>>;
+    }) => Promise<void>,
+  ): Promise<void> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              hookCatalog: hookPin,
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    try {
+      const store = {
+        authority: managed.authority,
+        resources: managed.resources,
+      };
+      const children = new HostedChildAgentSession(store, key);
+      await children.admit({
+        childRunId: 'run-1',
+        ownerScopeId: SESSION_ID,
+        rootSessionId: SESSION_ID,
+        completion: 'sent',
+        description: 'audit the diff',
+        prompt: 'review the change',
+        definition: {
+          definitionId: 'hosted-agent/hosted-workspace-shell/1',
+          definitionRevision: 1,
+          definitionDigest:
+            managed.authority.sessionHeader.definitionRef.digest,
+        },
+        workingDirectory: '.',
+        workspaceMode: 'shared',
+        executionCallId: 'run-1',
+      });
+      await children.dispatchStarted('run-1', {
+        dispatchId: 'dispatch-1',
+        runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+      });
+      await children.attach('run-1', CHILD_SESSION_ID);
+      await build({
+        children,
+        messages: new HostedSessionMessageSession(
+          store,
+          key,
+          children,
+          undefined,
+        ),
+        managed,
+      });
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  }
+
+  const CHILD_SESSION_ID = '550e8400-e29b-41d4-a716-446655440001';
+
+  async function journalEvents() {
+    return (
+      await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+      )
+    ).events;
+  }
+
+  // H4d-b: a Session whose journal carries a child's message must reopen
+  // (the restore verifier admits the domain), run the message's wake turn,
+  // and commit the receipt's consumption once that turn settles.
+  it('reopens a Session holding a child message and consumes it after its wake turn', async () => {
+    const content = Buffer.from('which branch should I use?');
+    await prewriteMessageSession(async ({ messages }) => {
+      await messages.receive({
+        messageId: 'msg_up',
+        route: 'to_parent',
+        childRunId: 'run-1',
+        senderSessionId: CHILD_SESSION_ID,
+        content,
+        contentDigest: createHash('sha256').update(content).digest('hex'),
+      });
+    });
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const events = await journalEvents();
+        expect(
+          events.some(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === 'msg_up:message',
+          ),
+        ).toBe(true);
+        expect(
+          events.filter(
+            (event) =>
+              event.kind === 'domain.committed' &&
+              event.payload['domain'] === 'session_message',
+          ),
+        ).toHaveLength(2);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  it('maps the message route refusals and holds a child settlement for its message', async () => {
+    await prewriteMessageSession(async ({ children }) => {
+      await children.sendToChild({
+        taskId: children.taskIdOf('run-1'),
+        text: 'also check the tests',
+        messageId: 'msg_down',
+        continuationRunId: 'prompt:call-1',
+        executionCallId: 'prompt:call-1',
+        closing: false,
+      });
+    });
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const message = (body: Record<string, unknown>) =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/messages/operations`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ operationId: randomUUID(), ...body });
+    const child = (body: Record<string, unknown>) =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/children/operations`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ operationId: randomUUID(), childRunId: 'run-1', ...body });
+    const invalid = await message({ messageId: 'msg_down', kind: 'teleport' });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.code).toBe('invalid_message_operation');
+    const missing = await message({
+      messageId: 'msg_none',
+      kind: 'handover',
+      targetSessionId: CHILD_SESSION_ID,
+    });
+    expect(missing.status).toBe(409);
+    expect(missing.body.code).toBe('session_message_record');
+    const pending = await child({
+      kind: 'commit_result',
+      result: 'done',
+      receipt: '{}',
+    });
+    expect(pending.status).toBe(409);
+    expect(pending.body.code).toBe('child_messages_pending');
+    await message({
+      messageId: 'msg_down',
+      kind: 'handover',
+      targetSessionId: CHILD_SESSION_ID,
+    }).expect(202);
+    const wrongTarget = await message({
+      messageId: 'msg_down',
+      kind: 'handover',
+      targetSessionId: randomUUID(),
+    });
+    expect(wrongTarget.status).toBe(409);
+    expect(wrongTarget.body.code).toBe('session_message_conflict');
+    await message({
+      messageId: 'msg_down',
+      kind: 'accepted',
+      inputId: 'msg_down:message',
+    }).expect(202);
+    // The settlement must name the message it saw.
+    const unseen = await child({
+      kind: 'commit_result',
+      result: 'done',
+      receipt: '{}',
+    });
+    expect(unseen.status).toBe(409);
+    expect(unseen.body.code).toBe('child_messages_pending');
+    await child({
+      kind: 'commit_result',
+      result: 'done',
+      receipt: '{}',
+      messageCount: 1,
+    }).expect(202);
+    // A target store that faltered is a retry, never the target's verdict.
+    const faltered = vi
+      .spyOn(HostedSessionMessageSession.prototype, 'receive')
+      .mockRejectedValueOnce(
+        new ManagedSessionStoreHttpError(503, 'store_unavailable', 'down'),
+      );
+    const content2 = Buffer.from('second question');
+    const storeDown = await message({
+      messageId: 'msg_late2',
+      kind: 'receive',
+      route: 'to_parent',
+      childRunId: 'run-1',
+      senderSessionId: CHILD_SESSION_ID,
+      contentBase64: content2.toString('base64'),
+      contentDigest: createHash('sha256').update(content2).digest('hex'),
+    });
+    expect(storeDown.status).toBe(503);
+    expect(storeDown.body.code).toBe('session_message_failed');
+    faltered.mockRestore();
+    const noReceipt = await message({ messageId: 'msg_down', kind: 'consume' });
+    expect(noReceipt.status).toBe(409);
+    expect(noReceipt.body.code).toBe('session_message_record');
+    const content = Buffer.from('late question');
+    const refused = await message({
+      messageId: 'msg_late',
+      kind: 'receive',
+      route: 'to_parent',
+      childRunId: 'run-2',
+      senderSessionId: CHILD_SESSION_ID,
+      contentBase64: content.toString('base64'),
+      contentDigest: createHash('sha256').update(content).digest('hex'),
+    });
+    // No such child run here: refused for good, before anything publishes.
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('session_message_record');
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  // H4d-b: a parent with the attached run-1 loaded; `receive` posts one
+  // child message to it through the route.
+  async function loadMessageParent() {
+    await prewriteMessageSession(async () => undefined);
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const receive = (messageId: string) => {
+      const content = Buffer.from(`question ${messageId}`);
+      return headers(
+        supertest(server).post(`/session/${SESSION_ID}/messages/operations`),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .send({
+          operationId: randomUUID(),
+          messageId,
+          kind: 'receive',
+          route: 'to_parent',
+          childRunId: 'run-1',
+          senderSessionId: CHILD_SESSION_ID,
+          contentBase64: content.toString('base64'),
+          contentDigest: createHash('sha256').update(content).digest('hex'),
+        })
+        .then((response) => response);
+    };
+    return { server, receive, clientId: loaded.body.clientId as string };
+  }
+
+  // H4f × H4d-b: a stopped run's message turns stop with it — the one in
+  // flight is aborted and the ones waiting behind it never run.
+  it('stops the message turn in flight and the messages waiting behind it', async () => {
+    const { server, receive, clientId } = await loadMessageParent();
+    let signal!: AbortSignal;
+    // An aborted model call rejects, as the provider's does.
+    state.model.mockImplementationOnce(
+      (input) =>
+        new Promise((_resolve, reject) => {
+          signal = input.signal;
+          signal.addEventListener(
+            'abort',
+            () => reject(new Error('The model call was aborted.')),
+            { once: true },
+          );
+        }),
+    );
+    expect((await receive('msg_running')).status).toBe(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(1));
+    expect((await receive('msg_waiting')).status).toBe(202);
+    const stop = () =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/messages/operations`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ operationId: randomUUID(), kind: 'stop' });
+    // A message turn in flight is aborted; the waiting one never starts.
+    expect((await stop()).status).toBe(202);
+    expect(signal.aborted).toBe(true);
+    const settledOf = async (turnId: string) =>
+      (await journalEvents()).find(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+      )?.payload;
+    await vi.waitFor(
+      async () =>
+        expect((await settledOf('msg_running:message'))?.['outcome']).toBe(
+          'cancelled',
+        ),
+      { timeout: 10_000, interval: 50 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(await settledOf('msg_waiting:message')).toBeUndefined();
+    // The relay's next stop, with no turn running, settles it.
+    expect((await stop()).status).toBe(202);
+    expect(await settledOf('msg_waiting:message')).toMatchObject({
+      outcome: 'cancelled',
+      stopReason: 'stop_requested',
+    });
+    expect(state.model).toHaveBeenCalledTimes(1);
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  // H4f × H4d-b: the control plane can lose its attachment before a stop
+  // reaches the Session. Its load carries the stop, so the first pass the
+  // load kicks starts none of the waiting messages.
+  it("loads a stopped run's Session without starting its waiting message", async () => {
+    const content = Buffer.from('which branch should I use?');
+    await prewriteMessageSession(async ({ messages }) => {
+      await messages.receive({
+        messageId: 'msg_up',
+        route: 'to_parent',
+        childRunId: 'run-1',
+        senderSessionId: CHILD_SESSION_ID,
+        content,
+        contentDigest: createHash('sha256').update(content).digest('hex'),
+      });
+    });
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      passiveManagedRuntimeRecovery: true,
+      stopMessages: true,
+    });
+    expect(loaded.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(state.model).not.toHaveBeenCalled();
+    const stopped = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/messages/operations`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({ operationId: randomUUID(), kind: 'stop' });
+    expect(stopped.status).toBe(202);
+    expect(
+      (await journalEvents()).find(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === 'msg_up:message',
+      )?.payload,
+    ).toMatchObject({ outcome: 'cancelled', stopReason: 'stop_requested' });
+    expect(state.model).not.toHaveBeenCalled();
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  // A load the resident Session refuses — its identity, its Store or its
+  // tool profile — stops nothing; one it admits stops its messages from
+  // then on.
+  it("stops a resident Session's messages only by a load it admits", async () => {
+    const { server, receive } = await loadMessageParent();
+    const load = (descriptor: Record<string, unknown>) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: descriptor,
+        passiveManagedRuntimeRecovery: true,
+        stopMessages: true,
+      });
+    const wrongTenant = await load({ ...store(), tenantId: 'another' });
+    expect(wrongTenant.status).toBe(409);
+    const wrongStore = await load({
+      ...store(),
+      baseUrl: 'http://another-store.test',
+    });
+    expect(wrongStore.status).toBe(409);
+    expect(wrongStore.body.code).toBe('hosted_session_store_mismatch');
+    const wrongProfile = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/1',
+      passiveManagedRuntimeRecovery: true,
+      stopMessages: true,
+    });
+    expect(wrongProfile.status).toBe(409);
+    expect(wrongProfile.body.code).toBe('hosted_tool_profile_conflict');
+    expect((await receive('msg_runs')).status).toBe(202);
+    await vi.waitFor(
+      async () =>
+        expect(
+          (await journalEvents()).find(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === 'msg_runs:message',
+          )?.payload['outcome'],
+        ).toBe('completed'),
+      { timeout: 10_000, interval: 50 },
+    );
+    const calls = state.model.mock.calls.length;
+    const admitted = await load(store());
+    expect(admitted.status).toBe(200);
+    expect((await receive('msg_held')).status).toBe(202);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(state.model.mock.calls.length).toBe(calls);
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  // A message turn that died inside its attempt in an earlier process is
+  // not a waiting input: the pump no longer picks it for a stopped
+  // Session, so the stop runs its aftermath and nothing stays owed.
+  it('settles the crashed message turn of a stopped run', async () => {
+    const content = Buffer.from('which branch should I use?');
+    await prewriteMessageSession(async ({ messages, managed }) => {
+      await messages.receive({
+        messageId: 'msg_up',
+        route: 'to_parent',
+        childRunId: 'run-1',
+        senderSessionId: CHILD_SESSION_ID,
+        content,
+        contentDigest: createHash('sha256').update(content).digest('hex'),
+      });
+      await managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        daemonPromptId: 'msg_up:message',
+        message: { role: 'user', parts: [{ text: 'which branch?' }] },
+      });
+    });
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      passiveManagedRuntimeRecovery: true,
+      stopMessages: true,
+    });
+    expect(loaded.status).toBe(200);
+    const stopped = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/messages/operations`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({ operationId: randomUUID(), kind: 'stop' });
+    expect(stopped.status).toBe(202);
+    expect(
+      (await journalEvents()).some(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === 'msg_up:message',
+      ),
+    ).toBe(true);
+    expect(state.model).not.toHaveBeenCalled();
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  });
+
+  it('refuses a message once the Session close began', async () => {
+    const { server, receive } = await loadMessageParent();
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = LocalJsonlManagedSessionJournalHandle.prototype.seal;
+    vi.spyOn(
+      LocalJsonlManagedSessionJournalHandle.prototype,
+      'seal',
+    ).mockImplementation(async function (
+      this: LocalJsonlManagedSessionJournalHandle,
+      commit,
+    ) {
+      entered();
+      await gate;
+      await original.call(this, commit);
+    });
+    const closing = headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    ).then((response) => response);
+    await started;
+    try {
+      // The close already cancelled the pending inputs: a receipt now
+      // would wait for a turn nothing runs.
+      const refused = await receive('msg_after_close');
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_session_closing');
+    } finally {
+      release();
+    }
+    expect((await closing).status).toBe(204);
+    expect(
+      (await journalEvents()).some(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload['inputId'] === 'msg_after_close:message',
+      ),
+    ).toBe(false);
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
+  it('lets a message admitted before the close land before its pending inputs are cancelled', async () => {
+    const { server, receive } = await loadMessageParent();
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = HostedSessionMessageSession.prototype.receive;
+    vi.spyOn(
+      HostedSessionMessageSession.prototype,
+      'receive',
+    ).mockImplementation(async function (
+      this: HostedSessionMessageSession,
+      ...args: Parameters<HostedSessionMessageSession['receive']>
+    ) {
+      entered();
+      await gate;
+      return original.apply(this, args);
+    });
+    const receiving = receive('msg_in_flight');
+    await started;
+    let closed = false;
+    const closing = headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .then((response) => response)
+      .finally(() => {
+        closed = true;
+      });
+    // The close waits for the receipt that passed its check.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(closed).toBe(false);
+    release();
+    const received = await receiving;
+    expect(received.status).toBe(202);
+    expect(received.body.inputId).toBe('msg_in_flight:message');
+    expect((await closing).status).toBe(204);
+    // Its input is cancelled with the other pending inputs, never left
+    // waiting for a turn after the Session closed.
+    const events = await journalEvents();
+    expect(
+      events.some(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload['inputId'] === 'msg_in_flight:message',
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === 'msg_in_flight:message',
+      ),
+    ).toBe(true);
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
   // H4e-b1: the reopen verifier admits the lead's team roster and board, so
   // a Session that led a team reopens with its own committed history.
   it('reopens a Session whose journal carries its team and board', async () => {
     domainEnablement.childRun = true;
-    domainEnablement.teams = true;
     try {
       const key = {
         tenantId: 'tenant',
@@ -5251,6 +5867,7 @@ describe('Hosted Harness no-tool session', () => {
             definitionDigest:
               managed.authority.sessionHeader.definitionRef.digest,
           },
+          workspaceMode: 'shared',
           workingDirectory: '.',
           executionCallId: 'run-1',
         });
@@ -5290,7 +5907,7 @@ describe('Hosted Harness no-tool session', () => {
           .status,
       ).toBe(204);
     } finally {
-      domainEnablement.teams = false;
+      domainEnablement.childRun = false;
     }
   });
 
@@ -9236,19 +9853,13 @@ describe('Hosted Harness no-tool session', () => {
       body,
     );
     expect(created.status).toBe(200);
+    // Captured here and asserted after the Turn: an assertion inside the
+    // model mock fails only the Turn, which the test would not see.
+    let firstDeclarations: string[] | undefined;
     state.model.mockImplementationOnce(async ({ toolTurn }) => {
-      expect(
-        (await toolTurn!.declarations(new AbortController().signal)).map(
-          (tool) => tool.name,
-        ),
-      ).toEqual([
-        'read_file',
-        'write_file',
-        'edit',
-        'run_shell_command',
-        // H4b: a Shell-laned root Session advertises its Agent tool.
-        'agent',
-      ]);
+      firstDeclarations = (
+        await toolTurn!.declarations(new AbortController().signal)
+      ).map((tool) => tool.name!);
       return { text: 'text without side effects', model: 'test-model' };
     });
     const prompt = [{ type: 'text', text: 'hello' }];
@@ -9273,6 +9884,23 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000 },
     );
+    expect(firstDeclarations).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      'run_shell_command',
+      'monitor',
+      // H4b: a Shell-laned root Session advertises its Agent tool,
+      // and (H4d-b) messages the child tasks it launched.
+      'agent',
+      // H4e-b1: with the team domains enabled, so are its team tools.
+      'team_create',
+      'team_delete',
+      'task_create',
+      'task_update',
+      'task_list',
+      'send_message',
+    ]);
     expect(acquire).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
@@ -9323,13 +9951,107 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'run_shell_command',
       'monitor',
-      // H4b: a Shell-laned root Session advertises its Agent tool.
+      // H4b: a Shell-laned root Session advertises its Agent tool,
+      // and (H4d-b) messages the child tasks it launched.
       'agent',
+      // H4e-b1: with the team domains enabled, so are its team tools.
+      'team_create',
+      'team_delete',
+      'task_create',
+      'task_update',
+      'task_list',
+      'send_message',
     ]);
     expect(state.model).toHaveBeenCalledTimes(2);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       loaded.body.clientId as string,
+    );
+  });
+
+  // #13753 I2: `childWorkspaces` describes the host, not the Session: the
+  // create that carries it advertises isolation, and a later load answers
+  // whatever that load restates, since nothing persists it.
+  it('advertises worktree isolation only while the create or load restates the host capability', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    const server = await app(true);
+    const isolationOf = async (clientId: string): Promise<boolean> => {
+      let declared: boolean | undefined;
+      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+        const agent = (await toolTurn!.declarations(signal)).find(
+          (tool) => tool.name === 'agent',
+        );
+        declared =
+          'isolation' in
+          ((agent?.parametersJsonSchema as { properties?: object })
+            ?.properties ?? {});
+        return { text: 'ok', model: 'test-model' };
+      });
+      const prompt = [{ type: 'text', text: randomUUID() }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: randomUUID(),
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      expect(declared).toBeDefined();
+      return declared!;
+    };
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      childWorkspaces: true,
+    });
+    expect(created.status).toBe(200);
+    expect(await isolationOf(created.body.clientId as string)).toBe(true);
+    // A load re-answered from the resident Session restates it too.
+    for (const childWorkspaces of [false, true]) {
+      const resident = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+        ...(childWorkspaces ? { childWorkspaces } : {}),
+      });
+      expect(resident.status).toBe(200);
+      expect(resident.body.clientId).toBe(created.body.clientId);
+      expect(await isolationOf(resident.body.clientId as string)).toBe(
+        childWorkspaces,
+      );
+    }
+    let clientId = created.body.clientId as string;
+    for (const childWorkspaces of [undefined, 'true', true]) {
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        ...(childWorkspaces === undefined ? {} : { childWorkspaces }),
+      });
+      expect(loaded.status).toBe(200);
+      clientId = loaded.body.clientId as string;
+      expect(await isolationOf(clientId)).toBe(childWorkspaces === true);
+    }
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
     );
   });
 
@@ -10094,6 +10816,62 @@ describe('Hosted Harness no-tool session', () => {
       );
     },
   );
+
+  it('fences an accepted delayed title and deduplicates a completed delivery', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const send = (title: string, managedRenameRevision: string) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/title`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({ title, managedRenameRevision });
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = LocalManagedSessionAuthority.prototype.commitDomainRecord;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'commitDomainRecord',
+    ).mockImplementation(function (
+      this: LocalManagedSessionAuthority,
+      command,
+      request,
+      actor,
+    ) {
+      if (request.content['managedRenameRevision'] === '1') {
+        entered();
+        return held.then(() => original.call(this, command, request, actor));
+      }
+      return original.call(this, command, request, actor);
+    });
+    const older = send('A', '1').then((response) => response);
+    await waiting;
+    await send('B', '2')
+      .expect(200)
+      .expect((response) =>
+        expect(response.body.managedRenameRevision).toBe('2'),
+      );
+    release();
+    expect((await older).status).toBe(409);
+    const before = await readFile(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      'utf8',
+    );
+    await send('B', '2').expect(200);
+    expect(
+      await readFile(path.join(state.root, `${SESSION_ID}.jsonl`), 'utf8'),
+    ).toBe(before);
+    await send('A', '3').expect(200);
+  });
 
   it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
     'loads a renamed %s Session and verifies its retained title resources',
@@ -14241,6 +15019,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         description: 'first audit',
         prompt: 'review one',
         definition,
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: fg1,
       });
@@ -14324,6 +15103,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           description: 'second audit',
           prompt: 'review two',
           definition,
+          workspaceMode: 'shared',
           workingDirectory: '.',
           executionCallId: fg2,
         });
@@ -18176,7 +18956,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
   // retry it and the retry opens a second task.
   it('answers a committed team call of a cancelled user Turn from its record', async () => {
     domainEnablement.childRun = true;
-    domainEnablement.teams = true;
     try {
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
@@ -18323,7 +19102,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
         supertest(replacement).delete(`/session/${SESSION_ID}`),
       );
     } finally {
-      domainEnablement.teams = false;
       domainEnablement.childRun = false;
     }
   }, 30_000);
@@ -18336,7 +19114,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     'answers a committed team sibling of a Runtime park through the %s route',
     async (route) => {
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
         acquireSpy = vi
@@ -18572,7 +19349,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
           supertest(replacement).delete(`/session/${SESSION_ID}`),
         );
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
@@ -18593,7 +19369,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     'answers a committed %s sibling before the bare-load resume of a publication Session',
     async (sibling, expected) => {
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         const key = {
           tenantId: 'tenant',
@@ -18884,7 +19659,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
         );
         await headers(supertest(second).delete(`/session/${SESSION_ID}`));
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
@@ -18901,7 +19675,6 @@ describe('Hosted Harness Runtime turn takeover', () => {
     async (sibling) => {
       const kind = 'task_create' as 'task_create' | 'agent';
       domainEnablement.childRun = true;
-      domainEnablement.teams = true;
       try {
         vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
         vi.spyOn(
@@ -19117,10 +19890,76 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(retried).toBe(0);
         expect(domainCommits('team_task')).toBe(1);
       } finally {
-        domainEnablement.teams = false;
         domainEnablement.childRun = false;
       }
     },
     30_000,
   );
+});
+
+it('pins stored definitions across resident and cold loads and delivers instructions to the Turn', async () => {
+  const server = await app();
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: state.root,
+    sessionKey: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    },
+  });
+  const instructionsRef = await resources.publish(
+    'managed-agent-instructions',
+    Buffer.from('D8_PINNED_INSTRUCTIONS'),
+  );
+  const identity = {
+    agentId: `agent_${'a'.repeat(32)}`,
+    revision: '1',
+    digest: 'b'.repeat(64),
+  };
+  const definition = {
+    ...identity,
+    model: { id: 'configured' },
+    instructionsRef,
+  };
+  const created = await headers(supertest(server).post('/session')).send({
+    sessionId: SESSION_ID,
+    sessionScope: 'thread',
+    managedSessionStore: store(),
+    agentDefinition: definition,
+  });
+  expect(created.status).toBe(200);
+  const load = (agentDefinition?: typeof identity) =>
+    headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+      managedSessionStore: store(),
+      agentDefinition,
+      driveRuntimeRecovery: true,
+    });
+  expect((await load()).body.error).toBe('hosted_agent_definition_conflict');
+  expect((await load({ ...identity, digest: 'c'.repeat(64) })).body.error).toBe(
+    'hosted_agent_definition_conflict',
+  );
+  expect((await load(identity)).status).toBe(200);
+  await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(204);
+  const loaded = await load(identity);
+  expect(loaded.status).toBe(200);
+  const prompt = [{ type: 'text', text: 'hello' }];
+  await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+    .set('X-Qwen-Client-Id', loaded.body.clientId)
+    .send({
+      prompt,
+      promptId: PROMPT_ID,
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+    })
+    .expect(202);
+  await vi.waitFor(() => expect(state.model).toHaveBeenCalled());
+  expect(state.model.mock.calls.at(-1)?.[0]).toMatchObject({
+    agentDefinition: definition,
+    agentInstructions: 'D8_PINNED_INSTRUCTIONS',
+  });
+  await vi.waitFor(async () => {
+    const response = await headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(response.status).toBe(204);
+  });
 });
