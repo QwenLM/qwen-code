@@ -1281,6 +1281,116 @@ class QwenHostedHarnessConnectorTest {
                 .isNull();
     }
 
+    // An approval-mode check that throws instead of answering (a store
+    // failure, or the interrupt an abandoned cancel send receives) confirms
+    // nothing: the ref the cold attach already cached is evicted, so the
+    // next verb re-loads and re-verifies it instead of taking it unchecked.
+    // The control plane records `default` and the Harness ref says `yolo`.
+    @Test
+    void anUnansweredApprovalModeCheckEvictsTheRefItMinted() {
+        DataAccessResourceFailureException unanswered =
+                new DataAccessResourceFailureException("interrupted");
+        Map<String, Object> cancel = Map.of("kind", "cancel",
+                "childRunId", "run-1");
+
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector connector =
+                approvalModeFixture(client, failingOnce(unanswered));
+        assertThatThrownBy(() -> connector.runChildOperation("tenant-a",
+                SESSION_ID, cancel)).isSameAs(unanswered);
+        assertThatThrownBy(() -> connector.runChildOperation("tenant-a",
+                SESSION_ID, cancel))
+                .hasMessageContaining("did not confirm the Session approval mode");
+        verify(client, times(2)).loadSession(any());
+        verify(client, never()).runChildOperation(any(), any());
+
+        // The recovery route caches its cold load the same way.
+        HostedHarnessClient recovering = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector recovery =
+                approvalModeFixture(recovering, failingOnce(unanswered));
+        assertThatThrownBy(() -> recovery.recoverManagedRuntime("tenant-a",
+                SESSION_ID, false)).isSameAs(unanswered);
+        assertThatThrownBy(() -> recovery.runChildOperation("tenant-a",
+                SESSION_ID, cancel))
+                .hasMessageContaining("did not confirm the Session approval mode");
+        verify(recovering, times(2)).loadSession(any());
+        verify(recovering, never()).runChildOperation(any(), any());
+    }
+
+    // Only the ref the failing call minted is evicted: one verified when
+    // it was attached stays cached when a later check throws, so a store
+    // blip costs no cold re-load. The ref and the record agree (`yolo`).
+    @Test
+    void anUnansweredApprovalModeCheckKeepsARefVerifiedEarlier() {
+        DataAccessResourceFailureException unanswered =
+                new DataAccessResourceFailureException("interrupted");
+        Map<String, Object> cancel = Map.of("kind", "cancel",
+                "childRunId", "run-1");
+
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector connector =
+                approvalModeFixture(client, failingSecond(unanswered));
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a",
+                SESSION_ID, true)).isSameAs(unanswered);
+        connector.runChildOperation("tenant-a", SESSION_ID, cancel);
+        verify(client, times(1)).loadSession(any());
+        verify(client).runChildOperation(any(), any());
+
+        HostedHarnessClient recovering = mock(HostedHarnessClient.class);
+        QwenHostedHarnessConnector recovery =
+                approvalModeFixture(recovering, failingSecond(unanswered));
+        recovery.recoverManagedRuntime("tenant-a", SESSION_ID, false);
+        assertThatThrownBy(() -> recovery.recoverManagedRuntime("tenant-a",
+                SESSION_ID, false)).isSameAs(unanswered);
+        recovery.runChildOperation("tenant-a", SESSION_ID, cancel);
+        verify(recovering, times(1)).loadSession(any());
+        verify(recovering).runChildOperation(any(), any());
+    }
+
+    // The record says `default`; the check throws on the minting call.
+    private static ManagedActionStore failingOnce(RuntimeException unanswered) {
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID))
+                .thenThrow(unanswered).thenReturn("default");
+        return actions;
+    }
+
+    // The record says `yolo`; the check answers, then throws once.
+    private static ManagedActionStore failingSecond(
+            RuntimeException unanswered) {
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("yolo")
+                .thenThrow(unanswered).thenReturn("yolo");
+        return actions;
+    }
+
+    private QwenHostedHarnessConnector approvalModeFixture(
+            HostedHarnessClient client, ManagedActionStore actions) {
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("yolo");
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", "hosted-workspace-files/1");
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(
+                properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        return connector;
+    }
+
     // R4-13: each call site must fetch the client AFTER resolving the
     // attachment — the resolution runs a create/load round trip during
     // which an adoption can close and rebuild the client; a receiver

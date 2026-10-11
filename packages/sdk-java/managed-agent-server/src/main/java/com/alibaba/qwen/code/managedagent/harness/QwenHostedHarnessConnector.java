@@ -288,6 +288,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef attached = passiveManagedRuntimeRecovery && loadExisting
                 ? load(session, true) : attachments.get(key);
+        boolean minted = false;
         if (attached == null) {
             AttachmentLock slot = attachmentLocks.compute(key,
                     (ignored, held) -> {
@@ -303,6 +304,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     attached = loadExisting ? load(session, passiveManagedRuntimeRecovery)
                             : create(session, passiveManagedRuntimeRecovery);
                     attachments.put(key, attached);
+                    minted = true;
                 }
             } finally {
                 slot.lock.unlock();
@@ -311,7 +313,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
         }
         if (session.workspace() != null
-                && !actions.approvalMode(tenantId, sessionId).equals(attached.getApprovalMode())) {
+                && !approvalModeConfirmed(session, attached, minted)) {
             attachments.remove(key);
             throw new IllegalStateException(
                     "Hosted Harness did not confirm the Session approval mode");
@@ -922,6 +924,27 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 attached.getHarnessEventEpoch());
     }
 
+    /**
+     * Whether the Harness ref carries the Session's recorded approval mode.
+     * A ref this call minted is already cached when the check runs, so a
+     * check that throws instead of answering evicts it too: left cached,
+     * the unverified ref would serve every later verb unchecked.
+     */
+    private boolean approvalModeConfirmed(SessionRecord session,
+            HarnessSessionRef ref, boolean minted) {
+        AttachmentKey key = new AttachmentKey(session.tenantId(),
+                session.sessionId());
+        try {
+            return actions.approvalMode(session.tenantId(), session.sessionId())
+                    .equals(ref.getApprovalMode());
+        } catch (RuntimeException unanswered) {
+            if (minted && attachments.remove(key, ref)) {
+                pendingRecovery.remove(key);
+            }
+            throw unanswered;
+        }
+    }
+
     private SessionRecord requireRecoverableSession(String tenantId,
             String sessionId, boolean cancellation) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
@@ -948,6 +971,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 cancellation);
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef cached = attachments.get(key);
+        boolean minted = cached == null;
         if (cached == null) {
             HarnessSessionRef attached = load(session, cancellation,
                     !cancellation, cancellation);
@@ -963,7 +987,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             // a dead owner: reuse the attachment instead of re-loading it.
         }
         if (session.workspace() != null
-                && !actions.approvalMode(tenantId, sessionId).equals(cached.getApprovalMode())) {
+                && !approvalModeConfirmed(session, cached, minted)) {
             attachments.remove(key);
             pendingRecovery.remove(key);
             throw new IllegalStateException(
