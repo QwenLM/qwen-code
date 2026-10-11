@@ -26,6 +26,7 @@ const mock = vi.hoisted(() => ({
 }));
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (original) => ({
   ...(await original<Record<string, unknown>>()),
+  useWorkspace: () => ({ capabilities: undefined }),
   useConnection: () => ({
     ...mock.connection,
     workspaceCwd: mock.standalone ? undefined : mock.connection.workspaceCwd,
@@ -37,7 +38,8 @@ const target = {
   workspaceId: 'owner-a',
   actions: mock.actions,
 };
-vi.mock('./useArtifactWorkspaceTarget', () => ({
+vi.mock('./useArtifactWorkspaceTarget', async (original) => ({
+  ...(await original<typeof import('./useArtifactWorkspaceTarget')>()),
   useArtifactWorkspaceTarget: (cwd: string) =>
     mock.trusted && cwd ? { ...target } : undefined,
 }));
