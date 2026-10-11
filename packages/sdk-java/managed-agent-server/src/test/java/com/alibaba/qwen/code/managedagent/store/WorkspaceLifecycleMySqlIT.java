@@ -4,13 +4,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
+import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.TimeZone;
 import java.util.UUID;
@@ -29,6 +35,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
 
 class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     private DriverManagerDataSource source;
@@ -187,7 +194,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     }
 
     @Test
-    void ordinaryAuthorizationKeepsFenceLocksInsideTheTenant() throws Exception {
+    void ordinaryAuthorizationFencesOnlyWithinOneSession() throws Exception {
         var fixture = fixture();
         var journal = new ManagedSessionStore(fixture.jdbc);
         String token = "w".repeat(32);
@@ -220,13 +227,16 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                 });
                 try {
                     assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
-                    assertThrows(TimeoutException.class, () -> sameTenant.get().get(100, TimeUnit.MILLISECONDS));
+                    // Ordinary admissions fence per Session (drain + head) and
+                    // never queue on tenant-wide rows: neither the sibling
+                    // session of the same tenant nor another tenant's session
+                    // waits on the in-flight authorisation above (#13800).
+                    sameTenant.get().get(5, TimeUnit.SECONDS);
                     differentTenant.get(5, TimeUnit.SECONDS);
                 } catch (Exception error) {
                     throw new IllegalStateException(error);
                 }
             });
-            sameTenant.get().get(5, TimeUnit.SECONDS);
         }
     }
 
@@ -248,5 +258,50 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.completeOperation("tenant", fixture.session,
                 operation.operationId(), "worker", operation.claimGeneration(), true))).isTrue();
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_session_retirement", Integer.class)).isOne();
+    }
+
+    @Test
+    void idleJournalCheckReVerifiesARevisionItsSnapshotCannotSee() throws Exception {
+        var fixture = fixture();
+        var store = new ManagedSessionStore(fixture.jdbc);
+        var journal = fixture.transactions.execute(ignored ->
+                new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
+        var txManager = new DataSourceTransactionManager(source);
+        var snapshot = txManager.getTransaction(new DefaultTransactionDefinition());
+        try {
+            // Pin this REPEATABLE READ transaction's read view with a plain
+            // consistent read on the head table before the writer appends
+            // anything else behind the head's own lock.
+            fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_head"
+                    + " WHERE tenant_id = ? AND session_id = ?", Long.class, "tenant", fixture.session);
+            var templates = ManagedHookRecordContractTest.fixtures().get("templates");
+            var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2, sha256("{}"), "e30=");
+            ObjectNode registration = templates.get("hook_registration").deepCopy();
+            registration.withObject("/catalogRef").put("digest", data.digest());
+            var input = new ManagedSessionStoreModels.CommitResource("witness-input", "managed-input", 1, 2,
+                    sha256("{}"), "e30=");
+            var request = journal.requestDomainWithInput("witness-input", "hook_registration", registration,
+                    List.of(data), "witness-turn", input);
+            try (var writer = Executors.newSingleThreadExecutor()) {
+                writer.submit(() -> fixture.transactions.executeWithoutResult(ignored -> journal.commit(request)))
+                        .get(30, TimeUnit.SECONDS);
+            }
+            // The head's revision is ahead of this transaction's read view:
+            // the unlocked scan must not vouch for the journal's idleness.
+            assertThatThrownBy(() -> WorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json,
+                    "tenant", fixture.session))
+                    .satisfies(error -> {
+                        assertThat(error).isInstanceOf(ApiException.class);
+                        assertThat(((ApiException) error).getCode())
+                                .isEqualTo("workspace_lifecycle_journal_unverified");
+                    });
+        } finally {
+            txManager.rollback(snapshot);
+        }
+    }
+
+    private static String sha256(String value) throws NoSuchAlgorithmException {
+        return HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
     }
 }

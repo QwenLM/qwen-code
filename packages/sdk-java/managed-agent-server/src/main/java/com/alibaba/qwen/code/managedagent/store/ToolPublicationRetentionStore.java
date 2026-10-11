@@ -3,11 +3,14 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.nio.charset.StandardCharsets;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -34,12 +37,37 @@ public final class ToolPublicationRetentionStore {
     }
 
     static void lockTenant(JdbcTemplate jdbc, String tenant) {
+        // A zero statement timeout is unlimited, the historical shape.
+        lockTenant(jdbc, tenant, 0);
+    }
+
+    /**
+     * Bounded variant for hot paths: each acquisition statement gives up
+     * after {@code timeoutSeconds} rather than out-waiting the caller
+     * (#13800).
+     */
+    static void lockTenant(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
         String key = hash(tenant);
-        jdbc.update("INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
-                + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", key, tenant);
-        String stored = jdbc.queryForObject("SELECT tenant_id FROM qwen_tool_publication_tenant"
-                + " WHERE tenant_key = ? FOR UPDATE", String.class, key);
-        ToolPublicationContract.require(tenant.equals(stored), "Retention tenant conflicts");
+        jdbc.execute((ConnectionCallback<Void>) connection -> {
+            try (PreparedStatement insert = connection.prepareStatement(
+                    "INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
+                            + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key")) {
+                insert.setQueryTimeout(timeoutSeconds);
+                insert.setString(1, key);
+                insert.setString(2, tenant);
+                insert.executeUpdate();
+            }
+            try (PreparedStatement lock = connection.prepareStatement(
+                    "SELECT tenant_id FROM qwen_tool_publication_tenant WHERE tenant_key = ? FOR UPDATE")) {
+                lock.setQueryTimeout(timeoutSeconds);
+                lock.setString(1, key);
+                try (ResultSet result = lock.executeQuery()) {
+                    ToolPublicationContract.require(result.next() && tenant.equals(result.getString("tenant_id")),
+                            "Retention tenant conflicts");
+                }
+            }
+            return null;
+        });
     }
 
     static void lockSession(JdbcTemplate jdbc, String tenant, String session) {

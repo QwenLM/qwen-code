@@ -255,6 +255,22 @@ function settledTurnOutcome(abort: AbortController): {
     : { state: 'cancelled', stopReason: 'cancelled' };
 }
 
+/**
+ * The wedge family #13800 names: a turn that dies against its Session store
+ * ends with a named, caller-visible reason, never a silent freeze. Only
+ * transport and server-5xx failures reclassify: per-Session refusals
+ * (writer conflicts, recovery blocks) keep their own names.
+ */
+function namedStoreFailure(cause: unknown): string | undefined {
+  if (
+    cause instanceof ManagedSessionStoreTransportError ||
+    (cause instanceof ManagedSessionStoreHttpError && cause.status >= 500)
+  ) {
+    return 'managed_session_store_unavailable';
+  }
+  return undefined;
+}
+
 interface HostedSession {
   managed: ManagedSession;
   storeBaseUrl: string;
@@ -2214,6 +2230,8 @@ async function eventEnvelope(
     const expired = event.payload['stopReason'] === 'deadline_exceeded';
     const modelUnavailable =
       event.payload['stopReason'] === 'model_unavailable';
+    const storeUnavailable =
+      event.payload['stopReason'] === 'managed_session_store_unavailable';
     return {
       v: 1,
       id: event.sequence,
@@ -2226,7 +2244,9 @@ async function eventEnvelope(
           ? 'hosted_turn_deadline_exceeded'
           : modelUnavailable
             ? 'model_unavailable'
-            : 'hosted_turn_failed',
+            : storeUnavailable
+              ? 'managed_session_store_unavailable'
+              : 'hosted_turn_failed',
         message: expired
           ? 'The Hosted Harness Turn exceeded its deadline.'
           : 'Hosted Harness turn failed.',
@@ -2423,6 +2443,10 @@ async function executeHostedTurn(
             cause instanceof HostedModelUnavailableError
           )
             stopReason = 'model_unavailable';
+          if (stopReason === 'error') {
+            const storeFailure = namedStoreFailure(cause);
+            if (storeFailure !== undefined) stopReason = storeFailure;
+          }
           if (state === 'error') {
             // The model layer surfaces any abort as a cancellation, so a
             // deadline expiry names the deadline, not the thrown cause.
@@ -4785,8 +4809,16 @@ export function registerHostedHarnessSessionRoutes(
           );
           try {
             const outcome = settledTurnOutcome(abort);
+            const storeFailure =
+              outcome.stopReason === 'error'
+                ? namedStoreFailure(cause)
+                : undefined;
             await session.managed.sink.write(
-              turnResult ?? turnResultRecord(outcome.state, outcome.stopReason),
+              turnResult ??
+                turnResultRecord(
+                  outcome.state,
+                  storeFailure ?? outcome.stopReason,
+                ),
             );
           } catch (settleCause) {
             session.blocked = true;
@@ -6252,6 +6284,8 @@ export function registerHostedHarnessSessionRoutes(
           if (state === 'error' && cause instanceof HostedModelUnavailableError)
             failureReason = 'model_unavailable';
           if (state === 'error') {
+            const storeFailure = namedStoreFailure(cause);
+            if (storeFailure !== undefined) failureReason = storeFailure;
             writeStderrLineSafe(
               `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
             );

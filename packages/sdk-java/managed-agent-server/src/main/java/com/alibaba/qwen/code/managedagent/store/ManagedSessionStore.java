@@ -40,7 +40,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -52,6 +54,11 @@ public class ManagedSessionStore {
     private static final int STORAGE_VERSION = 1;
     private static final int MAX_ID_BYTES = 512;
     private static final int MAX_TEXT_BYTES = 4096;
+    // Hot paths touch the tenant-wide guard rows only on admission, and
+    // never wait on them past this per-statement bound: a held row degrades
+    // to a named, retryable failure instead of out-waiting the caller's own
+    // request budget (#13800).
+    private static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = 5;
     private static final Pattern DIGEST = Pattern.compile("^[0-9a-f]{64}$");
     private static final Pattern WRITER_TOKEN = Pattern.compile(
             "^[A-Za-z0-9_-]{"
@@ -147,8 +154,10 @@ public class ManagedSessionStore {
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenantId, sessionId);
         WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
         if (request.kind() != null) {
@@ -177,10 +186,31 @@ public class ManagedSessionStore {
 
     private void checkLifecycleWriter(String tenantId, String sessionId,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
-        if (authority != null) {
-            WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
+        // Ordinary traffic fences per Session (head row, drain admission);
+        // taking the two tenant-wide rows here would let any long holder of
+        // them wedge every Session of the tenant (#13800).
+        if (authority == null) {
+            return;
+        }
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
+    }
+
+    private static ApiException guardContended() {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
+                "tenant_guard_contended",
+                "A tenant-wide Managed Session guard could not be acquired"
+                        + " within the hot-path bound; retry.");
+    }
+
+    private static void lockBounded(Runnable lock) {
+        try {
+            lock.run();
+        } catch (CannotAcquireLockException | QueryTimeoutException error) {
+            throw guardContended();
         }
     }
 
@@ -190,8 +220,9 @@ public class ManagedSessionStore {
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        // Ordinary authorisation fences per Session (drain + head): the
+        // tenant-wide guard rows stay with lifecycle/publication paths, or
+        // any long holder of them wedges unrelated Sessions (#13800).
         if (!"legacy-close".equals(request.kind()) || !WorkspaceLifecycleStore.legacyClose(jdbc, tenantId, sessionId)) {
             requireOrdinaryAdmission(tenantId, sessionId);
         }
@@ -258,6 +289,10 @@ public class ManagedSessionStore {
             String session, String writer, long generation, String token) {
         validateScope(tenant, workspace, session);
         requireCredential(tenant, workspace, session, token);
+        // Publication-lane writer: keeps the tenant CAS row before the head
+        // row, the same order as before #13800 decoupled ordinary traffic.
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         HeadRow head = requireHeadForUpdate(tenant, session);
         requireHeadScope(head, tenant, workspace, session);
         Timestamp now = databaseNow();
@@ -289,8 +324,15 @@ public class ManagedSessionStore {
         }
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
-        WorkspaceMigrationAdmission.sessionAdmission(jdbc, tenantId, sessionId);
+        // Acquisition stays serialized with an in-flight delete/retire: while
+        // a Session has no head row, the tenant CAS row is the only ordering
+        // point, so it stays. Both acquisitions run in the codebase-wide
+        // placement-before-publication order, bounded — a held row degrades
+        // to a named failure instead of a silent wedge or a 1213 (#13800).
+        lockBounded(() -> WorkspaceMigrationAdmission.sessionAdmission(jdbc,
+                tenantId, sessionId, GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
+                tenantId, GUARD_ACQUIRE_TIMEOUT_SECONDS));
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<String> closed = jdbc.query("SELECT status FROM managed_agent_session"
                 + " WHERE tenant_id = ? AND session_id = ? AND workspace_id IS NOT NULL FOR UPDATE",
@@ -835,6 +877,11 @@ public class ManagedSessionStore {
         if (bytes.length != request.byteLength() || !sha256(bytes).equals(request.digest())) {
             throw invalid("Tool result bytes do not match their length or digest.");
         }
+        // Tool-result publication lane: keeps the tenant CAS row before the
+        // head row, the same order as before #13800 decoupled ordinary
+        // traffic.
+        lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         Timestamp now = databaseNow();
@@ -1193,7 +1240,9 @@ public class ManagedSessionStore {
     }
 
     private HeadRow findHeadForUpdate(String tenantId, String sessionId) {
-        ToolPublicationRetentionStore.lockSession(jdbc, tenantId, sessionId);
+        // The head row lock below is the per-Session serialization point;
+        // the tenant-wide CAS row stays with explicit publication paths so
+        // ordinary writes never queue on it (#13800).
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<HeadRow> rows = jdbc.query(
                 "SELECT * FROM qwen_managed_session_journal_head"

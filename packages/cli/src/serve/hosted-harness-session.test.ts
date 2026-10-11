@@ -13246,6 +13246,86 @@ describe('Hosted Harness no-tool session', () => {
     expect(state.model).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
+
+  it('names a Session store transport failure in the settled turn result', async () => {
+    vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const publish = LocalManagedSessionResourceStore.prototype.publish;
+    let rejectWrite: ((reason?: unknown) => void) | undefined;
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    ).mockImplementation(function (
+      this: LocalManagedSessionResourceStore,
+      kind,
+      bytes,
+    ) {
+      if (kind === 'managed-message' && !rejectWrite) {
+        return new Promise<Awaited<ReturnType<typeof publish>>>(
+          (_resolve, reject) => {
+            rejectWrite = reject;
+          },
+        );
+      }
+      return publish.call(this, kind, bytes);
+    });
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'wait' }];
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(() => expect(rejectWrite).toBeDefined());
+    rejectWrite?.(new ManagedSessionStoreTransportError('store flap'));
+    await vi.waitFor(
+      async () => {
+        const transcript = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(transcript.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_error',
+              promptId: PROMPT_ID,
+              data: expect.objectContaining({
+                code: 'managed_session_store_unavailable',
+              }),
+            }),
+          ]),
+        );
+      },
+      { timeout: 10_000 },
+    );
+    const saved = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    );
+    const settled = saved.events.find(
+      (event) => event.kind === 'turn.settled',
+    )!;
+    expect(settled.payload['outcome']).toBe('error');
+    expect(settled.payload['stopReason']).toBe(
+      'managed_session_store_unavailable',
+    );
+    expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
 });
 
 describe('Hosted Harness tool approvals', () => {

@@ -1050,7 +1050,12 @@ public final class JdbcRuntimeBindingRepository
         lockPlacementDomain(connection, tenantId, 0);
     }
 
-    private static void lockPlacementDomain(Connection connection, String tenantId, int timeoutSeconds)
+    /**
+     * Bounded variant: each acquisition statement is capped at
+     * {@code timeoutSeconds}, so a caller guarding per-turn traffic cannot
+     * be frozen behind a long holder of the tenant row (#13800).
+     */
+    public static void lockPlacementDomain(Connection connection, String tenantId, int timeoutSeconds)
             throws SQLException {
         String key = JdbcRepositorySupport.valueKey(tenantId);
         try (PreparedStatement insert = connection.prepareStatement(

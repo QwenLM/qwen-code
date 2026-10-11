@@ -55,6 +55,14 @@ public class WorkspaceLifecycleStore {
         });
     }
 
+    /** Bounded variant for hot paths: fails instead of out-waiting the caller (#13800). */
+    public static void lockPlacement(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
+        jdbc.execute((ConnectionCallback<Void>) connection -> {
+            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, timeoutSeconds);
+            return null;
+        });
+    }
+
     public static void requireClaim(JdbcTemplate jdbc, String tenant, String session,
             RuntimeLifecycleAuthority authority, boolean drainingAllowed) {
         if (authority == null) {
@@ -85,7 +93,8 @@ public class WorkspaceLifecycleStore {
     }
 
     public static void requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session) {
-        var heads = jdbc.queryForList("SELECT compacted_through_revision FROM qwen_managed_session_journal_head"
+        var heads = jdbc.queryForList("SELECT compacted_through_revision, journal_revision"
+                + " FROM qwen_managed_session_journal_head"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenant, session);
         if (heads.isEmpty()) {
             return;
@@ -93,10 +102,20 @@ public class WorkspaceLifecycleStore {
         if (((Number) heads.getFirst().get("compacted_through_revision")).longValue() != 0) {
             throw blocked("workspace_lifecycle_journal_unverified");
         }
+        long headRevision = ((Number) heads.getFirst().get("journal_revision")).longValue();
         var pending = new java.util.HashSet<String>();
-        jdbc.query("SELECT record_bytes FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                + " ORDER BY journal_revision FOR UPDATE", row -> {
-                for (String line : new String(row.getBytes(1), StandardCharsets.UTF_8).split("\n")) {
+        // The head row locked above is the per-Session fence: writers append
+        // revisions only behind it, so this ordered scan needs no lock of its
+        // own — and a lifecycle settle no longer pins every revision of the
+        // journal while it parses them in Java (#13800). The scan itself is a
+        // snapshot read, so the locked head's revision is re-verified below:
+        // a revision this transaction's snapshot cannot see fails the check
+        // closed, rather than admitting over a live turn it cannot see.
+        final long[] maxScanned = {0};
+        jdbc.query("SELECT journal_revision, record_bytes FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
+                + " ORDER BY journal_revision", row -> {
+                maxScanned[0] = Math.max(maxScanned[0], row.getLong("journal_revision"));
+                for (String line : new String(row.getBytes("record_bytes"), StandardCharsets.UTF_8).split("\n")) {
                     try {
                         JsonNode event = json.readTree(line).path("managedSession");
                         String turn = event.path("payload").path("turnId").asText();
@@ -110,6 +129,13 @@ public class WorkspaceLifecycleStore {
                     }
                 }
             }, tenant, session);
+        // A revision committed after this transaction's snapshot was pinned
+        // is invisible to the scan above; the locked head's revision is a
+        // current read, so anything it counts beyond the scan's maximum was
+        // committed in that window and the idle verdict cannot be trusted.
+        if (maxScanned[0] < headRevision) {
+            throw blocked("workspace_lifecycle_journal_unverified");
+        }
         if (!pending.isEmpty()) {
             throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn.");
         }
