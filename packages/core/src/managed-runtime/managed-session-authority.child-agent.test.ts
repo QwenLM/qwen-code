@@ -701,7 +701,6 @@ describe('managed session authority child_agent records', () => {
   });
 
   it('refuses an acceptance that names a shell run', async () => {
-    enablement.shellKind = true;
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     await withAuthority(harness, async (authority) => {
