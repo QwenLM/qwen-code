@@ -19,7 +19,9 @@ export interface ExperienceSignals {
 export type CompletedToolOutcome = Pick<
   ToolCallResponseInfo,
   'callId' | 'executionStatus' | 'error' | 'errorType' | 'resultDisplay'
->;
+> & {
+  status?: 'success' | 'error' | 'cancelled';
+};
 
 const SUBSTANTIVE_TOOLS = new Set<string>([
   ToolNames.WRITE_FILE,
@@ -41,6 +43,7 @@ export function isSubstantiveToolCall(name: string, kind?: Kind): boolean {
 
 export function didToolCallProduceWork(outcome: CompletedToolOutcome): boolean {
   return (
+    outcome.status !== 'cancelled' &&
     (outcome.executionStatus === 'success' ||
       outcome.executionStatus === 'error') &&
     outcome.errorType !== ToolErrorType.EXECUTION_DENIED &&

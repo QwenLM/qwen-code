@@ -73,6 +73,11 @@ it.each(['not_started', 'cancelled', undefined] as const)(
     expect(classifyToolExperience('edit', result)).toBeNull();
   },
 );
+it('ignores scheduler cancellation after successful execution', () => {
+  const result = { ...success, status: 'cancelled' as const };
+  expect(didToolCallProduceWork(result)).toBe(false);
+  expect(classifyToolExperience('edit', result)).toBeNull();
+});
 it('ignores denied results even when labelled executed', () => {
   const result = { ...success, errorType: ToolErrorType.EXECUTION_DENIED };
   expect(didToolCallProduceWork(result)).toBe(false);

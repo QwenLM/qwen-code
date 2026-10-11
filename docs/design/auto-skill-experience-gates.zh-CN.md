@@ -8,6 +8,9 @@ Issue #9062 仍未解决：AutoSkill 评审目前只依赖完成 20 次工具调
 只读探索会消耗一次评审，而短调试会话和用户纠正可能没有评审机会。
 AutoSkill 仍默认关闭；确认流程、managed skill 写入限制和内存压力检查保持不变。
 本设计替换触发条件，不改变评审 agent 或 shell 进程生命周期。
+本设计取代[最初 AutoSkill 提案](skill-nudge/skill-nudge.md)中的计数、触发和
+`ScheduleSkillReviewParams` 章节。该提案只按次数触发的代码片段仅作为历史记录，
+不再是当前调用方契约；评审 agent 和写入沙箱设计保持不变。
 
 ## 设计
 
@@ -20,7 +23,15 @@ finally 路径。直接 `addHistory` 也消费匹配记录。重新提交的结�
 被拒绝的输入不会推进评审窗口。skill 文件修改保护仍在本地执行完成时更新，
 即使 PostToolUse hook 随后拒绝该结果也保留保护；被拒绝的结果仍不计入经验。
 
-执行状态排除被拒绝、未执行和已取消的调用。shell 成功恢复要求已有的结构化
+流内 ID normalization 除当前历史的 ID 外，也保留客户端在会话中已记录的
+完成调用 ID。压缩或 rewind/restore 因此不会让新的执行复用一个会被完成记账
+当作重放丢弃的 ID。重建的主聊天共享同一个只读保留视图；`/clear` 与会话切换
+随既有评审状态一起清除该视图。不新增独立 ID 存储或持久化状态。
+
+调度器记录的终态排除已取消的调用，即使执行此前已经成功结算。
+执行状态排除未执行和已取消的调用；终态错误类型排除 hook 拒绝的结果。
+Auto Memory 回忆提示不依赖经验门控：非取消的终态工具仍会被记住。
+shell 成功恢复要求已有的结构化
 `ShellResultDisplay` 为 completed 且退出码为 0，绝不解析输出文本。
 shell 失败使用执行状态和错误类型；即使前端标为成功，结构化的 cancelled
 结果也会被排除。不需要更改 shell 进程拆除逻辑。
@@ -37,7 +48,10 @@ shell 失败使用执行状态和错误类型；即使前端标为成功，结�
 信号与待接受完成记录不依赖历史索引，可跨压缩保留。派发时仅重置已消费的
 计数与信号，尚待接受的完成记录仍供后续使用。会话切换和 `/clear` 清除全部
 评审状态。已有评审运行时保留新窗口，因为其历史快照不包含派发后的工作。
-评审仍在既有回合边界检查，不在每次工具结果后检查。已派发评审若后续失败，
+评审仍在回合边界检查，不在每次工具结果后检查。AutoSkill 也在完成 Retry 时
+检查：provider 失败前已经接受的结果，即使重试后不再调用工具，也可获得评审
+机会；重放结果仍只计数一次。递归 Steer 和 Hook 回合继承原始交互的边界；
+Auto Memory 的提取、dream 和迁移保留原有类型门控。已派发评审若后续失败，
 保持既有行为：不重新尝试已消费窗口。
 
 ## 影响层次
@@ -45,6 +59,8 @@ shell 失败使用执行状态和错误类型；即使前端标为成功，结�
 - `packages/core/src/memory/experience-signals.ts`：结果分类、实质工作判定、批次累积。
 - `packages/core/src/memory/manager.ts`：必填经验信号及门控。
 - `packages/core/src/core/client.ts`：已接受结果计数、steer 和重置。
+- `packages/core/src/core/llm-chat.ts`：在流内 normalization 时保留会话已记录 ID，
+  覆盖历史移除与主聊天重建。
 - headless CLI、TUI 和 ACP 完成路径：提供已有结构化响应，覆盖全部生产调用者。
   ACP 使用原始聊天流，因此也转发已接受的结果批次。基线 ACP 不调度 AutoSkill
   评审；本改动保留这一启用范围，不新增 ACP 功能。
@@ -60,8 +76,13 @@ OpenAI-compatible provider，执行真实工具。以 provider 收到的 extract
 验收：21 次只读调用不派发评审；同工具恢复在 4 次调用不派发、5 次派发一次；
 不同工具成功不闭合重试；20 次 shell 执行保留兜底；禁用和手工 skill 保护
 保持；新窗口不复用旧信号。单测覆盖拒绝、重复结果、混合并行批次、结构化
-未知 shell 状态、接受/拒绝 steer、压缩及会话重置。不引入新的 shell
-进程取消语义。
+未知 shell 状态、接受/拒绝 steer、压缩及会话重置。终止式 steer 和 retry
+不需要后续工具调用；retry 控制覆盖少于 5 次的恢复、20 次纯只读调用、禁用
+AutoSkill 和重复重放。真实聊天流 normalization 测试覆盖截断、restore、
+compact 形状的历史替换与聊天重建后复用 provider ID 或生成 ID：新完成调用
+仍计数并保留 skill 写入保护，重放仍幂等。clear 与会话切换对照允许新会话
+复用 ID。ACP iterator 在首个 chunk 前后失败时，结果仍恰好接受一次。
+不引入新的 shell 进程取消语义。
 
 ## 风险与开放问题
 

@@ -2506,6 +2506,7 @@ export class LlmChat {
     private history: Content[] = [],
     private readonly chatRecordingService?: ChatRecordingService,
     private readonly telemetryService?: UiTelemetryService,
+    private readonly reservedToolCallIds: ReadonlySet<string> = new Set(),
   ) {
     validateHistory(history);
     markCompressedHistory(history);
@@ -6287,6 +6288,8 @@ export class LlmChat {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
     const usedToolCallIds = collectToolCallIdsFromHistory(this.history);
+    // Completed IDs remain reserved after their history is compacted or rewound.
+    for (const id of this.reservedToolCallIds) usedToolCallIds.add(id);
     const rawToolCallIdsInCurrentTurn = new Set<string>();
     const reservedToolCallIds = new Map<string, string>();
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;

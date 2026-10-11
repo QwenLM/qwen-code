@@ -9,6 +9,10 @@ tool calls. Read-only exploration spends a review, while short debugging session
 and user corrections can miss one. AutoSkill remains opt-in; confirmation,
 managed-skill write restrictions and memory-pressure checks remain unchanged.
 This design replaces the trigger, not the review agent or shell process lifecycle.
+It supersedes the counting, trigger and `ScheduleSkillReviewParams` sections of
+[the original AutoSkill proposal](skill-nudge/skill-nudge.md). That proposal's
+count-only snippets are historical, not the current caller contract; the review
+agent and write-sandbox design remain unchanged.
 
 ## Design
 
@@ -25,7 +29,17 @@ Skill-file modification protection still updates at local execution completion,
 even if a PostToolUse hook subsequently denies the result. That denied result
 remains excluded from experience accounting.
 
-Execution status excludes denied, unstarted and cancelled calls. A successful
+Stream ID normalization also reserves the client's session-level recorded
+completion IDs, not just IDs in current history. Compression and rewind/restore
+therefore cannot let a fresh execution reuse an ID that completion accounting
+would discard as a replay. Recreated main chats share the same read-only
+reservation view; `/clear` and session changes clear it with the existing review
+state. This adds no separate ID store or persistent state.
+
+Tracked terminal status excludes cancelled calls even if execution already
+settled successfully. Execution status excludes unstarted and cancelled calls;
+terminal error type excludes hook-denied results. Auto Memory recall hints remain
+independent of this experience gate: non-cancelled terminal tools are remembered. A successful
 shell retry requires an existing structured `ShellResultDisplay` with completed
 outcome and exit code 0; output text is never parsed. Failed shell results use
 execution status/error type; structured cancelled results are excluded even if
@@ -47,8 +61,13 @@ compression. Dispatch resets only consumed count/signals; pending completions
 remain available for future acceptance. Session changes and `/clear` clear all
 review state. An already-running review retains the new window because its
 history snapshot cannot cover work completed after dispatch. Reviews are checked
-at existing turn boundaries, not after every tool result. A dispatched review
-that later fails retains existing behavior: its consumed window is not retried.
+at turn boundaries, not after every tool result. AutoSkill also checks a completed
+Retry: results accepted before a provider failure can qualify even when retrying
+finishes without further tool calls. Replayed results still count only once.
+Recursive Steer and Hook turns inherit their original interaction's boundary;
+Auto Memory extraction, dream and migration retain their existing type gates.
+A dispatched review that later fails retains existing behavior: its consumed
+window is not retried.
 
 ## Affected layers
 
@@ -56,6 +75,8 @@ that later fails retains existing behavior: its consumed window is not retried.
   substantive-work detection and batch accumulation.
 - `packages/core/src/memory/manager.ts`: required experience signals and gate.
 - `packages/core/src/core/client.ts`: accepted-result accounting, steer and resets.
+- `packages/core/src/core/llm-chat.ts`: reserve recorded session IDs during stream
+  normalization, including after history removal and main-chat recreation.
 - Headless CLI, TUI and ACP completion paths: provide the existing structured
   response; all production callers are covered. ACP uses raw chat streams, so it
   also forwards accepted result batches. Baseline ACP does not schedule AutoSkill
@@ -77,8 +98,15 @@ Acceptance: 21 read-only calls dispatch zero reviews; a same-tool retry with
 close a retry; 20 shell executions retain the backstop; disabled/manual-skill
 protections remain; fresh windows do not reuse old signals. Unit tests cover
 rejection, duplicate results, mixed parallel batches, structured unknown shell
-status, accepted/rejected steer, compression and session resets. No new shell
-process-cancellation semantics are introduced.
+status, accepted/rejected steer, compression and session resets. Terminal steer
+and retry need no later tool call; retry controls cover recovery below 5 calls,
+20 read-only calls, disabled AutoSkill and duplicate replay. Real chat-stream
+normalization tests cover reused provider IDs and generated IDs after truncation,
+restore, compact-shaped history replacement and chat recreation; fresh completions
+still count and protect skill writes, while replay remains idempotent. Clear and
+session-switch controls permit ID reuse in a new session. ACP iterator failures
+before and after the first chunk retain exactly-once result acceptance. No new
+shell process-cancellation semantics are introduced.
 
 ## Risks and open questions
 
