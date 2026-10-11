@@ -460,7 +460,7 @@ async function hostCall(
     throw new Error('Mod API not supported: ' + method);
   validateInput(method, value, {});
   const plugin = realms[call.plugin].plugin;
-  return call.budget.lend(async () => {
+  const invoke = async () => {
     const result = await dispatch(
       method,
       value,
@@ -498,7 +498,9 @@ async function hostCall(
     if (!record(result)) throw new Error('Invalid Mod API result.');
     if ('deny' in result) throw new Error(String(result['deny']));
     return result['value'];
-  });
+  };
+  // Void log notifications do not suspend their caller's execution.
+  return method === 'ui.log' ? invoke() : call.budget.lend(invoke);
 }
 
 port.on('message', async (request: ModRequest) => {

@@ -48,6 +48,7 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
     await mkdtemp(path.join(os.tmpdir(), 'qwen-mod-worker-bundle-')),
   );
   vi.stubEnv('DEV', 'false');
+  vi.resetModules();
   await import('../../esbuild.config.js');
   await state.build;
   await writeFile(
@@ -58,7 +59,9 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
     path.join(state.directory, 'helper.ts'),
     'export const greeting: string = "bundled";',
   );
-  worker = new Worker(path.join(state.directory, 'mod-worker.js'));
+  worker = new Worker(path.join(state.directory, 'mod-worker.js'), {
+    workerData: new SharedArrayBuffer(4),
+  });
   const dispatch = (request) =>
     new Promise((resolve, reject) => {
       const onError = (error) => {
@@ -82,17 +85,25 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
   const commands = await dispatch({
     type: 'load',
     cwd: state.directory,
-    options: { value: 'option' },
-    source: {
-      root: state.directory,
-      entry: path.join(state.directory, 'entry.ts'),
-      source: `import { greeting } from './helper.js'; export function register(on, options) {
+    plugins: [
+      {
+        id: 'fixture',
+        name: 'fixture',
+        options: { value: 'option' },
+        source: {
+          root: state.directory,
+          entry: path.join(state.directory, 'entry.ts'),
+          source: `import { greeting } from './helper.js'; export function register(on, options) {
       on('session.start', async ($, e, next) => { await $.command.register({ name: 'hello', description: 'Bundled' }); return next(e); });
       on('command.run', {command:'hello'}, () => ({text: greeting + ':' + options.value + ':' + typeof process}));
     }`,
-    },
+        },
+      },
+    ],
   });
-  expect(commands).toEqual([{ name: 'hello', description: 'Bundled' }]);
+  expect(commands).toEqual([
+    { name: 'hello', description: 'Bundled', plugin: 'fixture' },
+  ]);
   expect(
     await dispatch({ type: 'command', command: 'hello', args: '' }),
   ).toEqual({ text: 'bundled:option:undefined' });

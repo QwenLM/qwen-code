@@ -213,6 +213,47 @@ describe('Mod middleware through real isolated realms', () => {
     ]);
   });
 
+  it.each([
+    ['return {wrong:true};', '1:', true],
+    ['return {text:"first catch recovered"};', 'first catch recovered', false],
+    ['return undefined;', 'second catch recovered', false],
+    ['throw new Error("catch failed");', 'second catch recovered', false],
+    ['await next(e); throw new Error("catch failed");', '1:', true],
+    ['await next(e); return {wrong:true};', '1:', true],
+    ['await next(e);', '1:', true],
+  ])(
+    'stops catch selection after an answer or a replay: %s',
+    async (body, expected, called) => {
+      const runtime = await group(
+        `export function register(on) {
+        on('command.run', {}, ($,e,next)=>next(e)).catch(async ($,e,next)=>{${body}});
+        on('command.run', {}, ()=>{throw new Error('inner');}).catch(()=>({text:'second catch recovered'}));
+      }`,
+        provider,
+      );
+      expect(await runtime.runCommand('hello', '', signal())).toBe(expected);
+      expect(effects()).toEqual(called ? ['effect:1'] : []);
+    },
+  );
+
+  it.each([false, true])(
+    'retains catch replay when normal next was called: %s',
+    async (called) => {
+      const runtime = await group(
+        `export function register(on) {
+        on('command.run', {}, ($,e,next)=>next(e)).catch(async ($,e,next)=>{await next({...e,args:'first'}); throw new Error('catch failed');});
+        on('command.run', {}, async ($,e,next)=>{${called ? "await next({...e,args:'normal'});" : ''} throw new Error('inner');}).catch(($,e,next)=>{$.ui.log('unexpected later catch'); return next(e);});
+      }`,
+        provider,
+      );
+      const result = called ? '1:normal' : '1:first';
+      expect(await runtime.runCommand('hello', '', signal())).toBe(result);
+      expect(
+        logs.filter((log) => log.to === 'transcript').map((log) => log.text),
+      ).toEqual(['effect:1']);
+    },
+  );
+
   it.each(['undefined', 'null', 'false'])(
     'rejects a missing same-plugin next result before an outer hook can wrap it: %s',
     async (result) => {
@@ -377,6 +418,23 @@ describe('Mod middleware through real isolated realms', () => {
     expect(await runtime.runCommand('hello', '', signal())).toBe('1:once');
     expect(effects()).toEqual(['effect:1']);
   });
+
+  it('charges catch execution while a void log notification is pending', async () => {
+    const runtime = await group(
+      wrapper(
+        'throw new Error("before")',
+        `$.ui.log('hold'); await Promise.resolve(); await Promise.resolve();
+        const start=Date.now(); while(Date.now()-start<1600){}
+        return {text:'catch escaped its budget'};`,
+      ),
+      `export function register(on) {
+        on('ui.log', {text:'hold'}, ()=>new Promise(()=>{}));
+      }`,
+      provider,
+    );
+    expect(await runtime.runCommand('hello', '', signal())).toBe('1:');
+    expect(effects()).toEqual(['effect:1']);
+  }, 20_000);
 
   it('skips immediate self reentry and recovers ancestor reentry with an inert API', async () => {
     const runtime = await group(

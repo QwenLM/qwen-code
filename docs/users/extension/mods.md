@@ -126,9 +126,13 @@ export function register(on) {
 
 Ordinary `next` executes downstream on every call. A plugin's registrations form
 one layer, sharing a failure record and time budget. On a throw, timeout or
-invalid result, its catches are tried in registration order. The first answer
-wins. `next.called` in catch means the plugin crossed into the next plugin, not
-merely into another registration of its own.
+invalid result, its catches are tried in registration order until one returns a
+non-undefined answer or calls `next`. A catch that returns undefined or throws
+without calling `next` allows the next matching catch to run. As in Claude Code
+2.1.296, an invalid answer or a failure after `next` ends catch selection and uses
+the shared fallback record; it does not try later catches. `next.called` in catch
+means the plugin crossed into the next plugin before recovery began, not merely
+into another registration of its own.
 
 If the plugin already called downstream, recovery waits for and replays the last
 started call, including its rejection, ignoring replay arguments. If it had not,
@@ -153,8 +157,9 @@ and its `next` reuses the original event once. `ui.log` remains a void notificat
 queued notifications before returning output.
 
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
-cross-plugin `next` or API calls. Catch and re-entry recovery use a one-second
-budget. Re-entry dispatch shares this shorter budget with other registrations in
+cross-plugin `next` or API calls. Pending void `ui.log` notifications do not pause
+the caller's budget. Catch and re-entry recovery use a one-second budget.
+Re-entry dispatch shares this shorter budget with other registrations in
 that plugin. Qwen additionally caps each root dispatch at 60 seconds and each
 uninterrupted guest execution slice at 10 seconds. All `session.end` work shares
 1.5 seconds. An outer handler that finishes early abandons pending downstream
