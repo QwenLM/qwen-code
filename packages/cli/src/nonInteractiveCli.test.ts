@@ -53,7 +53,7 @@ import {
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import {
   runNonInteractive,
   formatGoalState,
@@ -3572,13 +3572,15 @@ describe('runNonInteractive', () => {
         dream,
       ]);
       const onResultEmitted = vi.fn();
+      const abortController = new AbortController();
+      const abortListeners = getEventListeners(abortController.signal, 'abort');
       let returned = false;
       const run = runNonInteractive(
         mockConfig,
         mockSettings,
         'Test input',
         'prompt-memory-order',
-        { onResultEmitted },
+        { onResultEmitted, abortController },
       ).then((code) => {
         returned = true;
         return code;
@@ -3650,6 +3652,9 @@ describe('runNonInteractive', () => {
         expect(
           messages().filter((message) => message.type === 'result'),
         ).toHaveLength(1);
+        expect(getEventListeners(abortController.signal, 'abort')).toEqual(
+          abortListeners,
+        );
       } finally {
         finishExtraction(0);
         finishDream(0);
@@ -3671,6 +3676,321 @@ describe('runNonInteractive', () => {
       mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValueOnce([
         memoryTask,
       ]);
+    });
+
+    it.each([
+      { cancellation: 'SIGINT before catch', beforeCatch: true },
+      { cancellation: 'SIGINT during catch drain', beforeCatch: false },
+      { cancellation: 'wall-time budget during catch drain', budget: true },
+      {
+        cancellation: 'recoverable interrupt before catch',
+        beforeCatch: true,
+        recoverable: true,
+      },
+      {
+        cancellation: 'recoverable interrupt during catch drain',
+        recoverable: true,
+      },
+    ])(
+      'stops waiting for pending memory on $cancellation',
+      async ({ beforeCatch, budget, recoverable }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        if (budget) {
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+          vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(10);
+        }
+        const abortController = new AbortController();
+        const signalListeners = process.listeners('SIGINT');
+        const abortListeners = getEventListeners(
+          abortController.signal,
+          'abort',
+        );
+        const cancel = () => {
+          if (recoverable) {
+            abortController.abort(new TurnInterruptedError());
+          } else {
+            process.emit('SIGINT');
+          }
+        };
+        const executionError = new Error('Model stream failed');
+        mockLlmClient.sendMessageStream.mockImplementation(() => {
+          if (beforeCatch) cancel();
+          throw executionError;
+        });
+        const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+        const emitResult = vi.spyOn(adapter, 'emitResult');
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-memory-cancellation',
+          {
+            adapter,
+            abortController,
+            recoverableCancellation: recoverable,
+            onResultEmitted,
+          },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+
+        try {
+          await vi.waitFor(() =>
+            expect(onResultEmitted).toHaveBeenCalledOnce(),
+          );
+          if (!beforeCatch) {
+            await vi.waitFor(() =>
+              expect(
+                mockLlmClient.consumePendingMemoryTaskPromises,
+              ).toHaveBeenCalledOnce(),
+            );
+            expect(settled).toBe(false);
+            expect(abortController.signal.aborted).toBe(false);
+            if (budget) {
+              await vi.advanceTimersByTimeAsync(10_000);
+              vi.useRealTimers();
+            } else {
+              cancel();
+            }
+          }
+          expect(abortController.signal.aborted).toBe(true);
+
+          // Memory has no completion timer: cancellation must finish the run
+          // while it remains pending, before the fixture releases it below.
+          await vi.waitFor(() => expect(settled).toBe(true));
+          if (recoverable) {
+            await expect(run).resolves.toBe(130);
+            expect(process.exit).not.toHaveBeenCalled();
+          } else {
+            await expect(run).resolves.toEqual(
+              new Error(`process.exit(${budget ? 55 : 130}) called`),
+            );
+            expect(process.exit).toHaveBeenCalledExactlyOnceWith(
+              budget ? 55 : 130,
+            );
+          }
+          rejectMemory(new Error('Memory task failed after cancellation'));
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(emitResult).toHaveBeenCalledOnce();
+          expect(onResultEmitted).toHaveBeenCalledOnce();
+          expect(process.listeners('SIGINT')).toEqual(signalListeners);
+          expect(getEventListeners(abortController.signal, 'abort')).toEqual(
+            abortListeners,
+          );
+        } finally {
+          vi.useRealTimers();
+          finishMemory(0);
+          await run;
+        }
+      },
+    );
+
+    it.each([
+      'success',
+      'structured success',
+      'TEXT loop detection',
+      'TEXT already reported error',
+    ] as const)(
+      'honors SIGINT while memory remains pending after %s',
+      async (terminal) => {
+        const textMode = terminal.startsWith('TEXT');
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          textMode ? OutputFormat.TEXT : OutputFormat.STREAM_JSON,
+        );
+        if (terminal === 'structured success') {
+          vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+            type: 'object',
+            properties: { summary: { type: 'string' } },
+            required: ['summary'],
+          });
+          mockCoreExecuteToolCall.mockResolvedValue({
+            responseParts: [{ text: 'ok' }],
+          });
+        }
+        const terminalEvent: ServerLlmStreamEvent =
+          terminal === 'structured success'
+            ? {
+                type: LlmEventType.ToolCallRequest,
+                value: {
+                  callId: 'memory-cancel-structured',
+                  name: 'structured_output',
+                  args: { summary: 'done' },
+                  isClientInitiated: false,
+                  prompt_id: 'prompt-memory-terminal-cancel',
+                },
+              }
+            : terminal === 'TEXT loop detection'
+              ? {
+                  type: LlmEventType.LoopDetected,
+                  value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+                }
+              : terminal === 'TEXT already reported error'
+                ? {
+                    type: LlmEventType.Error,
+                    value: {
+                      error: { message: '429 Too Many Requests', status: 429 },
+                    },
+                  }
+                : {
+                    type: LlmEventType.Finished,
+                    value: {
+                      reason: undefined,
+                      usageMetadata: { totalTokenCount: 1 },
+                    },
+                  };
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([terminalEvent]),
+        );
+        const abortController = new AbortController();
+        const signalListeners = process.listeners('SIGINT');
+        const abortListeners = getEventListeners(
+          abortController.signal,
+          'abort',
+        );
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-memory-terminal-cancel',
+          { abortController, onResultEmitted },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+
+        try {
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.consumePendingMemoryTaskPromises,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(settled).toBe(false);
+          expect(onResultEmitted).toHaveBeenCalledTimes(textMode ? 0 : 1);
+          // Returning a terminal helper without awaiting it must not remove
+          // the invocation's signal handlers while that helper still waits.
+          expect(process.listeners('SIGINT')).toHaveLength(
+            signalListeners.length + 1,
+          );
+          process.emit('SIGINT');
+          expect(abortController.signal.aborted).toBe(true);
+          await vi.waitFor(() => expect(settled).toBe(true));
+          await expect(run).resolves.toEqual(
+            new Error('process.exit(130) called'),
+          );
+          expect(process.exit).toHaveBeenCalledExactlyOnceWith(130);
+          if (textMode) {
+            expect(processStdoutSpy).not.toHaveBeenCalled();
+          } else {
+            const results = processStdoutSpy.mock.calls
+              .flatMap(
+                ([chunk]) =>
+                  JSON.parse(String(chunk)) as CLIMessage | CLIMessage[],
+              )
+              .filter((message) => message.type === 'result');
+            expect(results).toEqual([
+              expect.objectContaining({ is_error: false }),
+            ]);
+            expect(onResultEmitted).toHaveBeenCalledOnce();
+          }
+          expect(process.listeners('SIGINT')).toEqual(signalListeners);
+          expect(getEventListeners(abortController.signal, 'abort')).toEqual(
+            abortListeners,
+          );
+        } finally {
+          finishMemory(0);
+          await run;
+        }
+      },
+    );
+
+    it('serializes real continued turns behind pending memory after one result', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      mockLlmClient.getChat.mockReturnValue({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [{ text: 'Continue the interrupted work' }],
+          },
+        ]),
+      });
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Answer' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+      const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      const emitResult = vi.spyOn(adapter, 'emitResult');
+      const onResultEmitted = vi.fn();
+      const options = { adapter, onResultEmitted, continueInterrupted: true };
+      const runFirst = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-memory-continued-first',
+        options,
+      );
+      // Match the caller's serialization boundary using real invocations:
+      // receiving a result alone must not release the next invocation.
+      const runSecond = runFirst.then(() =>
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          '',
+          'prompt-memory-continued-second',
+          options,
+        ),
+      );
+      const runs = Promise.all([runFirst, runSecond]);
+      void runs.catch(() => undefined);
+
+      try {
+        await vi.waitFor(() =>
+          expect(
+            mockLlmClient.consumePendingMemoryTaskPromises,
+          ).toHaveBeenCalledOnce(),
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(emitResult).toHaveBeenCalledOnce();
+        expect(onResultEmitted).toHaveBeenCalledOnce();
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+          [{ text: 'Continue the interrupted work' }],
+          expect.any(AbortSignal),
+          'prompt-memory-continued-first',
+          expect.objectContaining({ type: SendMessageType.Retry }),
+        );
+
+        finishMemory(1);
+        await expect(runs).resolves.toEqual([0, 0]);
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockLlmClient.sendMessageStream).toHaveBeenLastCalledWith(
+          [{ text: 'Continue the interrupted work' }],
+          expect.any(AbortSignal),
+          'prompt-memory-continued-second',
+          expect.objectContaining({ type: SendMessageType.Retry }),
+        );
+        expect(emitResult).toHaveBeenCalledTimes(2);
+        expect(onResultEmitted).toHaveBeenCalledTimes(2);
+        expect(process.exit).not.toHaveBeenCalled();
+      } finally {
+        finishMemory(0);
+        await runs;
+      }
     });
 
     it.each([
