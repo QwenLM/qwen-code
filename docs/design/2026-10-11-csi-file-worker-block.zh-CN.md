@@ -49,6 +49,21 @@ Hosted turn 或 Kubernetes 部署。
 及 retained storage 参数在 composer 中有实际生产 setter，在工具、history
 和 executor 中有实际 read site。普通 worker 不选择该 backend，保留已有行为。
 
+私有 team-memory secret 检查以 composer 提供的已验证 Session 工作目录为根，
+具体保护其 `.qwen/team-memory` 子树。即使工作目录位于仓库根目录之下，也不向上
+查找 Git 根目录。普通工具保留最近 Git 根目录和 realpath 的分类规则。这是有意的
+差异：私有工具不能发现准入描述符根目录之外的宿主仓库；backend 拒绝根目录之外
+的路径及 symlink 遍历。
+
+文件历史保持原始 Session 和目录。同一 Session 重新安装不同的 context digest
+会冲突，mount 身份变化会拒绝准入。绑定、准备和 snapshot 已要求当前工具目录与
+history 一致；执行在文件效果前重复同一检查。改变 cwd 必须为新 Session 安装
+context，不能复用其他目录的历史。
+
+Write 和 Edit 在 signal 已取消时重抛外层 mutation wrapper 捕获的错误，保留
+Core 工具 API 的取消传播。未取消的 wrapper 错误仍返回带类型的工具失败。这不改变
+scheduler 已有的取消分类或工具的内层 catch。
+
 Java 请求沿用 Broker 编码，保留规范 Session UUID 隔离、Workspace generation
 和存储身份、根相对工作目录及规范绝对 mount root。拒绝根据精确能力摘要，
 不依赖 provisioner kind 或隔离类型，覆盖请求创建、两个 provision 重载、

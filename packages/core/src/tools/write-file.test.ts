@@ -37,6 +37,7 @@ import { LlmClient } from '../core/client.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import type { TextFileIo } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
 // A unique per-run root: a fixed path under os.tmpdir() breaks whenever a
@@ -188,6 +189,59 @@ describe('WriteFileTool', () => {
     extra?: Partial<WriteFileToolParams>,
   ) =>
     tool.build({ file_path: filePath, content, ...extra }).execute(abortSignal);
+
+  it.each([true, false])(
+    'classifies scoped mutation failure when aborted=%s',
+    async (aborted) => {
+      const controller = new AbortController();
+      const error = new DOMException('Mutation cancelled', 'AbortError');
+      if (aborted) controller.abort(error);
+      const withMutation = vi.fn(async () => {
+        throw error;
+      });
+      const io: TextFileIo = { inspect: vi.fn(), withMutation };
+      const scopedService = Object.assign(new StandardFileSystemService(), {
+        textFileIo: io,
+      });
+      const config = {
+        ...mockConfigInternal,
+        getFileSystemService: () => scopedService,
+      } as unknown as Config;
+      const file = p('cancelled.txt');
+      const execution = new WriteFileTool(config)
+        .build({ file_path: file, content: 'new content' })
+        .execute(controller.signal);
+
+      if (aborted) await expect(execution).rejects.toBe(error);
+      else
+        expect((await execution).error?.type).toBe(
+          ToolErrorType.FILE_WRITE_FAILURE,
+        );
+      expect(withMutation).toHaveBeenCalledWith(
+        file,
+        controller.signal,
+        expect.any(Function),
+      );
+      expect(fs.existsSync(file)).toBe(false);
+    },
+  );
+
+  it('propagates an ordinary pre-write error after cancellation', async () => {
+    const parent = unread('parent.txt', 'original bytes');
+    const controller = new AbortController();
+    controller.abort();
+    const config = {
+      ...mockConfigInternal,
+      getFileReadCacheDisabled: () => true,
+    } as unknown as Config;
+
+    await expect(
+      new WriteFileTool(config)
+        .build({ file_path: path.join(parent, 'child.txt'), content: 'new' })
+        .execute(controller.signal),
+    ).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(fs.readFileSync(parent, 'utf8')).toBe('original bytes');
+  });
 
   /** Builds, approves the confirmation when it offers one, then executes. */
   async function confirmAndRun(filePath: string, content: string) {

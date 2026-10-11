@@ -58,6 +58,26 @@ new scoped mutation and retained storage parameters have actual production
 setters in the composer and read sites in the tools, history and executor.
 Ordinary workers do not select this backend and retain their current behavior.
 
+Private team-memory secret checks are anchored at the verified Session working
+directory supplied by the composer, specifically its `.qwen/team-memory`
+subtree. They do not search for an ancestor Git root, even when the working
+directory is below a repository root. Ordinary tools retain their nearest-Git-root
+and realpath classification. This difference is intentional: private tools must
+not discover a host repository outside the admitted descriptor root; the backend
+rejects paths outside that root and symlink traversal.
+
+File history retains its original Session and directory. Reinstalling a different
+context digest for that Session conflicts, and a changed mount identity refuses
+admission. Binding, preparation and snapshots already require the current tool
+directory to match history; execution repeats that same fence before effects.
+Changing cwd therefore requires installation for a new Session instead of reusing
+history from another directory.
+
+Write and Edit rethrow errors caught by their outer mutation wrapper when the
+signal is aborted, preserving cancellation propagation at the Core tool API.
+Non-aborted wrapper failures remain typed tool errors. This does not change the
+scheduler's existing cancellation classification or the tools' inner catches.
+
 The Java request retains canonical Session UUID isolation, Workspace generation
 and storage identity, root-relative working directory and a canonical absolute
 mount root using the existing Broker encoding. Refusal checks the exact

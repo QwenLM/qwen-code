@@ -322,6 +322,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           )
         : await this.executeObserved(abortSignal);
     } catch (error) {
+      if (abortSignal.aborted) throw error;
       return this.writeFailure(error);
     }
   }
