@@ -9008,6 +9008,7 @@ export class Session implements SessionContext {
         'qwen.promptCancelled': {
           cancelledAt: noticeAt,
           elapsedMs: Math.max(0, noticeAt - (recording.startedAt ?? noticeAt)),
+          reason: cancelledAt !== undefined ? 'user' : 'interrupted',
         },
       };
     }

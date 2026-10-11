@@ -111,6 +111,7 @@ describe('createTranscriptReplayMachine', () => {
             promptId: 'prompt-1',
             cancelledAt: 2500,
             elapsedMs: 1500,
+            reason: 'interrupted',
           },
         }),
       }),
@@ -140,6 +141,37 @@ describe('createTranscriptReplayMachine', () => {
             promptId: 'prompt-1',
             cancelledAt: 2200,
             elapsedMs: 1200,
+            reason: 'interrupted',
+          },
+        }),
+      }),
+    ]);
+  });
+
+  it('labels a persisted user cancel as user provenance', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-marker-result', 'system', {
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          startedAt: 1000,
+          cancelledAt: 2200,
+          cancelReason: 'user',
+          endedAt: 2500,
+        },
+      }),
+    );
+
+    expect(projected).toEqual([
+      expect.objectContaining({
+        _meta: expect.objectContaining({
+          promptCancelled: {
+            promptId: 'prompt-1',
+            cancelledAt: 2200,
+            elapsedMs: 1200,
+            reason: 'user',
           },
         }),
       }),

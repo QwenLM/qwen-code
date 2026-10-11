@@ -3674,6 +3674,7 @@ const EN: Messages = {
     return `${n} thought${n === 1 ? '' : 's'}`;
   },
   'turn.stopped': 'You cancelled this request',
+  'turn.interrupted': 'This request was interrupted',
   'turn.stoppedAfter': (v) => {
     const seconds = v?.seconds ?? 0;
     return `You cancelled this request after ${seconds} second${seconds === 1 ? '' : 's'}`;
@@ -7773,6 +7774,7 @@ const ZH: Messages = {
   'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'turn.thinkingCount': (v) => `思考 ${v?.count ?? 0} 次`,
   'turn.stopped': '你已取消请求',
+  'turn.interrupted': '本次请求已中断',
   'turn.stoppedAfter': (v) => `你在 ${v?.seconds ?? 0} 秒后取消了请求`,
   'message.renderError': '此消息无法显示。',
   'tasks.title': '后台任务',

@@ -2275,6 +2275,7 @@ function normalizePromptCancellation(
 ): DaemonUiEvent[] {
   const elapsedMs = numberField(value, 'elapsedMs');
   const cancelledAt = numberField(value, 'cancelledAt');
+  const reason = stringField(value, 'reason');
   const promptId = stringField(value, 'promptId') ?? base.promptId;
   if (
     !promptId ||
@@ -2290,6 +2291,7 @@ function normalizePromptCancellation(
       promptId,
       elapsedMs,
       serverTimestamp: cancelledAt,
+      ...(reason ? { reason } : {}),
     },
   ];
 }

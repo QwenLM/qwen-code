@@ -19527,14 +19527,45 @@ describe('createAcpSessionBridge', () => {
 
   describe('turn_complete promptCancelled', () => {
     it.each([
-      ['cancelled', { cancelledAt: 4_500, elapsedMs: 3_500 }, true],
-      ['end_turn', { cancelledAt: 4_500, elapsedMs: 3_500 }, false],
-      ['cancelled', { cancelledAt: NaN, elapsedMs: 3_500 }, false],
-      ['cancelled', { cancelledAt: 4_500, elapsedMs: -1 }, false],
-      ['cancelled', { cancelledAt: 4_500, elapsedMs: Infinity }, false],
+      [
+        'cancelled',
+        { cancelledAt: 4_500, elapsedMs: 3_500 },
+        true,
+        'interrupted',
+      ],
+      [
+        'cancelled',
+        { cancelledAt: 4_500, elapsedMs: 3_500, reason: 'user' },
+        true,
+        'user',
+      ],
+      [
+        'end_turn',
+        { cancelledAt: 4_500, elapsedMs: 3_500 },
+        false,
+        'interrupted',
+      ],
+      [
+        'cancelled',
+        { cancelledAt: NaN, elapsedMs: 3_500 },
+        false,
+        'interrupted',
+      ],
+      [
+        'cancelled',
+        { cancelledAt: 4_500, elapsedMs: -1 },
+        false,
+        'interrupted',
+      ],
+      [
+        'cancelled',
+        { cancelledAt: 4_500, elapsedMs: Infinity },
+        false,
+        'interrupted',
+      ],
     ])(
       'validates %s cancellation metadata %j',
-      async (stopReason, metadata, valid) => {
+      async (stopReason, metadata, valid, reason) => {
         const events: BridgeEvent[] = [];
         const handle = makeChannel({
           promptImpl: () =>
@@ -19564,7 +19595,10 @@ describe('createAcpSessionBridge', () => {
         );
         const terminal = events.find((event) => event.type === 'turn_complete');
         if (valid) {
-          expect(terminal?.data).toHaveProperty('promptCancelled', metadata);
+          expect(terminal?.data).toHaveProperty('promptCancelled', {
+            ...metadata,
+            reason,
+          });
         } else {
           expect(terminal?.data).not.toHaveProperty('promptCancelled');
         }

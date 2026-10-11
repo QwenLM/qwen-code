@@ -12596,6 +12596,7 @@ describe('Session', () => {
               'qwen.promptCancelled': {
                 cancelledAt: 4_500,
                 elapsedMs: 0,
+                reason: 'user',
               },
             },
           });
@@ -12746,7 +12747,10 @@ describe('Session', () => {
         ).resolves.toMatchObject({
           stopReason: 'cancelled',
           _meta: {
-            'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
+            'qwen.promptCancelled': {
+              cancelledAt: expect.any(Number),
+              reason: 'interrupted',
+            },
           },
         });
         const payload =

@@ -8808,7 +8808,11 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
       promptId: 'p1',
       data: {
         stopReason: 'cancelled',
-        promptCancelled: { elapsedMs: 10999, cancelledAt: 12000 },
+        promptCancelled: {
+          elapsedMs: 10999,
+          cancelledAt: 12000,
+          reason: 'interrupted',
+        },
       },
     });
     let after = reduceDaemonTranscriptEvents(before, timing);
@@ -8822,6 +8826,7 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
         promptId: 'p1',
         elapsedMs: 10999,
         serverTimestamp: 12000,
+        reason: 'interrupted',
       }),
     ]);
     const enriched = reduceDaemonTranscriptEvents(after, [

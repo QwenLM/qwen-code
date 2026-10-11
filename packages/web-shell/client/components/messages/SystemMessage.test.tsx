@@ -70,6 +70,27 @@ describe('SystemMessage — prompt_cancelled marker', () => {
     },
   );
 
+  it.each([
+    ['en', 'This request was interrupted'],
+    ['zh-CN', '本次请求已中断'],
+  ] as const)(
+    'renders an interrupted notice without claiming a user cancel (%s)',
+    (language, text) => {
+      const container = render(
+        <SystemMessage
+          content=""
+          variant="info"
+          source="prompt_cancelled"
+          data={{ elapsedMs: 10999, reason: 'interrupted' }}
+        />,
+        language,
+      );
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        text,
+      );
+    },
+  );
+
   it('renders the user-cancelled marker as a status region', () => {
     const container = render(
       <SystemMessage content="" variant="info" source="prompt_cancelled" />,

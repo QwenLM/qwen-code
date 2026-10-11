@@ -1511,6 +1511,8 @@ function broadcastTurnComplete(
         ? {
             cancelledAt: rawPromptCancelled['cancelledAt'],
             elapsedMs: rawPromptCancelled['elapsedMs'],
+            reason:
+              rawPromptCancelled['reason'] === 'user' ? 'user' : 'interrupted',
           }
         : undefined;
     const published = entry.events.publish({

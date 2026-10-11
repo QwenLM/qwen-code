@@ -79,6 +79,7 @@ describe('projectChatRecordsToDaemonTranscript', () => {
       promptId: 'p1',
       elapsedMs: 2000,
       serverTimestamp: 3000,
+      reason: 'interrupted',
       sourceRecordIds: ['cancel-1'],
     });
     expect(records).toEqual(persisted);
