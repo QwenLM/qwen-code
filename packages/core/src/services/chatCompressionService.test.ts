@@ -1789,6 +1789,11 @@ describe('ChatCompressionService.compress cache sharing', () => {
    * DashScope's `Range of input length should be [1, 196608]`.
    */
   const OBSERVED_INPUT_CEILING = 196_608;
+  /**
+   * A declared window below `OBSERVED_CEILING`, so a server reporting a larger
+   * ceiling must not raise the effective window past what config declares.
+   */
+  const NARROW_WINDOW = 131_072;
 
   it('keeps reactive overflow recovery off the shared request when the server reports a lower ceiling (#13432)', async () => {
     // Every other canShareCache conjunct holds in this fixture: main model,
@@ -2160,6 +2165,53 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
   });
 
+  it('does not let a ceiling above the declared window raise the reactive window (#13432)', async () => {
+    // The ceiling is a cap, not a floor: it may only lower the effective
+    // window. A llama.cpp `-c 262144` endpoint serving an id whose catalog row
+    // is smaller reports a number above `contextWindowSize`, and sizing against
+    // the ceiling instead of the declared window would reserve an output budget
+    // the model cannot hold — failing exactly the recovery the ceiling exists
+    // to make fit.
+    const chunk = 'x'.repeat(4_000);
+    const history = Array.from({ length: 122 }, (_, i) =>
+      i % 2
+        ? modelText(`chunk-${i} ${chunk}`)
+        : userText(`chunk-${i} ${chunk}`),
+    );
+    const { coldSpy, result } = await expectCold(
+      {
+        history,
+        contextWindowSize: NARROW_WINDOW,
+        lastPromptTokenCountIsEstimated: true,
+      },
+      {
+        originalTokenCount: SERVER_REPORTED_ACTUAL,
+        precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+        observedServerCeiling: OBSERVED_CEILING,
+      },
+    );
+    const request = coldSpy.mock.calls[0]![1] as {
+      contents: Content[];
+      systemInstruction?: string;
+      config?: { maxOutputTokens?: number };
+    };
+    const coldInputEstimate =
+      estimateContentTokens(request.contents) +
+      Math.ceil((request.systemInstruction ?? '').length / 4);
+    // Fixture guards: the declared window must clamp the budget under the fixed
+    // 20_000 ceiling — otherwise ignoring the window would be invisible — with
+    // room over the stubbed 500-token output for the summary to survive.
+    expect(
+      NARROW_WINDOW - coldInputEstimate - COMPACTION_BUDGET_SAFETY_MARGIN,
+    ).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(NARROW_WINDOW - coldInputEstimate - 2_000).toBeGreaterThan(500);
+    expect(request.config?.maxOutputTokens).toBeLessThan(
+      COMPACT_MAX_OUTPUT_TOKENS,
+    );
+    expect(request.config?.maxOutputTokens).toBeGreaterThan(500);
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+  });
+
   it('labels the server-reported ceiling apart from the inferred window in the skip log (#13432)', async () => {
     // The two numbers this PR separates must not collapse into one printed
     // value. An inferred window of 262_144 with no server ceiling and an
@@ -2192,6 +2244,12 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(inferred).toContain(`window=${OBSERVED_CEILING}`);
     expect(inferred).toContain('ceiling=none');
     expect(clamped).not.toBe(inferred);
+    // The sentence must name the limit the request actually exceeded: here the
+    // request (~300K) is far below the inferred window, so claiming it exceeded
+    // that window would be false, and the cause — the server ceiling — is the
+    // number the sentence has to put under its own label.
+    expect(clamped).toContain('exceeds the effective context limit');
+    expect(clamped).toContain(`effectiveLimit=${OBSERVED_CEILING}`);
   });
 });
 

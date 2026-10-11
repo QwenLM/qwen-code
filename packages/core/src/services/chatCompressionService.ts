@@ -830,7 +830,8 @@ export class ChatCompressionService {
           .getDebugLogger()
           .debug(
             `[chat-compression] output budget clamped to ${coldOutputBudget} ` +
-              `(estimated input ${getColdInputEstimate()}, window ${budgetWindow}, ` +
+              `(estimated input ${getColdInputEstimate()}, ` +
+              `effectiveWindow ${budgetWindow}, ` +
               `ceiling ${opts.observedServerCeiling ?? 'none'})`,
           );
       }
@@ -931,9 +932,11 @@ export class ChatCompressionService {
           : !hasProviderTokenCount
             ? 'no provider-reported token-count anchor'
             : !sharedRequestFits
-              ? `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
+              ? `shared request exceeds the effective context limit: ` +
+                `prompt=${sharedPromptTokenCount}, ` +
                 `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
-                `window=${contextLimit}, ceiling=${opts.observedServerCeiling ?? 'none'}`
+                `effectiveLimit=${reactiveContextCeiling}, window=${contextLimit}, ` +
+                `ceiling=${opts.observedServerCeiling ?? 'none'}`
               : 'payload-overflow recovery ships the slimmed cold path only';
       debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
     }
