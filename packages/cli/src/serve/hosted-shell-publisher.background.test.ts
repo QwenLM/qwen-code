@@ -504,7 +504,14 @@ it('melds a monitor watch through one terminal step only after its start receipt
   const loop = new HostedMonitorLoop(
     r.monitors,
     'monitor-execution',
-    new HostedMonitorRemoteExecutor(publisher!),
+    new HostedMonitorRemoteExecutor(publisher!, {
+      broker: {
+        monitorControl: () => Promise.reject(new Error('Never stopped.')),
+      },
+      sessionKey: r.key,
+      executionCallId: 'monitor-execution',
+      runtimeCallId: 'worker-call-a',
+    }),
   );
   await loop.resumeAttached({
     ownerScopeId: r.key.sessionId,
@@ -552,6 +559,232 @@ it('melds a monitor watch through one terminal step only after its start receipt
     observationSequence: 1,
     notifiedThrough: 1,
     stopReason: 'exited',
+    run: { state: 'settled', execution: 'settled' },
+  });
+});
+
+it.each([
+  // The quota fires from the debounce window that commits its last
+  // observation; the idle window fires with nothing observed.
+  ['max_events', 1_000, 1],
+  ['idle_timeout', 60_000, 0],
+] as const)(
+  'settles the %s auto-stop only on the worker stop evidence, after its final output (#13896)',
+  async (reason, firing, observed) => {
+    const r = await rig();
+    const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+    await r.monitors.admit({
+      monitorId: 'monitor-execution',
+      ownerScopeId: r.key.sessionId,
+      executionCallId: 'monitor-execution',
+      args: { command: 'tail -f build.log' },
+      maxEvents: 1,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+    });
+    await r.monitors.dispatchStarted('monitor-execution', BINDING);
+    const request = backgroundRequest(r.key, '1', true);
+    (request.capture as Record<string, unknown>)['executionCallId'] =
+      'monitor-execution';
+    publisher!.register(
+      { reference: request.reference, capture: request.capture },
+      'model-call-m',
+      request.reference.sessionId,
+    );
+    const prepared = await r.registry.prepare(
+      request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+    );
+    await r.monitors.attach('monitor-execution', BINDING, { pid: 8 });
+    // The worker's stop, as its registry answers monitor-stop: the capture
+    // finalizes through the publisher first, and only that completion's
+    // exit evidence comes back as `exited`.
+    const stops: unknown[] = [];
+    const broker = {
+      async monitorControl(operation: unknown) {
+        stops.push(operation);
+        prepared.sink.setProcessResult({
+          rawOutput: Buffer.alloc(0),
+          output: '',
+          error: null,
+          aborted: false,
+          exitCode: null,
+          signal: 15,
+          pid: undefined,
+          executionMethod: 'child_process',
+        });
+        prepared.sink.setStopRequested();
+        await prepared.sink.finish('stdout', true);
+        await prepared.sink.finish('stderr', true);
+        await r.registry.accept(
+          prepared.identity,
+          await prepared.sink.finalize('error', [], {
+            message: 'Background Shell terminated with SIGTERM.',
+          }),
+        );
+        return {
+          operationId: 'worker-call-a',
+          state: 'exited' as const,
+          unitName: 'qwen-mon-worker-call-a',
+          evidence: { exitCode: null, exitSignal: 'SIGTERM' },
+        };
+      },
+    };
+    const timers = new Map<number, Array<() => void>>();
+    const loop = new HostedMonitorLoop(
+      r.monitors,
+      'monitor-execution',
+      new HostedMonitorRemoteExecutor(publisher!, {
+        broker,
+        sessionKey: r.key,
+        executionCallId: 'monitor-execution',
+        runtimeCallId: 'worker-call-a',
+      }),
+      {
+        now: () => Date.now(),
+        // Windows fire only when the case drives them.
+        setTimeout: (handler, ms) => {
+          timers.set(ms, [...(timers.get(ms) ?? []), handler]);
+          return 0 as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeout: () => undefined,
+      },
+    );
+    await loop.resumeAttached({
+      ownerScopeId: r.key.sessionId,
+      executionCallId: 'monitor-execution',
+      args: { command: 'tail -f build.log' },
+      maxEvents: 1,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+      runtime: BINDING,
+    });
+
+    prepared.sink.setStarted(8);
+    if (observed > 0)
+      await prepared.sink.write('stdout', Buffer.from('built\n'));
+    timers.get(firing)!.shift()!();
+    await loop.done;
+
+    expect(stops).toEqual([
+      {
+        kind: 'monitor-stop',
+        sessionKey: r.key,
+        operationId: 'monitor-execution',
+        targetOperationId: 'worker-call-a',
+      },
+    ]);
+    const record = parseMonitorRun(
+      session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+        .record,
+    );
+    // The loop's own bound is the reason, proven by the worker — not the
+    // stop marker its finalize carried — and the record quotes the sealed
+    // output.
+    expect(record).toMatchObject({
+      observationSequence: observed,
+      stopReason: reason,
+      run: { state: 'settled', execution: 'settled' },
+    });
+    const finalManifest = parseToolResultManifestBytes(
+      await (
+        session!.resources as {
+          read: (ref: ManagedSessionDurableRef) => Promise<Buffer>;
+        }
+      ).read(record.outputRef!),
+    );
+    expect(finalManifest.captureStatus).toBe('complete');
+  },
+);
+
+it('settles a quota reached by the natural exit without stopping the watch (#13896)', async () => {
+  // The worker answers a stop only after its in-flight finalize returns,
+  // and that finalize waits on this exit chain: a stop issued from here
+  // would wait on itself until a 30 s request timeout broke the cycle.
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId: 'monitor-execution',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-execution',
+    args: { command: 'tail -f build.log' },
+    maxEvents: 1,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted('monitor-execution', BINDING);
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'monitor-execution';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  await r.monitors.attach('monitor-execution', BINDING, { pid: 8 });
+  const stops: unknown[] = [];
+  const loop = new HostedMonitorLoop(
+    r.monitors,
+    'monitor-execution',
+    new HostedMonitorRemoteExecutor(publisher!, {
+      broker: {
+        monitorControl: (operation) => {
+          stops.push(operation);
+          return Promise.reject(new Error('A stop from inside the exit.'));
+        },
+      },
+      sessionKey: r.key,
+      executionCallId: 'monitor-execution',
+      runtimeCallId: 'worker-call-a',
+    }),
+    {
+      now: () => Date.now(),
+      // No window ever fires: the last line reaches the loop only through
+      // the exit's own flush.
+      setTimeout: () => 0 as unknown as ReturnType<typeof setTimeout>,
+      clearTimeout: () => undefined,
+    },
+  );
+  await loop.resumeAttached({
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-execution',
+    args: { command: 'tail -f build.log' },
+    maxEvents: 1,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+    runtime: BINDING,
+  });
+
+  prepared.sink.setStarted(8);
+  await prepared.sink.write('stdout', Buffer.from('built\n'));
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  await r.registry.accept(
+    prepared.identity,
+    await prepared.sink.finalize('success', [], undefined),
+  );
+  await loop.done;
+
+  expect(stops).toEqual([]);
+  const record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-execution')!
+      .record,
+  );
+  expect(record).toMatchObject({
+    observationSequence: 1,
+    stopReason: 'max_events',
     run: { state: 'settled', execution: 'settled' },
   });
 });

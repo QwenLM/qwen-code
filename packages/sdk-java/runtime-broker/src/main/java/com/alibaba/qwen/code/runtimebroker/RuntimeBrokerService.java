@@ -568,7 +568,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         Map<String, Object> immutable = immutableMap(operation,
                 "operation");
-        if (!ManagedMcpProtocol.isOperation(immutable) && !ManagedHookProtocol.isOperation(immutable)) {
+        if (!ManagedMcpProtocol.isOperation(immutable) && !ManagedHookProtocol.isOperation(immutable)
+                && !ManagedMonitorProtocol.isOperation(immutable)) {
             ProviderRuntimeProtocol.control(immutable, harnessSessionId, runtimeSessionId);
         }
         return requireReadySession(harnessSessionId, runtimeSessionId)
@@ -579,7 +580,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     if (ManagedHookProtocol.isOperation(immutable)) {
                         ManagedHookProtocol.validateSession(context.session(), immutable);
                     }
-                    boolean recovery = ManagedMcpProtocol.isRecovery(immutable) || ManagedHookProtocol.isRecovery(immutable);
+                    ToolExecutionRecord watch = ManagedMonitorProtocol.isOperation(immutable)
+                            ? requireMonitorWatch(context, immutable) : null;
+                    boolean recovery = ManagedMcpProtocol.isRecovery(immutable) || ManagedHookProtocol.isRecovery(immutable)
+                            || ManagedMonitorProtocol.isRecovery(immutable);
                     if (!recovery) {
                         if (authority != null && !ManagedHookProtocol.isOperation(immutable)) {
                             throw conflict("runtime_lifecycle_operation_invalid", "Only Hook control may use lifecycle authority");
@@ -590,10 +594,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             bindingRepository.requireHarnessAdmission(context.session().getScope(), harnessSessionId, authority);
                         }
                     }
+                    // A Monitor control runs unfenced, like the scan's status
+                    // ask: its watch's hold row, not the control fence, keeps
+                    // the Runtime Session from releasing while the watch may
+                    // run, so the watch's own turn finishing during an
+                    // auto-stop answers held, never busy (#13896).
+                    boolean fenced = watch == null;
                     context.lock();
                     try {
                         requireReadySessionRecord(context);
-                        context.beginControl();
+                        if (fenced) {
+                            context.beginControl();
+                        }
                     } finally {
                         context.unlock();
                     }
@@ -608,12 +620,53 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 "runtime_control_failed",
                                 "Runtime control operation failed");
                     } catch (RuntimeException | Error failure) {
-                        context.endControl();
+                        if (fenced) {
+                            context.endControl();
+                        }
                         throw failure;
                     }
-                    return result.whenComplete((ignored, error) ->
-                            context.endControl());
+                    if (watch != null) {
+                        // The worker's exit evidence ends the watch's hold
+                        // here, as the sweep's own answer would: a Harness
+                        // auto-stop releases the row without a close (#13896).
+                        result = result.thenApply(view -> {
+                            if (view instanceof Map<?, ?> answer
+                                    && "exited".equals(answer.get("state"))) {
+                                settleBackgroundProcess(watch, (Map<String, Object>) view);
+                            }
+                            return view;
+                        });
+                    }
+                    return result.whenComplete((ignored, error) -> {
+                        if (fenced) {
+                            context.endControl();
+                        }
+                    });
                 });
+    }
+
+    /**
+     * A client Monitor control names one of this Runtime Session's own
+     * watches: {@code operationId} is the execution that started it and
+     * {@code targetOperationId} the call the worker derived its unit from.
+     * Another Session's watch, a row of another family or a mismatched pair
+     * is refused with the protocol's own shape before the worker sees it.
+     */
+    private ToolExecutionRecord requireMonitorWatch(SessionContext context,
+            Map<String, Object> operation) {
+        ManagedMonitorProtocol.validateSession(context.session(), operation);
+        ToolExecutionRecord watch = executionRepository.findByExecutionCallId(
+                operation.get("operationId") + ":process");
+        if (watch == null || ManagedHoldFamily.of(watch) != ManagedHoldFamily.MONITOR
+                || !operation.get("targetOperationId").equals(watch.getReference().get("callId"))
+                || !watch.getHarnessSessionId().equals(context.session().getHarnessSessionId())
+                || !watch.getRuntimeSessionId().equals(context.session().getRuntimeSessionId())
+                || !watch.getBindingId().equals(context.binding().getBindingId())
+                || watch.getRuntimeGeneration() != context.binding().getGeneration()) {
+            throw invalid("runtime_control_operation_invalid",
+                    "Monitor operation does not belong to the acquired Session.");
+        }
+        return watch;
     }
 
     public CompletionStage<ToolExecutionRecord> createExecution(

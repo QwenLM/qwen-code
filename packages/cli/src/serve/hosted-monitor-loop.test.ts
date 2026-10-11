@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
@@ -74,6 +74,16 @@ class ManualClock implements MonitorLoopClock {
     }
     this.time = until;
   }
+
+  /** Starts every handler due by then at once, as real timers can race. */
+  fireTogether(ms: number): Promise<unknown> {
+    this.time += ms;
+    const due = [...this.pending.entries()]
+      .filter(([, entry]) => entry.at <= this.time)
+      .sort((a, b) => a[1].at - b[1].at);
+    for (const [handle] of due) this.pending.delete(handle);
+    return Promise.all(due.map(([, entry]) => entry.handler()));
+  }
 }
 
 class FakeExecutor {
@@ -82,8 +92,11 @@ class FakeExecutor {
     | ((failed: boolean, stopRequested?: boolean) => Promise<void> | void)
     | undefined;
   terminateCalls = 0;
-  /** A remote watch stops nothing here and reports no proof. */
+  /** Whether terminate answers with the worker's exit evidence. */
   provesStop = true;
+  /** Holds each terminate open until the case answers it. */
+  holdStop = false;
+  private readonly heldStops: Array<(proven: boolean) => void> = [];
   commands: Array<Readonly<Record<string, unknown>>> = [];
   failStart: Error | undefined;
 
@@ -100,9 +113,17 @@ class FakeExecutor {
       receipt: { watch: 'started' },
       terminate: () => {
         this.terminateCalls += 1;
+        if (this.holdStop)
+          return new Promise<boolean>((resolve) =>
+            this.heldStops.push(resolve),
+          );
         return Promise.resolve(this.provesStop);
       },
     });
+  }
+
+  answerStop(proven: boolean): void {
+    this.heldStops.shift()?.(proven);
   }
 
   exitNaturally(): Promise<void> {
@@ -350,9 +371,8 @@ describe('HostedMonitorLoop', () => {
   it('parks an auto-stop it cannot prove instead of settling the quota (#13856)', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
-    // The production watch runs in the worker: its handle stops nothing and
-    // reports no proof, so the quota may not claim a settled watch that
-    // still runs and still holds its Runtime.
+    // The worker could not prove the stop (#13896): the quota may not
+    // claim a settled watch that may still run and still hold its Runtime.
     rig.executor.provesStop = false;
     await rig.loop.start(params({ maxEvents: 1 }));
 
@@ -486,6 +506,153 @@ describe('HostedMonitorLoop', () => {
     expect(committed(rig.authority)).toMatchObject({
       stopReason: 'stop_requested',
       run: { state: 'cancelled', execution: 'settled' },
+    });
+    await closeLoop(rig);
+  });
+
+  it('settles max_events from the exit chain without a stop (#13896)', async () => {
+    // The final window of a watch that ended on its own reaches the quota:
+    // its exit is the proof, and a stop issued from inside that exit would
+    // wait on the very finalize that carries it.
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    rig.executor.provesStop = false;
+    await rig.loop.start(params({ maxEvents: 1 }));
+
+    rig.executor.onLine?.('last line');
+    await rig.executor.exitNaturally();
+    expect(committed(rig.authority)).toMatchObject({
+      observationSequence: 1,
+      stopReason: 'max_events',
+      run: { state: 'settled', execution: 'settled' },
+    });
+    expect(rig.executor.terminateCalls).toBe(0);
+    await closeLoop(rig);
+  });
+
+  it.each([
+    ['max_events', { maxEvents: 1 }, 1_000, true],
+    ['idle_timeout', { idleTimeoutMs: 60_000 }, 60_000, false],
+  ] as const)(
+    'settles %s at the exit that lands while its stop waits on the worker (#13896)',
+    async (reason, bounds, firing, proven) => {
+      const harness = await createHarness();
+      const rig = await openLoop(harness);
+      rig.executor.holdStop = true;
+      await rig.loop.start(params(bounds));
+
+      if (reason === 'max_events') rig.executor.onLine?.('one');
+      const fired = rig.clock.advance(firing);
+      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      // The worker finalizes before it answers, so the exit is this stop's
+      // own evidence: its stop marker does not override the loop's reason.
+      await rig.executor.exitStopped();
+      expect(committed(rig.authority)).toMatchObject({
+        stopReason: reason,
+        run: { state: 'settled', execution: 'settled' },
+      });
+
+      // The answer that follows, proven or lost, finds the record settled.
+      rig.executor.answerStop(proven);
+      await fired;
+      await rig.loop.done;
+      expect(committed(rig.authority)).toMatchObject({
+        stopReason: reason,
+        run: { state: 'settled', execution: 'settled' },
+      });
+      await closeLoop(rig);
+    },
+  );
+
+  it.each([
+    [true, 'max_events', 1],
+    [false, 'stop_requested', 2],
+  ] as const)(
+    'lets a close stop wait out the auto-stop in flight (proven: %s) (#13896)',
+    async (proven, reason, calls) => {
+      const harness = await createHarness();
+      const rig = await openLoop(harness);
+      rig.executor.holdStop = true;
+      await rig.loop.start(params({ maxEvents: 1 }));
+
+      rig.executor.onLine?.('one');
+      const fired = rig.clock.advance(1_000);
+      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      const stopped = rig.loop.stop('stop_requested');
+      // The close's stop issues nothing while the auto-stop still waits.
+      expect(rig.executor.terminateCalls).toBe(1);
+
+      rig.executor.answerStop(proven);
+      await fired;
+      if (!proven) {
+        // Only the auto-stop's park leaves the record to the close's own
+        // proven stop.
+        await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(2));
+        rig.executor.answerStop(true);
+      }
+      await stopped;
+      expect(committed(rig.authority)).toMatchObject({
+        stopReason: reason,
+        run: { state: proven ? 'settled' : 'cancelled', execution: 'settled' },
+      });
+      expect(rig.executor.terminateCalls).toBe(calls);
+      await closeLoop(rig);
+    },
+  );
+
+  it.each([
+    ['runtime_lost', 'exitNaturally', 'exited', 'settled'],
+    ['stop_requested', 'exitStopped', 'stop_requested', 'cancelled'],
+  ] as const)(
+    'keeps the settlement an exit made while a %s close stop waited (#13896)',
+    async (settle, exit, reason, state) => {
+      const harness = await createHarness();
+      const rig = await openLoop(harness);
+      rig.executor.holdStop = true;
+      await rig.loop.start(params({}));
+
+      rig.executor.onLine?.('one');
+      await rig.clock.advance(1_000);
+      const stopped = rig.loop.stop(settle);
+      await rig.executor[exit]();
+      expect(committed(rig.authority)).toMatchObject({
+        stopReason: reason,
+        run: { state, execution: 'settled' },
+      });
+
+      // The stop's own answer arrives after the exit settled the record.
+      rig.executor.answerStop(false);
+      await stopped;
+      expect(committed(rig.authority)).toMatchObject({
+        stopReason: reason,
+        run: { state, execution: 'settled' },
+      });
+      await closeLoop(rig);
+    },
+  );
+
+  it('issues one auto-stop when the idle window fires inside the quota flush (#13896)', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    rig.executor.holdStop = true;
+    await rig.loop.start(params({ maxEvents: 1, idleTimeoutMs: 1_000 }));
+
+    // The window's flush is still committing when the idle timer fires: the
+    // idle stop is the one under way, and the quota the flush then reaches
+    // has nothing left to stop.
+    rig.executor.onLine?.('one');
+    const fired = rig.clock.fireTogether(1_000);
+    await vi.waitFor(() =>
+      expect(committed(rig.authority).observationSequence).toBe(1),
+    );
+    expect(rig.executor.terminateCalls).toBe(1);
+
+    rig.executor.answerStop(true);
+    await fired;
+    await rig.loop.done;
+    expect(committed(rig.authority)).toMatchObject({
+      stopReason: 'idle_timeout',
+      run: { state: 'settled', execution: 'settled' },
     });
     await closeLoop(rig);
   });

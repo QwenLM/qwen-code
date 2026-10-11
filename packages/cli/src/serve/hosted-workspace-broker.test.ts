@@ -683,6 +683,69 @@ it('forwards hook recovery to the original owner and rejects a changed receipt i
   );
 });
 
+it('forwards a Monitor stop on the control route and admits only a watch answer (#13896)', async () => {
+  const control = {
+    kind: 'monitor-stop' as const,
+    sessionKey: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: 'session',
+    },
+    operationId: 'execution',
+    targetOperationId: 'runtime-call',
+  };
+  const exited = {
+    operationId: 'runtime-call',
+    state: 'exited',
+    unitName: 'qwen-mon-runtime-call',
+    evidence: { exitCode: null, exitSignal: 'SIGTERM' },
+  };
+  let answer: Record<string, unknown> = exited;
+  const broker = await fixture((path, body) => {
+    expect(path).toBe('/internal/runtime-broker/v1/tool-sessions/turn/control');
+    expect(body['operation']).toEqual(control);
+    return { body: { ...identity, result: answer } };
+  });
+  expect(await broker.monitorControl(control)).toEqual(exited);
+  for (const invalid of [
+    { ...exited, operationId: 'another-call' },
+    // A Hook/MCP settlement state is not a watch answer.
+    { operationId: 'runtime-call', state: 'settled' },
+    // `exited` is the proof, so it never arrives without its evidence.
+    { operationId: 'runtime-call', state: 'exited' },
+  ]) {
+    answer = invalid;
+    await expect(broker.monitorControl(control)).rejects.toThrow(
+      'Runtime Monitor response is invalid.',
+    );
+  }
+});
+
+it('surfaces the refusal of a Monitor control that names another Session (#13896)', async () => {
+  const broker = await fixture(() => ({
+    code: 400,
+    body: {
+      code: 'runtime_control_operation_invalid',
+      error: 'Monitor operation does not belong to the acquired Session.',
+    },
+  }));
+  await expect(
+    broker.monitorControl({
+      kind: 'monitor-stop',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: 'another-session',
+      },
+      operationId: 'execution',
+      targetOperationId: 'runtime-call',
+    }),
+  ).rejects.toMatchObject({
+    status: 400,
+    code: 'runtime_control_operation_invalid',
+  });
+});
+
 it('preserves a worker history refusal reason', async () => {
   const broker = await fixture(() => ({
     code: 409,

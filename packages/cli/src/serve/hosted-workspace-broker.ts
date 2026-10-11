@@ -32,6 +32,10 @@ import type {
   ManagedHookControl,
   ManagedHookOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import type {
+  ManagedMonitorControl,
+  ManagedMonitorOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
 import type { ManagedSessionLifecycleAuthority } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 export interface HostedWorkspaceBrokerOptions {
@@ -518,6 +522,28 @@ export class HostedWorkspaceBroker {
     )
       throw new Error('Runtime Hook response identity is invalid.');
     return result as unknown as ManagedHookOperationView;
+  }
+
+  /**
+   * #13896: one watch's maintenance through the client route. A watch
+   * answers running, exited or unknown — never the Hook/MCP settlement
+   * states — and only `exited` with its evidence proves the watch ended.
+   */
+  async monitorControl(
+    operation: ManagedMonitorControl,
+  ): Promise<ManagedMonitorOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !== operation.targetOperationId ||
+      !['running', 'exited', 'unknown'].includes(String(result['state'])) ||
+      (result['state'] === 'exited' && !result['evidence'])
+    )
+      throw new Error('Runtime Monitor response is invalid.');
+    return result as unknown as ManagedMonitorOperationView;
   }
 
   async acknowledgeV3(
