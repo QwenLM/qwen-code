@@ -225,18 +225,43 @@ export async function truncateAndSaveToFile(
     lines.length === 1
       ? `Page in with ${ReadFileTool.Name} using the absolute file_path above, offset (zero-based line) and limit (line count). This is a single-line payload: line offsets cannot reach its middle; use a byte-range shell read or parse/query the saved JSON file.`
       : `Page in with ${ReadFileTool.Name} using the absolute file_path above, offset (zero-based line) and limit (line count).`;
+  const truncationDescription = `The truncated output below shows ${keep === 'head' ? 'the beginning' : keep === 'tail' ? 'the end' : 'the beginning and end'} of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.`;
   const previewDescription = jsonPreview
     ? 'The output below is a structured JSON sample; omitted values remain in the full output file.'
-    : `The truncated output below shows ${keep === 'head' ? 'the beginning' : keep === 'tail' ? 'the end' : 'the beginning and end'} of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.`;
-  const wrappedMessage = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
-The full output has been saved to: ${outputFile}
+    : truncationDescription;
+  // sha256 of the FULL pre-truncation output (see FULL_OUTPUT_DIGEST_LABEL):
+  // loop detection fingerprints a bounded result by this digest, so a body
+  // that skips persistence must embed it too rather than finger-printing by
+  // its unique per-call envelope.
+  const fullOutputDigest = crypto
+    .createHash('sha256')
+    .update(content)
+    .digest('hex');
+  // One envelope shape for every bounded body: the sentinel must LEAD it,
+  // because downstream guards recognize an already-truncated result by
+  // `startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)` (truncateLlmContent,
+  // tool-result-retention, loopDetectionService). Only the header, the
+  // recovery hint and the preview description differ between a saved spill
+  // and one skipped for disk budget — a skipped body must not claim a file.
+  const envelope = (
+    header: string,
+    parts: { hint?: string; description: string; preview: string },
+  ) => `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+${header}
 Total characters: ${content.length}; total lines: ${lines.length}.
-${FULL_OUTPUT_DIGEST_LABEL}${crypto.createHash('sha256').update(content).digest('hex')}
-${recoveryHint}
-${previewDescription}
+${FULL_OUTPUT_DIGEST_LABEL}${fullOutputDigest}
+${parts.hint ? `${parts.hint}\n` : ''}${parts.description}
 
 Truncated part of the output:
-${jsonPreview ?? truncatedContent}`;
+${parts.preview}`;
+  const wrappedMessage = envelope(
+    `The full output has been saved to: ${outputFile}`,
+    {
+      hint: recoveryHint,
+      description: previewDescription,
+      preview: jsonPreview ?? truncatedContent,
+    },
+  );
 
   // Token-aware fallback: if the wrapped (truncated + instructions) output is
   // not actually smaller than the original, truncating wastes effort and
@@ -253,9 +278,13 @@ ${jsonPreview ?? truncatedContent}`;
         MAX_SESSION_BYTES)
   )
     return {
-      content:
-        truncatedContent +
-        '\n[Note: Full output could not be saved: disk budget exhausted]',
+      content: envelope(
+        '[Note: Full output could not be saved: disk budget exhausted]',
+        {
+          description: truncationDescription,
+          preview: truncatedContent,
+        },
+      ),
     };
   persistenceConfig?.trackToolResultBytes?.(byteSize);
 

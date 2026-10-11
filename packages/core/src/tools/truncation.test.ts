@@ -823,6 +823,33 @@ describe('producer spill budget', () => {
     );
     expect(vi.mocked(logToolResultPersisted)).not.toHaveBeenCalled();
   });
+
+  it('keeps a disk-budget skip sentinel-led and idempotent', async () => {
+    const cfg = {
+      ...tmpConfig,
+      getTruncateToolOutputThreshold: () => 2000,
+      getToolResultBytesWritten: () => MAX_SESSION_BYTES,
+      trackToolResultBytes: vi.fn(),
+    } as Config;
+    const content = 'x'.repeat(60_000);
+
+    const skipped = await truncateToolOutput(cfg, 'shell', content, {
+      previewChars: 20_000,
+    });
+
+    // The bound must be recognizable by the guards that test `startsWith`,
+    // and it must not claim a file it never wrote.
+    expect(skipped.outputFile).toBeUndefined();
+    expect(skipped.content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)).toBe(true);
+    expect(skipped.content).toContain('disk budget exhausted');
+    expect(skipped.content).not.toContain('The full output has been saved to');
+    expect(vi.mocked(logToolResultPersisted)).not.toHaveBeenCalled();
+
+    // A second pass must leave the already-bounded body untouched instead of
+    // re-enveloping it under the next budget.
+    const second = await truncateLlmContent(cfg, 'shell', skipped.content);
+    expect(second.content).toBe(skipped.content);
+  });
 });
 
 it('does not emit persisted events for skips and correlates an actual saved file', async () => {
