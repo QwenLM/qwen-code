@@ -1057,3 +1057,30 @@ describe('background continuation', () => {
     expect(container.querySelector('[data-tone="neutral"]')).not.toBeNull();
   });
 });
+
+describe('SystemMessage — teammate attribution', () => {
+  it('renders an @name chip for a teammate-authored peer notification', () => {
+    const container = render(
+      <SystemMessage
+        content="[team] correctness: the workspace is empty"
+        variant="info"
+        source="background_notification"
+        data={{ taskId: 'teammate-message-2', status: 'message', kind: 'peer' }}
+        teammate={{ name: 'correctness' }}
+      />,
+    );
+    expect(container.textContent).toContain('@correctness');
+  });
+
+  it('renders no chip when the notification has no teammate author', () => {
+    const container = render(
+      <SystemMessage
+        content="Background agent completed."
+        variant="info"
+        source="background_notification"
+        data={{ taskId: 'task-1', status: 'completed' }}
+      />,
+    );
+    expect(container.textContent).not.toContain('@');
+  });
+});

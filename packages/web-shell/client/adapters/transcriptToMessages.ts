@@ -680,6 +680,7 @@ export function transcriptBlocksToDaemonMessages(
           currentAssistantIdx = null;
           currentThinkingIdx = null;
           needsNewContentMessage = true;
+          const teammate = teammateOfAgent(textBlock.agent);
           messages.push({
             id: block.id,
             role: 'system',
@@ -687,6 +688,7 @@ export function transcriptBlocksToDaemonMessages(
             variant: 'info',
             source: 'background_notification',
             data: getBackgroundNotificationData(textBlock),
+            ...(teammate ? { teammate } : {}),
             timestamp: blockTime,
             sourceBlockIds: [block.id],
           });
@@ -1864,6 +1866,19 @@ function getToolCallRawInput(
     getRecord(toolCall['input']) ??
     getRecord(toolCall['args'])
   );
+}
+
+/**
+ * Teammate (Agent Team peer) author of a projected notification, from the
+ * daemon-minted identity. Peer reports and roster changes carry
+ * `_meta.agent.kind === 'teammate'`; tasks and subagents stay unchipped.
+ */
+function teammateOfAgent(
+  agent: DaemonTextTranscriptBlock['agent'],
+): { name: string } | undefined {
+  if (!agent || agent.kind !== 'teammate') return undefined;
+  const name = agent.agentName.split('/').filter(Boolean).pop();
+  return name ? { name } : undefined;
 }
 
 function isBackgroundAgentBlock(

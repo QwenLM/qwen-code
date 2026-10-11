@@ -553,6 +553,51 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('attributes a peer notification to its teammate author', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'peer-1',
+        'user',
+        '[team] correctness: the workspace is empty PEERMARK-9902',
+        1,
+        false,
+        {
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'teammate-message-2',
+              status: 'message',
+              kind: 'peer',
+            },
+          },
+          agent: {
+            agentName: '/root/correctness',
+            depth: 1,
+            kind: 'teammate',
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'peer-1',
+        role: 'system',
+        content: '[team] correctness: the workspace is empty PEERMARK-9902',
+        variant: 'info',
+        source: 'background_notification',
+        data: {
+          taskId: 'teammate-message-2',
+          status: 'message',
+          kind: 'peer',
+        },
+        teammate: { name: 'correctness' },
+        timestamp: 1,
+      },
+    ]);
+  });
+
   it('keeps vision bridge notices separate from assistant output', () => {
     const notice = {
       status: 'skipped',
