@@ -68,6 +68,22 @@ class ManagedCwdChangeOperationTest {
     private final AtomicLong now = new AtomicLong(1_000_000);
 
     @Test
+    void shellProfileRetainsNonExecutingCwdAdmissionAndReplay() {
+        Fixture fixture = fixture(true);
+        String session = fixture.createBoundSession(TENANT, WS);
+        fixture.jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-shell/1' WHERE session_id = ?", session);
+        var admitted = begin(fixture, session, "shell-cwd", "digest", "services/b", 1);
+        assertThat(admitted.operation().kind()).isEqualTo(OperationKind.CWD_CHANGE);
+        assertThat(admitted.operation().targetCwdRelative()).isEqualTo("services/b");
+        assertThat(admitted.operation().expectedContextRevision()).isEqualTo(1);
+        assertThat(admitted.replayed()).isFalse();
+        var replay = begin(fixture, session, "shell-cwd", "digest", "services/b", 1);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.operation().operationId())
+                .isEqualTo(admitted.operation().operationId());
+    }
+
+    @Test
     void admissionAcceptsReplaysAndConflictsByDigest() {
         Fixture fixture = fixture(true);
         String sessionId = fixture.createBoundSession(TENANT, WS);
