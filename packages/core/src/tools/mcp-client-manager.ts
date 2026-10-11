@@ -42,6 +42,7 @@ import {
 } from './mcp-errors.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 import { mcpSessionMetadataKey } from './mcp-session-config.js';
+import { runWithTimeout } from './mcp-discovery-timeout.js';
 import { warnOnUnmatchedEagerToolEntries } from '../permissions/eager-allowlist-coverage.js';
 
 const debugLogger = createDebugLogger('MCP');
@@ -2828,6 +2829,7 @@ export class McpClientManager {
     }
 
     if (client.getStatus() !== MCPServerStatus.CONNECTED) {
+      const timeoutMs = this.discoveryTimeoutFor(serverConfig);
       try {
         // wrap the
         // lazy-spawn `client.connect()` in the same discovery
@@ -2860,7 +2862,6 @@ export class McpClientManager {
         // a fixture that asserts the transport is actually torn
         // down.
 
-        const timeoutMs = this.discoveryTimeoutFor(serverConfig);
         let timeoutId: NodeJS.Timeout | undefined;
         await Promise.race([
           client.connect(),
@@ -2925,9 +2926,59 @@ export class McpClientManager {
         }
         throw err;
       }
+
+      // #13796: a lazily spawned server must also be discovered, or it stays
+      // CONNECTED with zero registered tools for the rest of the session.
+      // Best-effort and separately bounded — this read only needs a live
+      // transport, so neither a `tools/list` slower than the spawn's budget
+      // nor a server that advertises nothing (indistinguishable from a
+      // transient list blip — see `listMcpResources`) may fail it.
+      await this.discoverBestEffortAfterLazySpawn(
+        serverName,
+        client,
+        timeoutMs,
+      );
     }
 
     return client.readResource(uri, options);
+  }
+
+  /**
+   * Best-effort discovery for the `readResource` lazy-spawn path (#13796).
+   *
+   * Registers the freshly spawned server's tools, prompts and resources so it
+   * isn't left CONNECTED-but-empty, while never failing the read that
+   * triggered the spawn:
+   *
+   *   - bounded by the same `discoveryTimeoutMs` budget as the other spawn
+   *     paths, so a hung `tools/list` can't fall back to its own 10-minute
+   *     `MCP_DEFAULT_TIMEOUT_MSEC` default;
+   *   - `preserveStatusOnFailure` keeps the client CONNECTED, because
+   *     `discover()` otherwise flips it to DISCONNECTED on failure and
+   *     `McpClient.readResource()` refuses to serve a non-CONNECTED client —
+   *     which would convert this best-effort step back into a failed read,
+   *     on a transport that is demonstrably alive.
+   *
+   * A failure is logged and swallowed, matching the bulk path's "callers
+   * expect best-effort discovery" contract.
+   */
+  private async discoverBestEffortAfterLazySpawn(
+    serverName: string,
+    client: McpClient,
+    timeoutMs: number,
+  ): Promise<void> {
+    try {
+      await runWithTimeout(
+        client.discover(this.cliConfig, { preserveStatusOnFailure: true }),
+        timeoutMs,
+        `discovery after lazy spawn of '${serverName}'`,
+      );
+    } catch (error) {
+      // Log the error but don't throw: the read only needs a live transport.
+      debugLogger.error(
+        `Error during discovery after lazy spawn of '${serverName}': ${getErrorMessage(error)}`,
+      );
+    }
   }
 
   // ────────────────────────────────────────────────────────────────────

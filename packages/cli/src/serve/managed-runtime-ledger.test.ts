@@ -5,7 +5,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, statSync, utimesSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  statSync,
+  utimesSync,
+} from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os, { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -25,6 +31,7 @@ import {
   sweepWorkerLedger,
   testInternals,
 } from './managed-runtime-ledger.js';
+import { isUnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 
 /**
  * A controllable rmSync for the unlink-failure paths: enrolled paths throw
@@ -43,6 +50,14 @@ const readFileSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
 const writeFileSyncControl = vi.hoisted(() => ({
   failingPrefix: new Set<string>(),
 }));
+// A controllable chmodSync for the owner-only-heal failure path: enrolled
+// paths throw EPERM, as a chmod refused by the owner or the mount does,
+// everything else passes through.
+const chmodSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
+// The warn channel of the module under test: a best-effort step that
+// degrades must say so, and the suite can only see that through the logger.
+// Transparent: every call still reaches the real logger.
+const debugWarnings = vi.hoisted(() => ({ messages: [] as string[] }));
 // A count of the blocking ps consults the module under test issues:
 // every process-table read goes through one execFileSync, so a fanout that
 // should share one consult shows up as a count here. Transparent: every
@@ -89,6 +104,17 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.rmSync(target, options);
     },
+    chmodSync: ((target: unknown, ...rest: unknown[]): unknown => {
+      if (typeof target === 'string' && chmodSyncControl.failing.has(target)) {
+        throw Object.assign(new Error(`EPERM: cannot chmod ${target}`), {
+          code: 'EPERM',
+        });
+      }
+      return (actual.chmodSync as (...args: unknown[]) => unknown)(
+        target,
+        ...rest,
+      );
+    }) as typeof actual.chmodSync,
     readFileSync: ((target: unknown, ...rest: unknown[]): unknown => {
       if (
         typeof target === 'string' &&
@@ -105,6 +131,29 @@ vi.mock('node:fs', async (importOriginal) => {
     }) as typeof actual.readFileSync,
   };
 });
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/debugLogger.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/debugLogger.js')
+      >();
+    return {
+      ...actual,
+      createDebugLogger: (tag?: string) => {
+        const logger = actual.createDebugLogger(tag);
+        return {
+          ...logger,
+          warn: (...args: unknown[]) => {
+            debugWarnings.messages.push(args.map(String).join(' '));
+            logger.warn(...args);
+          },
+        };
+      },
+    };
+  },
+);
 
 const POSIX = process.platform !== 'win32';
 
@@ -201,6 +250,113 @@ describe('Managed Runtime ledger', () => {
   });
 
   describe('worker-side document', () => {
+    it.skipIf(!POSIX)(
+      'creates the ledger directory and staging-written file owner-only',
+      async () => {
+        // The ledger names live pids and call ids: another local user able
+        // to traverse $HOME/.qwen must not read them, so both the directory
+        // and every file the tmp+rename dance produces land owner-only
+        // regardless of the ambient umask.
+        const ledgerDir = path.join(root, 'owned');
+        const workFile = path.join(ledgerDir, 'ledger.json');
+        const ledger = ManagedRuntimeLedger.create({
+          workFile,
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        ledger.addGroup({ pgid: 4242, callId: 'c1', startedAt: 123 });
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+        expect(statSync(workFile).mode & 0o777).toBe(0o600);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'tightens a ledger directory an earlier build left loose',
+      async () => {
+        // mkdirSync's mode applies only at creation, so a directory left
+        // loose by a pre-hardening build must be chmod'd back to owner-only
+        // or the pids inside stay listable by another local user.
+        const ledgerDir = path.join(root, 'loose');
+        await mkdir(ledgerDir, { recursive: true });
+        chmodSync(ledgerDir, 0o755);
+        ManagedRuntimeLedger.create({
+          workFile: path.join(ledgerDir, 'ledger.json'),
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'tightens only the ledger directory, never the shared ancestors above it',
+      async () => {
+        // The tmp tree above the ledger dir holds checkpoints, history and
+        // logs owned by other features and shared across sessions: only the
+        // leaf is ours to make owner-only.
+        const control = path.join(root, 'ambient');
+        await mkdir(control, { recursive: true });
+        const ambient = statSync(control).mode & 0o777;
+        const ledgerDir = path.join(root, 'shared', 'managed-runtime');
+        ManagedRuntimeLedger.create({
+          workFile: path.join(ledgerDir, 'ledger.json'),
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+        expect(statSync(path.dirname(ledgerDir)).mode & 0o777).toBe(ambient);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'still writes the ledger when the directory refuses the chmod, and says so',
+      async () => {
+        // A chmod the owner or the mount refuses — a root-created leaf, a
+        // shared CI cache, sshfs/CIFS — must not fail the creation: the
+        // directory stays writable, the ledger lands, and the silent
+        // degradation is warned instead of swallowed.
+        const ledgerDir = path.join(root, 'unchmoddable');
+        const workFile = path.join(ledgerDir, 'ledger.json');
+        chmodSyncControl.failing.add(ledgerDir);
+        debugWarnings.messages.length = 0;
+        try {
+          const ledger = ManagedRuntimeLedger.create({
+            workFile,
+            worker: {
+              pid: process.pid,
+              pgid: process.pid,
+              incarnation: 'inc',
+              startedAt: Date.now(),
+            },
+          });
+          ledger.addGroup({ pgid: 4242, callId: 'c1', startedAt: 123 });
+        } finally {
+          chmodSyncControl.failing.delete(ledgerDir);
+        }
+        const written = JSON.parse(await readFile(workFile, 'utf8')) as {
+          version: number;
+          groups: Array<{ pgid: number }>;
+        };
+        expect(written.version).toBe(1);
+        expect(written.groups.map((group) => group.pgid)).toContain(4242);
+        expect(
+          debugWarnings.messages.some((message) => message.includes(ledgerDir)),
+        ).toBe(true);
+      },
+    );
+
     it('writes the worker record at creation and persists groups synchronously', async () => {
       const workFile = path.join(root, 'nested', 'ledger.json');
       const ledger = ManagedRuntimeLedger.create({
@@ -729,6 +885,19 @@ describe('Managed Runtime ledger', () => {
   });
 
   describe('sweepWorkerLedger', () => {
+    it('the sweep report predicate pairs with the class that produces it', () => {
+      // The acp-integration boundary reads the shape, never the class: a
+      // rename on the producer must redden here, not degrade a message there.
+      expect(
+        isUnprovenSweepReport(
+          new LedgerSweepUnprovenError('/x/a.json', [4123], 'unproven'),
+        ),
+      ).toBe(true);
+      expect(isUnprovenSweepReport(null)).toBe(false);
+      expect(isUnprovenSweepReport({ workFile: 1, remaining: [] })).toBe(false);
+      expect(isUnprovenSweepReport({ workFile: 'a' })).toBe(false);
+    });
+
     it('answers absent for a missing file, having proven nothing', async () => {
       await expect(
         sweepWorkerLedger(path.join(root, 'absent.json')),

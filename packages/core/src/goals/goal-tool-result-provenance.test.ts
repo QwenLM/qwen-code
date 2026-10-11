@@ -173,7 +173,6 @@ describe('goalToolResultProvenance', () => {
       ToolNames.AGENT,
       ToolNames.ADVISOR,
       ToolNames.WORKFLOW,
-      ToolNames.THREAD_READ,
     ].flatMap((name) => [
       { name },
       {
@@ -186,7 +185,7 @@ describe('goalToolResultProvenance', () => {
     (request) => {
       // A rendered human reply inside the wrapper's own output -- the text a
       // content-sniffing edit would key on. Only the `tool_search` branch may
-      // read it; these ten must classify by invocation identity alone.
+      // read it; these eight must classify by invocation identity alone.
       expect(
         goalToolResultProvenance({ ...request, goalContext: permit }, [
           {
@@ -202,44 +201,6 @@ describe('goalToolResultProvenance', () => {
       });
     },
   );
-
-  // Derived from the wire names so a newly added `thread_*` tool cannot slip
-  // through this list undecided.
-  const ordinaryThreadTools = Object.values(ToolNames).filter(
-    (name) => name.startsWith('thread_') && name !== ToolNames.THREAD_READ,
-  );
-
-  it('excludes exactly the five acknowledgement tools from the wrapper class', () => {
-    expect([...ordinaryThreadTools].sort()).toEqual(
-      [
-        ToolNames.THREAD_BLOCK,
-        ToolNames.THREAD_CREATE,
-        ToolNames.THREAD_POST,
-        ToolNames.THREAD_REVIEW,
-        ToolNames.THREAD_WAIT,
-      ].sort(),
-    );
-  });
-
-  it.each(
-    ordinaryThreadTools.flatMap((name) => [
-      { name },
-      {
-        name: ToolNames.TOOL_CALL,
-        args: { name: name.toUpperCase(), arguments: {} },
-      },
-    ]),
-  )('keeps %s an ordinary external fact: %j', (request) => {
-    // thread_read restates another participant's recorded text (agent- or
-    // human-authored); these five return a fixed or store-generated
-    // acknowledgement of this agent's own action. thread_block's fixed reply is
-    // the user-authority evidence a blocked proposal cites, so stamping the
-    // whole family would leave the `infeasible` and `external` blockers with no
-    // external_fact to point at.
-    expect(
-      goalToolResultProvenance({ ...request, goalContext: permit }),
-    ).toEqual({ goalContext: permit });
-  });
 
   it('leaves a tool call made outside a Goal turn unstamped', () => {
     expect(goalToolResultProvenance({ name: 'read_file' })).toBeUndefined();

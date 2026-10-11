@@ -103,6 +103,14 @@ export function TrajectoryInspector({
         return [
           [t('trajectory.inspector.model'), row.model],
           [t('trajectory.inspector.status'), row.status],
+          ...(row.executionId
+            ? [
+                [
+                  t('trajectory.inspector.executionId'),
+                  row.executionId,
+                ] as DetailField,
+              ]
+            : []),
           [t('trajectory.inspector.responseId'), row.responseId],
           [t('trajectory.inspector.promptId'), row.promptId],
           [t('trajectory.inspector.subagent'), row.subagentId],

@@ -277,7 +277,7 @@
 
 .tableWrap {
   flex: 1;
-  min-height: 0;
+  min-height: 120px;
   display: flex;
   flex-direction: column;
 }
@@ -534,4 +534,48 @@
     min-width: 38px;
     max-width: 65px;
   }
+}
+
+.windowNavigation {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.windowStatus {
+  flex: 1 1 220px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.windowStatus span {
+  display: block;
+}
+
+.windowNotice {
+  height: 16.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.windowButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.windowButtons button[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.windowFailure {
+  flex: 1 1 100%;
+  color: var(--destructive);
 }

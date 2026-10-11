@@ -20,7 +20,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 /**
  * Admits the durable close, archive and delete operations and reads them
- * back. {@link SessionLifecycleCoordinator} delivers a close or a delete.
+ * back, with every other operation kind the shared table holds.
+ * {@link SessionLifecycleCoordinator} delivers a close or a delete;
+ * {@link TaskCancelCoordinator} a task cancel.
  */
 @Service
 public class SessionLifecycleService {
@@ -259,7 +261,7 @@ public class SessionLifecycleService {
                 operation.sessionId(), lower(operation.kind().name()),
                 lower(operation.state()), lower(operation.admissionStage()),
                 lower(operation.deliveryState()), operation.receiptId(),
-                replayed, null, operation.failureCode());
+                replayed, null, operation.failureCode(), operation.taskId());
     }
 
     public WebShellCommandOperation webShellOperation(OperationRecord operation, boolean replayed) {
@@ -270,7 +272,7 @@ public class SessionLifecycleService {
                 operation.sessionId(), lower(operation.kind().name()),
                 lower(operation.state()), lower(operation.admissionStage()),
                 lower(operation.deliveryState()), operation.receiptId(),
-                replayed, null, operation.failureCode());
+                replayed, null, operation.failureCode(), operation.taskId());
     }
 
     private static String lower(String value) {
