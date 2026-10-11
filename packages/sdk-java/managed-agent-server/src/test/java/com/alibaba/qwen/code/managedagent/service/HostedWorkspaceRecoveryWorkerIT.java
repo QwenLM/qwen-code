@@ -18,12 +18,17 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 
+// Closed after the class, like every Hosted*IT Spring test context: the
+// classes share one failsafe fork, and a cached context keeps its
+// schedulers running for the rest of it.
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:workspace-recovery-worker;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
         "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa", "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false"
 })
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class HostedWorkspaceRecoveryWorkerIT {
     @Autowired private DataSource source;
     @Autowired private JdbcTemplate jdbc;
