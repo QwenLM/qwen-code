@@ -1837,7 +1837,12 @@ export async function runNonInteractive(
 
         if (outputFormat === OutputFormat.TEXT) {
           await settleBeforeTerminalOutput();
-          await drainPendingMemoryTasks();
+          try {
+            await drainPendingMemoryTasks();
+          } catch {
+            // Keep the marker for the loop error already written to stderr.
+            throw new AlreadyReportedError(loopDetectedMessage);
+          }
           return 1;
         }
 

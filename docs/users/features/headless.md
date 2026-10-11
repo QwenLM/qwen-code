@@ -157,6 +157,8 @@ Response format:
 The capital of France is Paris.
 ```
 
+After printing the response, the CLI may still wait for managed memory work before exiting. See [Managed Memory Completion](#managed-memory-completion).
+
 ### JSON Output
 
 Returns structured data as a JSON array. All messages are buffered and output together with the terminal result. This format is ideal for programmatic processing and automation scripts.
@@ -231,12 +233,6 @@ Output (streaming as events occur):
 
 When combined with `--include-partial-messages`, additional stream events are emitted in real-time (message_start, content_block_delta, etc.) for real-time UI updates.
 
-Pending managed memory work does not delay the terminal `result` message in JSON or stream-JSON output. After writing a result, the CLI normally waits for tracked extraction, dreaming, and scheduled skill-review tasks before finishing the invocation. A one-shot process may therefore remain running after the result is written. In a reusable stream-JSON session, the next serialized turn and normal stdin EOF shutdown can also wait for those tasks.
-
-Cancellation and run-budget aborts stop this wait, including when they arrive after a result has been written; session-turn-cap exits also do not wait. Stopping the wait does not cancel the underlying memory tasks, which may continue in a reusable session or be abandoned when the process exits. No replacement result is emitted if one was already written, so consumers should also check the invocation outcome or process exit status. Independently scheduled memory metadata migration is outside this tracked task list and is cancelled when the invocation's `Config` shuts down. Receiving a result does not mean that memory has finished, and the wait has no separate drain timeout.
-
-The result's `usage` in both JSON formats, and `stats` in successful JSON output, capture telemetry while the result is prepared and emitted. They can include managed-memory usage already recorded, but omit usage recorded afterward. Finishing pending memory work does not update the emitted result. These totals therefore do not guarantee complete token or API accounting for the invocation; an earlier result does not reduce actual model usage or cost.
-
 For JSON and stream-JSON output, textual `tool_result.content` values are
 bounded to 65,536 UTF-8 bytes after JSON string serialization. Oversized
 values are emitted as deterministic head/tail previews. The same bound applies
@@ -248,6 +244,14 @@ session, JSONL event, tool input, or partial message.
 ```bash
 qwen -p "Write a Python script" --output-format stream-json --include-partial-messages
 ```
+
+### Managed Memory Completion
+
+Pending managed memory work does not delay the terminal `result` message in JSON or stream-JSON output. After writing its terminal output (a result message in JSON formats, or the final response or error in text output), the CLI normally waits for tracked extraction, dreaming, and scheduled skill-review tasks before finishing the invocation. A one-shot process may therefore remain running after its output is written. In a reusable stream-JSON session, the next serialized turn and normal stdin EOF shutdown can also wait for those tasks.
+
+Cancellation and run-budget aborts stop this wait, including when they arrive after terminal output has been written; session-turn-cap exits also do not wait. Stopping the wait does not cancel the underlying memory tasks, which may continue in a reusable session or be abandoned when the process exits. No replacement result is emitted if one was already written, so consumers should also check the invocation outcome or process exit status. Independently scheduled memory metadata migration is outside this tracked task list and is cancelled when the invocation's `Config` shuts down. Receiving a result does not mean that memory has finished, and the wait has no separate drain timeout.
+
+The result's `usage` in both JSON formats, and `stats` in successful JSON output, capture telemetry while the result is prepared and emitted. They can include managed-memory usage already recorded, but omit usage recorded afterward. Finishing pending memory work does not update the emitted result. These totals therefore do not guarantee complete token or API accounting for the invocation; an earlier result does not reduce actual model usage or cost.
 
 ### Input Format
 

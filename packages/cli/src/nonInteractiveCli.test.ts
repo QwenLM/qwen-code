@@ -3794,16 +3794,23 @@ describe('runNonInteractive', () => {
     it.each([
       'success',
       'structured success',
+      'GLOBAL_TOOL_CALL_DUPLICATE',
+      'drain-turn loop detection',
+      'drain-turn structured success',
       'TEXT loop detection',
       'TEXT already reported error',
     ] as const)(
       'honors SIGINT while memory remains pending after %s',
       async (terminal) => {
         const textMode = terminal.startsWith('TEXT');
+        const structured = terminal.endsWith('structured success');
+        const drainTurn = terminal.startsWith('drain-turn');
+        const duplicate = terminal === 'GLOBAL_TOOL_CALL_DUPLICATE';
+        const loop = duplicate || terminal.endsWith('loop detection');
         vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
           textMode ? OutputFormat.TEXT : OutputFormat.STREAM_JSON,
         );
-        if (terminal === 'structured success') {
+        if (structured) {
           vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
             type: 'object',
             properties: { summary: { type: 'string' } },
@@ -3813,40 +3820,88 @@ describe('runNonInteractive', () => {
             responseParts: [{ text: 'ok' }],
           });
         }
-        const terminalEvent: ServerLlmStreamEvent =
-          terminal === 'structured success'
+        const terminalEvent: ServerLlmStreamEvent = structured
+          ? {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'memory-cancel-structured',
+                name: 'structured_output',
+                args: { summary: 'done' },
+                isClientInitiated: false,
+                prompt_id: 'prompt-memory-terminal-cancel',
+              },
+            }
+          : loop
             ? {
-                type: LlmEventType.ToolCallRequest,
-                value: {
-                  callId: 'memory-cancel-structured',
-                  name: 'structured_output',
-                  args: { summary: 'done' },
-                  isClientInitiated: false,
-                  prompt_id: 'prompt-memory-terminal-cancel',
-                },
+                type: LlmEventType.LoopDetected,
+                value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
               }
-            : terminal === 'TEXT loop detection'
+            : terminal === 'TEXT already reported error'
               ? {
-                  type: LlmEventType.LoopDetected,
-                  value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+                  type: LlmEventType.Error,
+                  value: {
+                    error: { message: '429 Too Many Requests', status: 429 },
+                  },
                 }
-              : terminal === 'TEXT already reported error'
-                ? {
-                    type: LlmEventType.Error,
-                    value: {
-                      error: { message: '429 Too Many Requests', status: 429 },
-                    },
-                  }
-                : {
-                    type: LlmEventType.Finished,
-                    value: {
-                      reason: undefined,
-                      usageMetadata: { totalTokenCount: 1 },
-                    },
-                  };
-        mockLlmClient.sendMessageStream.mockReturnValueOnce(
-          createStreamFromEvents([terminalEvent]),
-        );
+              : {
+                  type: LlmEventType.Finished,
+                  value: {
+                    reason: undefined,
+                    usageMetadata: { totalTokenCount: 1 },
+                  },
+                };
+        if (drainTurn) {
+          mockMonitorRegistry.setNotificationCallback.mockImplementation(
+            (callback) => {
+              callback?.(
+                'Monitor ready',
+                '<task-notification>ready</task-notification>',
+                {
+                  monitorId: 'memory-cancel-monitor',
+                  toolUseId: 'memory-cancel-tool',
+                  status: 'running',
+                  eventCount: 1,
+                },
+              );
+            },
+          );
+          mockLlmClient.sendMessageStream.mockReturnValueOnce(
+            createStreamFromEvents([
+              {
+                type: LlmEventType.Finished,
+                value: {
+                  reason: undefined,
+                  usageMetadata: { totalTokenCount: 1 },
+                },
+              },
+            ]),
+          );
+        }
+        if (duplicate) {
+          vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+          const toolCall: ServerLlmStreamEvent = {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'memory-cancel-duplicate',
+              providerCallId: 'memory-cancel-duplicate',
+              name: 'testTool',
+              args: { arg1: 'value1' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-memory-terminal-cancel',
+            },
+          };
+          mockCoreExecuteToolCall.mockResolvedValue({
+            responseParts: [{ text: 'Tool response' }],
+          });
+          mockLlmClient.sendMessageStream
+            .mockReturnValueOnce(createStreamFromEvents([toolCall]))
+            .mockReturnValueOnce(createStreamFromEvents([toolCall]))
+            .mockReturnValueOnce(createStreamFromEvents([toolCall]));
+        } else {
+          mockLlmClient.sendMessageStream.mockReturnValueOnce(
+            createStreamFromEvents([terminalEvent]),
+          );
+        }
         const abortController = new AbortController();
         const signalListeners = process.listeners('SIGINT');
         const abortListeners = getEventListeners(
@@ -3889,6 +3944,17 @@ describe('runNonInteractive', () => {
           expect(process.exit).toHaveBeenCalledExactlyOnceWith(130);
           if (textMode) {
             expect(processStdoutSpy).not.toHaveBeenCalled();
+            expect(processStderrSpy).toHaveBeenCalledTimes(2);
+            expect(
+              processStderrSpy.mock.calls.map(([chunk]) => String(chunk)),
+            ).toEqual([
+              expect.stringContaining(
+                terminal === 'TEXT loop detection'
+                  ? 'Loop detection halted the run (turn_tool_call_cap:'
+                  : '429 Too Many Requests',
+              ),
+              'Operation cancelled.\n',
+            ]);
           } else {
             const results = processStdoutSpy.mock.calls
               .flatMap(
@@ -3897,10 +3963,31 @@ describe('runNonInteractive', () => {
               )
               .filter((message) => message.type === 'result');
             expect(results).toEqual([
-              expect.objectContaining({ is_error: false }),
+              expect.objectContaining(
+                loop
+                  ? {
+                      is_error: true,
+                      error: {
+                        message: expect.stringContaining(
+                          duplicate
+                            ? LoopType.GLOBAL_TOOL_CALL_DUPLICATE
+                            : LoopType.TURN_TOOL_CALL_CAP,
+                        ),
+                      },
+                    }
+                  : {
+                      is_error: false,
+                      ...(structured
+                        ? { structured_result: { summary: 'done' } }
+                        : {}),
+                    },
+              ),
             ]);
             expect(onResultEmitted).toHaveBeenCalledOnce();
           }
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
+            duplicate ? 3 : drainTurn ? 2 : 1,
+          );
           expect(process.listeners('SIGINT')).toEqual(signalListeners);
           expect(getEventListeners(abortController.signal, 'abort')).toEqual(
             abortListeners,
