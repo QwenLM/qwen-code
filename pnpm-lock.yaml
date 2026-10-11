@@ -1032,6 +1032,9 @@ importers:
       quickjs-emscripten-core:
         specifier: 0.32.0
         version: 0.32.0
+      semver:
+        specifier: ^7.7.2
+        version: 7.8.5
       sharp:
         specifier: ^0.35.4
         version: 0.35.4(@types/node@20.19.1)
@@ -1050,6 +1053,9 @@ importers:
       turndown:
         specifier: ^7.2.4
         version: 7.2.4
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
       undici:
         specifier: ^7.28.0
         version: 7.29.0
@@ -1096,6 +1102,9 @@ importers:
       '@types/prompts':
         specifier: ^2.4.9
         version: 2.4.9
+      '@types/semver':
+        specifier: ^7.7.1
+        version: 7.7.1
       '@types/tar':
         specifier: ^6.1.13
         version: 6.1.13
@@ -1117,9 +1126,6 @@ importers:
       tree-sitter-wasms:
         specifier: ^0.1.13
         version: 0.1.13
-      typescript:
-        specifier: 5.8.3
-        version: 5.8.3
       vitest:
         specifier: ^3.1.1
         version: 3.2.7(@types/debug@4.1.13)(@types/node@20.19.1)(jiti@2.7.0)(jsdom@26.1.0(supports-color@7.2.0))(lightningcss@1.32.0)(msw@2.10.4(@types/node@20.19.1)(typescript@5.8.3))(supports-color@7.2.0)(tsx@4.20.3)(yaml@2.9.0)

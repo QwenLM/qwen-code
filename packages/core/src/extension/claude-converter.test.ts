@@ -752,7 +752,7 @@ describe('convertClaudePluginPackage', () => {
       );
       const result = await convertPackage(dir, 'marketplace-mod');
 
-      expect(await loadModSource(result.convertedDir)).toBe(source);
+      expect((await loadModSource(result.convertedDir))?.source).toBe(source);
       expect(result.config.hooks).toEqual({
         SessionStart: [
           {
@@ -778,30 +778,38 @@ describe('convertClaudePluginPackage', () => {
     },
   );
 
-  it.each(['userConfig', 'dependencies'])(
-    'keeps unsupported Mod %s visible after marketplace conversion',
-    async (field) => {
-      const { result } = await layoutAndConvert(
-        'unsupported-mod-config',
-        { name: 'unsupported-mod', hooks: './custom/hooks.json' },
-        {
-          '.claude-plugin/plugin.json': JSON.stringify({
-            name: 'unsupported-mod',
-            version: '1.0.0',
-            [field]: { required: 'value' },
-          }),
-          'custom/hooks.json': JSON.stringify({
-            modules: ['./entry.js'],
-            hooks: {},
-          }),
-          'custom/entry.js': 'export function register() {}',
-        },
-      );
-      await expect(loadModSource(result.convertedDir)).rejects.toThrow(
-        `Mod ${field} is not supported yet.`,
-      );
-    },
-  );
+  it('preserves Mod authoring metadata after marketplace conversion', async () => {
+    const userConfig = {
+      greeting: {
+        type: 'string',
+        title: 'Greeting',
+        description: 'A greeting',
+      },
+    };
+    const dependencies = [
+      { name: 'base', marketplace: 'example', version: '^1.0.0' },
+    ];
+    const { result } = await layoutAndConvert(
+      'unsupported-mod-config',
+      { name: 'unsupported-mod', hooks: './custom/hooks.json' },
+      {
+        '.claude-plugin/plugin.json': JSON.stringify({
+          name: 'unsupported-mod',
+          version: '1.0.0',
+          userConfig,
+          dependencies,
+        }),
+        'custom/hooks.json': JSON.stringify({
+          modules: ['./entry.js'],
+          hooks: {},
+        }),
+        'custom/entry.js': 'export function register() {}',
+      },
+    );
+    const definition = await loadModSource(result.convertedDir);
+    expect(definition?.userConfig).toEqual(userConfig);
+    expect(definition?.dependencies).toEqual(dependencies);
+  });
 
   it('throws when marketplace.json itself is a symlink resolving outside the plugin', async () => {
     // A hostile clone makes the marketplace manifest a symlink to a JSON-shaped

@@ -15,9 +15,14 @@ import { CommandService } from '../services/CommandService.js';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 
-const mocks = vi.hoisted(() => ({ load: vi.fn(), create: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  load: vi.fn(),
+  dependencies: vi.fn(),
+  create: vi.fn(),
+}));
 vi.mock('@qwen-code/qwen-code-core/mods/discovery.js', () => ({
   loadModSource: mocks.load,
+  loadModDependencies: mocks.dependencies,
 }));
 vi.mock('@qwen-code/qwen-code-core/mods/runtime.js', () => ({
   ModRuntime: { create: mocks.create },
@@ -29,6 +34,7 @@ describe('headless Mod session ownership', () => {
     const extension = {
       id: 'id',
       name: 'hello-mod',
+      version: '1.0.0',
       path: '/mod',
       isActive: true,
     };
@@ -57,7 +63,13 @@ describe('headless Mod session ownership', () => {
       end: vi.fn().mockResolvedValue(undefined),
       dispose: vi.fn().mockResolvedValue(undefined),
     };
-    mocks.load.mockResolvedValue('export function register() {}');
+    mocks.load.mockResolvedValue({
+      root: '/mod',
+      entry: '/mod/entry.js',
+      source: 'export function register() {}',
+      dependencies: [],
+    });
+    mocks.dependencies.mockResolvedValue([]);
     mocks.create.mockImplementation(
       async (_source, _cwd, log: (entry: ModLog) => void) => {
         log({ to: 'transcript', text: 'startup log' });
@@ -128,6 +140,175 @@ describe('headless Mod session ownership', () => {
     });
     expect(runtime.runCommand).toHaveBeenCalledWith('hello', 'hello', signal);
     expect(commands[0].modelInvocable).toBe(false);
+  });
+
+  it('uses operator scopes and validates options before starting any runtime', async () => {
+    const { config, adapter } = setup();
+    mocks.load.mockResolvedValue({
+      root: '/mod',
+      entry: '/mod/entry.ts',
+      source: 'export function register() {}',
+      dependencies: [],
+      userConfig: {
+        value: {
+          type: 'string',
+          title: 'Value',
+          description: 'Value',
+          required: true,
+        },
+      },
+    });
+    const settings = {
+      merged: {
+        experimental: { mods: true },
+        pluginConfigs: { 'hello-mod': { options: { value: 'workspace' } } },
+      },
+      systemDefaults: { settings: {} },
+      user: {
+        settings: {
+          pluginConfigs: { 'hello-mod@inline': { options: { value: 'user' } } },
+        },
+      },
+      system: {
+        settings: {
+          pluginConfigs: { 'hello-mod': { options: { value: 'system' } } },
+        },
+      },
+    } as unknown as LoadedSettings;
+    const session = ModSession.create(
+      config as unknown as Config,
+      settings,
+      adapter as unknown as JsonOutputAdapterInterface,
+    )!;
+    sessions.push(session);
+    await session.initialize(new AbortController().signal);
+    expect(mocks.create.mock.calls[0][4]).toEqual({ value: 'system' });
+  });
+
+  it.each(['missing', 'cycle', 'options'])(
+    'starts no workers when a later plugin has invalid %s',
+    async (kind) => {
+      const extensions = [
+        { id: 'a', name: 'a', path: '/a', version: '1.0.0', isActive: true },
+        { id: 'b', name: 'b', path: '/b', version: '1.0.0', isActive: true },
+      ];
+      const { session } = setup({ getExtensions: () => extensions });
+      mocks.load.mockImplementation(async (path: string) => ({
+        root: path,
+        entry: path + '/entry.js',
+        source: '',
+        dependencies:
+          kind === 'cycle'
+            ? [{ name: path === '/a' ? 'b' : 'a' }]
+            : kind === 'missing' && path === '/b'
+              ? [{ name: 'absent' }]
+              : [],
+        userConfig:
+          kind === 'options' && path === '/b'
+            ? {
+                needed: {
+                  type: 'string',
+                  title: '',
+                  description: '',
+                  required: true,
+                },
+              }
+            : undefined,
+      }));
+      await expect(
+        session.initialize(new AbortController().signal),
+      ).rejects.toThrow(
+        kind === 'cycle'
+          ? /cycle/
+          : kind === 'missing'
+            ? /installed, enabled/
+            : /required/,
+      );
+      expect(mocks.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('orders Mod consumers before providers and accepts an ordinary extension dependency', async () => {
+    const extensions = ['base', 'ordinary', 'consumer'].map((name) => ({
+      id: name + '-id',
+      name,
+      path: '/' + name,
+      version: '1.0.0',
+      isActive: true,
+    }));
+    const { session } = setup({ getExtensions: () => extensions });
+    mocks.load.mockImplementation(async (path: string) =>
+      path === '/ordinary'
+        ? undefined
+        : {
+            root: path,
+            entry: path + '/entry.js',
+            source: '',
+            dependencies:
+              path === '/consumer'
+                ? [{ name: 'base' }, { name: 'ordinary' }]
+                : [],
+          },
+    );
+    await session.initialize(new AbortController().signal);
+    expect(mocks.create.mock.calls.map(([source]) => source.root)).toEqual([
+      '/consumer',
+      '/base',
+    ]);
+  });
+
+  it('checks transitive ordinary dependencies but ignores unrelated declarations', async () => {
+    const extensions = ['consumer', 'ordinary', 'unrelated'].map((name) => ({
+      id: name,
+      name,
+      path: '/' + name,
+      version: '1.0.0',
+      isActive: true,
+    }));
+    const { session } = setup({ getExtensions: () => extensions });
+    mocks.load.mockImplementation(async (path: string) =>
+      path !== '/consumer'
+        ? undefined
+        : {
+            root: path,
+            entry: path + '/entry.js',
+            source: '',
+            dependencies: [{ name: 'ordinary' }],
+          },
+    );
+    mocks.dependencies.mockResolvedValue([{ name: 'missing' }]);
+    await expect(
+      session.initialize(new AbortController().signal),
+    ).rejects.toThrow(/ordinary.*missing.*installed/);
+    expect(mocks.dependencies).toHaveBeenCalledExactlyOnceWith('/ordinary');
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it('does not turn an ordinary provider into a Mod ordering node', async () => {
+    const extensions = ['base', 'ordinary', 'consumer'].map((name) => ({
+      id: name,
+      name,
+      path: '/' + name,
+      version: '1.0.0',
+      isActive: true,
+    }));
+    const { session } = setup({ getExtensions: () => extensions });
+    mocks.load.mockImplementation(async (path: string) =>
+      path === '/ordinary'
+        ? undefined
+        : {
+            root: path,
+            entry: path + '/entry.js',
+            source: '',
+            dependencies: path === '/consumer' ? [{ name: 'ordinary' }] : [],
+          },
+    );
+    mocks.dependencies.mockResolvedValue([{ name: 'base' }]);
+    await session.initialize(new AbortController().signal);
+    expect(mocks.create.mock.calls.map(([source]) => source.root)).toEqual([
+      '/base',
+      '/consumer',
+    ]);
   });
 
   it('keeps Agent Plugins v1 hooks ignored', async () => {
