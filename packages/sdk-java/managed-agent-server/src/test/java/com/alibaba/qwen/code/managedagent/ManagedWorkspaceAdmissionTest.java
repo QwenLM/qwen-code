@@ -650,15 +650,16 @@ class ManagedWorkspaceAdmissionTest {
             assertThat(replay.body().status()).isEqualTo("closed");
         });
 
-        // The outcome answers only to the Session's own actor: a readable
-        // non-creator keeps the route's refusal, and an actor without a
-        // grant gets the not-found.
+        // The outcome answers only to the Session's own actor: on a
+        // tombstone a readable non-creator meets the reads' not-found —
+        // workspace_unavailable is the live-Session refusal — and an actor
+        // without a grant gets the same not-found.
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-b", "rename", sessionId, "new title"))
                         .isInstanceOfSatisfying(ApiException.class, error ->
                                 assertThat(error.getCode())
-                                        .isEqualTo("workspace_unavailable")));
+                                        .isEqualTo("session_not_found")));
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-c", "rename", sessionId, "new title"))

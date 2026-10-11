@@ -4,18 +4,25 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sun.source.tree.BinaryTree;
+import com.sun.source.tree.BlockTree;
+import com.sun.source.tree.CaseTree;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.ConditionalExpressionTree;
 import com.sun.source.tree.IdentifierTree;
+import com.sun.source.tree.LambdaExpressionTree;
 import com.sun.source.tree.LiteralTree;
 import com.sun.source.tree.MemberReferenceTree;
 import com.sun.source.tree.MemberSelectTree;
 import com.sun.source.tree.MethodInvocationTree;
 import com.sun.source.tree.MethodTree;
 import com.sun.source.tree.ParenthesizedTree;
+import com.sun.source.tree.StatementTree;
+import com.sun.source.tree.SwitchExpressionTree;
 import com.sun.source.tree.Tree;
+import com.sun.source.tree.TypeCastTree;
 import com.sun.source.tree.VariableTree;
+import com.sun.source.tree.YieldTree;
 import com.sun.source.util.JavacTask;
 import com.sun.source.util.TreeScanner;
 import java.io.IOException;
@@ -24,6 +31,8 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -61,12 +70,16 @@ import org.junit.jupiter.api.Test;
 //   is never guessed: when every candidate provably reaches neither the
 //   session lock nor the turn row the reference is skipped and pinned in
 //   an exactly-asserted exemption set, and otherwise the audit throws.
-// - SQL spellings are read from literals, their concatenations, class
-//   constants and references to them; comments never reach the tree, so
-//   they can never spoof a needle. The lock side credits only the text
-//   every branch of a conditional carries — a `flag ? " FOR UPDATE" : ""`
-//   appends no unconditional lock — while the turn side credits either
-//   branch. Calls embedded in a concatenation are still followed as calls.
+// - SQL spellings are read from literals, their concatenations, switch
+//   expressions, class constants and String locals — a local scores where
+//   it is used, not where it is declared, because the declaration does
+//   not run the statement. Comments never reach the tree, so they can
+//   never spoof a needle. Both sides credit every branch of a conditional
+//   or switch: a lock taken on only some runs still orders the runs that
+//   take it, exactly like a turn access that executes under a flag. Calls
+//   embedded in a spelling expression still resolve as calls, and score
+//   ahead of the spelling itself, because the operands evaluate before
+//   the statement's own SQL takes effect.
 // - A session-row lock is counted only from a spelling that names the
 //   session table — a FOR UPDATE on another table in the same body is not
 //   the lock — and the implicit row lock of an INSERT or UPDATE on the
@@ -75,7 +88,11 @@ import org.junit.jupiter.api.Test;
 // - Anonymous class bodies fold into the enclosing member (their methods
 //   answer only through the interface they implement), and calls that
 //   leave the file are outside the audit; the sibling boundary below pins
-//   which files lock the session row or touch the turn row at all.
+//   which files lock the session row or touch the turn row at all. A
+//   lambda handed straight into a call folds there — its body runs within
+//   the call — while a lambda in any other position whose body would
+//   contribute an event fails closed: the parse cannot see its invocation
+//   site, so the body never folds at its declaration.
 //   Transactionality is runtime wiring — a Spring proxy, or a
 //   TransactionTemplate in another file's caller — not a spelling a
 //   same-file parse can see, so the audit pins the order, not the
@@ -88,18 +105,17 @@ class SessionRowLockOrderTest {
     private static final String TURN_TABLE = "managed_agent_turn";
     private static final String LOCK_MODE = "FOR UPDATE";
 
-    // Sibling stores that take an unconditional session-row lock today.
-    // None writes the turn row, so the session-first order has nothing to
-    // bite on there; the one that also reads it is order-audited below.
-    // WorkspaceRecoveryStore is deliberately absent: its session-row lock
-    // rides a `lockSources ? " FOR UPDATE" : ""` conditional, and a lock
-    // taken on only some branches is not the lock this canary pins. A new
-    // sibling locker — or a new sibling turn-row access — fails here
-    // instead of passing unaudited.
+    // Sibling stores whose session-row lock the audit can see today,
+    // conditional locks included: a lock taken on only some runs still
+    // orders the runs that take it. None writes the turn row, so the
+    // session-first order has nothing to bite on there; the ones that
+    // also read it are order-audited below. A new sibling locker — or a
+    // new sibling turn-row access — fails here instead of passing
+    // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
             "ManagedActionStore.java", "ManagedExtensionRecordStore.java",
             "ManagedSessionStore.java", "ManagedToolResultStore.java",
-            "WorkspaceLifecycleStore.java");
+            "WorkspaceLifecycleStore.java", "WorkspaceRecoveryStore.java");
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
             "ManagedActionStore.java", "ManagedToolResultProjector.java",
@@ -344,11 +360,14 @@ class SessionRowLockOrderTest {
         // is whatever the locker/reader intersection computed.
         Set<String> orderAudited = new TreeSet<>(sessionLockers);
         orderAudited.retainAll(turnReaders);
-        assertThat(orderAudited).containsExactly("ManagedActionStore.java");
+        assertThat(orderAudited).containsExactly("ManagedActionStore.java",
+                "WorkspaceRecoveryStore.java");
         // ManagedActionStore.admit takes the tenant lock before the
         // session row and never touches the turn row — the file's single
-        // turn read lives in a locker-less query method — so it stays
-        // violation-free under the same order audit the main file gets.
+        // turn read lives in a locker-less query method — and
+        // WorkspaceRecoveryStore's conditional source lock precedes its
+        // turn count, so both stay violation-free under the same order
+        // audit the main file gets.
         for (String name : orderAudited) {
             assertThat(audits.get(name).violations())
                     .as("%s keeps the session-first order", name).isEmpty();
@@ -878,13 +897,13 @@ class SessionRowLockOrderTest {
                 .hasMessageContaining("writer");
     }
 
-    // A lock that rides only one branch of a conditional is not the
-    // unconditional session-row lock this canary pins: WorkspaceRecovery-
-    // Store's `lockSources ? " FOR UPDATE" : ""` shape credits no lock, so
-    // the writer stays out of the locker set — while the turn-row write on
-    // the same statement is still seen.
+    // A lock that rides only one branch of a conditional still orders the
+    // runs that take it — the either-branch rule the turn side always had:
+    // WorkspaceRecoveryStore's `lockSources ? " FOR UPDATE" : ""` shape is
+    // a locker, and stays violation-free only because its conditional lock
+    // precedes the turn write.
     @Test
-    void theAuditDoesNotCreditAConditionalLock() {
+    void theAuditCreditsAConditionalLockOnEitherBranch() {
         String synthetic = """
                 class SyntheticStore {
 
@@ -900,7 +919,7 @@ class SessionRowLockOrderTest {
                 }
                 """;
         Audit audit = audit(synthetic);
-        assertThat(audit.lockers()).isEmpty();
+        assertThat(audit.lockers()).containsExactly("conditionalLockWriter");
         assertThat(audit.violations()).isEmpty();
         assertThat(audit.touchesTurnRow()).isTrue();
     }
@@ -967,6 +986,156 @@ class SessionRowLockOrderTest {
                 """;
         assertThat(audit(synthetic).violations()).containsExactly(
                 "embeddingWriter");
+    }
+
+    // A call embedded in the SQL's own concatenation evaluates before the
+    // statement runs: scoring the spelling first would pass a writer whose
+    // embedded helper writes the turn row ahead of the lock the outer
+    // statement takes — the evaluation-order inversion a spelling-first
+    // audit certified as clean.
+    @Test
+    void theAuditScoresAnEmbeddedCallBeforeTheStatementsSpelling() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void embeddingLockWriter(String tenantId,
+                            String sessionId) {
+                        jdbc.update("UPDATE managed_agent_session SET note"
+                                + " = '" + turnDigest() + "'");
+                    }
+
+                    private String turnDigest() {
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        return "m";
+                    }
+                }
+                """;
+        assertThat(audit(synthetic).violations()).containsExactly(
+                "embeddingLockWriter");
+    }
+
+    // A switch expression in text position contributes every branch to the
+    // spelling: a turn write spelled only inside a switch branch is still
+    // a turn write, so the writer whose lock follows it violates.
+    @Test
+    void theAuditReadsSqlFromASwitchExpression() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void switchWriter(String tenantId,
+                            String sessionId, int kind) {
+                        jdbc.update("UPDATE managed_agent_" + switch (kind) {
+                            case 1 -> "turn SET status = 'FAILED'";
+                            default -> "event SET note = 'm'";
+                        } + " WHERE session_id = ?");
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThat(audit(synthetic).violations()).containsExactly(
+                "switchWriter");
+    }
+
+    // A lambda assigned to a variable runs where it is invoked, which the
+    // parse cannot see: a body reaching a side fails closed instead of
+    // folding its lock at the declaration, where it would order the
+    // inversion this canary exists to catch as clean.
+    @Test
+    void theAuditFailsClosedOnAnAssignedLambdaReachingASide() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void lambdaWriter(String tenantId,
+                            String sessionId) {
+                        Runnable lock = () -> lockSession(tenantId,
+                                sessionId);
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        lock.run();
+                    }
+
+                    private void lockSession(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThatThrownBy(() -> audit(synthetic))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lambdaWriter");
+    }
+
+    // A lambda handed straight into a call runs within it, so its body
+    // folds at that position: the writer that locks first stays clean.
+    @Test
+    void theAuditFoldsADirectArgumentLambda() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void callbackWriter(String tenantId,
+                            String sessionId) {
+                        requireSessionForUpdate(tenantId, sessionId);
+                        runInTransaction(() -> jdbc.update("UPDATE"
+                                + " managed_agent_turn SET status"
+                                + " = 'FAILED'"));
+                    }
+
+                    private void runInTransaction(Runnable body) {
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        Audit audit = audit(synthetic);
+        assertThat(audit.violations()).isEmpty();
+        assertThat(audit.lockers()).containsExactly("callbackWriter");
+    }
+
+    // A String local's spelling scores where the variable is used: the
+    // declaration runs no statement, so a writer that locks before running
+    // its stored SQL keeps its order.
+    @Test
+    void theAuditScoresALocalStringAtItsUseSite() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void localSqlWriter(String tenantId,
+                            String sessionId) {
+                        String failTurn = "UPDATE managed_agent_turn SET"
+                                + " status = 'FAILED'";
+                        requireSessionForUpdate(tenantId, sessionId);
+                        jdbc.update(failTurn, tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        Audit audit = audit(synthetic);
+        assertThat(audit.violations()).isEmpty();
+        assertThat(audit.lockers()).containsExactly("localSqlWriter");
+        assertThat(audit.turnRowAccessors())
+                .containsExactlyInAnyOrder("localSqlWriter");
     }
 
     // A pure delegator's lock and turn sides resolve to the same call
@@ -1166,22 +1335,47 @@ class SessionRowLockOrderTest {
     private static Audit audit(String source) {
         CompilationUnitTree unit = parse(source);
         Map<Key, MethodTree> methods = new LinkedHashMap<>();
-        Map<String, String> lockConstants = new HashMap<>();
-        Map<String, String> turnConstants = new HashMap<>();
+        Map<String, String> constants = new HashMap<>();
         for (Tree declaration : unit.getTypeDecls()) {
             if (declaration instanceof ClassTree type) {
-                harvest(type, "", methods, lockConstants, turnConstants);
+                harvest(type, "", methods, constants);
             }
         }
         List<Ambiguous> ambiguous = new ArrayList<>();
         Map<Key, List<Event>> events = new LinkedHashMap<>();
+        Map<Key, List<List<Event>>> heldLambdas = new LinkedHashMap<>();
         for (Map.Entry<Key, MethodTree> member : methods.entrySet()) {
-            events.put(member.getKey(), eventsOf(member.getValue(),
-                    member.getKey(), methods, lockConstants, turnConstants,
-                    ambiguous));
+            MemberScan scan = eventsOf(member.getValue(), member.getKey(),
+                    methods, constants, ambiguous);
+            events.put(member.getKey(), scan.events());
+            heldLambdas.put(member.getKey(), scan.heldLambdas());
         }
         Set<Key> lockReaching = reaching(events, true);
         Set<Key> turnReaching = reaching(events, false);
+        // A held lambda body is benign only while every event it carries
+        // provably reaches neither side — like an ambiguous reference; the
+        // moment one does, the audit fails closed instead of folding the
+        // body at its declaration, a position its invocation may never
+        // share.
+        for (Map.Entry<Key, List<List<Event>>> member
+                : heldLambdas.entrySet()) {
+            for (List<Event> held : member.getValue()) {
+                boolean sideReaching = held.stream().anyMatch(event ->
+                        event.callee() == null
+                                ? event.lock() || event.turn()
+                                : lockReaching.contains(event.callee())
+                                        || turnReaching.contains(
+                                                event.callee()));
+                if (sideReaching) {
+                    throw new IllegalStateException("a lambda body in "
+                            + member.getKey().handle() + " reaches the"
+                            + " session lock or the turn row but is not a"
+                            + " direct call argument, so its invocation site"
+                            + " is invisible to the audit");
+                }
+                events.get(member.getKey()).addAll(held);
+            }
+        }
         // An unresolvable reference is exempt only while every candidate
         // provably reaches neither side; the moment one does, the audit
         // fails closed instead of guessing an attribution.
@@ -1246,11 +1440,10 @@ class SessionRowLockOrderTest {
     // by (enclosing type, name, parameter type text): same-name overloads
     // that share an arity stay distinct members, and a nested type's
     // member is harvested exactly like a top-level one. Constants answer
-    // their flattened initializer per side, so a conditional lock clause in
-    // a constant scores exactly like the inline spelling.
+    // their flattened initializer, so a conditional lock clause in a
+    // constant scores exactly like the inline spelling.
     private static void harvest(ClassTree type, String ownerPath,
-            Map<Key, MethodTree> methods, Map<String, String> lockConstants,
-            Map<String, String> turnConstants) {
+            Map<Key, MethodTree> methods, Map<String, String> constants) {
         String path = ownerPath.isEmpty() ? type.getSimpleName().toString()
                 : ownerPath + "." + type.getSimpleName();
         for (Tree member : type.getMembers()) {
@@ -1269,13 +1462,10 @@ class SessionRowLockOrderTest {
                             .contains(Modifier.FINAL)
                     && field.getInitializer() != null
                     && "String".equals(String.valueOf(field.getType()))) {
-                lockConstants.put(field.getName().toString(),
-                        flatten(field.getInitializer(), lockConstants, true));
-                turnConstants.put(field.getName().toString(),
-                        flatten(field.getInitializer(), turnConstants,
-                                false));
+                constants.put(field.getName().toString(),
+                        flatten(field.getInitializer(), constants));
             } else if (member instanceof ClassTree nested) {
-                harvest(nested, path, methods, lockConstants, turnConstants);
+                harvest(nested, path, methods, constants);
             }
         }
     }
@@ -1347,126 +1537,216 @@ class SessionRowLockOrderTest {
         return reaching;
     }
 
-    // One member's ordered events: SQL spellings and calls to same-file
-    // members, in the parse tree's visit order. Concatenations flatten per
-    // side before the needle scan, so a split literal cannot hide a table
-    // name and a conditional clause credits the lock side only with the
-    // text every branch carries; the calls the flattened text embeds are
-    // still followed.
-    private static List<Event> eventsOf(MethodTree method, Key caller,
-            Map<Key, MethodTree> methods, Map<String, String> lockConstants,
-            Map<String, String> turnConstants, List<Ambiguous> ambiguous) {
-        List<Event> events = new ArrayList<>();
-        if (method.getBody() == null) {
-            return events;
+    // One member's ordered events plus the lambda bodies held aside: SQL
+    // spellings and calls to same-file members, in evaluation order. A
+    // spelling is the flattened static text of the expression that carries
+    // it — a split literal cannot hide a table name, and every branch of a
+    // conditional or switch is credited — scored after the calls the
+    // expression embeds, because the operands evaluate before the
+    // statement's own SQL takes effect.
+    private static MemberScan eventsOf(MethodTree method, Key caller,
+            Map<Key, MethodTree> methods, Map<String, String> constants,
+            List<Ambiguous> ambiguous) {
+        EventScanner scanner = new EventScanner(new ArrayList<>(), caller,
+                methods, new HashMap<>(constants), ambiguous);
+        if (method.getBody() != null) {
+            scanner.scan(method.getBody(), null);
         }
-        new TreeScanner<Void, Void>() {
-            @Override
-            public Void visitMethodInvocation(MethodInvocationTree node,
-                    Void unused) {
-                addCall(node);
-                return super.visitMethodInvocation(node, unused);
-            }
+        return new MemberScan(scanner.events, scanner.heldLambdas);
+    }
 
-            @Override
-            public Void visitMemberReference(MemberReferenceTree node,
-                    Void unused) {
-                addReference(node);
-                return super.visitMemberReference(node, unused);
-            }
+    private record MemberScan(List<Event> events,
+            List<List<Event>> heldLambdas) { }
 
-            @Override
-            public Void visitBinary(BinaryTree node, Void unused) {
-                if (node.getKind() == Tree.Kind.PLUS) {
-                    String lockText = flatten(node, lockConstants, true);
-                    String turnText = flatten(node, turnConstants, false);
-                    if (!lockText.isEmpty() || !turnText.isEmpty()) {
-                        addSpelling(lockText, turnText, events);
-                        scanCalls(node);
-                        return null;
+    // The statement walk over one body. The constants map is the member's
+    // own overlay of the file's class constants: the String locals the
+    // walk records land in it, so a local's spelling scores at its uses.
+    // Lambdas not passed straight into a call are held aside for the
+    // reachability check in audit(): their invocation site is invisible to
+    // the parse, so a body that reaches a side fails closed there instead
+    // of folding at its declaration.
+    private static final class EventScanner extends TreeScanner<Void, Void> {
+        private final List<Event> events;
+        private final List<List<Event>> heldLambdas = new ArrayList<>();
+        private final Key caller;
+        private final Map<Key, MethodTree> methods;
+        private final Map<String, String> constants;
+        private final List<Ambiguous> ambiguous;
+        // The lambda nodes passed straight into a call, marked at the call
+        // site: only their bodies fold into the enclosing member.
+        private final Set<Tree> directArgumentLambdas =
+                Collections.newSetFromMap(new IdentityHashMap<>());
+
+        EventScanner(List<Event> events, Key caller,
+                Map<Key, MethodTree> methods, Map<String, String> constants,
+                List<Ambiguous> ambiguous) {
+            this.events = events;
+            this.caller = caller;
+            this.methods = methods;
+            this.constants = constants;
+            this.ambiguous = ambiguous;
+        }
+
+        @Override
+        public Void visitMethodInvocation(MethodInvocationTree node,
+                Void unused) {
+            addCall(node);
+            for (Tree argument : node.getArguments()) {
+                Tree unwrapped = argument;
+                for (;;) {
+                    if (unwrapped instanceof ParenthesizedTree parens) {
+                        unwrapped = parens.getExpression();
+                    } else if (unwrapped instanceof TypeCastTree cast) {
+                        unwrapped = cast.getExpression();
+                    } else {
+                        break;
                     }
                 }
-                return super.visitBinary(node, unused);
+                if (unwrapped instanceof LambdaExpressionTree lambda) {
+                    directArgumentLambdas.add(lambda);
+                }
             }
+            return super.visitMethodInvocation(node, unused);
+        }
 
-            @Override
-            public Void visitConditionalExpression(
-                    ConditionalExpressionTree node, Void unused) {
-                String lockText = flatten(node, lockConstants, true);
-                String turnText = flatten(node, turnConstants, false);
-                if (!lockText.isEmpty() || !turnText.isEmpty()) {
-                    addSpelling(lockText, turnText, events);
+        @Override
+        public Void visitMemberReference(MemberReferenceTree node,
+                Void unused) {
+            addReference(node);
+            return super.visitMemberReference(node, unused);
+        }
+
+        @Override
+        public Void visitBinary(BinaryTree node, Void unused) {
+            if (node.getKind() == Tree.Kind.PLUS) {
+                String text = flatten(node, constants);
+                if (!text.isEmpty()) {
                     scanCalls(node);
+                    addSpelling(text, events);
                     return null;
                 }
-                return super.visitConditionalExpression(node, unused);
             }
+            return super.visitBinary(node, unused);
+        }
 
-            @Override
-            public Void visitLiteral(LiteralTree node, Void unused) {
-                if (node.getValue() instanceof String text) {
-                    addSpelling(text, text, events);
-                }
+        @Override
+        public Void visitConditionalExpression(
+                ConditionalExpressionTree node, Void unused) {
+            String text = flatten(node, constants);
+            if (!text.isEmpty()) {
+                scanCalls(node);
+                addSpelling(text, events);
                 return null;
             }
+            return super.visitConditionalExpression(node, unused);
+        }
 
-            @Override
-            public Void visitIdentifier(IdentifierTree node, Void unused) {
-                String name = node.getName().toString();
-                if (lockConstants.containsKey(name)) {
-                    addSpelling(lockConstants.get(name),
-                            turnConstants.get(name), events);
-                }
+        @Override
+        public Void visitSwitchExpression(SwitchExpressionTree node,
+                Void unused) {
+            String text = flatten(node, constants);
+            if (!text.isEmpty()) {
+                scanCalls(node);
+                addSpelling(text, events);
                 return null;
             }
+            return super.visitSwitchExpression(node, unused);
+        }
 
-            // The calls and references inside an expression whose spelling
-            // was already scored: the SQL text is flattened once, but the
-            // member calls it embeds keep their own audit edges.
-            private void scanCalls(Tree node) {
-                new TreeScanner<Void, Void>() {
-                    @Override
-                    public Void visitMethodInvocation(
-                            MethodInvocationTree call, Void unused) {
-                        addCall(call);
-                        return super.visitMethodInvocation(call, unused);
-                    }
-
-                    @Override
-                    public Void visitMemberReference(
-                            MemberReferenceTree reference, Void unused) {
-                        addReference(reference);
-                        return super.visitMemberReference(reference, unused);
-                    }
-                }.scan(node, null);
-            }
-
-            private void addCall(MethodInvocationTree node) {
-                resolve(node.getMethodSelect(), node.getArguments().size(),
-                        caller, methods, ambiguous).forEach(key ->
-                        events.add(new Event(false, false, key)));
-            }
-
-            // A method reference is an invocation whose argument count is
-            // not spelled, so it can never resolve to one member: it is
-            // exempt when every same-named member is benign and throws
-            // otherwise.
-            private void addReference(MemberReferenceTree node) {
-                if (node.getName().contentEquals("<init>")) {
-                    return;
-                }
-                List<Key> candidates = methods.keySet().stream()
-                        .filter(key -> key.name()
-                                .contentEquals(node.getName().toString()))
-                        .toList();
-                if (!candidates.isEmpty()) {
-                    ambiguous.add(new Ambiguous(caller,
-                            handle(candidates),
-                            candidates));
+        @Override
+        public Void visitVariable(VariableTree node, Void unused) {
+            // A String local's spelling scores where the variable is used:
+            // the declaration runs no statement. Calls in the initializer
+            // still evaluate here.
+            if (node.getInitializer() != null
+                    && "String".equals(String.valueOf(node.getType()))) {
+                String text = flatten(node.getInitializer(), constants);
+                if (!text.isEmpty()) {
+                    constants.put(node.getName().toString(), text);
+                    scanCalls(node.getInitializer());
+                    return null;
                 }
             }
-        }.scan(method.getBody(), null);
-        return events;
+            return super.visitVariable(node, unused);
+        }
+
+        @Override
+        public Void visitLambdaExpression(LambdaExpressionTree node,
+                Void unused) {
+            if (directArgumentLambdas.contains(node)) {
+                return super.visitLambdaExpression(node, unused);
+            }
+            // A lambda in any other position runs where it is invoked,
+            // which the parse cannot see: its events are held aside, and
+            // audit() folds the provably benign ones and fails closed on
+            // any that reach a side.
+            EventScanner held = new EventScanner(new ArrayList<>(), caller,
+                    methods, constants, ambiguous);
+            held.scan(node.getBody(), null);
+            heldLambdas.add(held.events);
+            return null;
+        }
+
+        @Override
+        public Void visitLiteral(LiteralTree node, Void unused) {
+            if (node.getValue() instanceof String text) {
+                addSpelling(text, events);
+            }
+            return null;
+        }
+
+        @Override
+        public Void visitIdentifier(IdentifierTree node, Void unused) {
+            String text = constants.get(node.getName().toString());
+            if (text != null) {
+                addSpelling(text, events);
+            }
+            return null;
+        }
+
+        // The calls and references inside an expression whose spelling was
+        // already scored: the SQL text is flattened once, but the member
+        // calls it embeds keep their own audit edges.
+        private void scanCalls(Tree node) {
+            new TreeScanner<Void, Void>() {
+                @Override
+                public Void visitMethodInvocation(MethodInvocationTree call,
+                        Void unused) {
+                    addCall(call);
+                    return super.visitMethodInvocation(call, unused);
+                }
+
+                @Override
+                public Void visitMemberReference(
+                        MemberReferenceTree reference, Void unused) {
+                    addReference(reference);
+                    return super.visitMemberReference(reference, unused);
+                }
+            }.scan(node, null);
+        }
+
+        private void addCall(MethodInvocationTree node) {
+            resolve(node.getMethodSelect(), node.getArguments().size(),
+                    caller, methods, ambiguous).forEach(key ->
+                    events.add(new Event(false, false, key)));
+        }
+
+        // A method reference is an invocation whose argument count is not
+        // spelled, so it can never resolve to one member: it is exempt when
+        // every same-named member is benign and throws otherwise.
+        private void addReference(MemberReferenceTree node) {
+            if (node.getName().contentEquals("<init>")) {
+                return;
+            }
+            List<Key> candidates = methods.keySet().stream()
+                    .filter(key -> key.name()
+                            .contentEquals(node.getName().toString()))
+                    .toList();
+            if (!candidates.isEmpty()) {
+                ambiguous.add(new Ambiguous(caller, handle(candidates),
+                        candidates));
+            }
+        }
     }
 
     // The same-file member an invocation resolves to, or the reference
@@ -1543,52 +1823,65 @@ class SessionRowLockOrderTest {
                 .collect(Collectors.joining("|"));
     }
 
-    private static void addSpelling(String lockText, String turnText,
-            List<Event> events) {
+    private static void addSpelling(String text, List<Event> events) {
         // SQL keywords are case-insensitive, so the spelling and the
         // needles fold once before matching: a lowercase `for update`
         // takes the same lock the canary exists to order.
-        String lockFolded = lockText.toLowerCase(Locale.ROOT);
-        String turnFolded = turnText.toLowerCase(Locale.ROOT);
-        boolean lock = lockFolded.contains("insert into " + SESSION_TABLE)
-                || lockFolded.contains("update " + SESSION_TABLE)
-                || (lockFolded.contains(SESSION_TABLE)
-                        && lockFolded.contains(
+        String folded = text.toLowerCase(Locale.ROOT);
+        boolean lock = folded.contains("insert into " + SESSION_TABLE)
+                || folded.contains("update " + SESSION_TABLE)
+                || (folded.contains(SESSION_TABLE)
+                        && folded.contains(
                                 LOCK_MODE.toLowerCase(Locale.ROOT)));
-        boolean turn = turnFolded.contains(TURN_TABLE);
+        boolean turn = folded.contains(TURN_TABLE);
         if (lock || turn) {
             events.add(new Event(lock, turn, null));
         }
     }
 
-    // The static text an expression can carry, per side: string literals,
-    // their concatenations, class constants and the branches of a
-    // conditional. The lock side takes only the text both branches carry;
-    // the turn side takes either branch. Dynamic parts contribute nothing,
-    // and a needle split across a literal boundary still lands in the
-    // joined text.
-    private static String flatten(Tree node, Map<String, String> constants,
-            boolean lockSide) {
+    // The static text an expression can carry: string literals, their
+    // concatenations, constants and every branch of a conditional or
+    // switch expression. Both sides take every branch — a lock taken on
+    // only some runs still orders the runs that take it, exactly like a
+    // turn access that executes under a flag. Dynamic parts contribute
+    // nothing, and a needle split across a literal boundary still lands in
+    // the joined text.
+    private static String flatten(Tree node, Map<String, String> constants) {
         if (node instanceof LiteralTree literal
                 && literal.getValue() instanceof String text) {
             return text;
         }
         if (node instanceof BinaryTree binary
                 && binary.getKind() == Tree.Kind.PLUS) {
-            return flatten(binary.getLeftOperand(), constants, lockSide)
-                    + flatten(binary.getRightOperand(), constants, lockSide);
+            return flatten(binary.getLeftOperand(), constants)
+                    + flatten(binary.getRightOperand(), constants);
         }
         if (node instanceof ParenthesizedTree parenthesized) {
-            return flatten(parenthesized.getExpression(), constants,
-                    lockSide);
+            return flatten(parenthesized.getExpression(), constants);
         }
         if (node instanceof ConditionalExpressionTree conditional) {
-            String whenTrue = flatten(conditional.getTrueExpression(),
-                    constants, lockSide);
-            String whenFalse = flatten(conditional.getFalseExpression(),
-                    constants, lockSide);
-            return lockSide ? commonText(whenTrue, whenFalse)
-                    : whenTrue + whenFalse;
+            return flatten(conditional.getTrueExpression(), constants)
+                    + flatten(conditional.getFalseExpression(), constants);
+        }
+        if (node instanceof SwitchExpressionTree switchExpression) {
+            StringBuilder text = new StringBuilder();
+            for (CaseTree branch : switchExpression.getCases()) {
+                Tree body = branch.getBody();
+                List<? extends StatementTree> statements =
+                        body instanceof BlockTree block
+                                ? block.getStatements()
+                                : branch.getStatements();
+                if (statements != null) {
+                    for (StatementTree statement : statements) {
+                        if (statement instanceof YieldTree yield) {
+                            text.append(flatten(yield.getValue(), constants));
+                        }
+                    }
+                } else if (body != null) {
+                    text.append(flatten(body, constants));
+                }
+            }
+            return text.toString();
         }
         if (node instanceof IdentifierTree identifier) {
             return constants.getOrDefault(identifier.getName().toString(),
@@ -1601,25 +1894,6 @@ class SessionRowLockOrderTest {
         return "";
     }
 
-    // The text present on every branch, as the shared prefix and suffix of
-    // the two flattened arms: `" FOR UPDATE"` against `""` shares nothing,
-    // so a conditional lock clause credits no unconditional lock.
-    private static String commonText(String whenTrue, String whenFalse) {
-        int prefix = 0;
-        int bound = Math.min(whenTrue.length(), whenFalse.length());
-        while (prefix < bound
-                && whenTrue.charAt(prefix) == whenFalse.charAt(prefix)) {
-            prefix++;
-        }
-        int suffix = 0;
-        while (suffix < bound - prefix
-                && whenTrue.charAt(whenTrue.length() - 1 - suffix)
-                        == whenFalse.charAt(whenFalse.length() - 1 - suffix)) {
-            suffix++;
-        }
-        return whenTrue.substring(0, prefix)
-                + whenTrue.substring(whenTrue.length() - suffix);
-    }
 
     // The bytecode's own member enumeration, recursively over the named
     // nested types and projected to owner#name/arity, for the harvest

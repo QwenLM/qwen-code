@@ -385,6 +385,8 @@ public class ManagedAgentService {
             admission = store.replayCommand(tenantId, SUBMIT,
                     idempotencyKey, requestDigest);
         }
+        requireReplayedAdmission(tenantId, SUBMIT, idempotencyKey, admission,
+                session, actorId);
         dispatch(tenantId, admission, session.workspace() != null);
         return response(admission);
     }
@@ -419,6 +421,8 @@ public class ManagedAgentService {
             admission = store.replayCommand(tenantId, CANCEL,
                     idempotencyKey, requestDigest);
         }
+        requireReplayedAdmission(tenantId, CANCEL, idempotencyKey, admission,
+                session, actorId);
         if (admission.commandEffect()) {
             coordinator.cancel(tenantId, admission.sessionId(),
                     admission.turnId());
@@ -1179,6 +1183,14 @@ public class ManagedAgentService {
         if (session.workspace() != null
                 && !workspaces.createdSession(session.tenantId(), actorId,
                         session.sessionId())) {
+            // Below the recorder/creator pass, so a recorded outcome still
+            // answers its own actors on a tombstone; every other actor
+            // meets the reads' 404 there, never the live-Session 409 that
+            // would name the row.
+            if ("DELETED".equals(session.status())) {
+                throw new ApiException(HttpStatus.NOT_FOUND,
+                        "session_not_found", "The Session was not found.");
+            }
             throw new ApiException(HttpStatus.CONFLICT,
                     "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
@@ -1306,6 +1318,16 @@ public class ManagedAgentService {
     private void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
         if (session.workspace() != null) {
+            // A tombstone is invisible to every actor shape, as the reads
+            // answer: the fence stands above the role split, whose 403/409
+            // codes are live-Session answers. An unbound tombstone needs no
+            // fence here — its 404 stands below the replay in
+            // beginSessionMutation, and a recorded lifecycle outcome must
+            // keep answering above it.
+            if ("DELETED".equals(session.status())) {
+                throw new ApiException(HttpStatus.NOT_FOUND,
+                        "session_not_found", "The Session was not found.");
+            }
             String workspaceId = session.workspace().getWorkspaceId();
             WorkspaceAccess access = workspaces.accessOf(session.tenantId(),
                     actorId, workspaceId);
@@ -1387,11 +1409,34 @@ public class ManagedAgentService {
     private Admission replayForCreator(String tenantId, String operation,
             String idempotencyKey, String requestDigest,
             SessionRecord session, String actorId) {
+        StoreModels.CommandRecord command = store.findCommand(tenantId,
+                operation, idempotencyKey).orElse(null);
+        if (command == null) {
+            return null;
+        }
+        if (!recordedByCaller(command, actorId)) {
+            requireReplayCreator(session, actorId);
+        }
+        return store.replayCommand(tenantId, operation, idempotencyKey,
+                requestDigest);
+    }
+
+    // The answer-side half of that gate. The pre-read can miss a key a
+    // racer recorded inside its still-open transaction; the in-store probe
+    // and the DuplicateKeyException arm then answer the recorded admission
+    // with no gate at all, so a replayed answer re-runs the check on the
+    // command row. The read stays a plain probe — never a locking one, so
+    // ManagedAgentStore's replay-probe rule still holds.
+    private void requireReplayedAdmission(String tenantId, String operation,
+            String idempotencyKey, Admission admission, SessionRecord session,
+            String actorId) {
+        if (!admission.replayed()) {
+            return;
+        }
         store.findCommand(tenantId, operation, idempotencyKey)
                 .filter(command -> !recordedByCaller(command, actorId))
                 .ifPresent(command -> requireReplayCreator(session,
                         actorId));
-        return replay(tenantId, operation, idempotencyKey, requestDigest);
     }
 
     // The recorder half of the replay admission: a V66 command row names

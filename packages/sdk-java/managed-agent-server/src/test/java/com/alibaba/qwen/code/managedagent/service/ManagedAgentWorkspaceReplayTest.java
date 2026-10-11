@@ -25,7 +25,14 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 import org.assertj.core.api.ThrowableAssert;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
@@ -45,6 +52,20 @@ class ManagedAgentWorkspaceReplayTest {
     private HarnessCoordinator coordinator;
 
     private ManagedAgentService service(AtomicBoolean files) {
+        return service(files, null);
+    }
+
+    // A one-shot gate on the Workspace-files probe both Turn routes run
+    // after the replay pre-read: while armed, the first caller to reach it
+    // parks until the test lets it through, so a race's pre-read provably
+    // precedes the recorder's commit.
+    private static final class RaceGate {
+        private final CountDownLatch parked = new CountDownLatch(1);
+        private final CountDownLatch through = new CountDownLatch(1);
+        private final AtomicBoolean armed = new AtomicBoolean(false);
+    }
+
+    private ManagedAgentService service(AtomicBoolean files, RaceGate gate) {
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector() {
                     @Override
@@ -54,6 +75,20 @@ class ManagedAgentWorkspaceReplayTest {
 
                     @Override
                     public boolean isWorkspaceFilesAvailable() {
+                        if (gate != null
+                                && gate.armed.compareAndSet(true, false)) {
+                            gate.parked.countDown();
+                            try {
+                                if (!gate.through.await(30,
+                                        TimeUnit.SECONDS)) {
+                                    throw new IllegalStateException(
+                                            "race release timed out");
+                                }
+                            } catch (InterruptedException error) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(error);
+                            }
+                        }
                         return files.get();
                     }
 
@@ -518,5 +553,180 @@ class ManagedAgentWorkspaceReplayTest {
                         .isInstanceOfSatisfying(ApiException.class, error ->
                                 assertThat(error.getCode())
                                         .isEqualTo("workspace_unavailable")));
+    }
+
+    // The tombstone fence stands above the role and replay gates: a
+    // deleted bound Session answers the reads' 404 — never the
+    // live-Session 403 or 409 — to a reader with a fresh key and to a
+    // non-recorder OPERATOR reusing a recorded key, while the recorder's
+    // own retry still answers the recorded outcome.
+    @Test
+    void aDeletedBoundSessionAnswers404AboveTheRoleAndReplayGates() {
+        freshDatabase();
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        // actor-r can read the Workspace but is below OPERATOR; actor-c
+        // holds OPERATOR but never records a key.
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
+                        + " ?, 'READER')",
+                tenant, "actor-r".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
+                        + " ?, 'OPERATOR')",
+                tenant, "actor-c".getBytes(StandardCharsets.UTF_8));
+        ManagedAgentService service = service(new AtomicBoolean(true));
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+
+        String turnId = transaction.execute(status -> service.submitTurn(
+                tenant, "actor-a", "submit", sessionId, input).turnId());
+        transaction.executeWithoutResult(status -> service.cancelTurn(tenant,
+                "actor-a", "cancel", sessionId, turnId));
+        // The live-Session refusals, pinned so the tombstone codes below
+        // are measured against them.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.submitTurn(tenant, "actor-r",
+                        "reader-live", sessionId, input))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode()).isEqualTo(
+                                        "session_operation_forbidden")));
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.submitTurn(tenant, "actor-c",
+                        "submit", sessionId, input))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("workspace_unavailable")));
+        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
+                        + " deleted_at = 1, updated_at = 1, version ="
+                        + " version + 1 WHERE tenant_id = ? AND session_id"
+                        + " = ?",
+                tenant, sessionId);
+
+        // A fresh key from the reader meets 404, not the role gate's 403.
+        assertNotFound(() -> service.submitTurn(tenant, "actor-r",
+                "reader-submit", sessionId, input));
+        assertNotFound(() -> service.cancelTurn(tenant, "actor-r",
+                "reader-cancel", sessionId, turnId));
+        // A recorded key answers the non-recorder OPERATOR 404, not the
+        // creator gate's 409.
+        assertNotFound(() -> service.submitTurn(tenant, "actor-c", "submit",
+                sessionId, input));
+        assertNotFound(() -> service.cancelTurn(tenant, "actor-c", "cancel",
+                sessionId, turnId));
+        // The recorder's own retries still answer the recorded outcome.
+        transaction.executeWithoutResult(status -> assertThat(
+                service.submitTurn(tenant, "actor-a", "submit", sessionId,
+                        input).replayed()).isTrue());
+        transaction.executeWithoutResult(status -> assertThat(
+                service.cancelTurn(tenant, "actor-a", "cancel", sessionId,
+                        turnId).replayed()).isTrue());
+    }
+
+    // The answer side of the recorder/creator gate: the pre-read can miss
+    // a key the recorder holds in a still-open transaction, and the
+    // in-store probe or the duplicate-key arm then answers the recorded
+    // admission ungated. A non-creator OPERATOR losing that race must be
+    // refused — the recorded outcome answers only to the actor who
+    // recorded it and to the Session's creator.
+    @Test
+    void aRecordedAdmissionRacedByANonCreatorOperatorIsRefused()
+            throws Exception {
+        freshDatabase();
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
+                        + " ?, 'OPERATOR')",
+                tenant, "actor-c".getBytes(StandardCharsets.UTF_8));
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        RaceGate submitGate = new RaceGate();
+        RaceGate cancelGate = new RaceGate();
+        // One gate per race: each race's service parks its racer on the
+        // gate that race arms.
+        ManagedAgentService submitService = service(
+                new AtomicBoolean(true), submitGate);
+        ManagedAgentService cancelService = service(
+                new AtomicBoolean(true), cancelGate);
+        // The submit race's recorded Turn is the cancel race's target.
+        AtomicReference<String> racedTurn = new AtomicReference<>();
+        try {
+            Object submitAnswer = raceSecondCaller(threads, submitGate,
+                    () -> {
+                        var admission = submitService.submitTurn(tenant,
+                                "actor-a", "submit-race", sessionId, input);
+                        assertThat(admission.replayed()).isFalse();
+                        racedTurn.set(admission.turnId());
+                        return admission;
+                    },
+                    () -> submitService.submitTurn(tenant, "actor-c",
+                            "submit-race", sessionId, input));
+            assertThat(submitAnswer).isInstanceOfSatisfying(
+                    ApiException.class, error -> assertThat(error.getCode())
+                            .isEqualTo("workspace_unavailable"));
+
+            Object cancelAnswer = raceSecondCaller(threads, cancelGate,
+                    () -> {
+                        var admission = cancelService.cancelTurn(tenant,
+                                "actor-a", "cancel-race", sessionId,
+                                racedTurn.get());
+                        assertThat(admission.replayed()).isFalse();
+                        return admission;
+                    },
+                    () -> cancelService.cancelTurn(tenant, "actor-c",
+                            "cancel-race", sessionId, racedTurn.get()));
+            assertThat(cancelAnswer).isInstanceOfSatisfying(
+                    ApiException.class, error -> assertThat(error.getCode())
+                            .isEqualTo("workspace_unavailable"));
+        } finally {
+            submitGate.through.countDown();
+            cancelGate.through.countDown();
+            threads.shutdownNow();
+        }
+    }
+
+    // Runs the recorder inside a transaction it holds open after the write,
+    // then lets the racer — parked on the files probe, its replay pre-read
+    // already done — through only once the recorder has committed. The
+    // racer's insert therefore meets the committed key with no chance for
+    // the pre-read gate to have seen it.
+    private Object raceSecondCaller(ExecutorService threads, RaceGate gate,
+            Supplier<Object> recorder, Supplier<Object> racer)
+            throws Exception {
+        CountDownLatch recorded = new CountDownLatch(1);
+        CountDownLatch commit = new CountDownLatch(1);
+        Future<?> recorderDone = threads.submit(() -> {
+            transaction.executeWithoutResult(status -> {
+                recorder.get();
+                recorded.countDown();
+                try {
+                    if (!commit.await(30, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("commit timed out");
+                    }
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(error);
+                }
+            });
+        });
+        try {
+            assertThat(recorded.await(30, TimeUnit.SECONDS)).isTrue();
+            gate.armed.set(true);
+            Future<Object> racerDone = threads.submit(() -> {
+                try {
+                    return transaction.execute(status -> racer.get());
+                } catch (ApiException error) {
+                    return error;
+                }
+            });
+            assertThat(gate.parked.await(30, TimeUnit.SECONDS)).isTrue();
+            commit.countDown();
+            recorderDone.get(30, TimeUnit.SECONDS);
+            gate.through.countDown();
+            return racerDone.get(30, TimeUnit.SECONDS);
+        } finally {
+            commit.countDown();
+            gate.through.countDown();
+        }
     }
 }
