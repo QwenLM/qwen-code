@@ -1881,6 +1881,111 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
+  it('answers a mixed batch per item: the fenced execution unknown, the witnessed stop cancelled', async () => {
+    // R11-2: the abandoned-call tail's per-item discrimination has no
+    // other mixed-batch witness — flattening it to a batch-level flag
+    // would certify "could not be observed" for a stop that WAS
+    // witnessed, the inverse of the harm this PR exists to fix.
+    await parkAtAwaitRuntime('write_file', false, false, true, 'exec-2');
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      async (executionCallId) =>
+        ({
+          state: executionCallId === EXECUTION_ID ? 'abandoned' : 'settled',
+        }) as never,
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      // The assistant's durable functionCalls the parked checkpoint points
+      // at: the tail re-derives what the dead Turn owes from the journal.
+      await replacement.sink.write({
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'hosted-harness/1',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'assistant',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'write_file',
+                args: { file_path: '0.txt', content: 'x' },
+              },
+            },
+            {
+              functionCall: {
+                id: 'call-2',
+                name: 'write_file',
+                args: { file_path: '1.txt', content: 'x' },
+              },
+            },
+          ],
+        },
+      });
+      const original =
+        LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+      let authorizationReads = 0;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'harnessRunAuthorization',
+      ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+        authorizationReads += 1;
+        const verdict = await original.call(this);
+        // The settle's own re-read: the checkpoint moved to a different
+        // Turn during the stop, so the settle journaled nothing and the
+        // tail owes both calls.
+        if (authorizationReads === 3 && verdict.status === 'runnable')
+          return {
+            ...verdict,
+            checkpoint: {
+              ...verdict.checkpoint,
+              identity: {
+                ...verdict.checkpoint.identity,
+                turnId: '44444444-4444-4444-8444-444444444444',
+              },
+            },
+          };
+        return verdict;
+      });
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(2);
+      const byCall = new Map(
+        journaled
+          .flatMap((entry) => entry.message?.parts ?? [])
+          .map((part) => [
+            part.functionResponse?.id,
+            part.functionResponse?.response as
+              | Record<string, unknown>
+              | undefined,
+          ]),
+      );
+      const fenced = byCall.get('call-1');
+      expect(fenced?.['executionStatus']).toBe('unknown');
+      expect(String(fenced?.['error'])).toContain('could not be observed');
+      const witnessed = byCall.get('call-2');
+      expect(witnessed?.['executionStatus']).toBe('cancelled');
+      expect(String(witnessed?.['error'])).toContain('The tool call never ran');
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it.each([
     { message: 'Session Store answered 503', errorClass: Error },
     { message: undefined, errorClass: RecoveryDeclined },

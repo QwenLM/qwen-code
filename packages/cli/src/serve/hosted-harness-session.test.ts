@@ -2767,6 +2767,210 @@ describe('Hosted Harness no-tool session', () => {
     }
   });
 
+  it('keeps a crashed wake turn unsettled while its settle cannot verify the park', async () => {
+    // R11-1: the stop proves cleanly, but the settle's own authorization
+    // re-read faults transiently — a retry-inviting refusal the aftermath
+    // must answer 'pending' with, never a terminal record over parked
+    // executions the settle journaled nothing for.
+    const inputId = await prewriteAutomationParkedWakeSession();
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      }),
+    });
+    try {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'binding',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        },
+      );
+      // The aftermath's own read and the stop's read pass; every read
+      // behind the stop's first Broker poll — the settle's own re-read —
+      // faults into an erased verdict.
+      let blockSettleReads = false;
+      const original =
+        LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'harnessRunAuthorization',
+      ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+        if (blockSettleReads)
+          return {
+            status: 'blocked',
+            reason: 'missing_state',
+            message: 'Session Store answered 503',
+          } as never;
+        return original.call(this);
+      });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+        async () => {
+          blockSettleReads = true;
+          return { state: 'settled' } as never;
+        },
+      );
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      const session = {
+        managed,
+        automations: new HostedAutomationSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          key,
+        ),
+      } as never;
+      const aftermath = await settleCrashedWakeTurnAftermath({
+        session,
+        sessionId: SESSION_ID,
+        cwd: state.root,
+        brokerOptions: { token: 'test', baseUrl: 'http://127.0.0.1:1' },
+        turnId: inputId,
+      });
+      expect(aftermath).toBe('pending');
+      // No terminal record over a park the settle could not verify, and
+      // the lease stays for the retry that can.
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        key,
+      );
+      expect(
+        journal.events.some(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === inputId,
+        ),
+      ).toBe(false);
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  });
+
+  it('carries an unobserved stop across aftermath retries, never certifying it witnessed', async () => {
+    // R10-1: a stop that throws after counting the fenced execution must
+    // hand the id to the pump's retry — the reclaimed record reads as
+    // already-stopped there, and a fresh per-pass carry would let the
+    // settle journal a cancellation nobody witnessed.
+    const inputId = await prewriteAutomationParkedWakeSession();
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      }),
+    });
+    try {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'binding',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        },
+      );
+      // Pass 1's pre-cancel read faults after the id is counted; by pass 2
+      // the Broker has reclaimed the record, which is no witness.
+      let statusCalls = 0;
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+        async () => {
+          statusCalls += 1;
+          if (statusCalls === 1)
+            throw new TypeError('Runtime Broker status lost to a 503');
+          return undefined as never;
+        },
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      const session = {
+        managed,
+        automations: new HostedAutomationSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          key,
+        ),
+      } as never;
+      const first = await settleCrashedWakeTurnAftermath({
+        session,
+        sessionId: SESSION_ID,
+        cwd: state.root,
+        brokerOptions: { token: 'test', baseUrl: 'http://127.0.0.1:1' },
+        turnId: inputId,
+      });
+      expect(first).toBe('pending');
+      const second = await settleCrashedWakeTurnAftermath({
+        session,
+        sessionId: SESSION_ID,
+        cwd: state.root,
+        brokerOptions: { token: 'test', baseUrl: 'http://127.0.0.1:1' },
+        turnId: inputId,
+      });
+      expect(second).toBe('settled');
+      const toolResults = (await managed.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === inputId && entry.type === 'tool_result',
+      );
+      expect(toolResults).toHaveLength(1);
+      const response = toolResults[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+      // The durable settle discharged the carry; it must not outlive the
+      // Turn.
+      const carried = (
+        session as unknown as { recoveryUnobserved?: Map<string, Set<string>> }
+      ).recoveryUnobserved;
+      expect(carried?.has(inputId) ?? false).toBe(false);
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  });
+
   it('refuses a prompt retriably when the wake park probe read nothing', async () => {
     await prewriteAutomationParkedWakeSession();
     const repair = mockRepairBroker();

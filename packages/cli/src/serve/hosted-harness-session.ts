@@ -809,9 +809,12 @@ export async function settleCrashedWakeTurnAftermath(params: {
           // The same cross-retry honesty carry the takeover cancel drive
           // keeps: a stop that counted unobserved ids must hand them to the
           // settle, or a reclaimed record certifies as a witnessed
-          // cancellation. Owned here — outside the adopt block and the
-          // transcript retry loop — so a compensating retry still sees them.
-          const carried = new Set<string>();
+          // cancellation. Owned on the Session — a stop that throws after
+          // counting is this channel's retry channel, and a per-pass local
+          // would let the next pass certify the stop nobody observed.
+          const carried = new Set<string>(
+            session.recoveryUnobserved?.get(turnId),
+          );
           try {
             // A parked crash on a replacement Broker owns nothing until
             // adopted: status queries answer 404
@@ -846,13 +849,21 @@ export async function settleCrashedWakeTurnAftermath(params: {
             // that can never answer. Skip it; the 409-aware release
             // block below still completes what the lease owes.
             if (adopted) {
-              const stopped = await stopParkedRuntimeExecutions({
-                session: session.managed,
-                promptId: turnId,
-                brokerOptions,
-                carryUnobservedInto: carried,
-              });
-              broker = stopped.broker;
+              try {
+                const stopped = await stopParkedRuntimeExecutions({
+                  session: session.managed,
+                  promptId: turnId,
+                  brokerOptions,
+                  carryUnobservedInto: carried,
+                });
+                broker = stopped.broker;
+              } finally {
+                if (carried.size > 0)
+                  (session.recoveryUnobserved ??= new Map()).set(
+                    turnId,
+                    carried,
+                  );
+              }
             }
           } catch (cause) {
             // A decline is deterministic evidence read from the journal
@@ -873,13 +884,21 @@ export async function settleCrashedWakeTurnAftermath(params: {
           // with an unconsumed input.
           for (let attempt = 0; attempt < 3; attempt += 1) {
             try {
-              await settleParkedTurnCancelled({
+              const settleOutcome = await settleParkedTurnCancelled({
                 session: session.managed,
                 sessionId,
                 cwd,
                 promptId: turnId,
                 unobserved: carried,
               });
+              // A settle that could not verify the park journaled nothing:
+              // the release and the terminal record must not build on it —
+              // the throw reaches the function catch, which answers
+              // 'pending' for the retry.
+              if (settleOutcome === 'not-runnable')
+                throw new Error(
+                  'Wake crash aftermath cannot verify the park (authorization not runnable).',
+                );
               break;
             } catch (cause) {
               if (!(cause instanceof SessionTranscriptChangedError))
@@ -968,6 +987,9 @@ export async function settleCrashedWakeTurnAftermath(params: {
         await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
       }
     }
+    // The settle journaled durably, so retries re-derive the outcomes from
+    // the journal and the carry has no more work.
+    session.recoveryUnobserved?.delete(turnId);
     return 'settled';
   } catch (cause) {
     writeStderrLineSafe(
