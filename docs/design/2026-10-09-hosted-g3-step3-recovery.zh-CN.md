@@ -118,6 +118,8 @@ prepare reference/key。恢复选择该 revision，而非最初审批 descriptor
 `continuationRef` 是私有恢复数据，不作为公开 Action 字段返回。Java Action
 projector 和 TS options reader 都必须先支持 v1/v2/v3，writer 才能输出 v3。
 
+发布前将序列化后的审批计划和最终批次计划与 Store 的 64 KiB 内联资源上限比较。计划超限时省略该恢复资源，沿用 v1/v2 options，维持普通存活进程的审批和执行。这种审批不具备新增的 continuation 恢复保证。能容纳的计划如果发布到 Store 失败，仍须阻塞，不能按大小超限降级。
+
 ### 4.2 恢复 driver，再服从持久化竞争结果
 
 1. 获取新 writer activation，恢复准确的 Session/profile、原 Runtime owner 与

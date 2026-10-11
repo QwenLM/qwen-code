@@ -134,6 +134,8 @@ recovery data and is never returned as a public Action field. Both the Java
 Action projector and TS options reader must support v1/v2/v3 before a writer
 emits v3.
 
+Measure the serialized approval and final batch plans before publication against the Store's 64 KiB inline resource limit. If a plan is oversized, omit that recovery resource and keep ordinary live approval and execution working with the existing v1/v2 options. Such an approval has no new continuation recovery guarantee. A Store publication failure for a fitting plan still blocks; it is not a size fallback.
+
 ### 4.2 Restore a driver, then honor the durable winner
 
 1. Acquire the new writer activation and restore the exact Session/profile,

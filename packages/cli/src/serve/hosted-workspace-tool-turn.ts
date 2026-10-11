@@ -1734,9 +1734,15 @@ export class HostedWorkspaceToolTurn {
       actionId,
       calls,
     };
+    const planBytes = Buffer.from(JSON.stringify(plan));
+    if (
+      planBytes.byteLength >
+      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+    )
+      return undefined;
     const planRef = await this.session.resources.publish(
       'hosted-approval-continuation',
-      Buffer.from(JSON.stringify(plan)),
+      planBytes,
     );
     if (stage === 'final') {
       const activation = this.session.activation;
