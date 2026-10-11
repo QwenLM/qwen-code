@@ -6980,6 +6980,98 @@ describe('Hosted Harness no-tool session', () => {
     expect(release.mock.calls[1]).toEqual([{ drain: true }]);
   });
 
+  it('closes a Session whose held Runtime is already gone (#13856 R1-1)', async () => {
+    // The held turn's Runtime is already gone by the close: the drain's 404
+    // names nothing left to stop, so the close tolerates it and answers 204
+    // rather than wedging on a 503 over a Session that can never close.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+      randomUUID(),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+      error: { message: 'not run' },
+    });
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+    );
+    release.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(404, 'runtime_session_not_found'),
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'registerPublisher',
+    ).mockResolvedValue('1');
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'run_shell_command',
+        callId: 'shell',
+        args: { command: 'printf hello' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: {
+              id: call.callId,
+              name: call.name,
+              args: call.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      await toolTurn!.consumeResults();
+      return { text: 'done', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'run command' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        )
+      ).status,
+    ).toBe(204);
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(release.mock.calls[1]).toEqual([{ drain: true }]);
+  });
+
   type DetachedFamily = 'child_run' | 'monitor_run';
 
   async function prewriteDetachedOutput(
