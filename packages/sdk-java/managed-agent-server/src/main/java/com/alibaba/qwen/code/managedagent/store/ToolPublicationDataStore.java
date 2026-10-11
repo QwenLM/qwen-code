@@ -418,8 +418,15 @@ public final class ToolPublicationDataStore {
                             authorization.binding().path("sessionKey"), inputs, Math.max(0, current.getTime() - created.getTime()));
                 });
             } catch (RuntimeException error) {
-                processed |= deferOrFailUnclaimedVerification(scope, publicationId, operationId,
-                        ((Number) candidate.get("claim_epoch")).longValue(), error);
+                try {
+                    processed |= deferOrFailUnclaimedVerification(scope, publicationId, operationId,
+                            ((Number) candidate.get("claim_epoch")).longValue(), error);
+                } catch (RuntimeException handling) {
+                    LOG.warn("Tool publication verification handling failed scope={} operation={}",
+                            scope, operationId, handling);
+                    skipPoisonCandidate(scope, publicationId, operationId);
+                    processed = true;
+                }
                 continue;
             }
             if (task == null) {
@@ -433,7 +440,13 @@ public final class ToolPublicationDataStore {
                         operationId, task.queueMillis(),
                         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
             } catch (RuntimeException error) {
-                deferOrFailVerification(task, error);
+                try {
+                    deferOrFailVerification(task, error);
+                } catch (RuntimeException handling) {
+                    LOG.warn("Tool publication verification handling failed scope={} operation={}",
+                            task.scope(), task.operationId(), handling);
+                    skipPoisonCandidate(task.scope(), task.publicationId(), task.operationId());
+                }
             } finally {
                 verificationTask.remove();
             }
@@ -538,7 +551,8 @@ public final class ToolPublicationDataStore {
 
     private boolean deferOrFailUnclaimedVerification(String scope, String publicationId, String operationId,
             long epoch, RuntimeException error) {
-        return Boolean.TRUE.equals(transactions.execute(status -> {
+        String[] releasedObject = new String[1];
+        boolean handled = Boolean.TRUE.equals(transactions.execute(status -> {
             retention.lockRetainedPublication(scope, publicationId);
             var rows = operation(scope, publicationId, operationId, true);
             Timestamp current = now();
@@ -559,38 +573,41 @@ public final class ToolPublicationDataStore {
             }
             ApiException failure = permanentVerificationFailure(error);
             if (failure != null) {
-                recordVerificationFailure(scope, publicationId, operationId, failure);
+                releasedObject[0] = recordVerificationFailure(scope, publicationId, operationId, failure);
             } else {
                 deferVerification(scope, publicationId, operationId, current, rows.getFirst().deadline(), error);
             }
             return true;
         }));
+        deleteReleasedObject(releasedObject[0]);
+        return handled;
     }
 
     private void deferOrFailVerification(VerificationTask task, RuntimeException error) {
-        transactions.executeWithoutResult(status -> {
+        String objectKey = transactions.execute(status -> {
             retention.lockRetainedPublication(task.scope(), task.publicationId());
             var rows = operation(task.scope(), task.publicationId(), task.operationId(), true);
             Timestamp current = now();
             if (rows.size() != 1 || !"PENDING".equals(rows.getFirst().state())
                     || rows.getFirst().epoch() != task.epoch()) {
-                return;
+                return null;
             }
             if (!rows.getFirst().deadline().after(current)) {
                 expireVerification(task.scope(), task.publicationId(), task.operationId());
-                return;
+                return null;
             }
             boolean liveClaim = rows.getFirst().claimUntil() != null && rows.getFirst().claimUntil().after(current);
             ApiException failure = permanentVerificationFailure(error);
             if (liveClaim && failure != null && !List.of("managed_tool_publication_busy", "managed_tool_publication_claim_lost",
                     "managed_tool_publication_claim_expired", "managed_tool_publication_operation_expired")
                     .contains(failure.getCode())) {
-                recordVerificationFailure(task.scope(), task.publicationId(), task.operationId(), failure);
-            } else {
-                deferVerification(task.scope(), task.publicationId(), task.operationId(), current,
-                        rows.getFirst().deadline(), error);
+                return recordVerificationFailure(task.scope(), task.publicationId(), task.operationId(), failure);
             }
+            deferVerification(task.scope(), task.publicationId(), task.operationId(), current,
+                    rows.getFirst().deadline(), error);
+            return null;
         });
+        deleteReleasedObject(objectKey);
     }
 
     private void deferVerification(String scope, String publicationId, String operationId,
@@ -602,23 +619,41 @@ public final class ToolPublicationDataStore {
                 scope, operationId, error.getClass().getSimpleName());
     }
 
-    private void recordVerificationFailure(String scope, String publicationId, String operationId, ApiException failure) {
+    private String recordVerificationFailure(String scope, String publicationId, String operationId, ApiException failure) {
         jdbc.update("UPDATE qwen_tool_publication_operation SET state = 'FAILED', failure_status = ?, failure_code = ?,"
                         + " claim_owner = NULL, claim_until = NULL, verification_next_at = NULL"
                         + " WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
                 failure.getStatus().value(), failure.getCode(), scope, publicationId, operationId);
         jdbc.update("UPDATE qwen_tool_publication SET active_operation_id = NULL WHERE scope_key = ?"
                 + " AND publication_id = ? AND active_operation_id = ?", scope, publicationId, operationId);
-        releaseFailedFinish(scope, publicationId, operationId);
+        String objectKey = releaseFailedFinish(scope, publicationId, operationId);
         LOG.info("Tool publication verification failed operation={} code={}", operationId, failure.getCode());
+        return objectKey;
     }
 
-    private void releaseFailedFinish(String scope, String publicationId, String operationId) {
+    private void skipPoisonCandidate(String scope, String publicationId, String operationId) {
+        try {
+            transactions.executeWithoutResult(status -> jdbc.update("UPDATE qwen_tool_publication_operation"
+                    + " SET verification_next_at = ? WHERE scope_key = ? AND publication_id = ?"
+                    + " AND operation_id = ? AND state = 'PENDING'",
+                    new Timestamp(now().getTime() + 1000), scope, publicationId, operationId));
+        } catch (RuntimeException error) {
+            LOG.warn("Tool publication verification skip failed operation={}", operationId, error);
+        }
+    }
+
+    private void deleteReleasedObject(String objectKey) {
+        if (objectKey != null) {
+            objects.deleteIfPresent(objectKey);
+        }
+    }
+
+    private String releaseFailedFinish(String scope, String publicationId, String operationId) {
         Integer finishing = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication"
                 + " WHERE scope_key = ? AND publication_id = ? AND producer_phase = 'FINISHING'"
                 + " AND finish_operation_id = ?", Integer.class, scope, publicationId, operationId);
         if (finishing == null || finishing == 0) {
-            return;
+            return null;
         }
         var terminal = jdbc.queryForList("SELECT byte_length, object_key FROM qwen_tool_publication_object"
                 + " WHERE scope_key = ? AND publication_id = ? AND slot_key = 'terminal' AND operation_id = ?",
@@ -638,9 +673,7 @@ public final class ToolPublicationDataStore {
                         + " ELSE 0 END WHERE scope_key = ? AND publication_id = ?"
                         + " AND producer_phase = 'FINISHING' AND finish_operation_id = ?",
                 rollback, rollback, scope, publicationId, operationId);
-        if (objectKey != null) {
-            objects.deleteIfPresent(objectKey);
-        }
+        return objectKey;
     }
 
     private void expireVerification(String scope, String publicationId, String operationId) {
