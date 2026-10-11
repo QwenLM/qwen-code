@@ -97,12 +97,6 @@ export interface HostedTeamStore {
 /** A model-facing refusal: the call answers with it and commits nothing. */
 export class HostedTeamRefusal extends Error {}
 
-export type HostedTeamMemberState =
-  | 'running'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
-
 /** The Legacy board tools' schema bounds, in characters. */
 const SUBJECT_CHARS = 200;
 const DESCRIPTION_CHARS = 10_000;
@@ -173,7 +167,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_update',
     description:
-      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader", a member that is still running, or a member you gave work with send_message earlier in this turn; a member that has finished can otherwise be set as the owner only of a completed task, and a task whose owner has ended moves to another open status only with a new owner. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update: to give a member new work, send_message it the work by name first, then update the task in the same turn.',
+      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader", a member that is still running, or a member you gave work with send_message earlier in this turn; any other member that has finished can be the owner only of a completed task, so a task whose owner has finished moves to another open status only with a new owner or new work sent first. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update: to give a member new work, send_message it the work by name first, then update the task in the same turn.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -228,7 +222,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_list',
     description:
-      'List the team board, optionally filtered, followed by each member with the state of its newest run (and why a failed or cancelled run ended), its task id while it can still take work, and a continuation that never started. Address a member with send_message to its name.',
+      'List the team board, optionally filtered, followed by each member with the state of its newest started run (and why a failed or cancelled run ended), its task id while it can still take work, and a newer continuation that never started. Address a member with send_message to its name.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -406,14 +400,6 @@ export function hostedTeamMembership(
   return membershipAmong(teams, childRunId, () => true);
 }
 
-/** The same entry, among the teams not yet deleted. */
-export function hostedOpenTeamMembership(
-  teams: ReadonlyArray<{ readonly record: unknown }>,
-  childRunId: string,
-): HostedTeamMembership | undefined {
-  return membershipAmong(teams, childRunId, isOpenTeam);
-}
-
 function membershipAmong(
   teams: ReadonlyArray<{ readonly record: unknown }>,
   childRunId: string,
@@ -427,15 +413,6 @@ function membershipAmong(
       return { teamId: team.teamId, teamName: team.name, name: member.name };
   }
   return undefined;
-}
-
-function memberRunState(
-  child: ChildSessionRun | undefined,
-): HostedTeamMemberState {
-  if (child?.run.state === 'settled') return 'completed';
-  if (child?.run.state === 'failed' || child?.run.state === 'cancelled')
-    return child.run.state;
-  return 'running';
 }
 
 export class HostedTeamSession {
@@ -467,18 +444,17 @@ export class HostedTeamSession {
     );
   }
 
-  /** A member's liveness: the state of its child run. */
-  memberState(childRunId: string): HostedTeamMemberState {
-    return memberRunState(this.childRun(childRunId));
-  }
-
   /**
    * H4e-b2 decision 2: a member read through its continuation chain. The
    * roster entry names the chain's first run; the member is the chain's
    * head, the newest continuation that did not prove it never started.
+   * A caller reading several members passes one index for all of them.
    */
-  memberView(rootChildRunId: string): HostedMemberView {
-    return hostedMemberView(this.chains(), rootChildRunId);
+  memberView(
+    rootChildRunId: string,
+    chains: HostedChildChains = this.chains(),
+  ): HostedMemberView {
+    return hostedMemberView(chains, rootChildRunId);
   }
 
   /**
@@ -519,7 +495,11 @@ export class HostedTeamSession {
     toolName: string,
     args: Record<string, unknown>,
     callKey: string,
-    /** H4e-b2: the current Turn's call-key prefix, `${promptKey}:`. */
+    /**
+     * H4e-b2 decision 7: the current Turn's call-key prefix,
+     * `${promptKey}:`. The tool turn, the one production caller, always
+     * passes it; a caller outside a model Turn has no work given in one.
+     */
     turnPrefix?: string,
   ): Promise<string> {
     return this.serial(() => {
@@ -953,12 +933,13 @@ export class HostedTeamSession {
           (open.length > 0 ? ` (blocked by ${open.join(', ')})` : '')
         );
       });
+    const chains = this.chains();
     return [
       ...(lines.length > 0 ? lines : ['No tasks found.']),
       '',
       `--- Team "${team.name}" members ---`,
       ...(team.members.length > 0
-        ? team.members.map((member) => this.rosterLine(member))
+        ? team.members.map((member) => this.rosterLine(member, chains))
         : ['No members yet.']),
     ].join('\n');
   }
@@ -973,11 +954,11 @@ export class HostedTeamSession {
    * sends no notification, so this line is how the lead learns of it — but
    * not its own task id: a send to that ended run would be refused.
    */
-  private rosterLine(member: {
-    readonly name: string;
-    readonly childRunId: string;
-  }): string {
-    const view = this.memberView(member.childRunId);
+  private rosterLine(
+    member: { readonly name: string; readonly childRunId: string },
+    chains: HostedChildChains,
+  ): string {
+    const view = this.memberView(member.childRunId, chains);
     const head = view.head;
     const label = view.stopping
       ? 'running (stopping)'
@@ -1087,6 +1068,13 @@ export class HostedTeamSession {
       );
     }
     if (view.state === 'running' || completing) return;
+    // The head's newest continuation never started, so the newest work
+    // sent to the member did not arrive, whatever an earlier send of this
+    // Turn gave: no later started run exists, or it would be the head.
+    if (view.neverStarted !== undefined)
+      throw new HostedTeamRefusal(
+        `${who(`has finished, and its latest continuation never started (${neverStartedReason(view.neverStarted)})`)}, so the work that continuation carried did not arrive. Send that work again with send_message to "${owner}", then update the task in the same turn${unassign}.`,
+      );
     if (
       turnPrefix !== undefined &&
       givenWorkThisTurn(
@@ -1099,10 +1087,6 @@ export class HostedTeamSession {
       )
     )
       return;
-    if (view.neverStarted !== undefined)
-      throw new HostedTeamRefusal(
-        `${who(`has finished, and its latest continuation never started (${neverStartedReason(view.neverStarted)})`)}, so the work that continuation carried did not arrive. Send that work again with send_message to "${owner}", then update the task in the same turn${unassign}.`,
-      );
     throw new HostedTeamRefusal(
       `${who('has finished')}. If it already did this task's work, from its launch prompt or a message you sent it, set status "completed" with this owner once its report is in. Otherwise give it the work with send_message to "${owner}" first, which continues it, and then update the task in the same turn${unassign}.`,
     );

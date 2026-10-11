@@ -273,8 +273,12 @@ export function outboundChildMessages(
  * Decision 7: whether an earlier call of the current Turn gave the member
  * work — a continuation of its chain that did not prove it never started,
  * or a message to one of its started runs that was not cancelled or
- * rejected. Both
- * name their sending call's key, which carries the Turn's prompt key.
+ * rejected. Both name their sending call's key, so the lead's records
+ * decide it: a key belongs to the Turn when it starts with `turnPrefix`,
+ * `${promptKey}:`. A prefix match is exact because no other Turn's prompt
+ * key extends this one past a colon: a wake turn's `:accept:notify`
+ * prompt id collapses to a digest (`hostedPromptKey`), and every other
+ * prompt id is assigned whole.
  */
 export function givenWorkThisTurn(
   chains: HostedChildChains,

@@ -93,7 +93,7 @@ H4e-b1 设计把 H4e-b2 规划为五个部分,并启用 `team_message`:
      - `running`,请求停止后读作 `running (stopping)`;
      - `completed`;请求停止后才结算的链头读作 `completed (stop requested)`,路由拒绝续跑它;
      - `failed` 或 `cancelled`,附停止原因。
-   - **名册视图。** `task_list` 显示该状态;只要成员还能接收工作(运行中或可续跑),就同时显示链头的 task id。若链头最新的续跑(即最后提交的那个)从未启动,该行还会写出原因,以及随它一起被取消的消息条数(H4d-b 会取消其任务未经准入就结束的消息)。例如:`alpha: completed — task_r1 (its latest continuation never started: creation_failed; 1 message to it cancelled)`。该行不显示那个续跑的 task id:发给它的消息会从那个已结束的 run 开始路由,并被拒绝。失败或被取消的 child 不发送通知,所以 lead 正是通过这一行得知新工作没有到达成员,这与 H4e-b1 决策 6 让名册视图承担失败可见性的用意一致。
+   - **名册视图。** `task_list` 显示该状态;只要成员还能接收工作(运行中或可续跑),就同时显示链头的 task id。若链头最新的续跑(即最后提交的那个)从未启动,该行还会写出原因,以及发给它的消息中有多少条从未到达(H4d-b 会取消发往交接前就已结束的 run 的消息)。例如:`alpha: completed — task_r1 (its latest continuation never started: creation_failed; 1 message to it never arrived)`。该行不显示那个续跑的 task id:发给它的消息会从那个已结束的 run 开始路由,并被拒绝。失败或被取消的 child 不发送通知,所以 lead 正是通过这一行得知新工作没有到达成员,这与 H4e-b1 决策 6 让名册视图承担失败可见性的用意一致。
    - **读取状态的地方。**
      - 任一链头仍在运行时,`team_delete` 拒绝。
      - owner 规则也读取链头(决策 7)。在那里,正在停止的链头算作已结束且未完成;请求停止后才完成的链头算作已完成但不可续跑。

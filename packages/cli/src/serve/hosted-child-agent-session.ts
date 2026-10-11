@@ -480,21 +480,16 @@ export class HostedChildAgentSession {
    * have started left its predecessor untouched (H4d-a decision 9), so the
    * chain's head stays at the predecessor until another one starts.
    */
-  chainHead(run: ChildAgentRun): ChildAgentRun {
-    let head = run;
-    for (;;) {
-      const next = this.store.authority
-        .extensionRecordsInDomain('child_run')
-        .map((entry) => parseChildRun(entry.record))
-        .find(
-          (record): record is ChildAgentRun =>
-            record.kind === 'child_agent' &&
-            record.predecessorChildRunId === head.childRunId &&
-            record.run.execution !== 'not_started_proven',
-        );
-      if (next === undefined) return head;
-      head = next;
-    }
+  chainHead(
+    run: ChildAgentRun,
+    chains: HostedChildChains = new HostedChildChains(
+      this.store.authority.extensionRecordsInDomain('child_run'),
+    ),
+  ): ChildAgentRun {
+    // One definition of the head serves this routing and H4e-b2's member
+    // views alike.
+    const head = chains.head(run.childRunId);
+    return (head && this.record(head.childRunId)) ?? run;
   }
 
   /** Every message this Session sent to one child run, in any state. */
@@ -592,15 +587,29 @@ export class HostedChildAgentSession {
           reason: `No child agent task ${params.taskId} was launched by this Session.`,
         };
       }
+      // A continuation that never started is no head and left its
+      // predecessor untouched (H4d-a decision 9), so its task id routes
+      // from that predecessor: an answer that named it must still reach
+      // the chain, never read as an ended child.
+      const chains = new HostedChildChains(
+        this.store.authority.extensionRecordsInDomain('child_run'),
+      );
+      let from = run;
+      while (
+        from.run.execution === 'not_started_proven' &&
+        from.predecessorChildRunId !== null
+      ) {
+        const predecessor = this.record(from.predecessorChildRunId);
+        if (predecessor === undefined) break;
+        from = predecessor;
+      }
       // H4e-b2 decision 2: a run of an open team member's chain is that
       // member, and every continuation of it opens its instruction with
       // the member preamble (decision 5).
       const member = hostedOpenTeamChainMember(
         this.store.authority.extensionRecordsInDomain('team_state'),
-        new HostedChildChains(
-          this.store.authority.extensionRecordsInDomain('child_run'),
-        ),
-        run.childRunId,
+        chains,
+        from.childRunId,
       );
       const instruction =
         member === undefined
@@ -627,10 +636,13 @@ export class HostedChildAgentSession {
         if (!(cause instanceof ManagedSessionRecordError)) throw cause;
         return {
           kind: 'refused',
-          reason: `Message exceeds what a child task can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes with its launch description.`,
+          reason:
+            member === undefined
+              ? `Message exceeds what a child task can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes with its launch description.`
+              : `Message exceeds what a child task can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes together with its launch description and the member preamble every continuation of "${member.name}" carries.`,
         };
       }
-      const head = this.chainHead(run);
+      const head = this.chainHead(from, chains);
       const headTask = this.taskIdOf(head.childRunId);
       if (!isTerminalRunState(head.run.state)) {
         if (head.stopRequested) {
