@@ -94,6 +94,7 @@ import {
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
+import { reconcileNeverStartedChildRuns } from './hosted-never-started-reconcile.js';
 import {
   ChildMessagesPendingError,
   HostedChildAgentSession,
@@ -3370,6 +3371,15 @@ export function registerHostedHarnessSessionRoutes(
           },
           session.managed.authority.sessionHeader.sessionKey,
         );
+      // #13801 A3: settle records claimed but provably never started
+      // before any route can read this reopened Session.
+      if (session.childRuns && brokerOptions)
+        await reconcileNeverStartedChildRuns({
+          authority: session.managed.authority,
+          resources: session.managed.resources,
+          childRuns: session.childRuns,
+          brokerOptions,
+        });
       // H6b: every hosted Session owns its automation funnel — a run's
       // input needs no Runtime, and its settle reads the turn alone.
       session.automations = new HostedAutomationSession(

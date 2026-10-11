@@ -2593,6 +2593,26 @@
       "valid": true
     },
     {
+      "id": "dispatch-started-never-started-proven",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "after": {
+        "stopReason": "start_failed",
+        "run": {
+          "state": "failed",
+          "execution": "not_started_proven",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "valid": true
+    },
+    {
       "id": "attach-skips-dispatch",
       "domain": "child_run",
       "before": {},

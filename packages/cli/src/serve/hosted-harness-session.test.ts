@@ -163,6 +163,25 @@ vi.mock('./hosted-monitor-wake-turn.js', async (importOriginal) => {
   };
 });
 
+const neverStartedReconcile = vi.hoisted(() => ({
+  fn: vi.fn((input: unknown) => input),
+}));
+vi.mock('./hosted-never-started-reconcile.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./hosted-never-started-reconcile.js')
+    >();
+  return {
+    ...actual,
+    reconcileNeverStartedChildRuns: (
+      input: Parameters<typeof actual.reconcileNeverStartedChildRuns>[0],
+    ) => {
+      neverStartedReconcile.fn(input);
+      return actual.reconcileNeverStartedChildRuns(input);
+    },
+  };
+});
+
 const state = vi.hoisted(() => ({
   root: '',
   assertWritable: vi.fn(async () => undefined),
@@ -911,6 +930,20 @@ describe('Hosted Harness no-tool session', () => {
       expect(state.model).not.toHaveBeenCalled();
     },
   );
+
+  it('runs the never-started reconcile for a fresh Session open', async () => {
+    neverStartedReconcile.fn.mockClear();
+    await hookApp();
+    expect(neverStartedReconcile.fn).toHaveBeenCalledTimes(1);
+    expect(neverStartedReconcile.fn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authority: expect.anything(),
+        resources: expect.anything(),
+        childRuns: expect.any(HostedChildRunSession),
+        brokerOptions: expect.anything(),
+      }),
+    );
+  });
 
   it.each([
     { tenantId: 'foreign' },

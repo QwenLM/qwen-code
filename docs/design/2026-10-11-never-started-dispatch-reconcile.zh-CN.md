@@ -1,0 +1,200 @@
+# 「从未启动」派发的对账 arm（issue #13801 A3）
+
+[English](2026-10-11-never-started-dispatch-reconcile.md) | [简体中文](2026-10-11-never-started-dispatch-reconcile.zh-CN.md)
+
+状态：提案（2026-10-11，作者 wenshao）
+跟踪：#12380 阶段 H → #12827，#13532 验收运行的发现 **A3**。
+不在范围内：A1 本体（#13789，已合入）、跨 Session 楔死（#13800）、
+启用 `monitor_run` 或 `child_run` 的 `shell` kind。
+
+## 问题陈述
+
+一条后台派发已被认领的 `child_run` 记录会提交
+`run.state: "running"` 与 `run.execution: "dispatch_started"`，而进程
+可证明从未启动，并永远停在那里：
+
+- 记录第 1 版（`admit`）与第 2 版（`dispatchStarted`）在 Broker execute
+  调用**之前**提交（`hosted-workspace-tool-turn.ts` ——
+  `commitAwaitRuntimeBatch` 检查点使派发即时持久化）。
+- 若 daemon 在 `dispatchStarted` 提交之后、execute/settle 路径运行之前
+  死亡，或回合内 catch arm（`hosted-workspace-tool-turn.ts` 中
+  `close_not_started` 之上的 `proven` 门）拿不到它的证明，**没有
+  任何 arm 再会结算这条记录**。其余所有 `settleFailed` 调用方都只在
+  存活的回合内触发。
+- 公开 tasks API 于是永远报 `running` / `provisioning`
+  （`managed-extension-projection.ts`：`intent | dispatch_started →
+provisioning`，`taskState → running`）。
+
+R1 —— 缺失的 arm：重新加载时，一条执行已被认领、而进程可证明从未
+存在（无 `:process` 账本行、无 cgroup 单元）的记录，必须结算为
+`not_started_proven`，而不是停在 `dispatch_started`。
+R2 —— 公开回答依构造跟随记录（投影是纯读取；`not_started_proven`
+本已投影为终态）。
+R3 —— 不放宽：含糊的结果必须保持阻塞，绝不被报为「从未启动」。
+
+## 关键证据链（全部在当前 HEAD 核实）
+
+1. **缺失 `:process` 行是「从未启动」的完整证明。** `RuntimeBrokerService`
+   在 execute 准入时、_早于_ `beginDispatch`，于同一个 `.thenApply`
+   块内入账 `:process` 账本行（键为 `<executionCallId>:process`，JDBC
+   持久化，`RuntimeBrokerService.java` execute 路径）。因此准入严格
+   先于派发：
+   - 行**缺失** ⇒ execute 准入从未发生 ⇒ 派发从未开始 ⇒ worker 从未
+     收到该调用 ⇒ cgroup 单元不可能存在。issue 二分证据中的
+     cgroup 单元那一腿**已被行证据蕴含**，无需另行核查（harness 本来
+     也看不到 worker 本地的单元）。
+   - 行**存在** ⇒ 派发已开始 ⇒ 进程可能启动也可能没有：**含糊 ⇒
+     保持原状**（那是 B1 家族，#13533，不在本片范围）。
+2. **404 的不对称性让证明天然保守。** Broker 的 `requireExecution`
+   *先*按 `executionCallId` 在共享仓储中查行，行不在时抛出
+   `runtime_execution_not_found`（404），早于一切 Session/binding
+   身份校验。TS 客户端（`HostedWorkspaceBroker.status`）只把这个 404
+   映射为 `undefined`（409 `runtime_broker_execution_unknown` →
+   `{state:'unknown'}`；其余一律重抛）。因此 `status()` 回答
+   `undefined` 是确定性的「该行可证明不存在」，与应答它的是哪个
+   runtime-session 上下文无关。
+3. **冷 Broker 必须先 acquire 再探测。** 重启后 Broker 的内存 Session
+   表为空，未建立上下文时 `status()` 会失于
+   `runtime_session_not_found`。parked wake 契约（及
+   `stopParkedRuntimeExecutions`）已确立：先以同一身份幂等接管
+   （acquire），再探测。
+4. **runtime-session 身份经日志可持久恢复。** 每次后台派发都写有
+   `tool.intent` 事件（`payload.executionCallId`、`payload.argsRef`）；
+   publication 模式下 `argsRef` 资源是 `managed-tool-input` 路由 JSON，
+   携带 `harnessSessionId` 与 `runtimeSessionId`
+   （`hosted-runtime-recovery.ts` 的 `originalRuntimeBroker` 正是这样
+   恢复 owner 的）。一条被搁死的记录因此能重建其执行被认领时所用的
+   精确 Broker 身份。
+5. **该结算转换在现行契约下完全合法。** `dispatch_started →
+not_started_proven` 是许可的执行步，`running → failed` 是许可的
+   run 步，`failed` + `not_started_proven` 是被证明的终态配对
+   （`parseExtensionRun` 规则），`start_failed` 是许可的 child
+   `stopReason`。回合内 arm 提交的正是这个 body。记录从不携带
+   `startReceiptRef` —— 恰是 never-started 结算所要求的形态。
+
+## 拟议设计
+
+### 新模块：会话开的对账扫描
+
+`packages/cli/src/serve/hosted-never-started-reconcile.ts` 导出：
+
+```text
+reconcileNeverStartedChildRuns(input: {
+  managed: ManagedSession;              // authority + resources
+  childRuns: HostedChildRunSession;
+  brokerOptions: HostedWorkspaceBrokerOptions;
+}): Promise<{ scanned: number; settled: string[]; skipped: string[] }>
+```
+
+算法：
+
+1. 枚举 `authority.extensionRecordsInDomain('child_run')`；筛出解析后
+   `run.execution === 'dispatch_started'` 的记录。
+2. 对每个候选，从其 `tool.intent` 事件重建 runtime-session 身份：读取
+   `payload.argsRef`；要求 `managed-tool-input` 路由、带
+   `runtimeSessionId` 且 `harnessSessionId` 与本会话匹配；用
+   `assertManagedSessionStableId` 校验。任何读不出 / 缺失 / 不匹配
+   ⇒ **跳过**（无证明）。
+3. 按 runtimeSessionId 分组。每组：
+   `broker = new HostedWorkspaceBroker(brokerOptions, sessionKey,
+runtimeSessionId)`，再 `await broker.acquire()`（对持久化 READY
+   会话的幂等接管；失败 ⇒ 整组跳过，不结算任何记录）。
+4. 逐候选：`status(<executionCallId>:process)`：
+   - `undefined`（404，确定性缺失）⇒
+     `childRuns.settleFailed(shellId, { stopReason: 'start_failed',
+started: false })` → 经 `commitExtensionRecord` 提交
+     `state: failed`、`execution: not_started_proven`、
+     `stopReason: start_failed`（同一事务内持久化，command id 幂等
+     重放安全，已结算时按 deep-equal 跳过）。
+   - 任何应答（含 `unknown`）或任何拒绝 ⇒ **跳过**。
+5. 结算**提交**错误向上传播（会话自身写平面失败必须响亮可重试）；
+   一切**取证**错误（acquire、路由读取、status）记入 `skipped`，
+   绝不阻塞 open —— Broker 暂不可达只是「未证明」，恰是 R3 安全的
+   回答。
+
+### 挂点：hosted 会话 open
+
+在 `registerHostedHarnessSessionRoutes` 的 open/load 处理里
+（`hosted-harness-session.ts`），紧随 `childRuns`/`monitors` funnel
+构建完成之后（记录已由 `openManagedSession` 回放完毕）：
+
+```text
+if (session.childRuns && brokerOptions)
+  await reconcileNeverStartedChildRuns({
+    managed: session.managed, childRuns: session.childRuns, brokerOptions });
+```
+
+- 每次 fresh open 运行一次，先于任何路由消费该会话；扫描与注册之间
+  不会有并发回合重新 attach。
+- 无搁死记录时零成本（无候选 ⇒ 无 Broker 流量）。
+- 可重入：扫描与结算之间若再崩，下一次 open 自愈（deep-equal 跳过 +
+  幂等 command id）。
+
+### 有意不做的事
+
+- 不从 harness 核查 cgroup 单元（worker 本地，需 supervisor 接管 ——
+  行证据已蕴含，见证据 §1）。
+- 不做 `monitor_run` arm：monitor 记录在同一窗口搁浅，但 issue 的
+  R1 只针对 `child_run`（monitor 的 `dispatchStarted` 连
+  `state: 'admitted'` 都不变，是**少报**方向，属 #13377 的镜像 ——
+  另一种症状，不在范围内）。
+- 不做周期扫描器：按 R1 只做 reload。open 时 Broker 不可达留下的洞，
+  留到下一次 reload 自愈；严格好于今天（永远没有）。
+- 探测后不 `release()`：release 会持久 `RELEASED` 并楔死该 runtime
+  session 的后续红驱（既有恢复教训）。
+- 不改记录契约、不改投影、不改 Java 侧：该转换各处早已合法
+  （证据 §5）。
+
+## 见证计划（arm 移除/合并即红）
+
+单元层（`hosted-never-started-reconcile.test.ts`，本地 store 台架 +
+stub 的 `HostedWorkspaceBroker` 模块）：
+
+- **R1 结算**：搁死的 `dispatch_started` 记录 +
+  `status(':process') → undefined` ⇒ 记录读作 `failed` +
+  `not_started_proven` + `stopReason: start_failed`；**再重开**一次
+  authority 断言相同（reload 可见）。断言 acquire→status 调用顺序
+  （冷 Broker 契约）。
+- **R2 依构造**：结算后 `authority.taskViews()` 显示终态任务
+  （`state: failed`、无 runtime hold），而非 running/provisioning。
+- **R3 含糊**：`status → {state:'executing'|'unknown'}` 或拒绝 ⇒
+  记录不动（仍 `dispatch_started`，无 settle 提交）。
+- **R3 无身份**：无 `tool.intent` 路由 / 会话不匹配 ⇒ 跳过。
+- **R3 非搁死**：`running_attached` 记录连候选都不是。
+
+契约层（`contracts/managed-child-run-record-v1.fixtures.json`）：
+
+- 新增后继对，如 `dispatch-started-never-started-proven`：
+  before = `admit-to-dispatch` 的 body，after =
+  `{ stopReason: 'start_failed', run: {state: 'failed',
+execution: 'not_started_proven'} }`，`valid: true` —— 由现有 TS 与
+  Java 夹具套件自动回放（两种语言同时钉住 arm 所提交的转换）。
+- 反向钉已存在于 run 级夹具（`failed-with-unknown-outcome` 合法、
+  非阻塞 unknown 非法）；含糊家族由既有强制规则
+  （`outcome_unknown|corrupt` ⇒ `recovery_blocked`）覆盖。
+
+接线（`hosted-harness-session.test.ts`）：
+
+- 带搁死记录的会话 load 会以构建好的会话调用该 reconcile（模块
+  mock；**hook 被移除即红**）。
+
+## 受影响文件
+
+| 文件                                                                                    | 改动                    |
+| --------------------------------------------------------------------------------------- | ----------------------- |
+| `packages/cli/src/serve/hosted-never-started-reconcile.ts`                              | **新增**，arm 本体      |
+| `packages/cli/src/serve/hosted-never-started-reconcile.test.ts`                         | **新增**，见证          |
+| `packages/cli/src/serve/hosted-harness-session.ts`                                      | open 时调用 arm（很小） |
+| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | 接线见证                |
+| `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 组后继对             |
+| `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | 本文档                  |
+
+## 未决问题
+
+- 已结算但未证明的 parked turn 自身的重放路径（如
+  `finishBackground`/resumeAttached arms）以后是否应汇流到同一取证
+  读、以去除重复逻辑？暂缓：open 扫描覆盖严格更大的记录集合；汇流
+  可以在 B1 之后做。
+- acquire 后永不 release 的 runtime session：保留租约与既有恢复行为
+  一致；daemon/Broker 生命周期负责清理。只在 soak 中出现租约压力时
+  再议。
