@@ -1337,12 +1337,16 @@ export class ContentGenerationPipeline {
       // supportsForcedToolChoice: false, and the field is omitted (the OpenAI
       // default) instead of shipping 'required' (#13807).
       const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
-      if (
-        fcMode === 'ANY' &&
-        this.contentGeneratorConfig.supportsForcedToolChoice !== false
-      ) {
-        (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
-          'required';
+      if (fcMode === 'ANY') {
+        if (this.contentGeneratorConfig.supportsForcedToolChoice === false) {
+          debugLogger.debug(
+            'supportsForcedToolChoice=false: omitting tool_choice="required" for the Chat Completions wire',
+            { model: context.model },
+          );
+        } else {
+          (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
+            'required';
+        }
       } else if (fcMode === 'NONE') {
         (baseRequest as unknown as Record<string, unknown>)['tool_choice'] =
           'none';

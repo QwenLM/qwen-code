@@ -997,6 +997,11 @@
             "contextWindowSize": {
               "description": "Overrides the default context window size for the selected model. Use this setting when a provider's effective context limit differs from Qwen Code's default. This value defines the model's assumed maximum context capacity, not a per-request token limit.",
               "type": "number"
+            },
+            "supportsForcedToolChoice": {
+              "description": "Whether the provider supports forcing tool choice (tool_choice: \"required\"). Set false for endpoints that reject forced tool choice, such as Apple Foundation Models served through `fm serve`.",
+              "type": "boolean",
+              "default": true
             }
           }
         }
