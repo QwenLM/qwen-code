@@ -403,14 +403,16 @@ describe('build artifact — transcript entry (#11031)', () => {
     // 1,315,297 at e951f96; that rendering is intentional transcript UI.
     // main grew the same entry in parallel — 1,309,207 at 1aba19c878, plus
     // 3,033 for table fullscreen and Shadow DOM keyboard handling, reaching
-    // 1,312,240. Merging the two measures 1,320,366 in CI at d4304811. The
-    // ceiling leaves a small margin around that intentional UI;
-    // re-measure and lower it if the entry gets leaner.
+    // 1,312,240. Merging the two measures 1,320,366 in CI at d4304811.
+    // Teammate activity notices (attributed bubbles for teammate tool calls
+    // and inter-agent messages) add 3,487, measuring 1,323,853 at the
+    // 13785 projection head. The ceiling leaves a small margin around that
+    // intentional UI; re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_323_000);
+    expect(js.length).toBeLessThan(1_325_000);
   });
 
   it('carries no Live Voice strings and looks none up', () => {
