@@ -61,10 +61,15 @@ import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
+import { hostedTeamMembership } from './hosted-team-session.js';
 import {
-  hostedOpenTeamMembership,
-  hostedTeamMembership,
-} from './hosted-team-session.js';
+  HostedChildChains,
+  hostedOpenTeamChainMember,
+  hostedRouteDetails,
+  isSentInstruction,
+  teamMemberPreamble,
+  type HostedRouteDetails,
+} from './hosted-member-chain.js';
 import {
   stripDisplayControlChars,
   truncateNotificationLabel,
@@ -392,14 +397,20 @@ export function boundedNotificationText(
  */
 export class ChildMessagesPendingError extends Error {}
 
-/** Where `send_message` to a child task went. */
+/**
+ * Where `send_message` to a child task went, with what its answer must
+ * tell about the run it reached (H4e-b2), read on the writes chain.
+ */
 export type ChildMessageRoute =
-  | { readonly kind: 'message'; readonly childRunId: string }
-  | {
+  | ({
+      readonly kind: 'message';
+      readonly childRunId: string;
+    } & HostedRouteDetails)
+  | ({
       readonly kind: 'continuation';
       readonly childRunId: string;
       readonly predecessorChildRunId: string;
-    }
+    } & HostedRouteDetails)
   | { readonly kind: 'refused'; readonly reason: string };
 
 export class HostedChildAgentSession {
@@ -477,21 +488,20 @@ export class HostedChildAgentSession {
    * have started left its predecessor untouched (H4d-a decision 9), so the
    * chain's head stays at the predecessor until another one starts.
    */
-  chainHead(run: ChildAgentRun): ChildAgentRun {
-    let head = run;
-    for (;;) {
-      const next = this.store.authority
-        .extensionRecordsInDomain('child_run')
-        .map((entry) => parseChildRun(entry.record))
-        .find(
-          (record): record is ChildAgentRun =>
-            record.kind === 'child_agent' &&
-            record.predecessorChildRunId === head.childRunId &&
-            record.run.execution !== 'not_started_proven',
-        );
-      if (next === undefined) return head;
-      head = next;
-    }
+  chainHead(
+    run: ChildAgentRun,
+    chains: HostedChildChains = new HostedChildChains(
+      this.store.authority.extensionRecordsInDomain('child_run'),
+    ),
+  ): ChildAgentRun {
+    // One definition of the head serves this routing and H4e-b2's member
+    // views alike. A chain starts at a committed run and the authority
+    // keeps a continuation's kind, so its head is a child agent run.
+    const head = chains.head(run.childRunId);
+    const record = head && this.record(head.childRunId);
+    if (record === undefined)
+      throw new Error(`Child run ${run.childRunId} has no chain head.`);
+    return record;
   }
 
   /** Every message this Session sent to one child run, in any state. */
@@ -558,26 +568,32 @@ export class HostedChildAgentSession {
             `Session message ${params.messageId} was sent with different evidence.`,
           );
         }
-        return { kind: 'message', childRunId: message.childRunId };
+        return this.routed(
+          { kind: 'message', childRunId: message.childRunId },
+          params.messageId,
+        );
       }
       const continued = this.record(params.continuationRunId);
       if (continued !== undefined) {
         const envelope = decodeChildLaunchEnvelope(
           await this.store.resources.read(continued.inputRef),
         );
+        // H4e-b2 decision 5: a member's continuation opens with its
+        // preamble, whose presence follows the team and may have changed
+        // since, so the committed instruction is read for its form.
         if (
           continued.predecessorChildRunId === null ||
-          envelope.prompt !== params.text
+          !isSentInstruction(envelope.prompt, params.text)
         ) {
           throw new ManagedSessionConflictError(
             `Child run ${params.continuationRunId} was launched with different evidence.`,
           );
         }
-        return {
+        return this.routed({
           kind: 'continuation',
           childRunId: continued.childRunId,
           predecessorChildRunId: continued.predecessorChildRunId,
-        };
+        });
       }
       const run = this.runForTask(params.taskId);
       if (run === undefined) {
@@ -586,6 +602,37 @@ export class HostedChildAgentSession {
           reason: `No child agent task ${params.taskId} was launched by this Session.`,
         };
       }
+      // A continuation that never started is no head and left its
+      // predecessor untouched (H4d-a decision 9), so its task id routes
+      // from that predecessor: an answer that named it must still reach
+      // the chain, never read as an ended child.
+      const chains = new HostedChildChains(
+        this.store.authority.extensionRecordsInDomain('child_run'),
+      );
+      let from = run;
+      while (
+        from.run.execution === 'not_started_proven' &&
+        from.predecessorChildRunId !== null
+      ) {
+        const predecessor = this.record(from.predecessorChildRunId);
+        if (predecessor === undefined) break;
+        from = predecessor;
+      }
+      // H4e-b2 decision 2: a run of an open team member's chain is that
+      // member, and every continuation of it opens its instruction with
+      // the member preamble (decision 5).
+      const member = hostedOpenTeamChainMember(
+        this.store.authority.extensionRecordsInDomain('team_state'),
+        chains,
+        from.childRunId,
+      );
+      const instruction =
+        member === undefined
+          ? params.text
+          : teamMemberPreamble({
+              name: member.name,
+              teamName: member.team.name,
+            }) + params.text;
       // The bound is the smaller carrier: the continuation's launch
       // envelope, built from the chain's own description and definition,
       // which no later state changes — so a running and a completed task
@@ -597,23 +644,40 @@ export class HostedChildAgentSession {
       try {
         envelope = encodeChildLaunchEnvelope({
           description: launch.description,
-          prompt: params.text,
+          prompt: instruction,
           definition: launch.definition,
         });
       } catch (cause) {
         if (!(cause instanceof ManagedSessionRecordError)) throw cause;
         return {
           kind: 'refused',
-          reason: `Message exceeds what a child task can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes with its launch description.`,
+          reason:
+            member === undefined
+              ? `Message exceeds what a child task can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes with its launch description.`
+              : `Message exceeds what a child task can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes together with its launch description and the member preamble every continuation of "${member.name}" carries.`,
         };
       }
-      const head = this.chainHead(run);
+      const head = this.chainHead(from, chains);
       const headTask = this.taskIdOf(head.childRunId);
+      // H4e-b2 decision 3: a member's refusal names the member.
+      const subject =
+        member === undefined
+          ? `Child agent task ${headTask}`
+          : `Member "${member.name}" (task ${headTask})`;
       if (!isTerminalRunState(head.run.state)) {
         if (head.stopRequested) {
           return {
             kind: 'refused',
-            reason: `Child agent task ${headTask} is being stopped and cannot receive messages.`,
+            reason:
+              member === undefined
+                ? `${subject} is being stopped and cannot receive messages.`
+                : head.predecessorChildRunId !== null &&
+                    head.childSessionId === null
+                  ? // Stopped before it attached, it may end without
+                    // starting, which hands the member back to its
+                    // predecessor.
+                    `Member "${member.name}" is being stopped before its latest continuation started and cannot receive messages now. If that continuation ends without starting, the member takes messages again: check task_list once it settles.`
+                  : `Member "${member.name}" is being stopped and cannot receive messages.`,
           };
         }
         if (params.closing) {
@@ -627,7 +691,7 @@ export class HostedChildAgentSession {
         if (sentBefore.length >= limits.maxPerRun) {
           return {
             kind: 'refused',
-            reason: `Child agent task ${headTask} has received its ${limits.maxPerRun} messages (budget_exhausted).`,
+            reason: `${subject} has received its ${limits.maxPerRun} messages (budget_exhausted).`,
           };
         }
         if (
@@ -636,7 +700,7 @@ export class HostedChildAgentSession {
         ) {
           return {
             kind: 'refused',
-            reason: `Child agent task ${headTask} has ${limits.maxInFlightPerRun} messages still on their way to it (count_limit); wait for them to arrive.`,
+            reason: `${subject} has ${limits.maxInFlightPerRun} messages still on their way to it (count_limit); wait for them to arrive.`,
           };
         }
         const contentRef = await this.store.resources.publish(
@@ -661,27 +725,32 @@ export class HostedChildAgentSession {
           { domain: 'session_message', record: body },
           TRUSTED,
         );
-        return { kind: 'message', childRunId: head.childRunId };
+        return this.routed(
+          { kind: 'message', childRunId: head.childRunId },
+          params.messageId,
+        );
       }
       if (head.stopReason !== 'completed' || head.stopRequested) {
+        // A member is relaunched under a new name: a plain agent launch
+        // would not join the team.
         return {
           kind: 'refused',
-          reason: `Child agent task ${headTask} ended (${head.run.state}: ${head.stopReason ?? 'unknown'}) and cannot receive messages; launch a new agent instead.`,
+          reason:
+            member === undefined
+              ? `${subject} ended (${head.run.state}: ${head.stopReason ?? 'unknown'}) and cannot receive messages; launch a new agent instead.`
+              : head.stopReason === 'completed'
+                ? `Member "${member.name}" completed after a stop was requested and cannot receive messages; for more work, launch a new member under a new name.`
+                : `Member "${member.name}" ended (${head.run.state}: ${head.stopReason ?? 'unknown'}) and cannot receive messages; for more work, launch a new member under a new name.`,
         };
       }
-      // H4e-b1: an open team's roster names one run of its member, so a
-      // continuation would run off the roster, unlabeled and unseen by
-      // team_delete; continued members come with H4e-b2. Only a launch
-      // joins, so a member's run is never itself a continuation. Once its
-      // team is deleted, a former member continues as a plain child.
-      const member = hostedOpenTeamMembership(
-        this.store.authority.extensionRecordsInDomain('team_state'),
-        head.childRunId,
-      );
-      if (member !== undefined) {
+      // H4e-b2 decision 2: a member of an active team is continued like
+      // any child, and the roster follows its chain. A closing team admits
+      // no new work while it drains (H4e-a decision 8); once its team is
+      // deleted, a former member continues as a plain child.
+      if (member !== undefined && member.team.lifecycle !== 'active') {
         return {
           kind: 'refused',
-          reason: `Child agent task ${headTask} ran as "${member.name}" of team "${member.teamName}" and has finished; a member of an open team cannot be continued yet. For more work, launch a new member with another name while the team takes members; once every member has ended, deleting the team would let this one be continued like any other child agent, but would give up the team's board.`,
+          reason: `Member "${member.name}" (task ${headTask}) belongs to team "${member.team.name}", which is closing and takes no new work. Finish it with team_delete.`,
         };
       }
       // A continuation is a launch: it owes the launch admission (H4d-a
@@ -698,7 +767,10 @@ export class HostedChildAgentSession {
       if (!admission.admitted) {
         return {
           kind: 'refused',
-          reason: `Hosted child agent refused to continue task ${headTask} (${admission.reason}).`,
+          reason:
+            member === undefined
+              ? `Hosted child agent refused to continue task ${headTask} (${admission.reason}).`
+              : `Hosted child agent refused to continue member "${member.name}" (task ${headTask}) (${admission.reason}).`,
         };
       }
       const inputRef = await this.store.resources.publish(
@@ -721,12 +793,25 @@ export class HostedChildAgentSession {
         { domain: 'child_run', record: body },
         TRUSTED,
       );
-      return {
+      return this.routed({
         kind: 'continuation',
         childRunId: params.continuationRunId,
         predecessorChildRunId: head.childRunId,
-      };
+      });
     });
+  }
+
+  /** A committed route with what its answer must tell (H4e-b2). */
+  private routed<
+    Route extends {
+      readonly kind: 'message' | 'continuation';
+      readonly childRunId: string;
+    },
+  >(route: Route, messageId?: string): Route & HostedRouteDetails {
+    return {
+      ...route,
+      ...hostedRouteDetails(this.store.authority, route, messageId),
+    };
   }
 
   /**
@@ -735,7 +820,18 @@ export class HostedChildAgentSession {
    * creation idempotency the control plane derives from this record can
    * never diverge from it.
    */
-  async admit(params: ChildAgentLaunchParams): Promise<{
+  async admit(
+    params: ChildAgentLaunchParams & {
+      /**
+       * H4e-b2 decision 5: the prompt the model sent, when `prompt` opens
+       * with a member preamble. A replay accepts a committed prompt that is
+       * the sent one alone or behind one well-formed preamble block, since
+       * whether the launch carries one follows a team that may have changed
+       * since, and goes on with the committed envelope as it is.
+       */
+      readonly sentPrompt?: string;
+    },
+  ): Promise<{
     readonly inputRef: ManagedSessionDurableRef;
     readonly envelope: ChildLaunchEnvelope;
   }> {
@@ -744,11 +840,13 @@ export class HostedChildAgentSession {
       prompt: params.prompt,
       definition: params.definition,
     };
-    const bytes = encodeChildLaunchEnvelope(envelope);
     // A restated launch names the same record: identical evidence is the
     // replay — anything else conflicts, never a second child chain.
     const existing = this.record(params.childRunId);
     if (existing !== undefined) {
+      const committedBytes = await this.store.resources.read(existing.inputRef);
+      const committed = decodeChildLaunchEnvelope(committedBytes);
+      const sentPrompt = params.sentPrompt ?? params.prompt;
       const sameEvidence =
         existing.ownerScopeId === params.ownerScopeId &&
         existing.rootSessionId === params.rootSessionId &&
@@ -757,17 +855,18 @@ export class HostedChildAgentSession {
         existing.workingDirectory === params.workingDirectory &&
         existing.run.executionCallId === params.executionCallId &&
         isDeepStrictEqual(existing.run.definition, params.definition) &&
-        isDeepStrictEqual(
-          await this.store.resources.read(existing.inputRef),
-          bytes,
-        );
+        committed.description === params.description &&
+        isDeepStrictEqual(committed.definition, params.definition) &&
+        (committed.prompt === params.prompt ||
+          isSentInstruction(committed.prompt, sentPrompt));
       if (!sameEvidence) {
         throw new ManagedSessionConflictError(
           `Child run ${params.childRunId} was launched with different evidence.`,
         );
       }
-      return { inputRef: existing.inputRef, envelope };
+      return { inputRef: existing.inputRef, envelope: committed };
     }
+    const bytes = encodeChildLaunchEnvelope(envelope);
     const inputRef = await this.store.resources.publish('managed-input', bytes);
     await this.commit(
       params.childRunId,
@@ -1115,10 +1214,20 @@ export class HostedChildAgentSession {
               ),
               // A run keeps the label of the roster it joined, so a result
               // accepted after its team was deleted still names its member.
-              teammate: hostedTeamMembership(
-                this.store.authority.extensionRecordsInDomain('team_state'),
-                childRunId,
-              )?.name,
+              // H4e-b2 decision 6: a continuation is labeled through its
+              // chain root while that root is on the open team's roster.
+              teammate:
+                hostedTeamMembership(
+                  this.store.authority.extensionRecordsInDomain('team_state'),
+                  childRunId,
+                )?.name ??
+                hostedOpenTeamChainMember(
+                  this.store.authority.extensionRecordsInDomain('team_state'),
+                  new HostedChildChains(
+                    this.store.authority.extensionRecordsInDomain('child_run'),
+                  ),
+                  childRunId,
+                )?.name,
               ...(workspace === undefined ? {} : { workspace }),
             }),
           }),

@@ -14,7 +14,10 @@ import {
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
-import { decodeChildLaunchEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import {
+  decodeChildLaunchEnvelope,
+  MANAGED_CHILD_LIMITS,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseSessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -29,6 +32,11 @@ import {
   sessionMessageNotificationText,
   withSessionMessageConsumption,
 } from './hosted-session-message-session.js';
+
+import { HostedTeamSession } from './hosted-team-session.js';
+import { teamMemberPreamble } from './hosted-member-chain.js';
+import { teamLifecycleBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
+import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 
 // H4d-b: `session_message` and continuations are enabled for real, so the
 // suite drives both funnels with no enablement mock.
@@ -399,10 +407,26 @@ describe('send_message to a child task (H4d-b)', () => {
       reason: null,
       started: false,
     });
+    // The next continuation says the one before it never started (H4e-b2),
+    // and a replay of that one says its own message never arrived.
+    const neverStarted = {
+      childRunId: 'prompt:call-9',
+      predecessorChildRunId: 'run-1',
+      reason: 'creation_failed',
+      cancelled: false,
+      lostMessages: 0,
+    };
     expect(await send(parent.children, 'second try', 'call-12')).toEqual({
       kind: 'continuation',
       childRunId: 'prompt:call-12',
       predecessorChildRunId: 'run-1',
+      previousNeverStarted: neverStarted,
+    });
+    expect(await send(parent.children, 'first try')).toEqual({
+      kind: 'continuation',
+      childRunId: 'prompt:call-9',
+      predecessorChildRunId: 'run-1',
+      ownNeverStarted: neverStarted,
     });
   });
 
@@ -762,5 +786,254 @@ describe('withSessionMessageConsumption', () => {
       source: 'session_message',
     });
     expect(consumed).toEqual(['msg_1:message']);
+  });
+});
+
+// H4e-b2: messages between a lead and its members are these Session
+// messages; the team adds a name, a preamble and a label on top.
+describe('team members over Session messages (H4e-b2)', () => {
+  async function lead(): Promise<Side & { teams: HostedTeamSession }> {
+    const parent = await side(PARENT);
+    const teams = new HostedTeamSession(
+      {
+        authority: parent.session.authority,
+        resources: parent.session.resources,
+      },
+      parent.session.authority.sessionHeader.sessionKey,
+    );
+    await teams.run('team_create', { team_name: 'review' }, 'prompt:call-team');
+    return { ...parent, teams };
+  }
+
+  async function join(
+    parent: Side & { teams: HostedTeamSession },
+    name: string,
+    childRunId: string,
+  ): Promise<void> {
+    const member = parent.teams.admitMember(name);
+    await launch(parent.children, childRunId);
+    await parent.teams.join({ ...member, childRunId });
+  }
+
+  function sendTo(
+    children: HostedChildAgentSession,
+    childRunId: string,
+    text: string,
+    call: string,
+  ) {
+    return children.sendToChild({
+      taskId: children.taskIdOf(childRunId),
+      text,
+      messageId: `msg_${call}`,
+      continuationRunId: `prompt:${call}`,
+      executionCallId: `prompt:${call}`,
+      closing: false,
+    });
+  }
+
+  async function promptOf(parent: Side, childRunId: string): Promise<string> {
+    return decodeChildLaunchEnvelope(
+      await parent.session.resources.read(
+        parent.children.record(childRunId)!.inputRef,
+      ),
+    ).prompt;
+  }
+
+  async function inputText(session: ManagedSession, inputId: string) {
+    const event = inputs(session).find(
+      (each) => each.payload['inputId'] === inputId,
+    )!;
+    return (
+      JSON.parse(
+        (
+          await session.resources.read(event.payload['contentRef'] as never)
+        ).toString('utf8'),
+      ) as { text: string }
+    ).text;
+  }
+
+  async function finish(
+    parent: Side,
+    childRunId: string,
+    childSessionId: typeof CHILD,
+  ): Promise<void> {
+    await attach(parent.children, childRunId, childSessionId);
+    await complete(parent.children, childRunId);
+  }
+
+  it('continues a finished member behind its preamble and replays by the instruction form', async () => {
+    const parent = await lead();
+    await join(parent, 'alice', 'run-a');
+    await finish(parent, 'run-a', CHILD);
+    expect(await sendTo(parent.children, 'run-a', 'fix it', 'c1')).toEqual({
+      kind: 'continuation',
+      childRunId: 'prompt:c1',
+      predecessorChildRunId: 'run-a',
+      member: { name: 'alice', teamName: 'review' },
+    });
+    expect(await promptOf(parent, 'prompt:c1')).toBe(
+      `${teamMemberPreamble({ name: 'alice', teamName: 'review' })}fix it`,
+    );
+    // The replay finds the committed continuation by its form.
+    expect(
+      await sendTo(parent.children, 'run-a', 'fix it', 'c1'),
+    ).toMatchObject({ kind: 'continuation', childRunId: 'prompt:c1' });
+    await expect(
+      sendTo(parent.children, 'run-a', 'something else', 'c1'),
+    ).rejects.toThrow(ManagedSessionConflictError);
+    // A child off every roster continues with the message alone.
+    await launch(parent.children, 'run-p');
+    await finish(parent, 'run-p', randomUUID());
+    await sendTo(parent.children, 'run-p', 'look again', 'c2');
+    expect(await promptOf(parent, 'prompt:c2')).toBe('look again');
+  });
+
+  it('refuses to continue a member of a closing team', async () => {
+    const parent = await lead();
+    await join(parent, 'alice', 'run-a');
+    await finish(parent, 'run-a', CHILD);
+    const team = parseTeamState(
+      parent.session.authority.extensionRecord(
+        'team_state',
+        'prompt:call-team',
+      )!.record,
+    );
+    const closing = teamLifecycleBody(team, 'closing');
+    await parent.session.authority.commitExtensionRecord(
+      {
+        operation: 'deleteTeam',
+        commandId: 'prompt:call-delete:closing',
+        sessionKey: parent.session.authority.sessionHeader.sessionKey,
+        contentDigest: sha256(JSON.stringify(closing)),
+      },
+      { domain: 'team_state', record: closing },
+      { class: 'trusted_entry' },
+    );
+    expect(await sendTo(parent.children, 'run-a', 'more', 'c1')).toEqual({
+      kind: 'refused',
+      reason: `Member "alice" (task ${parent.children.taskIdOf('run-a')}) belongs to team "review", which is closing and takes no new work. Finish it with team_delete.`,
+    });
+    expect(parent.children.record('prompt:c1')).toBeUndefined();
+  });
+
+  it("labels a member's messages and continued results only while its team is open", async () => {
+    const parent = await lead();
+    await join(parent, 'alice', 'run-a');
+    await attach(parent.children, 'run-a', CHILD);
+    const receive = (childRunId: string, senderSessionId: string, id: string) =>
+      parent.messages.receive({
+        messageId: id,
+        route: 'to_parent',
+        childRunId,
+        senderSessionId,
+        content: Buffer.from('which branch?'),
+        contentDigest: sha256('which branch?'),
+      });
+    await receive('run-a', CHILD, 'msg_from-alice');
+    const labeled = await inputText(parent.session, 'msg_from-alice:message');
+    expect(labeled).toContain(
+      `<from>child agent ${parent.children.taskIdOf('run-a')}</from>\n<teammate>alice</teammate>\n<reply>To answer, use send_message with task_id "${parent.children.taskIdOf('run-a')}".</reply>`,
+    );
+    await complete(parent.children, 'run-a');
+    // The continuation is the member: its result is labeled through the
+    // chain root.
+    await sendTo(parent.children, 'run-a', 'fix it', 'c1');
+    const continuedSession = randomUUID();
+    await finish(parent, 'prompt:c1', continuedSession);
+    await parent.children.accept('prompt:c1', {
+      notification: { description: 'alice task' },
+    });
+    expect(
+      await inputText(parent.session, 'prompt:c1:accept:notify'),
+    ).toContain('<teammate>alice</teammate>');
+    // Once the team is deleted, a former member continues as a plain
+    // child: no preamble, no label on its result or its messages.
+    await parent.teams.run('team_delete', {}, 'prompt:call-delete');
+    await sendTo(parent.children, 'run-a', 'once more', 'c2');
+    expect(await promptOf(parent, 'prompt:c2')).toBe('once more');
+    const formerSession = randomUUID();
+    await finish(parent, 'prompt:c2', formerSession);
+    await parent.children.accept('prompt:c2', {
+      notification: { description: 'alice task' },
+    });
+    expect(
+      await inputText(parent.session, 'prompt:c2:accept:notify'),
+    ).not.toContain('<teammate>');
+    await receive('prompt:c2', formerSession, 'msg_from-former');
+    expect(
+      await inputText(parent.session, 'msg_from-former:message'),
+    ).not.toContain('<teammate>');
+  });
+
+  it('names the member in the bounds a send to it meets', async () => {
+    const parent = await lead();
+    await join(parent, 'alice', 'run-a');
+    for (let index = 0; index < 8; index++)
+      await sendTo(parent.children, 'run-a', `m${index}`, `m${index}`);
+    expect(
+      await sendTo(parent.children, 'run-a', 'one too many', 'm8'),
+    ).toEqual({
+      kind: 'refused',
+      reason: `Member "alice" (task ${parent.children.taskIdOf('run-a')}) has 8 messages still on their way to it (count_limit); wait for them to arrive.`,
+    });
+    // The envelope bound counts the preamble every continuation carries.
+    expect(
+      await sendTo(
+        parent.children,
+        'run-a',
+        'x'.repeat(MANAGED_CHILD_LIMITS.maxEnvelopeBytes),
+        'big',
+      ),
+    ).toEqual({
+      kind: 'refused',
+      reason: `Message exceeds what a child task can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes together with its launch description and the member preamble every continuation of "alice" carries.`,
+    });
+  });
+
+  it('replays a named launch whose committed prompt carries a preamble', async () => {
+    const parent = await side(PARENT);
+    const preamble = teamMemberPreamble({ name: 'alice', teamName: 'review' });
+    const params = {
+      childRunId: 'run-a',
+      ownerScopeId: PARENT,
+      rootSessionId: PARENT,
+      completion: 'sent' as const,
+      description: 'audit the diff',
+      definition: DEFINITION,
+      workingDirectory: '.',
+      workspaceMode: 'shared' as const,
+      executionCallId: 'run-a',
+    };
+    await parent.children.admit({
+      ...params,
+      prompt: `${preamble}review the change`,
+      sentPrompt: 'review the change',
+    });
+    // The team changed since: the replay rebuilds no preamble and goes on
+    // with the committed envelope.
+    const replayed = await parent.children.admit({
+      ...params,
+      prompt: 'review the change',
+      sentPrompt: 'review the change',
+    });
+    expect(replayed.envelope.prompt).toBe(`${preamble}review the change`);
+    // Only the prompt is read for its form: every other field of the
+    // launch must match as committed.
+    for (const differs of [
+      { prompt: 'another change', sentPrompt: 'another change' },
+      {
+        description: 'audit another diff',
+        prompt: 'review the change',
+        sentPrompt: 'review the change',
+      },
+      {
+        definition: { ...DEFINITION, definitionRevision: 2 },
+        prompt: 'review the change',
+        sentPrompt: 'review the change',
+      },
+    ])
+      await expect(
+        parent.children.admit({ ...params, ...differs }),
+      ).rejects.toThrow(ManagedSessionConflictError);
   });
 });
