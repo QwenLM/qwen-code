@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+import ntpath
 import os
-import shutil
 import subprocess
 import sys
 from collections.abc import AsyncIterator
@@ -18,6 +19,32 @@ from .json_lines import parse_json_line
 from .types import QueryOptions
 
 _PROCESS_STREAM_LIMIT = 4 * 1024 * 1024
+
+
+def _resolve_windows_command(command: str, env: dict[str, str]) -> str:
+    if ntpath.dirname(command):
+        return command
+
+    supported = {".COM", ".EXE", ".BAT", ".CMD"}
+    suffix = ntpath.splitext(command)[1].upper()
+    extensions = (
+        [""]
+        if suffix in supported
+        else [
+            extension
+            for extension in env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
+            if extension.upper() in supported
+        ]
+    )
+    for directory in env.get("PATH", "").split(";"):
+        directory = directory.strip('"')
+        if not directory:
+            continue
+        for extension in extensions:
+            candidate = os.path.abspath(os.path.join(directory, command + extension))
+            if os.path.isfile(candidate):
+                return candidate
+    raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), command)
 
 
 @dataclass(frozen=True)
@@ -78,7 +105,7 @@ class ProcessTransport:
             env.update(
                 {key.upper(): value for key, value in (self._options.env or {}).items()}
             )
-            command = shutil.which(command, path=env.get("PATH")) or command
+            command = _resolve_windows_command(command, env)
         args = [*spawn_info.args, *build_cli_arguments(self._options)]
         stderr_target = (
             asyncio.subprocess.PIPE
@@ -179,8 +206,12 @@ class ProcessTransport:
             )
 
         if self._stderr_task is not None:
-            await self._stderr_task
+            stderr_task = self._stderr_task
             self._stderr_task = None
+            try:
+                await asyncio.wait_for(stderr_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
 
     async def close(self) -> None:
         if self._closed:
@@ -195,15 +226,43 @@ class ProcessTransport:
             self._process.stdin.close()
             self._input_closed = True
 
-        if self._process.returncode is None:
-            self._process.terminate()
-            try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                self._process.kill()
-                await self._process.wait()
+        try:
+            if self._process.returncode is None:
+                tree_killed = False
+                if sys.platform == "win32":
+                    # Kill the shim and its CLI before the parent PID disappears.
+                    taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                    taskkill = taskkill / "System32" / "taskkill.exe"
+                    try:
+                        result = await asyncio.to_thread(
+                            subprocess.run,
+                            [str(taskkill), "/PID", str(self._process.pid), "/T", "/F"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=5.0,
+                            creationflags=subprocess.CREATE_NO_WINDOW,
+                        )
+                        tree_killed = result.returncode == 0
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                if not tree_killed and self._process.returncode is None:
+                    self._process.terminate()
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    if self._process.returncode is None:
+                        self._process.kill()
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
 
-        await self._finalize_exit()
+            await self._finalize_exit()
+        finally:
+            if self._stderr_task is not None:
+                self._stderr_task.cancel()
+                try:
+                    await self._stderr_task
+                except asyncio.CancelledError:
+                    pass
+                self._stderr_task = None
 
 
 def build_cli_arguments(options: QueryOptions) -> list[str]:
