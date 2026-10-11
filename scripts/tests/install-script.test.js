@@ -2230,6 +2230,9 @@ describe('standalone release packaging', () => {
         existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
       ).toBe(true);
       expect(
+        readScript(path.join(extractDir, 'qwen-code', 'lib', 'mod-worker.js')),
+      ).toBe('export {};\n');
+      expect(
         existsSync(
           path.join(extractDir, 'qwen-code', 'lib', 'execution-worker.js'),
         ),
@@ -2430,6 +2433,11 @@ describe('standalone release packaging', () => {
         expect(
           existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
         ).toBe(true);
+        expect(
+          readScript(
+            path.join(extractDir, 'qwen-code', 'lib', 'mod-worker.js'),
+          ),
+        ).toBe('export {};\n');
         const shim = readScript(
           path.join(extractDir, 'qwen-code', 'bin', 'qwen'),
         );
@@ -5204,6 +5212,7 @@ function ensureMinimalDist({
   });
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
   writeFileSync(path.join(distPath, 'codeModeHost.js'), 'export {};\n');
+  writeFileSync(path.join(distPath, 'mod-worker.js'), 'export {};\n');
   writeFileSync(path.join(distPath, 'sandboxBwrapRelay.js'), 'export {};\n');
   writeFileSync(path.join(distPath, 'sandboxLandlockRelay.js'), 'export {};\n');
   writeFileSync(path.join(distPath, 'sandboxFileWorker.js'), 'export {};\n');

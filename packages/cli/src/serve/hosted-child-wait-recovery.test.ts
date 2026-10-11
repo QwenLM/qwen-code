@@ -37,6 +37,7 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import type { HarnessAgentWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
+  answerCommittedTurnCalls,
   answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
   recoverHostedRuntimeTurn,
@@ -46,6 +47,8 @@ import {
 import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedTeamSession } from './hosted-team-session.js';
+import { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import {
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HostedWorkspaceToolTurn,
@@ -1430,6 +1433,337 @@ describe('hosted child wait recovery (#13708)', () => {
       expect(answers.has('call-2')).toBe(false);
       expect(answers.get('call-3')).toContain('The tool call never ran');
       expect(answers.get('call-4')).toContain('The tool call never ran');
+    } finally {
+      await session.close();
+    }
+  });
+
+  // H4d-b: a send_message writes only to the journal before its answer,
+  // like a team call: what it committed is answered as sent on every
+  // route, and one that committed nothing is told it never ran where the
+  // turn resumes.
+  it('answers an interrupted send_message by what it committed', async () => {
+    const session = await open('boot-1', true);
+    try {
+      const contentRef = await session.resources.publish(
+        'managed-input',
+        Buffer.from(JSON.stringify([{ type: 'text', text: 'ask the child' }])),
+      );
+      const admissionRef = await session.resources.publish(
+        'managed-admission',
+        Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+      );
+      await session.authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: PROMPT_ID,
+          sessionKey,
+          contentDigest: DIGEST,
+        },
+        {
+          inputId: PROMPT_ID,
+          turnId: PROMPT_ID,
+          source: 'hosted-harness',
+          contentRef,
+          admissionRef,
+          deadline: null,
+          wakeReason: 'input',
+        },
+      );
+      await createManagedHarnessHandle(session).ensureRunnable();
+      const children = childrenOf(session);
+      const childRunId = `${PROMPT_ID}:call-4`;
+      await children.admit({
+        childRunId,
+        ownerScopeId: SESSION_ID,
+        rootSessionId: SESSION_ID,
+        completion: 'sent',
+        description: 'audit the diff',
+        prompt: 'review the change',
+        definition: {
+          definitionId: 'hosted-agent/hosted-workspace-shell/1',
+          definitionRevision: 1,
+          definitionDigest:
+            session.authority.sessionHeader.definitionRef.digest,
+        },
+        workingDirectory: '.',
+        workspaceMode: 'shared',
+        executionCallId: childRunId,
+      });
+      await children.dispatchStarted(childRunId, {
+        dispatchId: 'dispatch-1',
+        runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+      });
+      await children.attach(childRunId, 'child-session-1');
+      const sent = await children.sendToChild({
+        taskId: children.taskIdOf(childRunId),
+        text: 'also check the tests',
+        messageId: sessionMessageId({
+          senderSessionId: SESSION_ID,
+          turnId: PROMPT_ID,
+          callId: 'call-5',
+        }),
+        continuationRunId: `${PROMPT_ID}:call-5`,
+        executionCallId: `${PROMPT_ID}:call-5`,
+        closing: false,
+      });
+      expect(sent.kind).toBe('message');
+      await session.sink.write({
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { id: 'call-5', name: 'send_message', args: {} },
+            },
+            {
+              functionCall: { id: 'call-6', name: 'send_message', args: {} },
+            },
+            { functionCall: { id: 'call-7', name: 'read_file', args: {} } },
+          ],
+        },
+      });
+      const funnels = {
+        session,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        children,
+        teams: teamsOf(session),
+        messages: new HostedSessionMessageSession(
+          { authority: session.authority, resources: session.resources },
+          sessionKey,
+          children,
+          undefined,
+        ),
+      };
+      const answers = async () =>
+        new Map(
+          toolResultEntries(await session.sink.project()).flatMap((entry) =>
+            (entry.message?.parts ?? []).map((part) => [
+              part.functionResponse?.id,
+              JSON.stringify(part.functionResponse?.response),
+            ]),
+          ),
+        );
+      // A settling route answers only what committed.
+      expect(await answerCommittedTurnCalls(funnels)).toBe(1);
+      expect((await answers()).get('call-5')).toContain(
+        `Message queued for delivery to child agent ${children.taskIdOf(childRunId)}`,
+      );
+      expect((await answers()).has('call-6')).toBe(false);
+      // A resuming route also tells the one that committed nothing.
+      expect(await answerResumedTurnCalls(funnels)).toBe(1);
+      const resumed = await answers();
+      expect(resumed.get('call-6')).toContain('The tool call never ran');
+      expect(resumed.has('call-7')).toBe(false);
+    } finally {
+      await session.close();
+    }
+  });
+
+  /** A background child of call `callId`, attached and running. */
+  async function launchBackgroundChild(
+    session: ManagedSession,
+    callId: string,
+  ): Promise<string> {
+    const children = childrenOf(session);
+    const childRunId = `${PROMPT_ID}:${callId}`;
+    await children.admit({
+      childRunId,
+      ownerScopeId: SESSION_ID,
+      rootSessionId: SESSION_ID,
+      completion: 'sent',
+      description: 'audit the diff',
+      prompt: 'review the change',
+      definition: {
+        definitionId: 'hosted-agent/hosted-workspace-shell/1',
+        definitionRevision: 1,
+        definitionDigest: session.authority.sessionHeader.definitionRef.digest,
+      },
+      workingDirectory: '.',
+      workspaceMode: 'shared',
+      executionCallId: childRunId,
+    });
+    await children.dispatchStarted(childRunId, {
+      dispatchId: `dispatch-${callId}`,
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach(childRunId, `child-session-${callId}`);
+    return childRunId;
+  }
+
+  function messageIdOf(callId: string): string {
+    return sessionMessageId({
+      senderSessionId: SESSION_ID,
+      turnId: PROMPT_ID,
+      callId,
+    });
+  }
+
+  it('answers an interrupted send_message to the parent and a continuation by what they committed', async () => {
+    const session = await open('boot-1', true);
+    try {
+      await park(session, false);
+      const children = childrenOf(session);
+      const childRunId = await launchBackgroundChild(session, 'call-4');
+      await children.settleCompleted(childRunId, {
+        result: Buffer.from('{"review":"clean"}', 'utf8'),
+        receipt: Buffer.from('{"stopReason":"end_turn"}', 'utf8'),
+      });
+      await children.accept(childRunId, {});
+      const continued = await children.sendToChild({
+        taskId: children.taskIdOf(childRunId),
+        text: 'now check the tests',
+        messageId: messageIdOf('call-5'),
+        continuationRunId: `${PROMPT_ID}:call-5`,
+        executionCallId: `${PROMPT_ID}:call-5`,
+        closing: false,
+      });
+      expect(continued.kind).toBe('continuation');
+      const messages = new HostedSessionMessageSession(
+        { authority: session.authority, resources: session.resources },
+        sessionKey,
+        children,
+        { parentSessionId: randomUUID(), parentChildRunId: 'run-up' },
+      );
+      await messages.sendToParent({
+        text: 'which branch?',
+        messageId: messageIdOf('call-6'),
+        executionCallId: `${PROMPT_ID}:call-6`,
+        closing: false,
+      });
+      await session.sink.write({
+        uuid: 'assistant-2',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { id: 'call-5', name: 'send_message', args: {} },
+            },
+            {
+              functionCall: { id: 'call-6', name: 'send_message', args: {} },
+            },
+          ],
+        },
+      });
+      expect(
+        await answerCommittedTurnCalls({
+          session,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          children,
+          messages,
+        }),
+      ).toBe(2);
+      const answers = new Map(
+        toolResultEntries(await session.sink.project()).flatMap((entry) =>
+          (entry.message?.parts ?? []).map((part) => [
+            part.functionResponse?.id,
+            JSON.stringify(part.functionResponse?.response),
+          ]),
+        ),
+      );
+      expect(answers.get('call-5')).toContain(
+        `continued it as ${children.taskIdOf(`${PROMPT_ID}:call-5`)}`,
+      );
+      expect(answers.get('call-6')).toContain(
+        'Message queued for delivery to the parent agent',
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  // The parked round's gap fill runs first on the continue, cancel and
+  // funnel routes: a send_message that committed keeps the answer it
+  // earned there too, and one that committed nothing gets the fill's.
+  it('the parked-round gap fill answers a committed send_message by what it sent', async () => {
+    const session = await open('boot-1', true);
+    try {
+      await park(session, false);
+      const children = childrenOf(session);
+      const childRunId = await launchBackgroundChild(session, 'call-4');
+      expect(
+        (
+          await children.sendToChild({
+            taskId: children.taskIdOf(childRunId),
+            text: 'also check the tests',
+            messageId: messageIdOf('call-5'),
+            continuationRunId: `${PROMPT_ID}:call-5`,
+            executionCallId: `${PROMPT_ID}:call-5`,
+            closing: false,
+          })
+        ).kind,
+      ).toBe('message');
+      await session.sink.write({
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'agent', args: {} } },
+            {
+              functionCall: { id: 'call-5', name: 'send_message', args: {} },
+            },
+            {
+              functionCall: { id: 'call-7', name: 'send_message', args: {} },
+            },
+          ],
+        },
+      });
+      expect(
+        await fillParkedRoundAgentGaps({
+          managed: session,
+          sessionId: SESSION_ID,
+          promptId: PROMPT_ID,
+          cwd: root,
+          gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+          children,
+          messages: new HostedSessionMessageSession(
+            { authority: session.authority, resources: session.resources },
+            sessionKey,
+            children,
+            undefined,
+          ),
+        }),
+      ).toBe(2);
+      const answers = new Map(
+        toolResultEntries(await session.sink.project()).flatMap((entry) =>
+          (entry.message?.parts ?? []).map((part) => [
+            part.functionResponse?.id,
+            JSON.stringify(part.functionResponse?.response),
+          ]),
+        ),
+      );
+      expect(answers.get('call-5')).toContain(
+        `Message queued for delivery to child agent ${children.taskIdOf(childRunId)}`,
+      );
+      expect(answers.get('call-7')).toContain(
+        JSON.stringify(HOSTED_AGENT_CALL_NOT_REACHED_TEXT).slice(1, -1),
+      );
+      expect(answers.has('call-1')).toBe(false);
     } finally {
       await session.close();
     }
