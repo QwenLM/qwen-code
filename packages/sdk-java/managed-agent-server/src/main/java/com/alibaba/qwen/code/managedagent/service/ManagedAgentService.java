@@ -111,7 +111,7 @@ public class ManagedAgentService {
     }
 
     private boolean supportsClose(SessionRecord session) {
-        return session.workspace() == null || !WorkspaceToolProfiles.isShell(session.toolProfile())
+        return session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
                 && store.workspaceFilesEnabled()
                 && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
                 && harness.supportsLifecycle();
@@ -778,7 +778,7 @@ public class ManagedAgentService {
     private static boolean retention(SessionRecord session,
             Set<String> closed) {
         return session.workspace() == null
-                || !WorkspaceToolProfiles.isShell(session.toolProfile())
+                || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
                         && closed.contains(session.sessionId());
     }
 
@@ -914,13 +914,13 @@ public class ManagedAgentService {
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
-        return retention || session.workspace() != null && !WorkspaceToolProfiles.isShell(session.toolProfile())
+        return retention || session.workspace() != null && !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
                 && store.workspaceFilesEnabled()
                 && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
     }
 
     private Boolean foregroundShell(SessionRecord session) {
-        if (session.workspace() == null || !WorkspaceToolProfiles.isShell(session.toolProfile())) {
+        if (session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
             return null;
         }
         return store.workspaceFilesEnabled() && store.workspaceShellEnabled()

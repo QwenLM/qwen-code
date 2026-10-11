@@ -152,7 +152,7 @@ class QwenHostedHarnessConnectorTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2",
-            "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
+            "hosted-workspace-shell/1", "hosted-workspace-shell/2", "hosted-workspace-team-lead/1"})
     void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
@@ -247,15 +247,16 @@ class QwenHostedHarnessConnectorTest {
     // #13753 I2: the child Workspace capability rides every create and
     // load the connector sends (attach, recovery, lifecycle settle), so the
     // Hosted Agent tool admits a worktree child only on a host that serves it.
-    @Test
-    void childWorkspaceCapabilityRidesEveryCreateAndLoad() {
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-team-lead/1"})
+    void childWorkspaceCapabilityRidesEveryCreateAndLoad(String profile) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
         when(client.capabilities()).thenReturn(capabilities);
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
         when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
-        when(attached.getApprovalMode()).thenReturn("default");
+        when(attached.getApprovalMode()).thenReturn("yolo");
         when(client.createSession(any())).thenReturn(attached);
         when(client.loadSession(any())).thenReturn(attached);
         when(client.settleLifecycle(any(), any())).thenReturn(Map.of());
@@ -263,13 +264,13 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", "hosted-workspace-files/1");
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", profile);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         ManagedAgentProperties properties = properties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
         ManagedActionStore actions = mock(ManagedActionStore.class);
-        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("yolo");
         OperationRecord operation = mock(OperationRecord.class);
         when(operation.tenantId()).thenReturn("tenant-a");
         when(operation.sessionId()).thenReturn(SESSION_ID);
@@ -287,16 +288,22 @@ class QwenHostedHarnessConnectorTest {
         fresh.get().createOrLoad("tenant-a", SESSION_ID, true);
         fresh.get().recoverManagedRuntime("tenant-a", SESSION_ID, false);
         fresh.get().settleLifecycle(operation);
+        fresh.get().rename("tenant-a", SESSION_ID, "internal lead");
 
         ArgumentCaptor<CreateHarnessSession> create = ArgumentCaptor.forClass(CreateHarnessSession.class);
         ArgumentCaptor<LoadHarnessSession> load = ArgumentCaptor.forClass(LoadHarnessSession.class);
         verify(client).createSession(create.capture());
-        verify(client, times(3)).loadSession(load.capture());
+        verify(client, times(4)).loadSession(load.capture());
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(create.getValue(), "toJson"))
-                .containsEntry("childWorkspaces", true);
+                .containsEntry("childWorkspaces", true)
+                .containsEntry("toolProfile", profile)
+                .containsEntry("approvalMode", "yolo")
+                .doesNotContainKey("suppressChildAgents");
         for (LoadHarnessSession request : load.getAllValues()) {
             assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(request, "toJson"))
-                    .containsEntry("childWorkspaces", true);
+                    .containsEntry("childWorkspaces", true)
+                    .containsEntry("toolProfile", profile)
+                    .doesNotContainKey("suppressChildAgents");
         }
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getAllValues().get(2), "toJson"))
                 .containsEntry("lifecycleAuthority", Map.of("operationId", "close-1", "claimGeneration", 2L));

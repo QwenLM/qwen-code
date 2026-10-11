@@ -47,6 +47,15 @@ file tools plus foreground `run_shell_command` and Monitor. Session messages
 share that orchestrator's write chain, so the same lane has no message funnel.
 A Shell lane that omits the flag keeps the child agent tool.
 
+PR #13674 also separates the existing internal TeamLead rig with the reserved
+`hosted-workspace-team-lead/1` profile and a trusted Java-only empty-creation
+entry. Public create and AgentDefinition cannot select this identity, including
+through idempotency replay. These public Shell rules still apply only to
+Shell/1 and /2. Authorized input, Actions and protocol-0 close on an internally
+created Session retain their private policy; opening public foreground Shell
+does not expose team tools. See the [internal admission design](2026-10-11-internal-team-lead-admission.md)
+for the persisted boundary and pending Linux/MySQL process acceptance.
+
 ## Admission and persistence
 
 Profile and approval mode are written in the existing creation transaction.

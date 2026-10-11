@@ -35,7 +35,10 @@ import {
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
-import { hostedShellLaneAttachesChildAgents } from './hosted-workspace-profiles.js';
+import {
+  hostedShellLaneAttachesChildAgents,
+  type HostedWorkspaceToolProfile,
+} from './hosted-workspace-profiles.js';
 
 // H4b: the kind gate admits `child_agent` for real, so this suite runs
 // without an enablement mock. The Broker is mocked as in the sibling
@@ -114,6 +117,7 @@ function createTurn(
   childWorkspaces = false,
   attachChildAgents = true,
   hooksSession?: HostedHookSession,
+  profile: HostedWorkspaceToolProfile = 'hosted-workspace-team-lead/1',
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -147,7 +151,7 @@ function createTurn(
     },
     undefined,
     {
-      profile: 'hosted-workspace-shell/1',
+      profile,
       ...(attachChildAgents
         ? {
             childAgents: {
@@ -280,6 +284,8 @@ it('hides the agent tool when public shell admission attaches no child orchestra
     false,
     false,
     false,
+    undefined,
+    'hosted-workspace-shell/1',
   ).declarations(new AbortController().signal);
   expect(tools.some((tool) => tool.name === 'agent')).toBe(false);
 });

@@ -294,11 +294,11 @@ public class ManagedAgentStore implements AgentStateStore {
                 actorId, idempotencyKey);
         if (!existing.isEmpty()) {
             return replayWorkspaceCommand(tenantId, actorId,
-                    requestDigest, existing.getFirst());
+                    requestDigest, existing.getFirst(), false);
         }
         AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision,
                 true);
-        if (!input.isEmpty() && WorkspaceToolProfiles.isShell(pin.toolProfile())
+        if (!input.isEmpty() && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
                 && !workspaceShellEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -321,6 +321,35 @@ public class ManagedAgentStore implements AgentStateStore {
                 workspace, actorId, pin);
     }
 
+    /** Trusted internal creation; public requests and definitions cannot select this policy. */
+    @Transactional
+    public Admission insertInternalTeamLeadSessionCommand(String tenantId,
+            String actorId, String idempotencyKey, String requestDigest,
+            String title, WorkspaceSelection selection) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
+                actorId, idempotencyKey);
+        if (!existing.isEmpty()) {
+            return replayWorkspaceCommand(tenantId, actorId,
+                    requestDigest, existing.getFirst(), true);
+        }
+        if (!workspaceFilesEnabled) {
+            throw workspaceExecutionUnavailable();
+        }
+        requireCreationScope(tenantId, idempotencyKey, true);
+        ResolvedBinding workspace = workspaces.resolveForCreation(tenantId, actorId, selection);
+        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
+        if (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
+                || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
+                || workspaceMounts.stream().noneMatch(mount -> tenantId.equals(mount.tenantId())
+                        && workspace.binding().getStorageId().equals(mount.storageId()))) {
+            throw workspaceExecutionUnavailable();
+        }
+        return insertSession(tenantId, "CREATE_SESSION", idempotencyKey, requestDigest,
+                "qwen-code", title, List.of(), null, workspace, actorId,
+                new AgentPin(agentRevision, null, approvalMode, WorkspaceToolProfiles.INTERNAL_TEAM_LEAD));
+    }
+
     @Override
     @Transactional
     public Admission replayWorkspaceSessionCommand(String tenantId,
@@ -332,7 +361,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     "idempotency_conflict", "The creation command is missing.");
         }
         return replayWorkspaceCommand(tenantId, actorId, requestDigest,
-                existing.getFirst());
+                existing.getFirst(), false);
     }
 
     private static String childActorOf(String parentSessionId) {
@@ -594,14 +623,17 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private Admission replayWorkspaceCommand(String tenantId, String actorId,
-            String requestDigest, WorkspaceCommand command) {
-        if (!command.requestDigest().equals(requestDigest)) {
+            String requestDigest, WorkspaceCommand command, boolean internalTeamLead) {
+        SessionRecord session = requireSession(tenantId, command.sessionId());
+        if (!command.requestDigest().equals(requestDigest)
+                || internalTeamLead != WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(session.toolProfile())
+                || internalTeamLead && (!"qwen-code".equals(session.agentId())
+                        || session.agentDefinitionDigest() != null)) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "idempotency_conflict",
                     "The idempotency key was reused with different content.");
         }
-        ContextBinding bound = requireSession(tenantId,
-                command.sessionId()).workspace();
+        ContextBinding bound = session.workspace();
         if (bound == null) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "workspace_unavailable", "Workspace binding is missing.");
@@ -825,7 +857,7 @@ public class ManagedAgentStore implements AgentStateStore {
             return replayCommand(tenantId, operation, idempotencyKey,
                     requestDigest);
         }
-        if (WorkspaceToolProfiles.isShell(session.toolProfile()) && !workspaceShellEnabled) {
+        if (WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
             throw workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
@@ -1263,7 +1295,7 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new SessionMutation(session, true);
         }
-        if (WorkspaceToolProfiles.isShell(session.toolProfile())) {
+        if (WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
             throw workspaceExecutionUnavailable();
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
@@ -1322,7 +1354,7 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new OperationAdmission(existing.get(), true);
         }
-        if (refuseShell && WorkspaceToolProfiles.isShell(session.toolProfile())) {
+        if (refuseShell && WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
             throw workspaceExecutionUnavailable();
         }
         if (hasPendingRenameDelivery(tenantId, sessionId)) {

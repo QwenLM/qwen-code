@@ -12,12 +12,15 @@ export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
 export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
 export const HOSTED_WORKSPACE_SHELL_PROFILE_V2 = 'hosted-workspace-shell/2';
+export const HOSTED_WORKSPACE_TEAM_LEAD_PROFILE =
+  'hosted-workspace-team-lead/1';
 
 export type HostedWorkspaceToolProfile =
   | typeof HOSTED_WORKSPACE_FILE_PROFILE
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
-  | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V2;
+  | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V2
+  | typeof HOSTED_WORKSPACE_TEAM_LEAD_PROFILE;
 
 export function isHostedWorkspaceProfile(
   profile: unknown,
@@ -26,14 +29,16 @@ export function isHostedWorkspaceProfile(
     profile === HOSTED_WORKSPACE_FILE_PROFILE ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2 ||
+    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
   );
 }
 
 export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
   return (
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2 ||
+    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
   );
 }
 

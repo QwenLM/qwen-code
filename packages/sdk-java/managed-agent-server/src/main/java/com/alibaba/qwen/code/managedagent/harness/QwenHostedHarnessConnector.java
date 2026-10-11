@@ -185,7 +185,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (ref == null) {
             ref = client().loadSession(new LoadHarnessSession(session.sessionId(), managedSessionStore(session),
                     false, toolProfile(session), false, false,
-                    WorkspaceToolProfiles.isShell(toolProfile(session)))
+                    WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withChildWorkspaces(childWorkspaces)
                     .forLifecycle(operation.operationId(), operation.claimGeneration()));
@@ -627,7 +627,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         managedSessionStore(session),
                         session.harnessBootId() != null, toolProfile(session),
                         false, false,
-                        WorkspaceToolProfiles.isShell(toolProfile(session)))
+                        WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                         .withAgentDefinition(agentDefinition(session, false))
                         .withChildWorkspaces(childWorkspaces)
                         .withStoppedMessages());
@@ -787,7 +787,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                             .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
                             .toolProfile(toolProfile(session))
                             .childWorkspaces(childWorkspaces);
-            if (WorkspaceToolProfiles.isShell(toolProfile(session))) {
+            if (WorkspaceToolProfiles.isPublicShell(toolProfile(session))) {
                 builder.suppressChildAgents();
             }
             ManagedSessionStoreConnection store = managedSessionStore(
@@ -837,7 +837,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return client().loadSession(new LoadHarnessSession(session.sessionId(), store,
                 passiveManagedRuntimeRecovery, profile,
                 driveRuntimeRecovery, cancellationTakeover,
-                WorkspaceToolProfiles.isShell(profile))
+                WorkspaceToolProfiles.isPublicShell(profile))
                 .withAgentDefinition(agentDefinition(session, false))
                 .withChildWorkspaces(childWorkspaces));
     }
@@ -967,7 +967,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private void requireShellApproval(SessionRecord session) {
-        if (session.workspace() != null && WorkspaceToolProfiles.isShell(session.toolProfile())
+        if (session.workspace() != null && WorkspaceToolProfiles.isPublicShell(session.toolProfile())
                 && (actions == null || !WorkspaceToolProfiles.requiresApproval(
                         actions.approvalMode(session.tenantId(), session.sessionId())))) {
             throw new IllegalStateException("Hosted Workspace Shell requires persisted default or auto-edit approval mode");

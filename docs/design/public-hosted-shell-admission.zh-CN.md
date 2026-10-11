@@ -38,6 +38,13 @@ AgentDefinition identity 与 `suppressChildAgents`。
 消息与该编排器共用同一条写链，因此这条车道也没有消息漏斗。未带该标志的 Shell
 车道仍声明 child agent 工具。
 
+PR #13674 同时用保留的 `hosted-workspace-team-lead/1` profile 和可信 Java 空创建
+入口，区分已有内部 TeamLead 环境。公开创建与 AgentDefinition 不能选择这个身份，
+幂等重放也不能跨越该边界。上述公开 Shell 规则仍只适用于 Shell/1 和 /2。
+在可信创建的内部 Session 上，按权限提交输入、回答 Actions 和 protocol-0 关闭
+保留内部策略；开放公开前台 Shell 不会开放团队工具。持久化边界与待完成的
+Linux/MySQL 进程验收见[内部准入设计](2026-10-11-internal-team-lead-admission.zh-CN.md)。
+
 ## 准入与持久化
 
 profile 与审批模式写入已有创建事务。它们是服务端决策，不纳入客户端请求摘要。
