@@ -9,7 +9,11 @@
       "env": {
         "QWEN_TEST_EXPLORER_WORKSPACE_ROOT": "${workspacePath}"
       },
-      "includeTools": ["test_report_import", "test_report_query"]
+      "includeTools": [
+        "test_report_import",
+        "test_report_query",
+        "test_report_show"
+      ]
     }
   }
 }

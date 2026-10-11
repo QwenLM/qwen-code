@@ -8,7 +8,8 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { MAX_RESULT_CHARS, type ReportSnapshot } from './contracts.js';
-import { importResult, queryReport } from './report-query.js';
+import { importResult, queryReport, showResult } from './report-query.js';
+import { showSchema } from './app-contract.js';
 import { parseVitestReport } from './vitest-report.js';
 
 function snapshot(count = 80, diagnostic = 'Failure evidence'): ReportSnapshot {
@@ -60,6 +61,26 @@ function payload(value: CallToolResult): Record<string, unknown> {
 }
 
 describe('bounded report queries', () => {
+  it('shows a fixed view and falls back to a bounded summary when escaped fields exceed the initial page budget', () => {
+    const data = snapshot(5);
+    data.source.relativePath = '"\\'.repeat(2000);
+    data.consistencyWarnings = Array.from({ length: 8 }, () =>
+      '"\\'.repeat(1000),
+    );
+    for (const item of data.files[0].items) {
+      item.path = '"\\'.repeat(2000);
+      item.fullName = '"\\'.repeat(2000);
+    }
+    const shown = payload(showResult(data));
+    expect(showSchema.safeParse(shown).success).toBe(true);
+    expect(shown).toMatchObject({
+      kind: 'show',
+      viewResolution: { mode: 'fixed' },
+    });
+    expect(shown).not.toHaveProperty('firstPage');
+    expect(shown['summary']).toEqual(payload(importResult(data))['summary']);
+  });
+
   it('makes each complete page usable through text-only MCP content', () => {
     const data = snapshot(80, 'Read this diagnostic evidence');
     const results = [
@@ -232,6 +253,8 @@ describe('bounded report queries', () => {
         .truncated,
     ).toBe(true);
     payload(importResult(data));
+    const shown = payload(showResult(data));
+    expect(showSchema.safeParse(shown).success).toBe(true);
   });
 
   it('reassembles huge escaped diagnostics without losing Unicode surrogate pairs', () => {
@@ -341,5 +364,7 @@ describe('bounded report queries', () => {
         .consistencyWarningCount,
     ).toBe(2_000);
     payload(importResult(data));
+    const shown = payload(showResult(data));
+    expect(showSchema.safeParse(shown).success).toBe(true);
   });
 });

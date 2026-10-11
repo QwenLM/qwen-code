@@ -13,7 +13,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "npm run clean && esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/main.js",
+    "build": "npm run clean && node scripts/build.mjs",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "lint": "eslint src",
     "test": "npm run build && vitest run --config vitest.config.ts",
@@ -22,14 +22,21 @@
   },
   "files": [
     "dist/main.js",
+    "dist/app.html",
     "qwen-extension.json",
     "README.md",
     "skills"
   ],
   "devDependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^22.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
     "esbuild": "^0.25.0",
+    "jsdom": "^26.1.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "typescript": "^5.4.5",
     "vitest": "^3.2.4",
     "zod": "^3.25.0"

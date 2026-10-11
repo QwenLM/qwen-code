@@ -128,21 +128,38 @@ function summary(snapshot: ReportSnapshot) {
 }
 
 export function importResult(snapshot: ReportSnapshot): CallToolResult {
+  return initialResult(snapshot, 'import');
+}
+
+export function showResult(snapshot: ReportSnapshot): CallToolResult {
+  return initialResult(snapshot, 'show');
+}
+
+function initialResult(
+  snapshot: ReportSnapshot,
+  kind: 'import' | 'show',
+): CallToolResult {
   const page = queryReport(snapshot, {
     kind: 'list',
     collection: 'failures',
     limit: 5,
   }).structuredContent;
+  const envelope = {
+    kind,
+    summary: summary(snapshot),
+    ...(kind === 'show' ? { viewResolution: { mode: 'fixed' } } : {}),
+  };
+  const verb = kind === 'import' ? 'Imported' : 'Explore';
   const value = result(
     snapshot,
-    { kind: 'import', summary: summary(snapshot), firstPage: page },
-    `Imported ${snapshot.reportId}: ${snapshot.computed.fileEntries} file entries, ${snapshot.computed.assertions} assertions, ${snapshot.computed.failures} failure entries. Report success: ${snapshot.reported.success}. Process exit and run completeness are unknown. ${snapshot.consistencyWarnings.length} consistency warnings. Query this reportId for evidence.`,
+    { ...envelope, firstPage: page },
+    `${verb} ${snapshot.reportId}: ${snapshot.computed.fileEntries} file entries, ${snapshot.computed.assertions} assertions, ${snapshot.computed.failures} failure entries. Report success: ${snapshot.reported.success}. Process exit and run completeness are unknown. ${snapshot.consistencyWarnings.length} consistency warnings. Query this reportId for evidence.`,
   );
   if (fits(value)) return value;
   const compact = result(
     snapshot,
-    { kind: 'import', summary: summary(snapshot) },
-    `Imported ${snapshot.reportId}. Query failures for evidence. Process exit is unknown.`,
+    envelope,
+    `${verb} ${snapshot.reportId}. Query failures for evidence. Process exit is unknown.`,
   );
   if (!fits(compact))
     throw new ExplorerError(

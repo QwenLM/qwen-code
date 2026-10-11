@@ -1,6 +1,6 @@
 # Test Failure Explorer
 
-Private Qwen Code extension for importing and querying an existing Vitest 3.2 JSON report. It provides two MCP tools with text and structured results; this first stage is usable without a graphical host.
+Private Qwen Code extension for importing and exploring an existing Vitest 3.2 JSON report. Text and structured queries work in any MCP host; a fixed interactive MCP App adds filtering, pagination and diagnostic details in compatible graphical hosts.
 
 ## Build and configure
 
@@ -39,11 +39,20 @@ Record the command and actual process exit code separately. The extension does n
 ## Tools
 
 - `test_report_import({ relativePath: ".qwen/test-reports/example.json" })`: validate the report, persist an immutable workspace snapshot, return its reportId, source hash, summary and a small first failure page. This writes only the extension cache.
+- `test_report_show({ reportId })`: open the fixed explorer for an already imported snapshot, with a summary and small first failure page. Text-only hosts receive the same evidence and reportId.
 - `test_report_query({ reportId, query: { kind: "summary" } })`: distinguish reported counters from computed file/assertion counts.
 - `test_report_query({ reportId, query: { kind: "list", collection: "failures", text: "timeout", offset: 0, limit: 25 } })`: literal whole-snapshot search; collections also include `assertions` and `file-errors`. Optional status filtering preserves individual assertion statuses.
 - `test_report_query({ reportId, query: { kind: "detail", itemId, field: "diagnostics", offset: 0 } })`: read a bounded diagnostic chunk; `path` and `title` are separately pageable. Follow `nextOffset` until null.
 
-No App resource is registered in this stage. Tools are model-visible; neither tool is exposed to Apps. Normal MCP permissions still apply.
+Import and show are model-visible only. Query is also App-visible and does not create another card. Normal MCP permissions still apply. The App can only query this dedicated server; importing a new path is a separate model tool action.
+
+## Interactive explorer
+
+The card starts with failed assertions and file errors. Switch collections, submit a case-sensitive literal search over the whole snapshot, and page through the matches. Open an entry to read diagnostics, the full title or the full path in separate chunks. Reported suite counts and computed file/assertion counts remain distinct; the source path, hash, import time and report-only provenance identify the evidence.
+
+Select up to 20 failed entries across pages to prepare a short analysis request. Manually copy the text into the conversation; the card does not send messages, execute tests or apply fixes. Report strings are rendered as plain text without automatic links.
+
+The self-contained HTML resource is `ui://test-failure-explorer/v1/index.html`. It contains no report data and requests no external CSP domains. Data arrives through the show result and standard App tool calls; there are no external assets or separate network data requests. Refresh resets filters, pages and selection to the initial card result. If a host offers no tool callback, the saved summary and first page remain readable with query controls disabled. Query failures retain that saved evidence and display an error. If historical HTML has been evicted, use the text fallback or call show again with the saved reportId.
 
 ## Evidence and recovery
 
@@ -57,7 +66,7 @@ Missing/corrupt snapshots return `REPORT_UNAVAILABLE`. Corrupt existing IDs are 
 
 ## Fixed bounds
 
-Sources: 10 MiB, 2,000 file entries, 20,000 assertions. Snapshots: 20 MiB. Exceeding these rejects import, without partial data. A complete serialized MCP tool result is at most 24,000 JavaScript characters, including escaping and text/structured duplication. Lists default to 25 and allow at most 50, but may return fewer to meet that budget. Detail chunks are at most 8,000 characters and can shrink for escaping. Truncation/page metadata is explicit and the complete snapshot remains unchanged.
+Sources: 10 MiB, 2,000 file entries, 20,000 assertions. Snapshots: 20 MiB. Exceeding these rejects import, without partial data. A complete serialized MCP tool result is at most 24,000 JavaScript characters, including escaping and text/structured duplication. Lists default to 25 and allow at most 50, but may return fewer to meet that budget. Detail chunks are at most 8,000 characters and can shrink for escaping. Truncation/page metadata is explicit and the complete snapshot remains unchanged. The App resource is limited to 1 MiB of UTF-8 HTML at build time. The card uses at most one list and one detail request, cancelling superseded requests and ignoring late replies.
 
 Tests run from this integration directory:
 
