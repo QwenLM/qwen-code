@@ -127,6 +127,11 @@ class ReadMcpResourceToolInvocation extends BaseToolInvocation<
           formatted.parts.length > 0
             ? formatted.parts
             : emptyMcpResourceText(formatted, label),
+        // The formatter caps text and drops over-budget blobs itself, so when
+        // it reports truncation this body is not the raw one — declare the
+        // size unknown rather than let the scheduler measure the bounded body
+        // and certify it as the producer's raw size (#13652 R2-5).
+        ...(formatted.truncated ? { rawOutputSize: null } : {}),
         returnDisplay: `Read resource ${label} — ${summarizeMcpResource(
           formatted,
         )}`,
