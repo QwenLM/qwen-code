@@ -2,7 +2,7 @@
 
 [English](2026-10-10-managed-agent-teams.md) | [简体中文](2026-10-10-managed-agent-teams.zh-CN.md)
 
-Status: implemented in this change. Landed: the `managed-team_state`, `managed-team_task`, `managed-team_message` and `managed-team_plan` record bodies, registered and validated in TypeScript and Java, with the commit-time rules that bind every team record to its lead Session. None of the four domains is enabled for submission. Still design: the runtime that creates teams, spawns members, relays the mailbox, resolves plans and shuts members down (H4e-b, Follow-up work), except its lead-side half, which the [H4e-b1 design](2026-10-10-managed-agent-team-lead-runtime.md) implements with the team domains still disabled. This is the record-contract half of slice **H4e** of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380), tracked by [#13745](https://github.com/QwenLM/qwen-code/issues/13745). It follows H4a ([record contract](2026-10-06-managed-child-agent-runtime.md), #13505), H4b ([child Session runtime](2026-10-07-managed-child-session-runtime.md), #13550), H4c ([workflow kind](2026-10-09-managed-workflow-child-kind.md), #13754) and H4d-a ([Session messages](2026-10-09-managed-session-messages.md), #13786). Below, "the automation design" is section 5.1 of the [automation, Channels and child delivery design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-automation.md) at the commit that #12827 pins.
+Status: implemented in this change. Landed: the `managed-team_state`, `managed-team_task`, `managed-team_message` and `managed-team_plan` record bodies, registered and validated in TypeScript and Java, with the commit-time rules that bind every team record to its lead Session. None of the four domains was enabled for submission here. Still design: the runtime that relays the mailbox, resolves plans and shuts members down (H4e-b2 and H4e-b3, Follow-up work). Its lead-side half, which creates teams and spawns members, is implemented by the [H4e-b1 design](2026-10-10-managed-agent-team-lead-runtime.md), which also enabled `team_state` and `team_task` after its physical pass; `team_message` and `team_plan` stay disabled. This is the record-contract half of slice **H4e** of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380), tracked by [#13745](https://github.com/QwenLM/qwen-code/issues/13745). It follows H4a ([record contract](2026-10-06-managed-child-agent-runtime.md), #13505), H4b ([child Session runtime](2026-10-07-managed-child-session-runtime.md), #13550), H4c ([workflow kind](2026-10-09-managed-workflow-child-kind.md), #13754) and H4d-a ([Session messages](2026-10-09-managed-session-messages.md), #13786). Below, "the automation design" is section 5.1 of the [automation, Channels and child delivery design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-automation.md) at the commit that #12827 pins.
 
 ## Problem and scope
 
@@ -58,7 +58,7 @@ The facts below are from `main` at `9ec44d45c4`.
 
    A record of a team that is closing or deleted can still take its later revisions: a message in flight is still delivered, a pending plan request is still withdrawn, and a task can still be updated. Only new records are refused, so a team in `closing` admits no new work while it drains.
 
-9. **The four domains stay disabled and project no task.** None is in `MANAGED_SESSION_ENABLED_DOMAINS`, and a commit is refused with "registered but not enabled" before anything publishes. The Java store validates all four ahead of any writer, in the server-first order of H1 through H4d-a. None is on the list of domains that Java's lifecycle gate admits for a Session under a close or delete claim, and H4e-b decides what a closing lead may still commit (open question 3). A team task is a board item, not a runtime task, so all four register a null task kind and their Java rows carry null task columns.
+9. **The four domains stay disabled and project no task.** In this slice none is in `MANAGED_SESSION_ENABLED_DOMAINS` (H4e-b1 later enabled `team_state` and `team_task` after its physical pass), and a commit is refused with "registered but not enabled" before anything publishes. The Java store validates all four ahead of any writer, in the server-first order of H1 through H4d-a. None is on the list of domains that Java's lifecycle gate admits for a Session under a close or delete claim, and H4e-b decides what a closing lead may still commit (open question 3). A team task is a board item, not a runtime task, so all four register a null task kind and their Java rows carry null task columns.
 
 ## Records
 
@@ -162,7 +162,7 @@ Chain identity: `requestId`.
 
 - **Fixture parity.** The shared cases and successors replay in both languages, and every invalid case names the clause both validators must report.
 - **Authority.** The suite lifts the domain gate to plant records, except where it tests the gate itself:
-  - The real gate refuses each of the four domains, and nothing publishes.
+  - The real gate refuses each of the four domains in this slice, and nothing publishes.
   - A team opens, gains members one at a time, closes and is deleted. Its tasks, messages and plan requests chain to their ends, and a reopened log rebuilds every chain.
   - Every rule of decision 8 refuses its violation with the named message.
 - **Java store.** The same chains commit over H2 in MySQL mode, the same rules refuse with `managed_session_extension_record_rejected`, and a team row projects no task.
@@ -171,7 +171,7 @@ Chain identity: `requestId`.
 ## Acceptance criteria
 
 - TypeScript and Java accept and refuse identical team records and successors from the shared fixtures, and every existing contract corpus replays unchanged.
-- The four domains stay off the enabled list and are refused before anything publishes.
+- In this slice the four domains stay off the enabled list and are refused before anything publishes.
 - In both languages, every rule of decision 8 refuses its violation, and a lawful team, task, message and plan request commit and rebuild.
 - No public API or migration changes, and every existing H1–H4d-a suite stays green.
 
