@@ -120,6 +120,8 @@ projector 和 TS options reader 都必须先支持 v1/v2/v3，writer 才能输�
 
 发布前将序列化后的审批计划和最终批次计划与 Store 的 64 KiB 内联资源上限比较。计划超限时省略该恢复资源，沿用 v1/v2 options，维持普通存活进程的审批和执行。这种审批不具备新增的 continuation 恢复保证。能容纳的计划如果发布到 Store 失败，仍须阻塞，不能按大小超限降级。
 
+某个审批没有捕获计划后，同一个 assistant 批次的所有后续计划都不再发布，即使最终计划可以容纳。恢复时，在选择最终计划或更早的 v3 计划前，也须拒绝包含持久化 v1/v2 审批的批次；否则混合批次可能重复已有审批或选中无法读取的计划。检查从当前 assistant 消息的提交 sequence 开始，避免前一个批次的回退影响后续批次。
+
 ### 4.2 恢复 driver，再服从持久化竞争结果
 
 1. 获取新 writer activation，恢复准确的 Session/profile、原 Runtime owner 与

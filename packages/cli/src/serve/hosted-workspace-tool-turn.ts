@@ -782,6 +782,7 @@ export class HostedWorkspaceToolTurn {
     inputRefs: Map<number, ManagedSessionDurableRef>;
     definitionRefs: Map<number, ManagedSessionDurableRef>;
     actionIds: Map<number, string>;
+    uncaptured?: boolean;
   };
   hookStopReason?: string;
   private readonly broker: HostedWorkspaceBroker;
@@ -1650,6 +1651,7 @@ export class HostedWorkspaceToolTurn {
     const runtime = this.broker.runtime;
     if (
       !batch ||
+      batch.uncaptured ||
       !runtime ||
       isHostedWorkspaceShellProfile(this.profile) ||
       this.hooks ||
@@ -4687,6 +4689,7 @@ export class HostedWorkspaceToolTurn {
       ordinal < 0
         ? undefined
         : await this.captureNativeBatch('approval', requestId, ordinal);
+    if (ordinal >= 0 && !continuationRef) this.nativeBatch!.uncaptured = true;
     const options: HostedActionOptions = {
       ...(continuationRef
         ? {

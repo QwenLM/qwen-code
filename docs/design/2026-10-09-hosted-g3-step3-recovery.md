@@ -136,6 +136,8 @@ emits v3.
 
 Measure the serialized approval and final batch plans before publication against the Store's 64 KiB inline resource limit. If a plan is oversized, omit that recovery resource and keep ordinary live approval and execution working with the existing v1/v2 options. Such an approval has no new continuation recovery guarantee. A Store publication failure for a fitting plan still blocks; it is not a size fallback.
 
+Once an approval lacks a captured plan, omit all later plans in that assistant batch, even if a final plan would fit. Recovery also declines any batch containing a durable v1/v2 approval before choosing a final or earlier v3 plan; otherwise a mixed batch could repeat an existing approval or select an unreadable plan. This check starts at the current assistant message's committed sequence, so an earlier fallback does not disable a later batch.
+
 ### 4.2 Restore a driver, then honor the durable winner
 
 1. Acquire the new writer activation and restore the exact Session/profile,

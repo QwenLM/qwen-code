@@ -315,43 +315,47 @@ export async function findHostedApprovalContinuation(
       ),
   );
   if (callIds.every((id) => answered.has(id))) return undefined;
+  const assistantSequence = events.findLast(
+    (event) =>
+      event.kind === 'message.committed' &&
+      event.payload['messageId'] === latestAssistant.uuid &&
+      event.payload['role'] === 'assistant',
+  )?.sequence;
+  if (assistantSequence === undefined) return undefined;
   const batch = [...events]
     .reverse()
     .find(
       (event) =>
+        event.sequence > assistantSequence &&
         event.kind === 'hosted.batch.planned' &&
         event.payload['batchId'] === latestAssistant.uuid,
     );
-  if (batch)
-    return readHostedApprovalContinuation(
-      session,
-      batch.payload['planRef'] as unknown as ManagedSessionDurableRef,
-      promptId,
-    );
-  const examined = new Set<string>();
+  let approvalRef: ManagedSessionDurableRef | undefined;
   for (const event of [...events].reverse()) {
+    if (event.sequence <= assistantSequence) break;
     if (
       event.kind !== 'action.changed' ||
-      event.payload['source'] !== 'tool_call'
+      event.payload['source'] !== 'tool_call' ||
+      event.payload['state'] !== 'requested'
     )
       continue;
     const action = session.authority.action(
       event.payload['requestId'] as string,
     );
-    if (!action || examined.has(action.requestId)) continue;
-    examined.add(action.requestId);
+    if (!action) continue;
     const options = await readHostedActionOptions(session, action);
     if (
       options.turnId !== promptId ||
-      options.v !== 3 ||
       !callIds.includes(options.functionCallId)
     )
       continue;
-    return readHostedApprovalContinuation(
-      session,
-      options.continuationRef,
-      promptId,
-    );
+    if (options.v !== 3) return undefined;
+    approvalRef ??= options.continuationRef;
   }
-  return undefined;
+  const planRef = batch
+    ? (batch.payload['planRef'] as unknown as ManagedSessionDurableRef)
+    : approvalRef;
+  return planRef
+    ? readHostedApprovalContinuation(session, planRef, promptId)
+    : undefined;
 }
