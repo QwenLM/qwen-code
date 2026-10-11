@@ -85,6 +85,7 @@ import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   childLaunchAdmission,
+  childRunEndedText,
   childWorkspaceAnswerSuffix,
 } from './hosted-child-agent-session.js';
 import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
@@ -4117,7 +4118,7 @@ export class HostedWorkspaceToolTurn {
             request.call.name,
             request.call.callId,
             [],
-            `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
+            childRunEndedText(record),
           );
           if (!journaled?.has(request.call.callId))
             await this.commit('tool_result', ended, model);

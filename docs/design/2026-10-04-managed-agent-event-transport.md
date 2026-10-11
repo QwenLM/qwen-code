@@ -4,10 +4,12 @@
 
 [English](2026-10-04-managed-agent-event-transport.md) | [简体中文](2026-10-04-managed-agent-event-transport.zh-CN.md)
 
-**Status: design reserved — 设计预留·未交付.** Nothing described in this
-document is implemented. There is no `EventTransport` interface, no MQ client,
-no consumer, and no multi-node wake anywhere in the repository. Every
-architecture statement below is a forward-looking design reserve, not a
+**Status: design reserved — 设计预留·未交付.** The transport side remains
+unimplemented: no MQ client, no consumer, and no multi-node wake anywhere in
+the repository. (Written when no `EventTransport` type existed; MQ1 has since
+landed the interface and the composite seam — see
+[2026-10-11-managed-agent-event-transport-seam](2026-10-11-managed-agent-event-transport-seam.md).)
+Every architecture statement below is a forward-looking design reserve, not a
 description of running code; each such section says so again in its heading.
 This document changes no production behavior and ships no production code.
 
@@ -189,12 +191,17 @@ Evidence is in Appendix A; every path below was read on `5ddfacc9d4`.
   commit transaction for journal facts (same-transaction commit, after-commit
   drain) — the MQ2 phase wires the second and never relabels the first as
   covering it.
-- **Dedicated transport abstraction — DOES NOT EXIST IN CODE.** A code search
-  for `EventTransport`/`eventTransport`/`RocketMQ` returns zero matches
-  outside design documents. There is no transport configuration property, no
-  outbox-drain loop aimed at a broker, and no multi-node wake consumer. The
-  name exists only in the 2026-09-20 storage-and-event design (conceptual
-  interface, proposed follow-up work — see the header).
+- **Dedicated transport abstraction — DID NOT EXIST AT THE BASELINE; MQ1 has
+  since named it.** At the baseline read (`5ddfacc9d4`, 2026-10-04), a code
+  search for `EventTransport`/`eventTransport`/`RocketMQ` returned zero
+  matches outside design documents, and the name existed only in the
+  2026-09-20 storage-and-event design (conceptual interface, proposed
+  follow-up work). MQ1
+  ([2026-10-11-managed-agent-event-transport-seam](2026-10-11-managed-agent-event-transport-seam.md))
+  has since introduced the `EventTransport` interface behind the after-commit
+  seam; there is still no implementation, no transport configuration
+  property, no outbox-drain loop aimed at a broker, and no multi-node wake
+  consumer.
 - **TypeScript embedded scheduler — NO seam by design.**
   `EmbeddedHarnessScheduler` pumps activations from
   `FileManagedActivationStore` leases inside one process and schedules
@@ -450,10 +457,12 @@ Read on `5ddfacc9d4` (2026-10-04). One line per resident responsibility.
 | `packages/core/src/managed-runtime/managed-activation-store.ts`                             | activation descriptors, leases, fences, epochs                                                                                   | NO                               |
 | `packages/core/src/managed-runtime/managed-extension-projection.ts`                         | `ManagedSessionTaskView` projection incl. outbox/delivery state                                                                  | NO                               |
 
-**Verdict: PARTIAL.** A Java after-commit seam exists
-(`CommittedEventPublisher`, currently exactly one in-process implementation);
-a dedicated `EventTransport`/wake abstraction exists nowhere in code (code
-search yields zero matches; the 2026-09-20 design sketch is a document, not
-code) and must be introduced at MQ1 behind that seam.
+**Verdict: PARTIAL (read at the baseline `5ddfacc9d4`, 2026-10-04).** A Java
+after-commit seam exists (`CommittedEventPublisher`, at the baseline exactly
+one in-process implementation); a dedicated `EventTransport`/wake abstraction
+existed nowhere in code at the baseline and was to be introduced at MQ1
+behind that seam — which MQ1 has since done
+([2026-10-11-managed-agent-event-transport-seam](2026-10-11-managed-agent-event-transport-seam.md):
+interface plus composite, no implementation).
 The TypeScript embedded scheduler is process-local by design and gains no
 broker dependency from this slice.

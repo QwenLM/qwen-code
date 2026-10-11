@@ -254,12 +254,14 @@ class SessionRowLockOrderTest {
         // a locker this list does not name fails here instead of passing
         // unaudited. It includes the writers the deadlock was reported on,
         // recordAdmission's raw-SQL turn-row access, the raw FOR UPDATE
-        // lockers no helper name would find, and the three create entries,
-        // whose session-row INSERT is the lock.
+        // lockers no helper name would find, and the create entries, whose
+        // session-row INSERT is the lock.
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
                 "insertTurnCommand", "insertCancelCommand",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
-                "insertChildSessionCommand", "beginSessionMutation",
+                "insertChildSessionCommand",
+                "insertInternalTeamLeadSessionCommand",
+                "beginSessionMutation",
                 "beginTaskCancelOperation", "completeSessionMutation",
                 "beginOperation",
                 "beginWorkspaceClose", "beginWorkspaceLifecycle",
@@ -302,7 +304,9 @@ class SessionRowLockOrderTest {
                         "findDispatchable", "findLatestTurns", "findTurn",
                         "findTurnSummary", "hasActiveTurn",
                         "insertCancelCommand", "insertChildSession",
-                        "insertChildSessionCommand", "insertSession", "insertSessionCommand", "insertTurn",
+                        "insertChildSessionCommand",
+                        "insertInternalTeamLeadSessionCommand",
+                        "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
                         "materializeEvent", "materializeInput",

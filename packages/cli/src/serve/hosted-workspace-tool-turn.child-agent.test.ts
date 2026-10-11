@@ -35,6 +35,10 @@ import {
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import {
+  hostedShellLaneAttachesChildAgents,
+  type HostedWorkspaceToolProfile,
+} from './hosted-workspace-profiles.js';
 
 // H4b: the kind gate admits `child_agent` for real, so this suite runs
 // without an enablement mock. The Broker is mocked as in the sibling
@@ -111,7 +115,9 @@ function createTurn(
   promptName = 'prompt',
   hooksMountHeld = false,
   childWorkspaces = false,
+  attachChildAgents = true,
   hooksSession?: HostedHookSession,
+  profile: HostedWorkspaceToolProfile = 'hosted-workspace-team-lead/1',
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -145,13 +151,17 @@ function createTurn(
     },
     undefined,
     {
-      profile: 'hosted-workspace-shell/1',
-      childAgents: {
-        funnel: children,
-        depth,
-        childWorkspaces,
-        queueConsumption: (childRunId) => consumption.push(childRunId),
-      },
+      profile,
+      ...(attachChildAgents
+        ? {
+            childAgents: {
+              funnel: children,
+              depth,
+              childWorkspaces,
+              queueConsumption: (childRunId) => consumption.push(childRunId),
+            },
+          }
+        : {}),
       ...(hookEvents
         ? {
             hooks: {
@@ -258,6 +268,26 @@ beforeEach(async () => {
 afterEach(async () => {
   await session?.close();
   await rm(root, { recursive: true, force: true });
+});
+
+it('advertises child agents only on a shell lane that public admission has not suppressed', () => {
+  expect(hostedShellLaneAttachesChildAgents(true, false)).toBe(true);
+  expect(hostedShellLaneAttachesChildAgents(true, true)).toBe(false);
+  expect(hostedShellLaneAttachesChildAgents(false, false)).toBe(false);
+});
+
+it('hides the agent tool when public shell admission attaches no child orchestrator', async () => {
+  const tools = await createTurn(
+    0,
+    undefined,
+    'prompt',
+    false,
+    false,
+    false,
+    undefined,
+    'hosted-workspace-shell/1',
+  ).declarations(new AbortController().signal);
+  expect(tools.some((tool) => tool.name === 'agent')).toBe(false);
 });
 
 it('declares the agent tool at the root and hides it from a child Session', async () => {
@@ -461,6 +491,83 @@ it('ends a foreground worktree answer with its merge outcome', async () => {
     `[child workspace] merge conflicted at "src/a.ts", "odd\\nname"; the child's changes did not land; the child's work is kept at ${pin}.`,
   );
   expect(consumption).toEqual(['prompt:call-1']);
+});
+
+async function foregroundFailure(
+  isolated: boolean,
+  started: boolean,
+  cancelled = false,
+): Promise<string> {
+  const turn = createTurn(0, undefined, 'prompt', false, true);
+  const childRunId = 'prompt:call-1';
+  const driving = (async () => {
+    for (;;) {
+      if (children.record(childRunId) !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (started) {
+      await children.dispatchStarted(childRunId, {
+        dispatchId: 'dispatch-1',
+        runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+      });
+      await children.attach(childRunId, '550e8400-e29b-41d4-a716-446655440001');
+    }
+    if (cancelled) await children.settleCancelled(childRunId, { started });
+    else
+      await children.settleFailed(childRunId, {
+        stopReason: started ? 'child_failed' : 'creation_failed',
+        reason: null,
+        started,
+      });
+  })();
+  const responses = (
+    await Promise.all([
+      executeAgent(
+        turn,
+        call({
+          description: 'audit the diff',
+          prompt: 'review the change',
+          run_in_background: false,
+          ...(isolated ? { isolation: 'worktree' } : {}),
+        }),
+      ),
+      driving,
+    ])
+  )[0];
+  return JSON.stringify(responses);
+}
+
+// The relay tells a failure only after a merge it asked for has its
+// outcome, so a started worktree child's failure points the parent at its
+// Workspace. The line covers a merge that conflicted or was pinned away
+// too: it must never say the work landed.
+it('ends a started worktree child failure with the workspace line', async () => {
+  const answer = await foregroundFailure(true, true);
+  expect(answer).toContain('Child agent run failed (child_failed).');
+  expect(answer).toContain(
+    "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
+  );
+  expect(answer).not.toContain('then its merge ran first');
+});
+
+it('ends a started worktree child cancellation with the workspace line', async () => {
+  const answer = await foregroundFailure(true, true, true);
+  expect(answer).toContain('Child agent run cancelled (stop_requested).');
+  expect(answer).toContain(
+    "[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.",
+  );
+});
+
+it('adds no workspace line to a worktree child that never started', async () => {
+  const answer = await foregroundFailure(true, false);
+  expect(answer).toContain('Child agent run failed (creation_failed).');
+  expect(answer).not.toContain('[child workspace]');
+});
+
+it('adds no workspace line to a failed shared child', async () => {
+  const answer = await foregroundFailure(false, true);
+  expect(answer).toContain('Child agent run failed (child_failed).');
+  expect(answer).not.toContain('[child workspace]');
 });
 
 it('says the outcome is unavailable for a worktree receipt off the shape', async () => {
@@ -1331,7 +1438,7 @@ it.each(
       eventName,
       config: { type: 'command' },
     });
-    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     try {
       const result = await executeAgent(
         turn,
@@ -1365,7 +1472,7 @@ it('refuses a background child on a result Hook whose matcher cannot match agent
     config: { type: 'command' },
     matcher: 'read_file',
   });
-  const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+  const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
   try {
     expect(hooks.hasMountableToolResultHooks).toBe(true);
     const result = await executeAgent(
@@ -1432,7 +1539,7 @@ it.each([false, true])(
       session,
       original.getCatalog()!,
     );
-    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     try {
       expect(original.hasMountableToolResultHooks).toBe(true);
       await original.fire(
@@ -1521,7 +1628,7 @@ it('refuses a child while a once Hook is committed but unsettled', async () => {
     session,
     catalog,
   );
-  const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+  const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
   await hooks.ensureReady();
   expect(hooks.mountHeld).toBe(false);
   expect(hooks.hasUnsettledExecutions).toBe(true);
@@ -1550,7 +1657,7 @@ it.each(
   'admits result-Hook controls %# (background=$background)',
   async ({ descriptor, background }) => {
     const hooks = await restoredHooks(descriptor);
-    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     turn.setPromptHookRunner(async (hookConfig, eventName) => ({
       hookConfig,
       eventName,
