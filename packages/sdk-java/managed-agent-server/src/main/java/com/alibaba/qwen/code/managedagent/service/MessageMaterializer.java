@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
-import java.time.Clock;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -19,75 +18,105 @@ public class MessageMaterializer {
             MessageMaterializer.class);
     private static final int TARGET_LIMIT = 32;
     private static final int EVENT_LIMIT = 200;
-
-    /**
-     * Consecutive per-session failures after which the stuck projection is
-     * surfaced once at ERROR. The session keeps being retried on the capped
-     * backoff, and a later success resets it.
-     */
-    private static final int STUCK_FAILURE_BUDGET = 10;
-    private static final long MAX_BACKOFF_MS = 60_000;
-
+    // Selection gate for failing targets: retry on streaks 1, 2, 4, ...,
+    // up to the cap, and once every MAX_BACKOFF_STREAK passes at and past
+    // it. A skipped pass rotates the target behind fresher rows only when
+    // a row sits behind the selection window — at or below the limit the
+    // same rows are selected again whatever their order, so the write would
+    // buy nothing — and the catch already rotates after a failed attempt.
+    // Only the exponential phase warns with the stack, so a poisoned
+    // session can neither starve healthy ones nor warn at 10 Hz forever.
+    private static final int MAX_BACKOFF_STREAK = 64;
     private final AgentStateStore store;
-    private final Clock clock;
-    private final Map<String, SessionFailure> failures =
-            new ConcurrentHashMap<>();
+    private final Map<String, Integer> failures = new ConcurrentHashMap<>();
+    private final Set<String> surfaced = ConcurrentHashMap.newKeySet();
 
-    private record SessionFailure(int count, long retryAfter,
-            boolean surfaced) {
-    }
-
-    public MessageMaterializer(AgentStateStore store, Clock clock) {
+    public MessageMaterializer(AgentStateStore store) {
         this.store = store;
-        this.clock = clock;
     }
 
-    @Scheduled(fixedDelayString =
-            "${qwen.managed-agent.events.materialize-interval:100ms}")
+    // Blocking JDBC rotation writes must never occupy the one-thread
+    // default pool that carries the dispatch scan and lease recovery.
+    @Scheduled(scheduler = "managedMaterializationScheduler",
+            fixedDelayString =
+                    "${qwen.managed-agent.events.materialize-interval:100ms}")
     public void materialize() {
-        long now = clock.millis();
+        // Saturation means a row sits behind the selection window, so
+        // probe one row past the limit rather than inferring it from an
+        // exactly-full window.
         List<MaterializationTarget> targets =
-                store.findMaterializationTargets(TARGET_LIMIT);
-        // A session that stopped being a target (caught up or deleted) never
-        // fails again; drop its entry so the map tracks only live failures.
+                store.findMaterializationTargets(TARGET_LIMIT + 1);
+        // A session that stopped being a target (caught up or deleted)
+        // never fails again; drop its entries so both maps track only live
+        // failures. The probe row past the limit is live too.
         if (!failures.isEmpty()) {
             Set<String> live = new HashSet<>();
             for (MaterializationTarget target : targets) {
-                live.add(target.tenantId() + "\n" + target.sessionId());
+                live.add(target.tenantId() + ":" + target.sessionId());
             }
             failures.keySet().removeIf(key -> !live.contains(key));
+            surfaced.removeIf(key -> !live.contains(key));
         }
-        for (MaterializationTarget target : targets) {
-            String key = target.tenantId() + "\n" + target.sessionId();
-            SessionFailure failure = failures.get(key);
-            if (failure != null && now < failure.retryAfter()) {
-                continue;
+        boolean saturated = targets.size() > TARGET_LIMIT;
+        for (MaterializationTarget target
+                : targets.subList(0, Math.min(TARGET_LIMIT, targets.size()))) {
+            String key = target.tenantId() + ":" + target.sessionId();
+            int streak = failures.getOrDefault(key, 0);
+            if (streak > 0) {
+                boolean due = streak < MAX_BACKOFF_STREAK
+                        ? (streak & (streak - 1)) == 0
+                        : streak % MAX_BACKOFF_STREAK == 0;
+                if (!due) {
+                    if (saturated) {
+                        deferQuietly(target);
+                    }
+                    failures.put(key, streak + 1);
+                    continue;
+                }
             }
             try {
                 store.materializeNextBatch(target.tenantId(),
                         target.sessionId(), EVENT_LIMIT);
                 failures.remove(key);
+                surfaced.remove(key);
             } catch (RuntimeException error) {
-                // A deterministic failure (e.g. an unreadable event row)
-                // must not retry at the scan rate forever: back off
-                // exponentially, and surface the stuck projection once.
-                int count = (failure == null ? 0 : failure.count()) + 1;
-                long backoff = Math.min(MAX_BACKOFF_MS,
-                        100L << Math.min(count - 1, 10));
-                boolean surfaced = failure != null && failure.surfaced();
-                boolean surface = count >= STUCK_FAILURE_BUDGET && !surfaced;
-                failures.put(key, new SessionFailure(count,
-                        now + backoff, surfaced || surface));
-                if (surface) {
+                int next = streak + 1;
+                failures.put(key, next);
+                deferQuietly(target);
+                if (streak == MAX_BACKOFF_STREAK && surfaced.add(key)) {
+                    // A session that survives the whole exponential phase is
+                    // a stuck projection, not a blip: surface it once, then
+                    // keep retrying on the capped gate. One line, no stack —
+                    // the exponential phase already logged it seven times.
                     LOG.error("Managed Agent session {} projection is stuck"
                                     + " after {} consecutive failures;"
-                                    + " retrying on a capped backoff",
-                            target.sessionId(), count, error);
-                } else {
+                                    + " retrying on the capped gate",
+                            target.sessionId(), next);
+                }
+                if (streak < MAX_BACKOFF_STREAK) {
                     LOG.warn("Failed to materialize Managed Agent session {}",
                             target.sessionId(), error);
+                } else {
+                    // Past the cap an attempt fires every half minute; keep
+                    // the signal but drop the repetitive stack.
+                    LOG.warn("Failed to materialize Managed Agent session {}: {}",
+                            target.sessionId(), error.toString());
                 }
             }
+        }
+    }
+
+    // A store fault while rotating a target must degrade that one target,
+    // not abort the pass for every other selected session. The warn never
+    // carries the stack: a persistently faulting rotation fires at
+    // scheduler rate, and the stack buys nothing per pass.
+    private void deferQuietly(MaterializationTarget target) {
+        try {
+            store.deferMaterializationTarget(target.tenantId(),
+                    target.sessionId());
+        } catch (RuntimeException deferError) {
+            LOG.warn("Failed to defer Managed Agent session {}: {}",
+                    target.sessionId(), deferError.toString());
         }
     }
 }

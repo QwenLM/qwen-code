@@ -629,7 +629,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             context.registerBean("materializer",
                     com.alibaba.qwen.code.managedagent.service.MessageMaterializer.class,
                     () -> new com.alibaba.qwen.code.managedagent.service.MessageMaterializer(
-                            state, java.time.Clock.systemUTC()));
+                            state));
             try {
                 context.refresh();
                 assertThat(entered.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();

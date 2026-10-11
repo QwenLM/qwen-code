@@ -73,8 +73,7 @@ class MessageProjectionGapHealTest {
                 "{\"text\":\"survives the gap\",\"itemId\":\"item-gap-3\"}");
         insertGapEvent(sessionId, 4, "turn-gap", "item.output_text.delta",
                 "{\"text\":\"also survives\",\"itemId\":\"item-gap-4\"}");
-        MessageMaterializer materializer = new MessageMaterializer(store,
-                Clock.systemUTC());
+        MessageMaterializer materializer = new MessageMaterializer(store);
 
         Logger storeLog = (Logger) LoggerFactory.getLogger(
                 ManagedAgentStore.class);

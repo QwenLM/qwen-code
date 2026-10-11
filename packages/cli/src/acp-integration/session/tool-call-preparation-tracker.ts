@@ -20,14 +20,26 @@ export class ToolCallPreparationTracker {
   private readonly suppressed = new Set<string>();
   /** Calls parsed completely but not yet handed to tool execution. */
   private readonly resolved = new Set<string>();
+  private sawToolCall = false;
 
   constructor(private readonly emitter: ToolCallEmitter) {}
+
+  /** Whether this response has started or produced any tool call. */
+  get hasToolCall(): boolean {
+    return this.sawToolCall;
+  }
 
   /**
    * Emits at most one preparing frame per call ID before the full call arrives.
    */
   async observe(response: GenerateContentResponse): Promise<void> {
-    for (const preparation of getToolCallPreparations(response)) {
+    const preparations = getToolCallPreparations(response);
+    // Set before the first await, so no reader sees the response without a
+    // tool call while its frame is being emitted.
+    if (preparations.length > 0 || (response.functionCalls?.length ?? 0) > 0) {
+      this.sawToolCall = true;
+    }
+    for (const preparation of preparations) {
       if (
         this.pending.has(preparation.callId) ||
         this.suppressed.has(preparation.callId)
@@ -64,6 +76,8 @@ export class ToolCallPreparationTracker {
    * cleanup, including re-entry after an emission failure, cannot emit twice.
    */
   async discard(includeResolved = false): Promise<void> {
+    // Discarding resolved calls abandons the whole attempt, tool calls and all.
+    if (includeResolved) this.sawToolCall = false;
     const pending = [...this.pending.entries()];
     this.pending.clear();
     const resolved = new Set(this.resolved);

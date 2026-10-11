@@ -77,7 +77,7 @@ class ManagedArtifactSchedulingTest {
                 fixture::policy);
         context.registerBean(
                 "materializer", MessageMaterializer.class,
-                () -> new MessageMaterializer(state, java.time.Clock.systemUTC()));
+                () -> new MessageMaterializer(state));
         context.registerBean(
                 "projector",
                 ManagedToolResultProjector.class,
