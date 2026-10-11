@@ -1922,6 +1922,7 @@ class OperationRetryTerminalStateTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(attemptCount);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
@@ -1963,6 +1964,7 @@ class OperationRetryTerminalStateTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(attemptCount);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
@@ -2008,6 +2010,7 @@ class OperationRetryTerminalStateTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
         // attemptCount == budgetExemptAttempt == 10: every attempt so far
         // was budget-exempt, i.e. the Harness already answered.
         OperationRecord claimed = new OperationRecord("tenant", "session",
@@ -2056,6 +2059,7 @@ class OperationRetryTerminalStateTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
         // attemptCount == budgetExemptAttempt == 10: the Harness answered an
         // earlier attempt, so the row is on the exempt path.
         OperationRecord claimed = new OperationRecord("tenant", "session",
@@ -2107,6 +2111,7 @@ class OperationRetryTerminalStateTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(1);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
@@ -2150,6 +2155,7 @@ class OperationRetryTerminalStateTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(1);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
@@ -2350,6 +2356,7 @@ class OperationRetryTerminalStateTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(0);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
@@ -2381,6 +2388,7 @@ class OperationRetryTerminalStateTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(0);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
@@ -2414,6 +2422,7 @@ class OperationRetryTerminalStateTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(40);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
@@ -2460,6 +2469,7 @@ class OperationRetryTerminalStateTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(1);
         JsonNode body = actionBody();
         ManagedAgentProperties properties = new ManagedAgentProperties();
@@ -2530,6 +2540,7 @@ class OperationRetryTerminalStateTest {
     private static void mockUnresolvedAction(AgentStateStore sessions,
             ManagedActionStore actions, HarnessConnector harness,
             OperationRecord claimed) throws Exception {
+        when(harness.isAvailable()).thenReturn(true);
         JsonNode body = new ObjectMapper().readTree("{\"optionId\":\"allow\","
                 + "\"inputRevision\":1,\"policyRevision\":{}}");
         when(sessions.claimOperation(eq("tenant"), eq("session"),

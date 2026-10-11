@@ -353,7 +353,7 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_session")).containsAllEntriesOf(originalSession);
         assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_operation"))
                 .containsAllEntriesOf(originalClose)
-                // Post-V31 additions: V46 x3, V51 x2, V56, V62, V67 = 8.
+                // Post-V31 additions: V46 x3, V51 x2, V56, V62, V68 = 8.
                 // Recompute on any merge that adds a column on either
                 // side: both parents can textually hold the same count
                 // while their union needs a larger one.

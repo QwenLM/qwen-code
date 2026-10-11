@@ -10,6 +10,99 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('uses the exact cwd request and key and queries its accepted operation', async () => {
+    const operation = {
+      operationId: 'op-cwd',
+      sessionId: 's1',
+      type: 'cwd_change',
+      status: 'pending',
+      expectedContextRevision: 7,
+      targetCwdRelative: ' 空格 dir ',
+      replayed: false,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(operation));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.cwdChange!.submit(
+        's1',
+        { cwdRelative: ' 空格 dir ', expectedContextRevision: 7 },
+        { clientId: 'client', idempotencyKey: 'original-key' },
+      ),
+    ).toEqual(operation);
+    expect(String(fetchImpl.mock.calls[0][0])).toContain(
+      '/sessions/cwd/change',
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual(
+      expect.objectContaining({
+        sessionId: 's1',
+        cwdRelative: ' 空格 dir ',
+        expectedContextRevision: 7,
+        idempotencyKey: 'original-key',
+      }),
+    );
+    expect(
+      await provider.cwdChange!.query('s1', 'op-cwd', { clientId: 'client' }),
+    ).toEqual(operation);
+    expect(String(fetchImpl.mock.calls[1][0])).toContain('/operations/query');
+  });
+
+  it('requires explicit identity scope for cwd recovery and maps its capability independently', async () => {
+    const options = {
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          sessionId: 's1',
+          status: 'active',
+          createdAt: 1,
+          updatedAt: 1,
+          workspace: {
+            workspaceId: 'ws',
+            cwdRelative: '.',
+            contextRevision: 3,
+            state: 'ready',
+          },
+          capabilities: { cwdChange: true, workspaceTurns: false },
+        }),
+      ),
+    };
+    expect(createJavaManagedAgentProvider(options).cwdChange).toBeUndefined();
+    expect(
+      createJavaManagedAgentProvider({ ...options, productScope: '  ' })
+        .cwdChange,
+    ).toBeUndefined();
+    const provider = createJavaManagedAgentProvider({
+      ...options,
+      productScope: 'tenant:actor',
+    });
+    expect(
+      (await provider.getSession('s1', { clientId: 'client' })).capabilities
+        .cwdChange,
+    ).toBe(true);
+  });
+
+  it('rejects an unrelated operation returned by the query endpoint', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          sessionId: 'other',
+          operationId: 'op',
+          type: 'action_response',
+          status: 'completed',
+        }),
+      ),
+    });
+    await expect(
+      provider.cwdChange!.query('s1', 'op', { clientId: 'client' }),
+    ).rejects.toThrow();
+  });
   it('keeps an empty bound session idle and disables execution', async () => {
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
