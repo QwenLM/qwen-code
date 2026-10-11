@@ -212,17 +212,20 @@ const PATH_RE = /^[\w.@-]+(?:\/[\w.@-]+)+\/?(?::\d+(?::\d+)?)?$/;
  *
  * Humans group thousands (`2,239 passed`). `\b` sees a boundary between the
  * comma and the digit after it, so `\b(\d+)` claimed the tail (`239`); the
- * grouped class reads the whole number, and the lookbehind refuses to start a
- * match mid-group.
+ * grouped class reads the whole number. The lookbehind keys on a digit before
+ * a separator: it refuses to start mid-group, and refuses to glue onto the
+ * tail of a preceding numeric token (`12:00:30,471 passed` would otherwise
+ * read as `30,471`), while an ordinary separator comma (`1 failed,471
+ * passed`) still reads.
  */
 const COUNT_RES = [
   // A Test Plan states its count in the future tense as often as the past:
   // "expect all four files and 471 tests **to pass**". Dropping the modal was
   // measured against this repo's own PR #8176, where the exact claim this
   // command exists to check went unextracted.
-  /\b(?<![\d,])(\d{1,3}(?:,\d{3})+|\d+)\s+(?:tests?|specs?|assertions?)\s+(?:(?:to|should|will|would|must)\s+)?(?:pass(?:ed|ing|es)?|green|ok)\b/gi,
+  /\b(?<!\d[:.,-])(\d{1,3}(?:,\d{3})+|\d+)\s+(?:tests?|specs?|assertions?)\s+(?:(?:to|should|will|would|must)\s+)?(?:pass(?:ed|ing|es)?|green|ok)\b/gi,
   /\btests?:?\s+(\d{1,3}(?:,\d{3})+|\d+)\s+pass(?:ed|ing)?\b/gi,
-  /\b(?<![\d,])(\d{1,3}(?:,\d{3})+|\d+)\s+pass(?:ed|ing)\b/gi,
+  /\b(?<!\d[:.,-])(\d{1,3}(?:,\d{3})+|\d+)\s+pass(?:ed|ing)\b/gi,
 ];
 
 /**
