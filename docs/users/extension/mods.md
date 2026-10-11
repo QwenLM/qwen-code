@@ -71,32 +71,108 @@ are supported. A stream-json process retains module variables between turns.
 
 ## Supported subset
 
-| Surface    | Behavior                                                                                                                                                                   |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packaging  | One `.js`, `.mjs`, `.cjs`, `.ts`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin                                           |
-| Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                              |
-| Lifecycle  | `session.start` before the first prompt; `session.end` on exit and conversation replacement; clear/resume do not reload the module                                         |
-| Commands   | Register during `session.start` using name, description and optional argumentHint; exact `command.run` matcher for the plugin's own command; return `{text}` or `{}`       |
-| Middleware | Explicit `next(e)` and repeated calls; event input is frozen; host identity fields cannot change                                                                           |
-| Logging    | Synchronous `$.ui.log`; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug-only logs stay in the debug logger; logs do not become model input |
-| Isolation  | Separate QuickJS environment per plugin; no Node, filesystem or network APIs; memory, stack, source/output and execution limits; cancellable worker                        |
+| Surface    | Behavior                                                                                                                                                                                |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Packaging  | One `.js`, `.mjs`, `.cjs`, `.ts`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin                                                        |
+| Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
+| Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
+| Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
+| Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
+| API events | `command.register` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                                       |
+| Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
+| Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
-JSX/TSX, runtime package imports, wildcard/nested matchers,
-registration modifiers, advanced `next` metadata, cross-plugin interception,
-tools, context, state/store, rendering and hot reload are not implemented.
-Unsupported hooks or calls fail explicitly. Commands cannot return `context`,
-`exitCode` or engine references yet. Unlike Claude's per-hook recovery behavior,
-a failed dispatch disables that plugin runtime for the rest of the process.
+JSX/TSX, runtime package imports, built-in command interception, tools, context,
+state/store, rendering, streaming events and hot reload are not implemented.
+Commands cannot return `context`, `exitCode` or engine references yet.
 
-Qwen's existing command conflict policy applies: a conflicting extension command
-is renamed to `extensionName.commandName`; this differs from Claude's conflict
-rejection. Disabled slash command names are matched against the resulting name.
+Two Mods cannot register the same command name: the later registration rejects.
+A conflict with a Qwen built-in command still uses Qwen's command conflict policy:
+the extension command is renamed to `extensionName.commandName`. Disabled slash
+command names are matched against the resulting name.
+
+## Middleware and recovery
+
+Patterns select among `session.start`, `session.end`, `command.run`,
+`command.register` and `ui.log`. Use an exact name, a prefix such as `command.*`,
+`*`, or a single negation such as `!session.*`. Other concrete events and the
+patterns `!*` and `!!...` are rejected.
+
+Matchers are partial objects. All specified fields must match; arrays are
+alternatives, nested objects match their own fields, and regular expressions
+test the field's string representation. Matchers are copied during registration.
+They allow at most eight levels and 256 nodes. Stateful `g`/`y` regexes and nested
+quantifiers are rejected; regex inputs longer than 65,536 characters match
+conservatively, leaving the decision to the hook. Nested objects are data, not
+operators such as `startsWith`.
+
+An exact event can have one registration without a matcher and multiple
+registrations with matchers, including equal matchers. Each wildcard or negated
+pattern can be registered once. Within a plugin, registration order determines
+the chain; consumers run before their declared dependency providers. A handler
+can answer early, including at `session.start`, preventing later handlers from
+running. Only command `args` can be rewritten on `command.run`; lifecycle and
+command identity fields stay pinned.
+
+```javascript
+export function register(on) {
+  on('command.run', { command: /^hello/ }, async ($, e, next) => {
+    const result = await next({ ...e, args: e.args.trim() });
+    return { text: `[wrapped] ${result.text || ''}` };
+  }).catch(($, e, next) => next(e));
+}
+```
+
+Ordinary `next` executes downstream on every call. A plugin's registrations form
+one layer, sharing a failure record and time budget. On a throw, timeout or
+invalid result, its catches are tried in registration order. The first answer
+wins. `next.called` in catch means the plugin crossed into the next plugin, not
+merely into another registration of its own.
+
+If the plugin already called downstream, recovery waits for and replays the last
+started call, including its rejection, ignoring replay arguments. If it had not,
+catch's first `next` runs downstream once and subsequent calls replay it. A
+failed catch uses the same record. Without a successful catch, the plugin is
+skipped or its recorded result retained. A registered command that nobody answers
+fails explicitly; it is not sent to the model.
+
+`next` exposes `event`, `is(pattern)`, frozen `origin`, `signal`, and a fresh frozen
+`budget` snapshot with `ms` and `remainingMs`. Catch additionally receives `called`
+and `error.kind` (`throw`, `timeout` or `re-entry`). Engine events use origin
+`{ plugin: 'engine', tier: 'core' }`; Mod API events identify the calling plugin
+with tier `user`. Managed-tier `next.to`, tracing and custom namespace `lent`
+recovery are not available.
+
+API events begin at the chain head. Their input is the command specification or
+`{text, to}` log payload. Return `next(e)`, `{value}` to answer, or `{deny: reason}`
+to reject the API call. Immediate self-reentry skips that registration; active
+ancestor registrations can use their catch. Re-entry catch cannot call `$` APIs,
+and its `next` reuses the original event once. `ui.log` remains a void notification:
+`await $.ui.log(...)` does not wait for interceptors. The headless boundary drains
+queued notifications before returning output.
+
+A normal plugin layer has 10 seconds of its own time, excluding time waiting for
+cross-plugin `next` or API calls. Catch and re-entry recovery use a one-second
+budget. Re-entry dispatch shares this shorter budget with other registrations in
+that plugin. Qwen additionally caps each root dispatch at 60 seconds and each
+uninterrupted guest execution slice at 10 seconds. All `session.end` work shares
+1.5 seconds. An outer handler that finishes early abandons pending downstream
+work; cancellation never starts a fallback operation. Retained next/API functions
+cannot perform work after their invocation ends. A worker that cannot acknowledge
+cancellation within 250 milliseconds is terminated, requiring a new session.
+
+There are at most 32 Mod environments, 64 registered commands, 128 registrations
+per plugin, and 4,096 dispatch steps per root call. Each environment has a 64 MiB
+memory limit. Logs and message payloads are also bounded. Registration, compilation
+and configuration failures still reject initialization; ordinary hook failure
+can recover without resetting module state.
 
 Mods do not run in TUI, ACP, managed/SSH, sandbox or session-agent entry points in
 this version. Safe mode, bare mode and `disableAllHooks` also prevent loading.
 Restart after changing plugin code, options or extension activation. An already loaded
-command checks activation again before execution and refuses a disabled plugin.
+command rechecks every participating plugin before execution and refuses a changed
+or disabled middleware chain. External settings edits take effect after restart.
 Native Qwen extensions with an absolute or external hooks manifest path continue
 to use only the classic hook loader. Claude hooks paths that conversion already
 ignores because they are absolute or outside the extension are also skipped by
@@ -186,9 +262,9 @@ unrelated ordinary extensions' dependency declarations do not participate.
 Dependencies must already be installed, enabled and selected for this invocation.
 Qwen does not fetch, install or enable them automatically. Selected Mods are
 registered in stable consumer-before-dependency order for direct dependencies
-between Mods; ordinary providers are not registration nodes. Each still has a separate
-realm and its own command handlers; ordering does not yet provide cross-plugin
-event wrapping or shared capabilities.
+between Mods; ordinary providers are not registration nodes. Each Mod has a
+separate realm; events pass through their handlers in this order, allowing
+cross-plugin interception without sharing module variables.
 
 Missing, ambiguous, incompatible or cyclic dependencies reject startup before
 any Mod worker starts. Invalid Mod options also reject startup. This differs
@@ -200,10 +276,10 @@ retains the experimental subset's whole-session startup failure policy.
 The reader accepts regular files up to 256 KiB inside the installed extension and
 rejects symbolic links within that root. Graphs are limited to 64 files, 1 MiB
 of input and 1 MiB of compiled code. These bounds and symlink rejection are
-stricter than Claude's. Each guest has a 64 MiB memory limit,
-1 MiB stack limit and a 10-second dispatch budget. Startup allows 30 seconds for
-worker initialization and compilation; the guest memory limit does not cover
-the compiler's host memory. All session-end hooks share a 1.5-second shutdown budget.
+stricter than Claude's. Each guest has a 64 MiB memory limit and 1 MiB stack limit.
+The execution budgets described above include a 60-second startup limit for all
+worker initialization, compilation and startup hooks together. The guest memory
+limit does not cover the compiler's host memory.
 
 The author API is based on Claude Code 2.1.296 declarations and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).

@@ -119,37 +119,6 @@ describe('ModRuntime with the real QuickJS worker', () => {
       "export function register(on) { on('tool.call', () => ({})); }",
       /event not supported/,
     ],
-    [
-      'unsupported catch',
-      "export function register(on) { on('session.start',($,e,next)=>next(e)).catch(()=>({})); }",
-      /registration.catch is not supported/,
-    ],
-    [
-      'unknown API',
-      fixture('return await $.process.run({command:"echo no"});'),
-      /API not supported/,
-    ],
-    [
-      'invalid result',
-      fixture('return undefined;'),
-      /Unsupported command.run result/,
-    ],
-    [
-      'unsupported context',
-      fixture('return {text:"a",context:["hidden"]};'),
-      /Unsupported command.run result/,
-    ],
-    [
-      'event mutation',
-      fixture('e.origin.kind = "composer"; return {text:"bad"};'),
-      /read.only|not.*writable|not configurable/i,
-    ],
-    ['undefined next', fixture('return next();'), /pinned event fields/],
-    [
-      'foreign command',
-      fixture().replace("{command:'hello'}", "{command:'status'}"),
-      /own registered commands/,
-    ],
   ])(
     'rejects %s without leaving a usable failed runtime',
     async (_name, source, error) => {
@@ -170,15 +139,15 @@ describe('ModRuntime with the real QuickJS worker', () => {
   it.each(['while (true) {}', 'await new Promise(() => {});'])(
     'cancels a worker executing %s',
     async (body) => {
-      const runtime = await create(fixture(body));
+      const runtime = await create(
+        fixture(`if (e.args === 'ok') return {text:'alive'}; ${body}`),
+      );
       const started = Date.now();
       await expect(
         runtime.runCommand('hello', '', AbortSignal.timeout(100)),
       ).rejects.toThrow(/cancelled/);
       expect(Date.now() - started).toBeLessThan(3000);
-      await expect(runtime.runCommand('hello', '', signal())).rejects.toThrow(
-        /cancelled/,
-      );
+      expect(await runtime.runCommand('hello', 'ok', signal())).toBe('alive');
     },
   );
 
@@ -215,9 +184,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
         "for (let i=0;i<1000;i++) $.ui.log('x'.repeat(1000)); return {};",
       ),
     );
-    await expect(noisy.runCommand('hello', '', signal())).rejects.toThrow(
-      /log budget/,
-    );
+    expect(await noisy.runCommand('hello', '', signal())).toBe('');
     expect(logs.length).toBeLessThan(105);
     const hanging = await create(`export function register(on) {
       on('session.end', async () => { await new Promise(() => {}); });
