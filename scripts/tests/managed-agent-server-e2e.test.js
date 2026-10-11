@@ -642,13 +642,20 @@ describe('managed-agent-server e2e runner', () => {
   // is ready — discarding its answer misreports it as a wedged predicate.
   it('waitUntil lets the final in-flight poll answer past the deadline', async () => {
     const { waitUntil } = loadWaitUntil();
-    const started = Date.now();
+    let polls = 0;
     await expect(
       waitUntil(
         'probe',
         async () => {
-          await new Promise((resolve) => setTimeout(resolve, 120));
-          return Date.now() - started >= 200;
+          // Key the transition on the poll count, not the clock: a
+          // clock-keyed predicate must outwait one interval before it can
+          // answer true, leaving the loop's re-entry a ~30ms sliver that
+          // ordinary CI timer lateness eats. The instant first decline
+          // re-enters with ~150ms of budget, and this poll's fixed sleep
+          // still answers past the 250ms deadline.
+          if (polls++ === 0) return false;
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          return true;
         },
         250,
       ),
