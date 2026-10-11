@@ -1344,6 +1344,8 @@ it.each(
       expect(JSON.stringify(result)).toContain(mountRefusal);
       expect(JSON.stringify(result)).not.toContain('run it in the background');
       expect(JSON.stringify(result)).not.toContain('fresh turn');
+      // The marker above survives any reword; this pins the in-turn remedy.
+      expect(JSON.stringify(result)).toContain('ordinary tools');
       expect(
         session.authority.extensionRecordsInDomain('child_run'),
       ).toHaveLength(0);
@@ -1353,6 +1355,36 @@ it.each(
     }
   },
 );
+
+// The getter scans the catalog without dispatch's `matcher` predicate, and
+// that breadth is the contract: a background child outlives this turn, so a
+// later tool can match a hook whose matcher can never match `tool_name: 'agent'`.
+it('refuses a background child on a result Hook whose matcher cannot match agent', async () => {
+  const hooks = await restoredHooks({
+    eventName: HookEventName.PostToolUse,
+    config: { type: 'command' },
+    matcher: 'read_file',
+  });
+  const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+  try {
+    expect(hooks.hasMountableToolResultHooks).toBe(true);
+    const result = await executeAgent(
+      turn,
+      call({
+        description: 'audit',
+        prompt: 'review',
+        run_in_background: true,
+      }),
+    );
+    expect(JSON.stringify(result)).toContain(mountRefusal);
+    expect(
+      session.authority.extensionRecordsInDomain('child_run'),
+    ).toHaveLength(0);
+  } finally {
+    await turn.finish();
+    await hooks.close();
+  }
+});
 
 // The type/eligibility filter and the event filter are orthogonal, so the
 // controls exercise the five ineligible shapes on one event and the event
@@ -1573,6 +1605,26 @@ it('refuses a foreground agent call while this Turn holds the mount', async () =
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
   );
+});
+
+// The `!agentBackground` half of that arm: a Turn-owned mount releases at
+// finish(), so the background route it advises really does work here.
+it('admits a background agent call while this Turn holds the mount', async () => {
+  const turn = createTurn();
+  await turn.resumeCommittedResults(new AbortController().signal);
+  const admitted = executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: true,
+    }),
+  );
+  expect(JSON.stringify(await admitted)).not.toContain(
+    HOSTED_CHILD_MOUNT_REFUSALS.turn,
+  );
+  expect(children.record('prompt:call-1')).toBeDefined();
+  await turn.finish();
 });
 
 // Pins the arm order the comment at the Turn-owned arm depends on. With both

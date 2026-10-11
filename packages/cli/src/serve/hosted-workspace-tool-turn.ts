@@ -1778,7 +1778,7 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted team member always runs in the background; omit run_in_background or set it to true.';
           } else if (this.sessionOwnerMayHoldMount()) {
-            validationError = `Hosted child agent is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; use a Session without that owner hold or enabled result command Hooks.`;
+            validationError = `Hosted child agent is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
           } else if (!agentBackground && this.acquired) {
             // A foreground child cannot borrow its waiting parent's mount.
             // Ordered after the Session-owner arm: a Session-scoped mount
