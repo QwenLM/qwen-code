@@ -184,6 +184,11 @@ async function buildWorkspaceSkillsStatus(
             isWorkspaceTrusted: workspaceTrusted,
             locale,
           });
+          const onManagedListFailure = () => {
+            throw new Error(
+              `Managed extensions root "${managedExtensionsDir}" could not be listed; Skills listing deferred.`,
+            );
+          };
           const defaultSkillStates = (extension: Extension) => {
             const states = new Map<string, boolean>();
             for (const skill of extension.skills ?? []) {
@@ -226,6 +231,7 @@ async function buildWorkspaceSkillsStatus(
             const snapshot = await extensionManager.refreshCacheWithSnapshot({
               createDataDir: false,
               allowManagedHandBack: false,
+              onManagedListFailure,
             });
             extensions = extensionManager.getLoadedExtensions();
             applySnapshotOverrides(snapshot);
@@ -249,7 +255,7 @@ async function buildWorkspaceSkillsStatus(
               if (managedExtensionsDir) {
                 extensions = await extensionManager.loadManagedExtensions(
                   workspaceCwd,
-                  { createDataDir: false },
+                  { createDataDir: false, onListFailure: onManagedListFailure },
                 );
                 for (const extension of extensions) {
                   const policy = snapshot.extensions[extension.id];
@@ -289,7 +295,7 @@ async function buildWorkspaceSkillsStatus(
             if (managedExtensionsDir) {
               extensions = await extensionManager.loadManagedExtensions(
                 workspaceCwd,
-                { createDataDir: false },
+                { createDataDir: false, onListFailure: onManagedListFailure },
               );
             }
             for (const extension of extensions) {

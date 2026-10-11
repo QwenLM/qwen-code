@@ -21,6 +21,7 @@ import {
   hasStoredExtensionSecrets,
   ExtensionSettingScope,
 } from './extensionSettings.js';
+import { Override } from './override.js';
 
 function inventory(root: string): Record<string, string> {
   return Object.fromEntries(
@@ -695,7 +696,7 @@ describe('managed extension activation migration', () => {
     // A pre-managed user install left a V1 enablement path rule that
     // disables the package inside `workspace`; the name-based migration
     // carries it onto the managed policy.
-    const rule = `!${workspace.replace(/\\/g, '/')}/*`;
+    const rule = Override.fromInput(`!${workspace}`, true).output();
     fs.mkdirSync(path.join(process.env['QWEN_HOME']!, 'extensions'), {
       recursive: true,
     });
@@ -743,7 +744,7 @@ describe('managed extension activation migration', () => {
   });
 
   it('hands an externally imported home-path disable back after a managed batch enable and withdrawal', async () => {
-    const rule = `!${workspace.replace(/\\/g, '/')}/*`;
+    const rule = Override.fromInput(`!${workspace}`, true).output();
     writePackage(
       path.join(process.env['QWEN_HOME']!, 'extensions', 'user-copy'),
       '1.0.0',

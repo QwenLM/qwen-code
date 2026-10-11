@@ -1558,6 +1558,7 @@ export class ExtensionManager {
     createDataDir?: boolean;
     /** Read-only callers must retain managed ownership and stored secrets. */
     allowManagedHandBack?: boolean;
+    onManagedListFailure?: () => void;
   }): Promise<ExtensionStoreSnapshot> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
     // Captured before the load, not after: an install landing mid-refresh must
@@ -1577,6 +1578,7 @@ export class ExtensionManager {
             createDataDir: options?.createDataDir,
             onManagedListFailure: () => {
               managedListFailed = true;
+              options?.onManagedListFailure?.();
             },
             onManagedLoadFailure: (failure) => {
               // A failing entry whose declared name could not be recovered

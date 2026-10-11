@@ -16,6 +16,7 @@ import {
   ExtensionStore,
   type ExtensionPolicy,
 } from './extension-store.js';
+import { Override } from './override.js';
 
 let temporary: string;
 let managedExtensionsDir: string;
@@ -401,7 +402,7 @@ describe('managed user activation outside the home directory', () => {
     // file carries the disable, and no extension store exists yet.
     const enablementDir = path.join(process.env['QWEN_HOME']!, 'extensions');
     fs.mkdirSync(enablementDir, { recursive: true });
-    const rule = `!${os.homedir().replace(/\\/g, '/')}/*`;
+    const rule = Override.fromInput(`!${os.homedir()}`, true).output();
     fs.writeFileSync(
       path.join(enablementDir, 'extension-enablement.json'),
       JSON.stringify({ portable: { overrides: [rule] } }),
