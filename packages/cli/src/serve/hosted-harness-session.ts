@@ -2979,12 +2979,16 @@ export function registerHostedHarnessSessionRoutes(
           `qwen serve: Hosted Harness recovery re-answer of session ${sessionId} failed: ${sanitizeDaemonLogLine(String(cause))}`,
         );
         // Retry-inviting, like the first load's recovery failure; the
-        // attached Session keeps its owed lease for the next redrive.
+        // attached Session keeps its owed lease for the next redrive. A
+        // stopped writer outranks the takeover label, exactly as the
+        // blocked-first rule writes_stopped beats turn_blocked (R1-3).
         error(
           res,
           409,
           'hosted_turn_recovery_required',
-          hostedTurnBusyReason(resident),
+          resident.managed.authority.writesStopped
+            ? 'writes_stopped'
+            : 'takeover_failed',
         );
         return;
       }

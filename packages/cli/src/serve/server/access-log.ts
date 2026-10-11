@@ -6,7 +6,7 @@
 
 import { performance } from 'node:perf_hooks';
 import { context, ROOT_CONTEXT } from '@opentelemetry/api';
-import type { Application } from 'express';
+import type { Application, Response } from 'express';
 import type { DaemonLogContext, DaemonLogger } from '../daemon-logger.js';
 import { getDaemonTelemetryInboundTraceId } from './telemetry-context.js';
 
