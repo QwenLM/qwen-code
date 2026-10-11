@@ -598,6 +598,42 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('attributes a teammate roster change delivered as background_task_completed', () => {
+    // Real peer frames carry `_meta.source: 'background_task_completed'`, so
+    // the attribution must live on that push site too, not only on the
+    // 'background_notification' one.
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'peer-2',
+        'assistant',
+        'teammate correctness joined the team',
+        1,
+        false,
+        {
+          meta: {
+            source: 'background_task_completed',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'teammate-roster-1',
+              status: 'joined',
+              kind: 'peer',
+            },
+          },
+          agent: {
+            agentName: '/root/correctness',
+            depth: 1,
+            kind: 'teammate',
+          },
+        },
+      ),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      source: 'background_task_completed',
+      teammate: { name: 'correctness' },
+    });
+  });
+
   it('keeps vision bridge notices separate from assistant output', () => {
     const notice = {
       status: 'skipped',
