@@ -305,6 +305,13 @@ export function SubAgentPanel({
     tool.subTools?.length || taskExec?.toolCalls?.length || 0;
   const description = getAgentDescription(tool);
   const agentType = getAgentType(tool);
+  // The path adds information over the localized type name only when the
+  // subagent is nested: at depth 1 its last segment *is* the type, so showing
+  // both would be redundant noise in the common case.
+  const nestedAgentPath =
+    tool.agentPath && tool.agentPath.split('/').filter(Boolean).length > 2
+      ? tool.agentPath
+      : undefined;
   const elapsed =
     formatElapsed(tool.startTime, tool.endTime) ||
     formatDurationMs(taskExec?.executionSummary?.totalDurationMs);
@@ -340,9 +347,15 @@ export function SubAgentPanel({
           }}
         >
           <StatusIcon status={displayStatus} />
-          <span className={chromeStyles.lineName}>
+          <span
+            className={chromeStyles.lineName}
+            {...(tool.agentPath ? { title: tool.agentPath } : {})}
+          >
             {localizeAgentTypeName(agentType, t)}:
           </span>
+          {nestedAgentPath && (
+            <span className={styles.meta}>· {nestedAgentPath}</span>
+          )}
           {description && (
             <span className={styles.desc}>{truncateText(description, 50)}</span>
           )}

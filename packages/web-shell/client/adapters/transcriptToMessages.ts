@@ -876,7 +876,12 @@ export function transcriptBlocksToDaemonMessages(
           ? toolsByCallId.get(textBlock.parentToolCallId)
           : undefined;
         if (parentSubAgent) {
-          appendSubContent(parentSubAgent, textBlock.text, block.id);
+          appendSubContent(
+            parentSubAgent,
+            textBlock.text,
+            block.id,
+            textBlock.agent?.agentName,
+          );
           break;
         }
 
@@ -1021,7 +1026,12 @@ export function transcriptBlocksToDaemonMessages(
           ? toolsByCallId.get(textBlock.parentToolCallId)
           : undefined;
         if (parentSubAgent) {
-          appendSubContent(parentSubAgent, textBlock.text, block.id);
+          appendSubContent(
+            parentSubAgent,
+            textBlock.text,
+            block.id,
+            textBlock.agent?.agentName,
+          );
           break;
         }
         const target =
@@ -1508,9 +1518,13 @@ function appendSubContent(
   parent: DaemonMessageToolCall,
   text: string,
   blockId: string,
+  agentName?: string,
 ): void {
   parent.subContent = (parent.subContent || '') + text;
   parent.sourceBlockIds = unionMessageIds(parent.sourceBlockIds, blockId);
+  // Adopt the first identity and never rewrite it: the path is stable for one
+  // subagent run, and a later frame must not relabel a card already on screen.
+  if (!parent.agentPath && agentName) parent.agentPath = agentName;
 }
 
 function appendToolCallMessage(

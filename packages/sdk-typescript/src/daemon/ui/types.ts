@@ -1114,6 +1114,12 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
   parentToolCallId?: string;
+  /**
+   * The agent that produced this block, when it was not the session's root
+   * agent. Lets a renderer name a subagent by path without walking
+   * `parentToolCallId` chains.
+   */
+  agent?: DaemonAgentIdentity;
   /** Raw ACP update metadata used by renderers for display-only routing. */
   meta?: DaemonTextDeltaMeta;
   /**

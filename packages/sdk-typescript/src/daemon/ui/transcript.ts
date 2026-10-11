@@ -909,6 +909,11 @@ function appendTextDelta(
   if (parentId != null) {
     (block as DaemonTextTranscriptBlock).parentToolCallId = parentId;
   }
+  const eventAgent =
+    'agent' in event ? (event as DaemonUiTextEvent).agent : undefined;
+  if (eventAgent) {
+    (block as DaemonTextTranscriptBlock).agent = eventAgent;
+  }
   appendBlock(state, block);
 
   if (parentMap && parentId != null) {
