@@ -278,6 +278,7 @@ function toolBlock(
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
     subagentSessionReady: overrides.subagentSessionReady,
+    agent: overrides.agent,
     serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
@@ -5421,6 +5422,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
       messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
     expect(agentA!.subContent).toBeUndefined();
     expect(agentB!.subContent).toBeUndefined();
+  });
+});
+
+describe('replayed agent identity', () => {
+  function firstTool(blocks: DaemonTranscriptBlock[]) {
+    return transcriptBlocksToDaemonMessages(blocks).find(
+      (message) => message.role === 'tool_group',
+    )?.tools[0];
+  }
+
+  it('adopts the block agent path for a replayed Agent result', () => {
+    const tool = firstTool([
+      toolBlock('agent', 'agent-1', 'completed', 1_000, {
+        toolName: 'Agent',
+        agent: {
+          agentName: '/root/general-purpose',
+          depth: 1,
+          kind: 'subagent',
+        },
+      }),
+    ]);
+    expect(tool?.agentPath).toBe('/root/general-purpose');
+  });
+
+  it('stays unattributed when the replay carried no identity', () => {
+    const tool = firstTool([
+      toolBlock('agent', 'agent-1', 'completed', 1_000, {
+        toolName: 'Agent',
+      }),
+    ]);
+    expect(tool?.agentPath).toBeUndefined();
   });
 });
 

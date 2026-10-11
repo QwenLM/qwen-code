@@ -177,6 +177,16 @@ export interface TranscriptToolCallResultOptions extends UpdateMetaOptions {
   readonly errorMessage?: string;
   readonly artifacts?: readonly unknown[];
   readonly contentPrefix?: readonly ToolCallContent[];
+  /**
+   * Producer identity for the AgentTool call this result closes. Rebuilt by
+   * replay from the `task_execution` display so a reloaded session carries
+   * the same `_meta.agent` the live wire had.
+   */
+  readonly agent?: {
+    agentName: string;
+    depth: number;
+    kind: 'subagent';
+  };
 }
 
 export interface TranscriptTodoItem {
@@ -1008,6 +1018,7 @@ export function createTranscriptToolCallResultUpdate(
         ...(options.artifacts && options.artifacts.length > 0
           ? { artifacts: options.artifacts }
           : {}),
+        ...(options.agent ? { agent: options.agent } : {}),
         ...(options.extra ?? {}),
       },
     }),
@@ -1669,6 +1680,13 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           resultDisplay,
           record.uuid,
         ),
+        // The live wire stamps `_meta.agent` on the AgentTool call from
+        // `SubAgentTracker`; persistence keeps only the `subagentName` in the
+        // `task_execution` display, so rebuild the root-parented identity
+        // here to keep a reloaded session attributable.
+        ...(isTaskExecutionDisplay(resultDisplay)
+          ? { agent: agentIdentityFromTaskExecution(resultDisplay) }
+          : {}),
         ...meta,
       }),
     );
@@ -2654,6 +2672,21 @@ function normalizeTodos(values: readonly unknown[]): TranscriptTodoItem[] {
       },
     ];
   });
+}
+
+function agentIdentityFromTaskExecution(
+  display: Record<string, unknown>,
+): { agentName: string; depth: number; kind: 'subagent' } | undefined {
+  const subagentName = display['subagentName'];
+  if (typeof subagentName !== 'string' || subagentName.length === 0) {
+    return undefined;
+  }
+  // A persisted `task_execution` carries no lineage beyond its own type name,
+  // so replay can only ever rebuild the root-parented form; nested identity
+  // still requires the live wire. `SubagentValidator` constrains the name to
+  // `^[\p{L}\p{N}_-]+$`, so it cannot contain `/` and the path stays
+  // unambiguous.
+  return { agentName: `/root/${subagentName}`, depth: 1, kind: 'subagent' };
 }
 
 function isTaskExecutionDisplay(

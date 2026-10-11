@@ -1167,6 +1167,12 @@ function upsertToolBlock(
     if (event.subagentType && !existing.subagentType) {
       existing.subagentType = event.subagentType;
     }
+    // Same first-wins adoption as subagentType: a replayed result frame
+    // carries the identity its start frame never had — persistence keeps
+    // it only on the closing task_execution display.
+    if (event.agent && !existing.agent) {
+      existing.agent = event.agent;
+    }
     state.retainedBytes += estimateBlockBytes(existing) - bytesBefore;
     updateCurrentToolPointer(state, event.toolCallId, event.status);
     return;

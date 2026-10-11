@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeDaemonEvent } from '../src/daemon/ui/normalizer.js';
+import {
+  createDaemonTranscriptState,
+  reduceDaemonTranscriptEvents,
+} from '../src/daemon/ui/transcript.js';
 
 const SECURITY = {
   agentName: '/root/security',
@@ -105,5 +109,52 @@ describe('agent identity projection', () => {
     };
     const events = normalizeDaemonEvent(text('x', { agent: deep }) as never);
     expect(events[0]).toMatchObject({ agent: deep });
+  });
+});
+
+describe('agent identity transcript reduction', () => {
+  const raw = (
+    id: number,
+    sessionUpdate: string,
+    extra: Record<string, unknown>,
+  ) => ({
+    id,
+    v: 1 as const,
+    type: 'session_update' as const,
+    data: {
+      sessionUpdate,
+      toolCallId: 'agent-1',
+      content: [],
+      ...extra,
+    },
+  });
+
+  it('backfills the identity when only the closing result frame carries it', () => {
+    // Persistence keeps the identity only on the task_execution result, so a
+    // replayed Agent call sees the start frame unattributed; the update path
+    // must still adopt the identity.
+    let state = createDaemonTranscriptState({
+      retainSubagentBlocks: true,
+    });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent(
+        raw(1, 'tool_call', {
+          status: 'pending',
+          _meta: { toolName: 'agent' },
+        }) as never,
+      ),
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent(
+        raw(2, 'tool_call_update', {
+          status: 'completed',
+          _meta: { toolName: 'agent', agent: SECURITY },
+        }) as never,
+      ),
+    );
+    const tool = state.blocks.find((b) => b.kind === 'tool');
+    expect(tool).toMatchObject({ agent: SECURITY });
   });
 });

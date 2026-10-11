@@ -2022,6 +2022,83 @@ describe('createTranscriptReplayMachine', () => {
     },
   );
 
+  it('rebuilds agent identity on a replayed Agent result', () => {
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          status: 'success',
+          resultDisplay: {
+            type: 'task_execution',
+            subagentName: 'general-purpose',
+            status: 'completed',
+            result: 'done',
+          },
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'agent-1',
+      _meta: {
+        agent: {
+          agentName: '/root/general-purpose',
+          depth: 1,
+          kind: 'subagent',
+        },
+      },
+    });
+  });
+
+  it('leaves a task_execution result without a subagent name unattributed', () => {
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          status: 'success',
+          resultDisplay: {
+            type: 'task_execution',
+            status: 'completed',
+            result: 'done',
+          },
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(
+      (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+    ).toBeUndefined();
+  });
+
   it('attributes persisted Agent usage to its parent and omits it in summary', () => {
     const machine = createTranscriptReplayMachine();
     const result = updates(

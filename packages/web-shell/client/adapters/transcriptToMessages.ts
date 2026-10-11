@@ -1721,6 +1721,10 @@ export function daemonToolBlockToToolCall(
       : undefined,
     subagentSessionReady: block.subagentSessionReady,
     parentToolCallId: block.parentToolCallId,
+    // Replay rebuilds the AgentTool block's identity from its persisted
+    // `task_execution` display; a live sub-content frame that already adopted
+    // a path via `appendSubContent` keeps first-wins there.
+    ...(block.agent ? { agentPath: block.agent.agentName } : {}),
     startTime: block.createdAt,
     endTime:
       isComplete && !forceBackgroundPending ? block.updatedAt : undefined,
