@@ -14,6 +14,7 @@ import {
   type ChildSessionRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import type {
   CommittedExtensionOperation,
   ManagedSessionActor,
@@ -128,7 +129,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_create',
     description:
-      'Create a pending task on the team board. Members are not told about board changes; give a member its work in its launch prompt.',
+      'Create a pending task on the team board. Members are not told about board changes; give a member its work in its launch prompt, or send_message it, while it runs, with the task id that task_list shows beside its name (task_…).',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -159,7 +160,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_update',
     description:
-      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader" or a member that is still running. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update.',
+      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader" or a member that is still running; a member that has finished can be newly set as the owner only of a completed task, and a task whose owner has ended moves to another open status only with a new owner. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -214,7 +215,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_list',
     description:
-      'List the team board, optionally filtered, followed by each member and the state of its run.',
+      'List the team board, optionally filtered, followed by each member with the state of its run (and why a failed or cancelled run ended) and, while it runs, the task id send_message takes.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -379,13 +380,35 @@ export interface HostedTeamMembership {
   readonly name: string;
 }
 
+/** A team is open while active, or closing until it is deleted. */
+function isOpenTeam(team: TeamState): boolean {
+  return team.lifecycle !== 'deleted';
+}
+
 /** The roster entry naming one child run, among a Session's team records. */
 export function hostedTeamMembership(
   teams: ReadonlyArray<{ readonly record: unknown }>,
   childRunId: string,
 ): HostedTeamMembership | undefined {
+  return membershipAmong(teams, childRunId, () => true);
+}
+
+/** The same entry, among the teams not yet deleted. */
+export function hostedOpenTeamMembership(
+  teams: ReadonlyArray<{ readonly record: unknown }>,
+  childRunId: string,
+): HostedTeamMembership | undefined {
+  return membershipAmong(teams, childRunId, isOpenTeam);
+}
+
+function membershipAmong(
+  teams: ReadonlyArray<{ readonly record: unknown }>,
+  childRunId: string,
+  admits: (team: TeamState) => boolean,
+): HostedTeamMembership | undefined {
   for (const entry of teams) {
     const team = parseTeamState(entry.record);
+    if (!admits(team)) continue;
     const member = team.members.find((each) => each.childRunId === childRunId);
     if (member !== undefined)
       return { teamId: team.teamId, teamName: team.name, name: member.name };
@@ -420,7 +443,7 @@ export class HostedTeamSession {
     return this.store.authority
       .extensionRecordsInDomain('team_state')
       .map((entry) => parseTeamState(entry.record))
-      .find((team) => team.lifecycle !== 'deleted');
+      .find(isOpenTeam);
   }
 
   /** The member a child run joined as, in any team of this Session. */
@@ -718,9 +741,11 @@ export class HostedTeamSession {
     }
     const task = this.task(board.get(number)!.taskId);
     if (deleting) return `Task #${number} deleted.`;
+    const notified = team.members.find((each) => each.name === owner);
     const notice =
-      owner != null && owner !== MANAGED_TEAM_LEADER
-        ? ` "${owner}" was not notified: members learn of board changes only once the team mailbox lands, so give a member its work in its launch prompt.`
+      notified !== undefined &&
+      this.memberState(notified.childRunId) === 'running'
+        ? ` "${owner}" was not notified: members learn of board changes only once the team mailbox lands, so give a member its work in its launch prompt, or send_message it, while it runs, with the task id that task_list shows beside its name (task_…).`
         : '';
     return (
       `Task #${number} updated (status: ${task.status}` +
@@ -784,11 +809,23 @@ export class HostedTeamSession {
       throw new HostedTeamRefusal(
         `Cannot assign task #${number}: owner must include at least one letter, number, or hyphen.`,
       );
-    // A task keeps an owner whose run ended; only a new owner is checked.
-    if (owner != null && owner !== task.owner) this.assertOwner(team, owner);
+    const status =
+      (args['status'] as TeamTaskStatus | undefined) ?? task.status;
+    // A task keeps an owner whose run ended, so the lead can complete, edit
+    // or delete it; a new owner is checked, and so is a kept owner when the
+    // call moves the task to another open status, so a member that ended
+    // never lands on open work.
+    if (owner != null && owner !== task.owner)
+      this.assertOwner(team, owner, status === 'completed');
+    else if (
+      (owner === undefined || owner === task.owner) &&
+      task.owner !== null &&
+      status !== task.status &&
+      status !== 'completed'
+    )
+      this.assertOwner(team, task.owner, false, number);
     if (
-      ((args['status'] as TeamTaskStatus | undefined) ?? task.status) ===
-        'in_progress' &&
+      status === 'in_progress' &&
       (owner === undefined ? task.owner : owner) === null
     )
       throw new HostedTeamRefusal(
@@ -879,10 +916,25 @@ export class HostedTeamSession {
       '',
       `--- Team "${team.name}" members ---`,
       ...(team.members.length > 0
-        ? team.members.map(
-            (member) =>
-              `${member.name}: ${this.memberState(member.childRunId)}`,
-          )
+        ? team.members.map((member) => {
+            // A failed or cancelled run says why, so the lead can tell a
+            // member the host never started (an isolated member whose
+            // Workspace was not prepared) from one that failed its work.
+            // Only a running member shows its task id: once a member of an
+            // open team has finished, send_message refuses to continue it.
+            const state = this.memberState(member.childRunId);
+            const reason =
+              state === 'failed' || state === 'cancelled'
+                ? this.childRun(member.childRunId)?.stopReason
+                : undefined;
+            return (
+              `${member.name}: ${state}` +
+              (reason ? ` (${reason})` : '') +
+              (state === 'running'
+                ? ` — ${managedChildTaskId(this.key.sessionId, member.childRunId)}`
+                : '')
+            );
+          })
         : ['No members yet.']),
     ].join('\n');
   }
@@ -898,8 +950,18 @@ export class HostedTeamSession {
     return team;
   }
 
-  /** An owner is the leader or a member whose run has not ended. */
-  private assertOwner(team: TeamState, owner: string): void {
+  /**
+   * An owner is the leader or a member whose run has not ended. A member
+   * whose run completed may also be named on a task the call leaves
+   * completed: a one-shot member usually finishes before the lead's next
+   * call lands, and the board should still record who did the work.
+   */
+  private assertOwner(
+    team: TeamState,
+    owner: string,
+    completing: boolean,
+    keptOn?: number,
+  ): void {
     if (owner === MANAGED_TEAM_LEADER) return;
     const member = team.members.find((each) => each.name === owner);
     if (member === undefined)
@@ -907,10 +969,22 @@ export class HostedTeamSession {
         `"${owner}" is not a member of team "${team.name}". An owner is "leader" or a member name.`,
       );
     const state = this.memberState(member.childRunId);
-    if (state !== 'running')
+    if (state === 'running' || (state === 'completed' && completing)) return;
+    const ended =
+      state === 'completed'
+        ? 'has finished'
+        : state === 'cancelled'
+          ? 'was cancelled'
+          : `has ${state}`;
+    if (keptOn !== undefined)
       throw new HostedTeamRefusal(
-        `Member "${owner}" has ${state === 'completed' ? 'finished' : state} and cannot own a task.`,
+        `Member "${owner}" ${ended} and cannot keep task #${keptOn} open. Set owner "" to unassign it, or assign "leader" or a running member.`,
       );
+    throw new HostedTeamRefusal(
+      state === 'completed'
+        ? `Member "${owner}" has finished, so it can own only a completed task. If it did this task's work, set status "completed" with this owner; otherwise assign "leader" or a running member.`
+        : `Member "${owner}" ${state === 'cancelled' ? 'was cancelled' : `has ${state}`} and cannot own a task.`,
+    );
   }
 
   private tasksOf(teamId: string): TeamTask[] {
