@@ -234,7 +234,10 @@ export class HostedMonitorLoop {
         return;
       }
       if (this.settled) return;
-      await this.flush();
+      // The watch's physical end supersedes its quota: this final window
+      // commits, but the quota must not park the record ahead of the exit's
+      // own settle (#13856 R1-30).
+      await this.flush(false);
       if (this.settled) return;
       if (stopRequested) {
         this.ended = true;
@@ -325,7 +328,7 @@ export class HostedMonitorLoop {
   }
 
   /** Commits whatever the window buffered as one observation revision. */
-  private async flush(): Promise<void> {
+  private async flush(settleQuota: boolean = true): Promise<void> {
     if (this.ended || this.buffered.length === 0) return;
     const lines = this.buffered;
     this.buffered = [];
@@ -338,6 +341,7 @@ export class HostedMonitorLoop {
     this.armIdle();
     const sequence = this.monitors.record(this.monitorId)?.observationSequence;
     if (
+      settleQuota &&
       this.params !== undefined &&
       sequence !== undefined &&
       sequence >= this.params.maxEvents

@@ -3026,7 +3026,15 @@ export class HostedWorkspaceToolTurn {
     // fresh accept starts it, and a replay after a restart — whose
     // journal already carries the receipt — must resume it, or the
     // watch's lines, terminal conditions and settle never arrive.
-    if (this.monitors!.record(executionCallId)?.stopReason === null) {
+    const monitorRecord = this.monitors!.record(executionCallId);
+    // A parked watch has stopReason null like a live one, but its quota or
+    // idle window already ended it as unproven — resuming it would commit a
+    // post-quota observation the record refuses, silently. Only a live
+    // record is resumed (#13856 R1-55).
+    if (
+      monitorRecord?.stopReason === null &&
+      monitorRecord.run.state !== 'recovery_blocked'
+    ) {
       await this.resumeMonitorWatch(executionCallId);
     }
     let ref: ManagedSessionDurableRef;

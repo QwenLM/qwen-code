@@ -490,6 +490,29 @@ describe('HostedMonitorLoop', () => {
     await closeLoop(rig);
   });
 
+  it('settles an exit that crosses the quota as exited, without a false park (#13856 R1-30)', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    // The production remote watch cannot prove a terminate, which is exactly
+    // where the quota park would have minted a false runtime_lost revision.
+    rig.executor.provesStop = false;
+    const parked = vi.spyOn(rig.session, 'blockedRuntimeLost');
+    await rig.loop.start(params({ maxEvents: 1 }));
+
+    rig.executor.onLine?.('one');
+    // The physical end arrives with the quota just reached, ahead of any
+    // debounce window: the exit evidence wins over the quota.
+    await rig.executor.exitNaturally();
+    await rig.loop.done;
+
+    expect(committed(rig.authority)).toMatchObject({
+      stopReason: 'exited',
+      run: { state: 'settled', execution: 'settled' },
+    });
+    expect(parked).not.toHaveBeenCalled();
+    await closeLoop(rig);
+  });
+
   it('flushes the buffer and settles exited when the watch ends', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
