@@ -5023,6 +5023,57 @@ describe('qwen-triage verify hardening round 2', () => {
       'the verdict is `inconclusive`, never `merge-ready`',
     );
 
+    // #13732 before/after re-run on #13174 R9 (issuecomment-6092937757):
+    // neither arm moved the parked Turn off the first Turn, because the axis
+    // rule lived only under the harness section and one arm used the PR's own
+    // tests as its A/B instrument. The axes now sit in the plan the agent
+    // follows, so they are pinned inside Scope selection. A third arm, with
+    // the rule keyed to the central claim, framed the claim as something else
+    // and never applied it, so the trigger is the diff.
+    const scopeSelection = flat.slice(
+      flat.indexOf('## Scope selection'),
+      flat.indexOf('## Method'),
+    );
+    expect(scopeSelection).toContain(
+      'When the diff changes how a Turn is cancelled, parked, taken over',
+    );
+    expect(scopeSelection).toContain(
+      'whether or not that code is the central claim',
+    );
+    expect(scopeSelection).toContain(
+      'it gets its own A/B as a secondary claim',
+    );
+    expect(scopeSelection).toContain(
+      'The trigger is therefore the diff, not the claim.',
+    );
+    expect(scopeSelection).toContain(
+      'name the scenario axes before choosing the A/B instrument',
+    );
+    expect(scopeSelection).toContain(
+      "even when the instrument is the PR's own test files",
+    );
+    expect(scopeSelection).toContain('parking Turn 2 after Turn 1 completed');
+    expect(scopeSelection).toContain(
+      'The report lists each axis with the settings that ran',
+    );
+    expect(scopeSelection).toContain('`expected 409 to be 200`');
+
+    // The same re-run: both arms blamed a merge-only red on the PR, while
+    // `main` had changed the one file the failing test reads.
+    const targetedGates = flat.slice(
+      flat.indexOf('### Targeted gates'),
+      flat.indexOf('### Match the method to the artifact type'),
+    );
+    expect(targetedGates).toContain(
+      'Attribute a red on the merge before blaming the PR.',
+    );
+    expect(targetedGates).toContain('run the test at `HEAD^2` too');
+    expect(targetedGates).toContain(
+      'diff the files it reads between `HEAD^2` and `HEAD`',
+    );
+    expect(targetedGates).toContain('is a semantic merge conflict');
+    expect(targetedGates).toContain('`expected 112 to be 104`');
+
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.
     expect(flat).toContain('references/android.md');

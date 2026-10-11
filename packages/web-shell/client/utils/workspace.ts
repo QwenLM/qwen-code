@@ -72,6 +72,29 @@ export function workspaceLabelForCwd(
 }
 
 /**
+ * Suffix the parent directory onto labels that collide inside one list.
+ * Two daemons — or one daemon with two checkouts — frequently register the
+ * same basename (`qwen-code` everywhere); the menu must tell them apart by
+ * the workspace's own location, not only by tooltip or host badge.
+ */
+export function disambiguateWorkspaceLabels<
+  T extends { label: string; cwd: string },
+>(entries: readonly T[]): T[] {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    counts.set(entry.label, (counts.get(entry.label) ?? 0) + 1);
+  }
+  return entries.map((entry) => {
+    if ((counts.get(entry.label) ?? 0) < 2) return entry;
+    const parent = entry.cwd
+      .split(/[\\/]+/)
+      .filter(Boolean)
+      .at(-2);
+    return parent ? { ...entry, label: `${entry.label} (${parent})` } : entry;
+  });
+}
+
+/**
  * True when the daemon advertises more than one registered workspace — i.e. the
  * multi-workspace session surfaces (per-workspace labels/tags) should show.
  * A single-workspace daemon omits `workspaces` (or lists just the primary), so

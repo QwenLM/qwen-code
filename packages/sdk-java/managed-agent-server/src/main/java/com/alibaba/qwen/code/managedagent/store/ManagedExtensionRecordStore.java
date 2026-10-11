@@ -18,7 +18,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.List;
@@ -116,6 +119,15 @@ public class ManagedExtensionRecordStore {
     public record TaskPage(List<TaskRow> tasks, boolean hasMore) {
     }
 
+    /**
+     * H4f: the record a task id names and its latest committed body, which
+     * a task cancel reconciles against — the authority's own durable
+     * statement, mirrored in the transaction that committed it.
+     */
+    public record TaskTarget(String domain, String recordId, String kind,
+            String state, long revision, JsonNode body) {
+    }
+
     public List<JsonNode> listRecords(String tenantId, String sessionId,
             String domain) {
         Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
@@ -148,6 +160,39 @@ public class ManagedExtensionRecordStore {
                     return record;
                 }).filter(record -> "settled".equals(record.path("run").path("state").textValue()))
                 .findFirst();
+    }
+
+    /**
+     * H4f: the task's record identity and latest committed body, or empty
+     * when the id names no task of the Session.
+     */
+    public Optional<TaskTarget> findTaskTarget(String tenantId,
+            String sessionId, String taskId) {
+        String recordKey = recordKey(taskId);
+        if (recordKey == null) {
+            return Optional.empty();
+        }
+        return jdbc.query("SELECT * FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
+                (result, row) -> {
+                    taskRow(result, tenantId, sessionId);
+                    return new String[] {result.getString("domain"),
+                            result.getString("record_id"),
+                            result.getString("task_kind"),
+                            result.getString("task_state"),
+                            Long.toString(result.getLong("revision")),
+                            result.getString("record_resource_id")};
+                },
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                recordKey).stream().findFirst().map(row -> {
+                    JsonNode body = readBody(readResource(tenantId, sessionId,
+                            row[5]));
+                    ManagedExtensionProjection.RECORD_BODIES.get(row[0])
+                            .require().accept(body);
+                    return new TaskTarget(row[0], row[1], row[2], row[3],
+                            Long.parseLong(row[4]), body);
+                });
     }
 
     /** Reads only a committed resource in this Session's scope. */
@@ -710,6 +755,15 @@ public class ManagedExtensionRecordStore {
             JsonNode ref = record.get("contentRef");
             requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
         }
+        if (List.of("team_task", "team_message", "team_plan").contains(domain)) {
+            for (String field : List.of("descriptionRef", "metadataRef", "contentRef",
+                    "planRef", "feedbackRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
         if (domain.equals("schedule")) {
             JsonNode ref = record.get("promptRef");
             requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
@@ -881,6 +935,12 @@ public class ManagedExtensionRecordStore {
         if (domain.equals("session_message")) {
             requireSessionMessage(tenantId, sessionId, scopeKey, record,
                     previous == null, resources);
+        }
+        if (domain.startsWith("team_")) {
+            requireTeamRecord(sessionId, scopeKey, domain, record,
+                    previous == null ? null
+                            : readBody(resources.apply(previous.resourceId())),
+                    resources);
         }
         if (previous == null) {
             if (domain.equals("child_run")) {
@@ -1322,6 +1382,174 @@ public class ManagedExtensionRecordStore {
                     "Child continuation must name a predecessor no other run"
                             + " continues.");
         }
+    }
+
+    /**
+     * H4e: a team lives in its lead's journal. Each member joins as a live
+     * child Session run of the lead that no other team lists; every other
+     * team record opens only in an active team of this Session, so a
+     * closing team drains, and its parties, owner, dependencies and plan
+     * member come from that team. The authority checks the same rules.
+     */
+    private void requireTeamRecord(String sessionId, String scopeKey,
+            String domain, JsonNode record, JsonNode previous,
+            Function<String, StoredResource> resources) {
+        if (domain.equals("team_state")) {
+            require(sessionId.equals(record.get("leadSessionId").textValue()),
+                    "Team must be led by this Session.");
+            Set<String> joined = new HashSet<>();
+            if (previous != null) {
+                previous.get("members").forEach(member -> joined.add(
+                        member.get("childRunId").textValue()));
+            }
+            String teamId = record.get("teamId").textValue();
+            for (JsonNode member : record.get("members")) {
+                String run = member.get("childRunId").textValue();
+                if (joined.contains(run)) {
+                    continue;
+                }
+                JsonNode child = recordBody(scopeKey, sessionId, "child_run",
+                        run, resources);
+                require(child != null
+                        && ManagedExtensionRecords.isChildSessionRun(child)
+                        && !ManagedExtensionRecords.isTerminalRunState(
+                                child.at("/run/state").textValue()),
+                        "Team member must join as a child Session run of this"
+                                + " Session that has not ended.");
+                // Joins are rare, so the teams are read rather than indexed.
+                for (JsonNode other : domainBodies(scopeKey, "team_state",
+                        resources)) {
+                    require(other.get("teamId").textValue().equals(teamId)
+                            || memberWith(other, "childRunId", run) == null,
+                            "Team member's child run must belong to no other"
+                                    + " team.");
+                }
+            }
+            return;
+        }
+        String teamId = record.get("teamId").textValue();
+        JsonNode team = recordBody(scopeKey, sessionId, "team_state", teamId,
+                resources);
+        require(team != null && (previous != null
+                || "active".equals(team.get("lifecycle").textValue())),
+                "Team record must open in an active team of this Session.");
+        if (domain.equals("team_task")) {
+            String taskId = record.get("taskId").textValue();
+            if (previous == null) {
+                // Read only when a task opens; its number never changes.
+                for (JsonNode other : domainBodies(scopeKey, "team_task",
+                        resources)) {
+                    require(!teamId.equals(other.get("teamId").textValue())
+                            || other.get("number").longValue()
+                                    != record.get("number").longValue(),
+                            "Team task number must be unique in its team.");
+                }
+            }
+            JsonNode owner = record.get("owner");
+            require(owner.isNull() || (previous != null
+                    && ManagedExtensionRecords.same(owner, previous.get("owner")))
+                    || takesPart(team, owner.textValue()),
+                    "Team task owner must be the leader or a member of its"
+                            + " team.");
+            Set<String> earlier = new HashSet<>();
+            if (previous != null) {
+                previous.get("blockedBy").forEach(each -> earlier.add(
+                        each.textValue()));
+            }
+            Deque<String> pending = new ArrayDeque<>();
+            for (JsonNode each : record.get("blockedBy")) {
+                String blocker = each.textValue();
+                if (earlier.contains(blocker)) {
+                    continue;
+                }
+                JsonNode other = recordBody(scopeKey, sessionId, "team_task",
+                        blocker, resources);
+                require(other != null
+                        && teamId.equals(other.get("teamId").textValue()),
+                        "Team task must be blocked only by tasks of its team.");
+                pending.push(blocker);
+            }
+            // Only the new edges can close a cycle: one does exactly when
+            // this task is reachable from a new blocker.
+            Set<String> seen = new HashSet<>();
+            while (!pending.isEmpty()) {
+                String next = pending.pop();
+                require(!next.equals(taskId),
+                        "Team task dependencies must not form a cycle.");
+                if (seen.add(next)) {
+                    recordBody(scopeKey, sessionId, "team_task", next,
+                            resources).get("blockedBy").forEach(each ->
+                                    pending.push(each.textValue()));
+                }
+            }
+        }
+        if (domain.equals("team_message")) {
+            String to = record.get("to").textValue();
+            // Every revision, not only the opening: the roster only grows,
+            // so a lawful successor always passes, while one that
+            // readdresses the message is refused before its recipient is
+            // looked up below.
+            require(takesPart(team, record.get("from").textValue())
+                    && takesPart(team, to),
+                    "Team message must travel between the leader and members"
+                            + " of its team.");
+            JsonNode target = record.get("targetSessionId");
+            if (!target.isNull()) {
+                // The leader is this Session; a member is the Session its
+                // run attached, so a message to one not attached yet stays
+                // planned.
+                String expected = sessionId;
+                if (!ManagedTeamRecords.LEADER.equals(to)) {
+                    JsonNode child = recordBody(scopeKey, sessionId,
+                            "child_run", memberWith(team, "name", to)
+                                    .get("childRunId").textValue(),
+                            resources);
+                    expected = ManagedExtensionRecords.isChildSessionRun(child)
+                            && !child.get("childSessionId").isNull()
+                                    ? child.get("childSessionId").textValue()
+                                    : null;
+                }
+                require(target.textValue().equals(expected),
+                        "Team message must target the Session of its"
+                                + " recipient.");
+            }
+        }
+        if (domain.equals("team_plan") && previous == null) {
+            JsonNode member = memberWith(team, "name",
+                    record.get("member").textValue());
+            require(member != null
+                    && member.get("planModeRequired").booleanValue(),
+                    "Team plan must come from a member of its team that"
+                            + " requires plan mode.");
+        }
+    }
+
+    private static boolean takesPart(JsonNode team, String name) {
+        return ManagedTeamRecords.LEADER.equals(name)
+                || memberWith(team, "name", name) != null;
+    }
+
+    private static JsonNode memberWith(JsonNode team, String key,
+            String value) {
+        for (JsonNode member : team.get("members")) {
+            if (value.equals(member.get(key).textValue())) {
+                return member;
+            }
+        }
+        return null;
+    }
+
+    /** The latest committed body of every record of one domain of this
+     * Session. */
+    private List<JsonNode> domainBodies(String scopeKey, String domain,
+            Function<String, StoredResource> resources) {
+        return jdbc.query("SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " session_scope_key = ? AND domain = ?",
+                (result, row) -> result.getString("record_resource_id"),
+                scopeKey, domain)
+                .stream().map(resource -> readBody(resources.apply(resource)))
+                .toList();
     }
 
     /** The latest committed body of one record of this Session, or null. */

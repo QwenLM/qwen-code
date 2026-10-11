@@ -103,6 +103,18 @@ public class WorkspaceExecutionStore {
         authorizeAttachment(session, true, false, null, false);
     }
 
+    /**
+     * H4f × H4d-b: the attachment that carries a stopped run's message
+     * stop. Like a persisted cancellation it was authorized when the stop
+     * request committed on the parent, which its caller (the child result
+     * relay) has read, so it needs no CANCELLING Turn (message work never
+     * makes one) and no operator-mutable grant: only the Session's own
+     * structural binding is checked.
+     */
+    public void authorizeCommittedStop(SessionRecord session) {
+        authorizeAttachment(session, false, false, null, false, true);
+    }
+
     // Action-response delivery only: a refusal stemming solely from
     // operator-mutable grants or registry state must not certify the
     // terminal verdict, so it answers with the retryable variant instead.
@@ -113,6 +125,13 @@ public class WorkspaceExecutionStore {
     private void authorizeAttachment(SessionRecord session, boolean cancellation,
             boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
             boolean legacyClose) {
+        authorizeAttachment(session, cancellation, actionResponse, authority,
+                legacyClose, false);
+    }
+
+    private void authorizeAttachment(SessionRecord session, boolean cancellation,
+            boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
+            boolean legacyClose, boolean committedStop) {
         ContextBinding binding = session.workspace();
         String expectedStatus = authority == null && !legacyClose ? "ACTIVE" : session.status();
         if (binding == null || !(legacyClose ? "CLOSING".equals(session.status()) : authority == null ? "ACTIVE".equals(session.status())
@@ -138,6 +157,7 @@ public class WorkspaceExecutionStore {
                 + " s.workspace_config_ref, s.workspace_policy_ref"
                 + (cancellation
                         ? ", t.tenant_id AS cancellation_tenant, t.session_id AS cancellation_session"
+                        : committedStop ? ""
                         : ", r.tenant_id AS registry_tenant, r.workspace_id,"
                 + " r.workspace_generation, r.storage_id, r.state,"
                 + " c.tenant_id AS command_tenant, c.session_id AS command_session,"
@@ -148,6 +168,7 @@ public class WorkspaceExecutionStore {
                         ? " JOIN managed_agent_turn t ON t.tenant_id = s.tenant_id"
                                 + " AND t.session_id = s.session_id AND t.status = 'CANCELLING'"
                                 + " AND (t.submission_attempted = TRUE OR t.harness_event_epoch IS NOT NULL)"
+                        : committedStop ? ""
                         : " JOIN managed_workspace_registry r ON r.tenant_id = s.tenant_id"
                 + " AND r.workspace_id = s.workspace_id"
                 + " JOIN managed_workspace_create_command c ON c.tenant_id = s.tenant_id"
@@ -177,7 +198,8 @@ public class WorkspaceExecutionStore {
                             && (cancellation
                                     ? session.tenantId().equals(row.getString("cancellation_tenant"))
                                             && session.sessionId().equals(row.getString("cancellation_session"))
-                                    : session.tenantId().equals(row.getString("registry_tenant"))
+                                    : committedStop
+                                    || session.tenantId().equals(row.getString("registry_tenant"))
                             && session.tenantId().equals(row.getString("command_tenant"))
                             && session.sessionId().equals(row.getString("command_session"))
                             && session.tenantId().equals(row.getString("access_tenant"))
@@ -191,7 +213,7 @@ public class WorkspaceExecutionStore {
                     // Grants and registry state are operator-mutable: a
                     // refusal stemming only from them is not the structural
                     // verdict the terminal exit promises.
-                    return cancellation
+                    return cancellation || committedStop
                             || ("ACTIVE".equals(row.getString("state"))
                                     && WorkspaceAccess.valueOf(row.getString("role"))
                                             .atLeast(WorkspaceAccess.OPERATOR))
@@ -299,6 +321,119 @@ public class WorkspaceExecutionStore {
         });
     }
 
+    /**
+     * The child Workspace maintenance holder (#13753 I1): a physical step
+     * of a child Workspace holds the storage exactly as a tool turn does,
+     * so a turn meets it as workspace_busy and polls, while W1a fence and
+     * registration, which need an idle lease, refuse. The Runtime holder
+     * columns stay null and maintenance_id names the child Workspace. The
+     * hold belongs to the child Workspace's current claim generation: a
+     * newer generation takes it over, an older one is refused, and a hold
+     * whose claim has since expired is freed by
+     * {@link #releaseStaleMaintenance}.
+     */
+    public void holdForMaintenance(ContextBinding binding, String maintenanceId,
+            long claimGeneration) {
+        WorkspaceStorageKindGuard.requireFreshTransaction();
+        String key = storageKey(binding);
+        String holder = maintenanceHolderKey(maintenanceId, claimGeneration);
+        transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+            WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+            List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM"
+                    + " qwen_managed_child_workspace WHERE child_workspace_id = ? FOR UPDATE",
+                    Long.class, maintenanceId);
+            if (generations.size() != 1 || generations.getFirst() != claimGeneration) {
+                throw unavailable();
+            }
+            jdbc.update("INSERT INTO managed_workspace_execution_lease"
+                    + " (storage_key, storage_kind) VALUES (?, 'LOCAL') ON DUPLICATE KEY UPDATE"
+                    + " storage_key = storage_key", key);
+            List<String[]> rows = jdbc.query("SELECT holder_key, maintenance_id FROM"
+                    + " managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE",
+                    (row, index) -> new String[] {row.getString("holder_key"), row.getString("maintenance_id")},
+                    key);
+            if (rows.size() != 1) {
+                throw unavailable();
+            }
+            if (storageGuard != null) {
+                storageGuard.verifyLocked(binding);
+            }
+            String current = rows.getFirst()[0];
+            if (current != null && !holder.equals(current)
+                    && !maintenanceId.equals(rows.getFirst()[1])) {
+                throw busy();
+            }
+            jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = ?,"
+                    + " binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL,"
+                    + " maintenance_id = ? WHERE storage_key = ? AND storage_kind = 'LOCAL'",
+                    holder, maintenanceId, key);
+        });
+    }
+
+    /** The child Workspace states a physical step runs in, and that a scan resumes. */
+    private static final java.util.Set<String> RESUMABLE_STATES = java.util.Set.of(ChildWorkspaceStore.PREPARING,
+            ChildWorkspaceStore.MERGING, ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED,
+            ChildWorkspaceStore.DISCARDING);
+
+    /** Releases a maintenance hold, and only the one this claim took. */
+    public void releaseMaintenance(ContextBinding binding, String maintenanceId,
+            long claimGeneration) {
+        transaction.executeWithoutResult(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
+            jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
+                    + " maintenance_id = NULL WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+                    + " AND holder_key = ? AND maintenance_id = ?", storageKey(binding),
+                    maintenanceHolderKey(maintenanceId, claimGeneration), maintenanceId);
+        });
+    }
+
+    /**
+     * Clears the maintenance holds no step owns any more: their child
+     * Workspace has no live claim, because the worker died (or failed to
+     * release) after its last step. A live step renews its claim, so the
+     * hold of any step still going is never touched. A hold whose child
+     * Workspace is still in a step's state waits {@code resumableGraceMillis}
+     * past its claim (forever with {@code Long.MAX_VALUE}): a scan that
+     * resumes the row lets its new claimant take the hold over without a
+     * gap.
+     */
+    public int releaseStaleMaintenance(long now, long resumableGraceMillis) {
+        // Every maintenance hold is a candidate; the claim is judged once,
+        // under the child Workspace's row lock, so a claim taken meanwhile
+        // keeps its hold.
+        List<String[]> holds = jdbc.query("SELECT w.tenant_id, l.storage_key, l.maintenance_id"
+                + " FROM managed_workspace_execution_lease l JOIN qwen_managed_child_workspace w"
+                + " ON w.child_workspace_id = l.maintenance_id WHERE l.maintenance_id IS NOT NULL",
+                (row, index) -> new String[] {row.getString(1), row.getString(2), row.getString(3)});
+        int released = 0;
+        for (String[] hold : holds) {
+            Integer cleared = transaction.execute(status -> {
+                WorkspaceStorageKindGuard.lockDomain(jdbc, hold[0]);
+                List<Boolean> unclaimed = jdbc.query("SELECT claimed_until, state FROM qwen_managed_child_workspace"
+                        + " WHERE child_workspace_id = ? FOR UPDATE", (row, index) -> {
+                            long until = row.getLong(1);
+                            if (row.wasNull()) {
+                                return true;
+                            }
+                            if (!RESUMABLE_STATES.contains(row.getString(2))) {
+                                return until <= now;
+                            }
+                            return resumableGraceMillis != Long.MAX_VALUE
+                                    && until <= now - resumableGraceMillis;
+                        }, hold[2]);
+                if (unclaimed.size() != 1 || !unclaimed.getFirst()) {
+                    return 0;
+                }
+                return jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = NULL,"
+                        + " maintenance_id = NULL WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+                        + " AND maintenance_id = ?", hold[1], hold[2]);
+            });
+            released += cleared == null ? 0 : cleared;
+        }
+        return released;
+    }
+
     public boolean hasHolder(RuntimeBindingRecord saved) {
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease"
                 + " WHERE binding_id = ? AND runtime_generation = ? AND holder_key IS NOT NULL",
@@ -340,13 +475,23 @@ public class WorkspaceExecutionStore {
                 throw unavailable();
             }
             String key = digest(saved.getRequest().getScope().getTenantId() + "\u0000" + saved.getRequest().getStorageId());
-            jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
+            jdbc.query("SELECT holder_key, binding_id, runtime_generation, runtime_session_id, maintenance_id"
                     + " FROM managed_workspace_execution_lease WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE", row -> {
                         String holder = row.getString("holder_key");
                         String bindingId = row.getString("binding_id");
                         String sessionId = row.getString("runtime_session_id");
                         long generation = row.getLong("runtime_generation");
-                        if (holder == null) {
+                        String maintenanceId = row.getString("maintenance_id");
+                        if (maintenanceId != null) {
+                            // A child Workspace step holds the storage: it is
+                            // not the lost binding's hold, and its own claim
+                            // releases it. Anything else in the Runtime holder
+                            // columns beside it is corrupt.
+                            if (holder == null || bindingId != null || sessionId != null
+                                    || row.getObject("runtime_generation") != null) {
+                                throw unavailable();
+                            }
+                        } else if (holder == null) {
                             if (bindingId != null || sessionId != null || row.getObject("runtime_generation") != null) {
                                 throw unavailable();
                             }
@@ -406,6 +551,10 @@ public class WorkspaceExecutionStore {
 
     private static String storageKey(ContextBinding binding) {
         return digest(binding.getTenantId() + "\u0000" + binding.getStorageId());
+    }
+
+    private static String maintenanceHolderKey(String maintenanceId, long claimGeneration) {
+        return digest("child-workspace\u0000" + maintenanceId + "\u0000" + claimGeneration);
     }
 
     private static String holderKey(RuntimeSessionRecord session) {

@@ -95,6 +95,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+// This file's settings resolution is built on the mocked `os.homedir`, so
+// the ambient `QWEN_HOME` must not redirect it: test-setup.ts pins the
+// variable to an empty directory to keep the suite off the operator's real
+// settings. Tests that exercise `QWEN_HOME` itself set it in-body.
+delete process.env['QWEN_HOME'];
+
 // Resolve the (mocked) user-settings path once at module load. Tests mock
 // `os.homedir`, so the value is stable across the suite. Production callers
 // must keep going through `getUserSettingsPath()` to pick up `QWEN_HOME`

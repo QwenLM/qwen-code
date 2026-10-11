@@ -63,6 +63,32 @@ public interface AgentStateStore {
         throw new UnsupportedOperationException("Child Session creation is unavailable");
     }
 
+    /**
+     * The isolation slice (#13753 I1): the same creation, bound to the
+     * child run's ready child Workspace. The child's row takes the
+     * Workspace's directory instead of the parent's; the creating
+     * transaction locks the Workspace row and refuses unless it is ready,
+     * unfinished, prepared from the parent's current Workspace and storage,
+     * and names {@code childCwdRelative}.
+     */
+    default StoreModels.Admission insertChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage,
+            String childCwdRelative) {
+        throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /**
+     * The child directory a child run's Workspace recorded, or null before
+     * its layout was recorded. Readiness is the creating transaction's to
+     * check, so a replay still answers once the Workspace moved on.
+     */
+    default String findChildWorkspaceCwd(String tenantId,
+            String parentSessionId, String childRunId) {
+        return null;
+    }
+
     /** The replay of {@link #insertChildSessionCommand}: same key and
      * digest answers the original admission; either mismatch conflicts. */
     default StoreModels.Admission replayChildSessionCommand(String tenantId,
@@ -215,6 +241,61 @@ public interface AgentStateStore {
     /** The result of a settled cwd change. */
     record CwdChangeOutcome(boolean completed, String failureCode,
             Long resultContextRevision) {
+    }
+
+    /**
+     * H4f: admits a public task cancel, or returns the operation the same
+     * actor already admitted under the key. The caller has validated the
+     * key and checked current access; under the Session lock this replays
+     * a retained key first, then — only for a new request — requires an
+     * active Session ({@code 409 session_not_active}), the task's
+     * {@code cancel} action ({@code 409 task_action_unavailable}) and no
+     * other open operation ({@code 409 session_operation_active}).
+     */
+    default OperationAdmission beginTaskCancelOperation(String tenantId,
+            String sessionId, String taskId, String actorDigest,
+            String idempotencyKey, String requestDigest) {
+        throw new UnsupportedOperationException("Task cancel is unavailable");
+    }
+
+    /** Task cancels due for delivery: pending, or leased past their lease. */
+    default List<OperationTarget> findDeliverableTaskCancels(int limit) {
+        return List.of();
+    }
+
+    /** Parked (recovery_blocked) task cancels due for reconciliation. */
+    default List<OperationTarget> findParkedTaskCancels(int limit) {
+        return List.of();
+    }
+
+    /**
+     * Records a task cancel's outcome: {@code completed} with a receipt,
+     * {@code failed} or {@code recovery_blocked} with its code (the latter
+     * parked until {@code retryAt}). A leased claim ({@code owner} set)
+     * settles only while it is still current; a parked operation
+     * ({@code owner} null) only while it is still parked.
+     *
+     * @return false when the claim or the parking is no longer current
+     */
+    default boolean settleTaskCancel(String tenantId, String sessionId,
+            String operationId, String owner, long claimGeneration,
+            TaskCancelOutcome outcome, long retryAt) {
+        throw new UnsupportedOperationException("Task cancel is unavailable");
+    }
+
+    /** A task cancel's recorded outcome: its public status and code. */
+    record TaskCancelOutcome(String status, String failureCode) {
+        public static TaskCancelOutcome completed() {
+            return new TaskCancelOutcome("completed", null);
+        }
+
+        public static TaskCancelOutcome failed(String failureCode) {
+            return new TaskCancelOutcome("failed", failureCode);
+        }
+
+        public static TaskCancelOutcome recoveryBlocked(String failureCode) {
+            return new TaskCancelOutcome("recovery_blocked", failureCode);
+        }
     }
 
     Optional<OperationRecord> findOperation(String tenantId,

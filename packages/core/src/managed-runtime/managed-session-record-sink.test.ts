@@ -832,7 +832,7 @@ describe('managed session record sink', () => {
         type: 'system',
         subtype,
         systemPayload,
-      } as Partial<ChatRecord>);
+      } as unknown as Partial<ChatRecord>);
       await harness.sink.write(carried);
       // The name names the channel: a carried subtype lands as one
       // message.committed event and no domain record, or the live
