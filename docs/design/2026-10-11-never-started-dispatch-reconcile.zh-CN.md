@@ -53,11 +53,15 @@ R3 —— 不放宽：含糊的结果必须保持阻塞，绝不被报为「从�
    `{state:'unknown'}`；其余一律重抛）。因此 `status()` 回答
    `undefined` 是确定性的「该行可证明不存在」，与应答它的是哪个
    runtime-session 上下文无关。
-3. **冷 Broker 必须先 acquire 再探测。** 重启后 Broker 的内存 Session
-   表为空，未建立上下文时 `status()` 会失于
-   `runtime_session_not_found`。parked wake 契约（及
-   `stopParkedRuntimeExecutions`）已确立：先以同一身份幂等接管
-   （acquire），再探测。
+3. **缺失的「未启动」读取不需要任何会话上下文。** `getExecution`
+   先执行 `requireOwnedExecution` —— 在共享仓储中按
+   `executionCallId` 持久查找 —— 早于一切会话生命周期检查
+   （`requireReadySession`）。`:process` 行不存在时即使原 runtime
+   Session 已 `RELEASED`（善意重取此时被永久拒于
+   `runtime_session_not_acquirable` —— 那是 cancel/settle 类
+   变更路径的事，与本证明无关），仍确定性回答
+   `runtime_execution_not_found`（404）。行缺失与会话活力无关，
+   该臂从不 acquire。
 4. **runtime-session 身份经日志可持久恢复。** 每次后台派发都写有
    `tool.intent` 事件（`payload.executionCallId`、`payload.argsRef`）；
    publication 模式下 `argsRef` 资源是 `managed-tool-input` 路由 JSON，
@@ -80,7 +84,8 @@ not_started_proven` 是许可的执行步，`running → failed` 是许可的
 
 ```text
 reconcileNeverStartedChildRuns(input: {
-  managed: ManagedSession;              // authority + resources
+  authority: LocalManagedSessionAuthority;
+  resources: { read(ref): Promise<Buffer> };
   childRuns: HostedChildRunSession;
   brokerOptions: HostedWorkspaceBrokerOptions;
 }): Promise<{ scanned: number; settled: string[]; skipped: string[] }>
@@ -97,8 +102,9 @@ reconcileNeverStartedChildRuns(input: {
    ⇒ **跳过**（无证明）。
 3. 按 runtimeSessionId 分组。每组：
    `broker = new HostedWorkspaceBroker(brokerOptions, sessionKey,
-runtimeSessionId)`，再 `await broker.acquire()`（对持久化 READY
-   会话的幂等接管；失败 ⇒ 整组跳过，不结算任何记录）。
+runtimeSessionId)`。不 acquire：已释放的 runtime Session 会让强制
+   重取永久被拒 `runtime_session_not_acquirable`，而确定性的
+   「从未启动」读取不需要任何会话上下文（§3）。
 4. 逐候选：`status(<executionCallId>:process)`：
    - `undefined`（404，确定性缺失）⇒
      `childRuns.settleFailed(shellId, { stopReason: 'start_failed',
@@ -108,9 +114,8 @@ started: false })` → 经 `commitExtensionRecord` 提交
      重放安全，已结算时按 deep-equal 跳过）。
    - 任何应答（含 `unknown`）或任何拒绝 ⇒ **跳过**。
 5. 结算**提交**错误向上传播（会话自身写平面失败必须响亮可重试）；
-   一切**取证**错误（acquire、路由读取、status）记入 `skipped`，
-   绝不阻塞 open —— Broker 暂不可达只是「未证明」，恰是 R3 安全的
-   回答。
+   一切**取证**错误（路由读取、status）记入 `skipped`，绝不阻塞
+   open —— Broker 暂不可达只是「未证明」，恰是 R3 安全的回答。
 
 ### 挂点：hosted 会话 open
 
@@ -121,7 +126,11 @@ started: false })` → 经 `commitExtensionRecord` 提交
 ```text
 if (session.childRuns && brokerOptions)
   await reconcileNeverStartedChildRuns({
-    managed: session.managed, childRuns: session.childRuns, brokerOptions });
+    authority: session.managed.authority,
+    resources: session.managed.resources,
+    childRuns: session.childRuns,
+    brokerOptions,
+  });
 ```
 
 - 每次 fresh open 运行一次，先于任何路由消费该会话；扫描与注册之间
@@ -153,8 +162,9 @@ stub 的 `HostedWorkspaceBroker` 模块）：
 - **R1 结算**：搁死的 `dispatch_started` 记录 +
   `status(':process') → undefined` ⇒ 记录读作 `failed` +
   `not_started_proven` + `stopReason: start_failed`；**再重开**一次
-  authority 断言相同（reload 可见）。断言 acquire→status 调用顺序
-  （冷 Broker 契约）。
+  authority 断言相同（reload 可见）。断言 `broker.acquire` 从未被
+  调用：确定性缺失读取本身不依赖会话活力（已释放的 runtime Session
+  仍可由缺失的 `:process` 行证明从未启动）。
 - **R2 依构造**：结算后 `authority.taskViews()` 显示终态任务
   （`state: failed`、无 runtime hold），而非 running/provisioning。
 - **R3 含糊**：`status → {state:'executing'|'unknown'}` 或拒绝 ⇒

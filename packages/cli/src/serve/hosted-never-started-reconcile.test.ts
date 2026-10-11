@@ -255,8 +255,11 @@ describe('reconcileNeverStartedChildRuns', () => {
       stopReason: 'start_failed',
       run: { state: 'failed', execution: 'not_started_proven' },
     });
-    // The cold-Broker contract: idempotent adopt acquire precedes any probe.
-    expect(broker.calls).toEqual(['acquire', 'status:shell-1:process']);
+    // The definitive proof needs no acquire: status probes are the only
+    // Broker interaction, so a released runtime Session cannot wedge the
+    // scan behind a permanent runtime_session_not_acquirable.
+    expect(broker.calls).toEqual(['status:shell-1:process']);
+    expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.runtimeSessionIds).toEqual(['runtime-a']);
     const taskId = `task_${managedExtensionRecordKey(key.sessionId, 'child_run', 'shell-1')}`;
     expect(session!.authority.taskViews()).toEqual([
@@ -301,6 +304,28 @@ describe('reconcileNeverStartedChildRuns', () => {
       'runtime-b',
     ]);
     expect(committed('shell-2').run.execution).toBe('dispatch_started');
+  });
+
+  it('settles a stranded record whose runtime Session was released', async () => {
+    await open();
+    await createManagedHarnessHandle(session!).ensureRunnable();
+    await strand('shell-1');
+    await appendIntent('shell-1', 'runtime-a');
+    await reopen();
+    const orchestrator = orchestratorOf(session!);
+
+    const result = await reconcileNeverStartedChildRuns({
+      authority: session!.authority,
+      resources: session!.resources,
+      childRuns: orchestrator,
+      brokerOptions: BROKER_OPTIONS,
+    });
+
+    // A freed Session permanently refuses acquire with
+    // runtime_session_not_acquirable, so only a probe that never acquires
+    // can carry this proof at all.
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(result.settled).toEqual(['shell-1']);
   });
 
   it.each([['executing'], ['unknown'], ['settled']] as const)(

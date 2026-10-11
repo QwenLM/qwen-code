@@ -60,11 +60,14 @@ reported as never-started.
    `{state:'unknown'}`; every other rejection re-throws). So `status()`
    answering `undefined` is a definitive "the row provably does not exist",
    independent of which runtime-session context answered.
-3. **Cold Broker needs acquire-before-probe.** After a restart the Broker's
-   in-memory Session table is empty; a `status()` without an established
-   context fails `runtime_session_not_found`. The parked-wake contract (and
-   `stopParkedRuntimeExecutions`) already established: re-acquire idempotently
-   under the same identity first, then probe.
+3. **The absence read does not need a session context.** `getExecution`
+   runs `requireOwnedExecution` — a durable `findByExecutionCallId` lookup —
+   before any Session-lifecycle check (`requireReadySession`), and it answers
+   `runtime_execution_not_found` (404) for the absent `:process` row even
+   after the original runtime Session is `RELEASED` (reacquisition, which
+   matters only for mutations like cancel/settle, then fails permanently
+   with `runtime_session_not_acquirable`). So a probe of the missing row is
+   unaffected by runtime Session liveness and never needs an acquire.
 4. **The runtime-session identity is durable via the journal.** Each
    background dispatch writes a `tool.intent` event
    (`payload.executionCallId`, `payload.argsRef`); in publication mode the
@@ -107,9 +110,10 @@ Algorithm:
    Anything unreadable / missing / mismatched ⇒ **skip** (no proof).
 3. Group candidates by runtimeSessionId. Per group:
    `broker = new HostedWorkspaceBroker(brokerOptions, sessionKey,
-runtimeSessionId)` then `await broker.acquire()` (idempotent adoption of
-   the persisted READY session; failure ⇒ skip the whole group without
-   settling anything).
+runtimeSessionId)`. No acquire: a released runtime Session would wedge a
+   mandatory reacquire behind a permanent
+   `runtime_session_not_acquirable`, while the definitive not-found answer
+   needs no session context anyway (§3).
 4. Per candidate: `status(<executionCallId>:process)`:
    - `undefined` (404, definitive) ⇒
      `childRuns.settleFailed(shellId, { stopReason: 'start_failed',
@@ -119,8 +123,8 @@ started: false })` → commits `state: failed`,
      by command id, deep-equal no-op if already settled).
    - any answer (`{state}` incl. `unknown`) or any rejection ⇒ **skip**.
 5. The settle **commit** error propagates (the session's own writer plane
-   failing is loudly retryable); every _proof-reading_ error (acquire,
-   route read, status) is reported in `skipped` and never blocks the open —
+   failing is loudly retryable); every _proof-reading_ error (route read,
+   status) is reported in `skipped` and never blocks the open —
    a Broker that is not reachable yet simply means "not proven", which is
    the R3-safe answer.
 
@@ -170,8 +174,9 @@ stubbed `HostedWorkspaceBroker` module):
 - **R1 settle**: stranded `dispatch_started` record + `status(':process')
 → undefined` ⇒ record reads `failed` + `not_started_proven` +
   `stopReason: start_failed`; **reopen** the authority again and assert the
-  same (reload-visible). Assert the acquire→status call order (cold-Broker
-  contract).
+  same (reload-visible). Assert `broker.acquire` is never called: the
+  definitive absence read carries no liveness prerequisite (released
+  runtime Session still proves the missing `:process` row).
 - **R2 by construction**: after the settle, `authority.taskViews()` shows a
   terminal task (`state: failed`, no runtime hold) instead of
   running/provisioning.

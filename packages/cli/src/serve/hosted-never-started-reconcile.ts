@@ -150,15 +150,14 @@ export async function reconcileNeverStartedChildRuns(input: {
       sessionKey,
       runtimeSessionId,
     );
-    // A replacement Broker holds an empty in-memory Session table: the
-    // idempotent acquire restores the probe context before any status
-    // read, exactly like the parked-wake close does.
-    try {
-      await broker.acquire();
-    } catch {
-      skipped.push(...group.map((record) => record.shellId));
-      continue;
-    }
+    // Session liveness never moves this proof either way: the Broker's
+    // durable execution lookup (`requireOwnedExecution`) runs by id before
+    // any Session-lifecycle requirement, so a missing `:process` row
+    // answers 404 even after the original runtime was RELEASED (turn
+    // cancellation settles the turn and releases the Session without
+    // settling these records), where a mandatory re-acquire would wedge
+    // forever on `runtime_session_not_acquirable` instead. No acquire:
+    // the proof never needs one.
     for (const record of group) {
       const executionCallId = record.run.executionCallId ?? record.shellId;
       let answer: { state: string } | undefined;
