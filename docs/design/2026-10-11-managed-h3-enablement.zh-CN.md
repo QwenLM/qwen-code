@@ -2,7 +2,7 @@
 
 [English](2026-10-11-managed-h3-enablement.md) | [简体中文](2026-10-11-managed-h3-enablement.zh-CN.md)
 
-状态：提议（2026-10-11）。实现 #13856。相关：
+状态：已实现并已通过物理验收（2026-10-11）。实现 #13856。验收在 H3 rig 上于 `e64ee1fbeb` 运行，使用生产门禁列表、不带任何准入臂：六项行为全部观测到，含此前被阻塞的「输出作为 Artifact」臂（逐字节读回）与 Monitor watch 跨 turn 存活；本次走查需要——也得到了——本改动携带的 page 闭包修复。记录见 `.qwen/e2e-tests/2026-10-11-h3-enablement.md`。相关：
 [H3 Shell/Monitor 运行时](2026-10-03-managed-shell-monitor-runtime.zh-CN.md)
 （被启用的运行时）、#13532（物理验收）、#13533（B1/B2 与两个设计调用）、
 #13789（A1 修复）、#13830（B1）、#13834（B2 见证）、#13846（本片沿用的启用
