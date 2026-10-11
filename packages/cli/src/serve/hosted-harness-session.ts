@@ -182,6 +182,7 @@ import {
   type HostedRuntimeRecoveryReport,
 } from './hosted-runtime-recovery.js';
 import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
+import { hostedShellLaneAttachesChildAgents } from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
@@ -3386,14 +3387,22 @@ export function registerHostedHarnessSessionRoutes(
         // H4b: the Session's own child orchestrator, on the Shell lanes
         // the notification wake is proven over — files profiles keep their
         // exact current surface (their child admission is its own gate).
+        // Public Shell admission suppresses the child agent tool; a private
+        // Shell lane that omits the flag keeps it. Team attachment stays.
         if (session.shell || session.backgroundLane) {
-          session.childAgents = new HostedChildAgentSession(
-            {
-              authority: session.managed.authority,
-              resources: session.managed.resources,
-            },
-            session.managed.authority.sessionHeader.sessionKey,
-          );
+          if (
+            hostedShellLaneAttachesChildAgents(
+              true,
+              body?.['suppressChildAgents'] === true,
+            )
+          )
+            session.childAgents = new HostedChildAgentSession(
+              {
+                authority: session.managed.authority,
+                resources: session.managed.resources,
+              },
+              session.managed.authority.sessionHeader.sessionKey,
+            );
           session.teams = new HostedTeamSession(
             {
               authority: session.managed.authority,
@@ -3401,24 +3410,26 @@ export function registerHostedHarnessSessionRoutes(
             },
             session.managed.authority.sessionHeader.sessionKey,
           );
-          // H4d-b: the Session messages along its lineage on the same
-          // writes chain; a child names its parent from its definition.
-          session.messages = new HostedSessionMessageSession(
-            {
-              authority: session.managed.authority,
-              resources: session.managed.resources,
-            },
-            session.managed.authority.sessionHeader.sessionKey,
-            session.childAgents,
-            session.childDepth !== undefined &&
-            typeof savedLineage?.['parentSessionId'] === 'string' &&
-            typeof savedLineage['parentChildRunId'] === 'string'
-              ? {
-                  parentSessionId: savedLineage['parentSessionId'],
-                  parentChildRunId: savedLineage['parentChildRunId'],
-                }
-              : undefined,
-          );
+          // H4d-b: messages share the child orchestrator's write chain, so
+          // a Shell lane that suppressed the agent tool has no funnel.
+          if (session.childAgents) {
+            session.messages = new HostedSessionMessageSession(
+              {
+                authority: session.managed.authority,
+                resources: session.managed.resources,
+              },
+              session.managed.authority.sessionHeader.sessionKey,
+              session.childAgents,
+              session.childDepth !== undefined &&
+              typeof savedLineage?.['parentSessionId'] === 'string' &&
+              typeof savedLineage['parentChildRunId'] === 'string'
+                ? {
+                    parentSessionId: savedLineage['parentSessionId'],
+                    parentChildRunId: savedLineage['parentChildRunId'],
+                  }
+                : undefined,
+            );
+          }
         }
       }
       if (

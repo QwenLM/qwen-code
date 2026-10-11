@@ -16,6 +16,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptSummary,
   DaemonRewindResult,
   DaemonSessionRecapResult,
@@ -2906,6 +2907,23 @@ export function createDaemonSessionActions({
         );
       }
       return await session.removeMidTurnMessage(messageId);
+    },
+
+    async sendMidTurnMessagesNow(
+      opts,
+    ): Promise<DaemonSendMidTurnMessagesNowResult> {
+      const session = sessionRef.current;
+      if (!session) return { requested: false };
+      if (opts?.sessionId && session.sessionId !== opts.sessionId) {
+        // Authenticate against the target session, like removals of rows
+        // restored after a session switch.
+        const targetClientId =
+          getPersistedClientId(opts.sessionId) ?? session.clientId;
+        return await session.client.sendMidTurnMessagesNow(opts.sessionId, {
+          ...(targetClientId ? { clientId: targetClientId } : {}),
+        });
+      }
+      return await session.sendMidTurnMessagesNow();
     },
 
     async getMidTurnMessages(opts?: {
