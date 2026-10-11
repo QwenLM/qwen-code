@@ -836,18 +836,25 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
    * dropped without a trace while the limit warning names the key.
    */
   private appResourceLimit(
-    value: number | undefined,
+    value: number | null | undefined,
     fallback: number,
     min: number,
     max: number,
     key: 'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'timeout',
   ): number {
-    if (value !== undefined && effectiveAppResourceTimeoutMs(value) === null) {
+    // `!= null`, not `!== undefined`, for every key routed through here:
+    // `mcpServers` carries no per-key runtime validation, so a hand-written
+    // `null` reaches this helper, and every other reader of those fields
+    // treats null as unset -- production resolves the server timeout with
+    // `timeout ?? MCP_DEFAULT_TIMEOUT_MSEC` and the pool fingerprint collapses
+    // the two spellings. Warning on it would announce, on every App load, a
+    // discard the rest of the codebase does not make.
+    if (value != null && effectiveAppResourceTimeoutMs(value) === null) {
       debugLogger.warn(
         `Ignoring non-finite MCP App resource limit ${this.appLimitSettingRef(key)} (${typeof value === 'string' ? JSON.stringify(value) : String(value)}); falling back to ${fallback}`,
       );
     }
-    return boundedAppLimit(value, fallback, min, max);
+    return boundedAppLimit(value ?? undefined, fallback, min, max);
   }
 
   /**
@@ -905,26 +912,21 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // The returned number is deliberately unused -- `defaultTimeoutMs` above
     // owns the deadline and must stay on the already-defaulted `mcpTimeout`.
     //
-    // `!= null`, not `!== undefined`: `mcpServers` has no runtime validation,
-    // so a hand-written `"timeout": null` reaches here, and every other reader
-    // of the same field treats null as unset -- production resolves it with
-    // `timeout ?? MCP_DEFAULT_TIMEOUT_MSEC` and the pool fingerprint collapses
-    // the two spellings. Warning on it would announce a discard the rest of
-    // the codebase does not make, on every App load.
+    // A written `null` is read as unset for this key exactly as it is for the
+    // two siblings -- the policy and its rationale live in
+    // `appResourceLimit`, so this call is passed unguarded like they are.
     //
     // The fallback named is `timeoutMs`, the deadline this read is actually
     // given: an explicit `appResourceTimeoutMs` outranks the App resource
     // default, so naming the constant would point the operator at a number
     // the read never uses.
-    if (this.appResourceLimits?.timeout != null) {
-      this.appResourceLimit(
-        this.appResourceLimits.timeout,
-        timeoutMs,
-        1,
-        MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
-        'timeout',
-      );
-    }
+    this.appResourceLimit(
+      this.appResourceLimits?.timeout,
+      timeoutMs,
+      1,
+      MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
+      'timeout',
+    );
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     try {
       const resource = await this.mcpClient.readResource(

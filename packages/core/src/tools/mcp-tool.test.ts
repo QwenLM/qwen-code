@@ -1737,6 +1737,27 @@ describe('DiscoveredMCPTool', () => {
       expectDiscardedLimitWarn('timeout', undefined);
     });
 
+    it.each(['appResourceTimeoutMs', 'appResourceMaxBytes'] as const)(
+      'treats a written null %s as unset, not as a discarded value',
+      async (key) => {
+        const mcpClient = appClient(
+          vi.fn(async () => {
+            throw new Error('boom');
+          }),
+        );
+        // Same hand-edited `null` the server `timeout` already tolerates, on
+        // the two keys routed through the same helper: one settings object
+        // must not carry two null policies.
+        const written = null as unknown as number;
+        await createAppTool(mcpClient, undefined, undefined, {
+          [key]: written,
+        })
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+        expectDiscardedLimitWarn(key, undefined);
+      },
+    );
+
     it('names the deadline actually used as the fallback for a discarded server timeout', async () => {
       const mcpClient = appClient(
         vi.fn(async () => {
