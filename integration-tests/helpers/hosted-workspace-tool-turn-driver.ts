@@ -229,8 +229,10 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
   const tools = body['tools'] as Array<{ function: { name: string } }>;
   // Since H4b, a depth-0 Shell-lane Session whose child kind gate is on
   // advertises the Agent tool beside the Shell vocabulary, since H4d-b the
-  // parent form of send_message beside it, and since the H4e-b1 enablement
-  // the lead's team tools with them.
+  // parent form of send_message beside it, since the H4e-b1 enablement
+  // the lead's team tools with them, and since #13803 (K4) the Workflow
+  // tool — its own kind reader gates the advertisement, so a child Session
+  // still hides it.
   assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [
     ...(shellProfile ? ['agent'] : []),
     'edit',
@@ -245,6 +247,7 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
           'task_update',
           'team_create',
           'team_delete',
+          'workflow',
         ]
       : []),
     'write_file',
