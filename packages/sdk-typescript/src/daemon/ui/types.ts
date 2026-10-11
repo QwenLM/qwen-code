@@ -133,7 +133,7 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
 export interface DaemonAgentIdentity {
   agentName: string;
   depth: number;
-  kind: 'root' | 'subagent';
+  kind: 'root' | 'subagent' | 'teammate';
 }
 
 export interface DaemonInputReference {

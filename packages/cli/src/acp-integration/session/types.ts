@@ -97,9 +97,9 @@ export interface AgentIdentity {
    * that must survive renames keys on `parentToolCallId` instead.
    */
   agentName: string;
-  /** 0 for the root agent, 1 for a direct subagent, and so on. */
+  /** 0 for the root agent, 1 for a direct subagent or teammate, and so on. */
   depth: number;
-  kind: 'root' | 'subagent';
+  kind: 'root' | 'subagent' | 'teammate';
 }
 
 /** The identity of the agent a session's own frames come from. */

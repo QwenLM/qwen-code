@@ -1160,7 +1160,7 @@ function extractAgentIdentity(
   const depth = numberField(agent, 'depth');
   if (
     !agentName ||
-    (kind !== 'root' && kind !== 'subagent') ||
+    (kind !== 'root' && kind !== 'subagent' && kind !== 'teammate') ||
     depth === undefined ||
     depth < 0
   ) {

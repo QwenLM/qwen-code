@@ -74,7 +74,7 @@ describe('agent identity projection', () => {
   it.each([
     ['a missing depth', { agentName: '/root/security', kind: 'subagent' }],
     ['a missing kind', { agentName: '/root/security', depth: 1 }],
-    ['an unknown kind', { agentName: '/root/x', depth: 1, kind: 'teammate' }],
+    ['an unknown kind', { agentName: '/root/x', depth: 1, kind: 'bogus' }],
     ['an empty name', { agentName: '', depth: 1, kind: 'subagent' }],
     ['a negative depth', { agentName: '/root/x', depth: -1, kind: 'subagent' }],
   ])('rejects a half-populated identity: %s', (_label, agent) => {
@@ -83,6 +83,18 @@ describe('agent identity projection', () => {
     // looking name whose depth/kind disagree with it.
     const events = normalizeDaemonEvent(text('x', { agent }) as never);
     expect(events[0]).not.toHaveProperty('agent');
+  });
+
+  it('accepts a teammate identity, the Agent Team producer kind', () => {
+    const teammate = {
+      agentName: '/root/correctness',
+      depth: 1,
+      kind: 'teammate',
+    } as const;
+    const events = normalizeDaemonEvent(
+      text('x', { agent: teammate }) as never,
+    );
+    expect(events[0]).toMatchObject({ agent: teammate });
   });
 
   it('survives a nested path two levels deep', () => {

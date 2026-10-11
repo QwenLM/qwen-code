@@ -1183,11 +1183,21 @@ describe('Session', () => {
       const listeners = new Map<string, Set<(event: never) => void>>();
       const manager = {
         leaderCallback: null as
-          | ((modelText: string, displayText: string) => void)
+          | ((
+              modelText: string,
+              displayText: string,
+              senders?: readonly string[],
+            ) => void)
           | null,
         subscribedTypes: [] as string[],
         setLeaderMessageCallback(
-          cb: ((modelText: string, displayText: string) => void) | null,
+          cb:
+            | ((
+                modelText: string,
+                displayText: string,
+                senders?: readonly string[],
+              ) => void)
+            | null,
         ) {
           manager.leaderCallback = cb;
         },
@@ -1249,6 +1259,7 @@ describe('Session', () => {
       manager.leaderCallback?.(
         '<teammate_message from="security">found an injection</teammate_message>',
         '[team] security: found an injection',
+        ['security'],
       );
 
       await vi.waitFor(() => expect(sentPeerNotifications()).toHaveLength(1));
@@ -1260,6 +1271,13 @@ describe('Session', () => {
       expect(
         (peer!._meta?.['backgroundTask'] as { taskId: string }).taskId,
       ).toMatch(/^teammate-message-\d+$/);
+      // The team column's identity travels structurally, minted from the inbox
+      // entry's sender — not parsed out of the formatted envelope text.
+      expect(peer!._meta?.['agent']).toEqual({
+        agentName: '/root/security',
+        depth: 1,
+        kind: 'teammate',
+      });
 
       // The decisive half: the report reaches the leader's model, not merely
       // the client's transcript. A sink that only buffered locally would pass

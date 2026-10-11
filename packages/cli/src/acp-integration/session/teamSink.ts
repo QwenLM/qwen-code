@@ -42,6 +42,7 @@ export interface TeamSinkDeps {
   readonly injectLeaderMessage: (
     modelText: string,
     displayText: string,
+    senders?: readonly string[],
   ) => void;
   /** Asks the ACP client to decide a teammate's tool approval. */
   readonly requestPermission: (
@@ -185,8 +186,8 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     boundManager = manager;
     if (!manager) return;
 
-    manager.setLeaderMessageCallback((modelText, displayText) => {
-      deps.injectLeaderMessage(modelText, displayText);
+    manager.setLeaderMessageCallback((modelText, displayText, senders) => {
+      deps.injectLeaderMessage(modelText, displayText, senders);
     });
     approvalListener = handleApproval;
     manager

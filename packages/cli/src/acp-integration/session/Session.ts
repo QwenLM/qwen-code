@@ -431,11 +431,13 @@ import {
 } from '../../utils/mcp-server-mention.js';
 
 // Import modular session components
-import type {
-  ApprovalModeValue,
-  CumulativeUsage,
-  SessionContext,
-  ToolCallStartParams,
+import {
+  ROOT_AGENT_IDENTITY,
+  type AgentIdentity,
+  type ApprovalModeValue,
+  type CumulativeUsage,
+  type SessionContext,
+  type ToolCallStartParams,
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
@@ -1623,6 +1625,12 @@ export interface BackgroundNotificationQueueItem {
   toolUseId?: string;
   todoWorkChainId?: string;
   label?: string;
+  /**
+   * Producer identity for `peer` items: the teammate whose report this is.
+   * Stamped onto the emitted frame's `_meta.agent` so a client attributes the
+   * message structurally instead of parsing the sender out of the text.
+   */
+  agent?: AgentIdentity;
   /** Structured fields for i18n rendering on the frontend. */
   structured?: {
     description?: string;
@@ -10814,15 +10822,22 @@ export class Session implements SessionContext {
       config: this.config,
       sessionId: this.sessionId,
       signal: this.teamSinkAbort.signal,
-      injectLeaderMessage: (modelText, displayText) =>
-        this.#enqueueTeammateMessage(modelText, displayText),
+      injectLeaderMessage: (modelText, displayText, senders) =>
+        this.#enqueueTeammateMessage(modelText, displayText, senders),
       requestPermission: (params, signal) =>
         this.#requestPermissionQueued(params, signal),
     });
   }
 
-  #enqueueTeammateMessage(modelText: string, displayText: string): void {
+  #enqueueTeammateMessage(
+    modelText: string,
+    displayText: string,
+    senders?: readonly string[],
+  ): void {
     if (this.disposed || this.closing) return;
+    // A single-sender batch is attributable; a mixed batch is not, so it stays
+    // unattributed rather than naming one teammate for several reports.
+    const sender = senders?.length === 1 ? senders[0] : undefined;
     this.#enqueueBackgroundNotification({
       kind: 'peer',
       // Unique per message: the public `enqueueBackgroundNotification` dedupes
@@ -10831,6 +10846,15 @@ export class Session implements SessionContext {
       status: 'message',
       modelText,
       displayText,
+      ...(sender
+        ? {
+            agent: {
+              agentName: `${ROOT_AGENT_IDENTITY.agentName}/${sender}`,
+              depth: 1,
+              kind: 'teammate' as const,
+            },
+          }
+        : {}),
       continuesTodoStopGuardWorkChain: false,
     });
   }
@@ -12140,6 +12164,7 @@ export class Session implements SessionContext {
       _meta: {
         source,
         qwenDiscreteMessage: true,
+        ...(item.agent ? { agent: item.agent } : {}),
         backgroundTask: {
           taskId: item.taskId,
           sourceTurnId: item.sourceTurnId,

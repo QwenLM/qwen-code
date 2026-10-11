@@ -16,7 +16,11 @@ import {
 import type { RequestPermissionRequest } from '@agentclientprotocol/sdk';
 import { attachTeamSink, type TeamSinkDeps } from './teamSink.js';
 
-type LeaderCallback = (modelText: string, displayText: string) => void;
+type LeaderCallback = (
+  modelText: string,
+  displayText: string,
+  senders?: readonly string[],
+) => void;
 
 class FakeTeamEmitter {
   private readonly handlers = new Map<string, Set<(e: never) => void>>();
@@ -135,11 +139,14 @@ describe('attachTeamSink', () => {
     // attached must be adopted too.
     expect(manager.leaderCallback).not.toBeNull();
 
-    manager.leaderCallback?.('model text from security', '[team] security');
+    manager.leaderCallback?.('model text from security', '[team] security', [
+      'correctness',
+    ]);
 
     expect(injectLeaderMessage).toHaveBeenCalledWith(
       'model text from security',
       '[team] security',
+      ['correctness'],
     );
   });
 
@@ -155,8 +162,12 @@ describe('attachTeamSink', () => {
     empty.fireChange(late);
 
     expect(late.leaderCallback).not.toBeNull();
-    late.leaderCallback?.('report', '[team] report');
-    expect(injectLeaderMessage).toHaveBeenCalledWith('report', '[team] report');
+    late.leaderCallback?.('report', '[team] report', ['correctness']);
+    expect(injectLeaderMessage).toHaveBeenCalledWith(
+      'report',
+      '[team] report',
+      ['correctness'],
+    );
   });
 
   it('routes a teammate approval to the client and answers with its outcome', async () => {

@@ -286,7 +286,7 @@ export class TeamManager {
    * model still gets the whole report.
    */
   private leaderMessageCallback:
-    | ((message: string, display: string) => void)
+    | ((message: string, display: string, senders?: readonly string[]) => void)
     | null = null;
 
   /**
@@ -1069,10 +1069,17 @@ export class TeamManager {
    * Pass `null` to detach a previously-installed callback.
    */
   setLeaderMessageCallback(
-    cb: ((message: string, display: string) => void) | null,
+    cb:
+      | ((
+          message: string,
+          display: string,
+          senders?: readonly string[],
+        ) => void)
+      | null,
   ): void {
     this.leaderMessageCallback = cb
-      ? (message, display) => runOutsideAgentContext(() => cb(message, display))
+      ? (message, display, senders) =>
+          runOutsideAgentContext(() => cb(message, display, senders))
       : null;
   }
 
@@ -1238,6 +1245,9 @@ export class TeamManager {
     callback(
       this.formatLeaderEnvelope(newMessages).join('\n\n'),
       this.formatLeaderDisplay(newMessages),
+      // Senders travel with the batch so a host can attribute the report
+      // structurally instead of parsing it out of the formatted envelope.
+      [...new Set(newMessages.map((message) => message.from).filter(Boolean))],
     );
   }
 
