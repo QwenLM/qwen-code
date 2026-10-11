@@ -850,6 +850,98 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
+    void cwdCapabilitySharesTheGrantAndFactsBatchesRegardlessOfPageSize() {
+        for (int size : new int[] {1, 20}) {
+            Fixture fixture = new Fixture(Clock.systemUTC(), true);
+            when(fixture.harness.isWorkspaceFilesAvailable()).thenReturn(true);
+            String tenant = "cwd-" + UUID.randomUUID();
+            fixture.createCwdSessions(tenant, size);
+            fixture.ledger.reset();
+            var page = fixture.service.listWebShellSessions(tenant, "actor", null, 20).data();
+            assertThat(page).hasSize(size);
+            assertThat(page).allSatisfy(row -> assertThat(JSON.valueToTree(row).path("capabilities").path("cwdChange").asBoolean()).isTrue());
+            assertThat(fixture.ledger.total()).isEqualTo(5);
+            assertThat(fixture.ledger.count("join managed_workspace_registry", "join managed_workspace_create_command")).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void cwdCapabilityMirrorsAdmissionWithoutTheTurnProfileRestrictions() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+        String tenant = "cwd-" + UUID.randomUUID();
+        String id = fixture.createCwdSessions(tenant, 1).getFirst();
+        fixture.jdbc.update("UPDATE managed_agent_session SET agent_id = 'custom' WHERE tenant_id = ? AND session_id = ?", tenant, id);
+        var view = fixture.service.getWebShellSession(tenant, "actor", id);
+        assertThat(view.capabilities().workspaceTurns()).isFalse();
+        assertThat(JSON.valueToTree(view).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+        // Busy admission remains separate from support and authorization.
+        fixture.store.insertTurnCommand(tenant, "SUBMIT", "busy", "digest", id, List.of(Map.of("type", "text", "text", "test")), "digest");
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+    }
+
+    @Test
+    void cwdCapabilityRequiresOperatorRoleAndExactRegistryFacts() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+        String tenant = "cwd-" + UUID.randomUUID();
+        String id = fixture.createCwdSessions(tenant, 1).getFirst();
+        // A non-creator holding OPERATOR on the Workspace sees the
+        // capability, mirroring admission's atLeast(OPERATOR); a READER
+        // does not.
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = 'workspace' AND actor_id = ?", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+        for (String mutation : new String[] {
+                "UPDATE managed_workspace_registry SET state = 'DRAINING'",
+                "UPDATE managed_workspace_registry SET state = 'ACTIVE', workspace_generation = 2",
+                "UPDATE managed_workspace_registry SET workspace_generation = 1, storage_id = 'other-storage'",
+                "UPDATE managed_workspace_registry SET storage_id = 'storage'; UPDATE managed_workspace_access SET role = 'READER'"
+        }) {
+            // This fixture has only one tenant; each mutation proves a separate admission conjunct.
+            for (String statement : mutation.split(";")) fixture.jdbc.update(statement);
+            assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+        }
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'");
+        fixture.jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED'");
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+    }
+
+    @Test
+    void cwdCapabilityChecksTheCallerRoleOnEachWorkspaceOfAMixedPage() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+        String tenant = "cwd-" + UUID.randomUUID();
+        String readRow = fixture.createCwdSessions(tenant, 1).getFirst();
+        fixture.jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-2', 1, 'storage-2', 'Workspace 2', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+        String operateRow = fixture.tx.execute(status -> fixture.store.insertWorkspaceSessionCommand(tenant, "actor", UUID.randomUUID().toString(), "digest", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace-2", "."))).sessionId();
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.ledger.reset();
+        var page = fixture.service.listWebShellSessions(tenant, "other", null, 20).data();
+        java.util.Map<String, Boolean> cwd = new java.util.HashMap<>();
+        for (var row : page) {
+            cwd.put(row.sessionId(), row.capabilities().cwdChange());
+        }
+        assertThat(cwd).hasSize(2).containsEntry(operateRow, true).containsEntry(readRow, false);
+        assertThat(fixture.ledger.count("join managed_workspace_registry", "join managed_workspace_create_command")).isEqualTo(1);
+    }
+
+    @Test
+    void cwdCapabilityDoesNotPayForRegistryFactsWhenDisabledOrReaderOnly() {
+        for (boolean enabled : new boolean[] {false, true}) {
+            Fixture fixture = new Fixture(Clock.systemUTC(), enabled);
+            String tenant = "cwd-" + UUID.randomUUID();
+            fixture.createCwdSessions(tenant, 1);
+            fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "reader".getBytes(StandardCharsets.UTF_8));
+            fixture.ledger.reset();
+            var page = fixture.service.listWebShellSessions(tenant, "reader", null, 20).data();
+            assertThat(page).hasSize(1);
+            assertThat(JSON.valueToTree(page.getFirst()).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+            assertThat(fixture.ledger.count("join managed_workspace_registry", "join managed_workspace_create_command")).isZero();
+        }
+    }
+
+    @Test
     void transcriptServesEveryEventPastTheSnapshot() {
         Fixture fixture = new Fixture();
         String tenant = "tenant-" + UUID.randomUUID();
@@ -1697,6 +1789,10 @@ class Issue13181QueryBudgetTest {
         }
 
         Fixture(Clock clock) {
+            this(clock, false);
+        }
+
+        Fixture(Clock clock, boolean workspaceFilesEnabled) {
             JdbcDataSource raw = new JdbcDataSource();
             raw.setURL("jdbc:h2:mem:repro-" + UUID.randomUUID()
                     + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE;"
@@ -1709,11 +1805,23 @@ class Issue13181QueryBudgetTest {
             tx = new TransactionTemplate(manager);
             ManagedWorkspaceRegistry registry =
                     new ManagedWorkspaceRegistry(jdbc);
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getHarness().setWorkspaceFilesEnabled(workspaceFilesEnabled);
             store = new ManagedAgentStore(jdbc, JSON, clock, hub,
-                    registry, new ManagedAgentProperties());
+                    registry, properties);
             service = new ManagedAgentService(store, new RequestDigests(),
                     mock(HarnessCoordinator.class),
                     harness, registry);
+        }
+
+        List<String> createCwdSessions(String tenant, int count) {
+            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+            List<String> ids = new ArrayList<>();
+            for (int index = 0; index < count; index++) {
+                ids.add(tx.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor", UUID.randomUUID().toString(), "digest", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."))).sessionId());
+            }
+            return ids;
         }
     }
 

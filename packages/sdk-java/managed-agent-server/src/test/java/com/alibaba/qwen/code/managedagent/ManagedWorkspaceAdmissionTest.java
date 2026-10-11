@@ -828,6 +828,11 @@ class ManagedWorkspaceAdmissionTest {
                     }
 
                     @Override
+                    public boolean supportsFencedTitles() {
+                        return true;
+                    }
+
+                    @Override
                     public void rename(String tenantId, String sessionId,
                             String title) {
                     }
@@ -925,6 +930,11 @@ class ManagedWorkspaceAdmissionTest {
                     public Attachment createOrLoad(String tenantId,
                             String sessionId, boolean loadExisting) {
                         return new Attachment("boot");
+                    }
+
+                    @Override
+                    public boolean supportsFencedTitles() {
+                        return true;
                     }
 
                     @Override
@@ -1479,6 +1489,11 @@ class ManagedWorkspaceAdmissionTest {
             public Attachment createOrLoad(String tenantId, String sessionId,
                     boolean loadExisting) {
                 return new Attachment("boot");
+            }
+
+            @Override
+            public boolean supportsFencedTitles() {
+                return true;
             }
 
             @Override

@@ -134,6 +134,51 @@ function renameCommand(commandId: string) {
 }
 
 describe('managed session metadata', () => {
+  it('fences delayed hosted titles across cold reopen and recorder renames', async () => {
+    const harness = await createHarness();
+    const write = (
+      authority: LocalManagedSessionAuthority,
+      revision: string,
+      title: string,
+    ) =>
+      authority.commitDomainRecord(
+        renameCommand(`hosted-title:${revision}`),
+        {
+          domain: 'session_metadata',
+          content: { title, managedRenameRevision: revision },
+        },
+        { class: 'trusted_entry' },
+      );
+    await withAuthority(harness, async (authority) => {
+      await write(authority, '2', 'B');
+      const sequence = authority.committedSequence;
+      await expect(write(authority, '1', 'A')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      expect(authority.committedSequence).toBe(sequence);
+      await write(authority, '2', 'B');
+      expect(authority.committedSequence).toBe(sequence);
+      await authority.commitDomainRecord(
+        renameCommand('recorder-title'),
+        { domain: 'session_metadata', content: { title: 'Manual' } },
+        { class: 'trusted_entry' },
+      );
+    });
+    await withAuthority(harness, async (authority) => {
+      const sequence = authority.committedSequence;
+      await expect(write(authority, '1', 'A')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      expect(authority.committedSequence).toBe(sequence);
+      await write(authority, '3', 'A');
+    });
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      )?.title,
+    ).toBe('A');
+  });
   it('projects a renamed title into the synchronous directory read', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
