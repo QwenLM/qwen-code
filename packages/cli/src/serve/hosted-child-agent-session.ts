@@ -300,6 +300,30 @@ export async function childWorkspaceAnswerSuffix(
 }
 
 /**
+ * #13753 I2: what a foreground answer ends with for a worktree run that
+ * started and then failed or was cancelled. Such a record has no receipt,
+ * so the line claims an order, never a landing: the relay settles the run
+ * only after a merge it asked for (the child had finished its work) has
+ * its outcome, so what landed is already visible here, and what did not
+ * may be kept at the result ref. Empty for a `shared` run and for one
+ * that never started.
+ */
+export function childWorkspaceEndedSuffix(record: ChildAgentRun): string {
+  if (record.workspaceMode !== 'worktree' || record.run.execution !== 'settled')
+    return '';
+  return "\n\n[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.";
+}
+
+/**
+ * #13753 I2: the one-line end of an ended child run's answer, with its
+ * workspace suffix. The live answer and the recovery gap fill must agree
+ * (decision 7), so the sentence is defined once, here.
+ */
+export function childRunEndedText(record: ChildAgentRun): string {
+  return `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).${childWorkspaceEndedSuffix(record)}`;
+}
+
+/**
  * The notification's own budget, far below the 64 KiB inline cap of both
  * the bundled input and the wake turn's subsequent user `managed-message`
  * envelope: design 5 names the notification the summary of an accepted
