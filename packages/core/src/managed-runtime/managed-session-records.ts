@@ -141,6 +141,9 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'channel_delivery',
     // H4d-b: produced by send_message and the control plane's relay.
     'session_message',
+    // H4e-b1: a lead's team and its task board.
+    'team_state',
+    'team_task',
   ];
 
 /**

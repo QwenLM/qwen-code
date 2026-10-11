@@ -19,6 +19,7 @@ import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
+import { HostedModelUnavailableError } from './hosted-agent-definition.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 
 const state = vi.hoisted(() => ({
@@ -1369,4 +1370,96 @@ describe('Hosted Harness resume and retraction', () => {
       ' and two',
     ]);
   });
+});
+
+it('uses the unique configured route for a definition model', async () => {
+  const mocks = config([{ type: LlmEventType.Finished }]);
+  const switchModel = vi.fn(async () => undefined);
+  state.config['getAllConfiguredModels'] = () => [
+    {
+      id: 'pinned',
+      authType: 'openai',
+      registryBaseUrl: 'https://model.example/v1',
+    },
+  ];
+  state.config['switchModel'] = switchModel;
+  await runHostedHarnessTextTurn({
+    ...input,
+    agentDefinition: {
+      agentId: `agent_${'a'.repeat(32)}`,
+      revision: '1',
+      digest: 'b'.repeat(64),
+      model: { id: 'pinned' },
+    },
+  });
+  expect(switchModel).toHaveBeenCalledWith('openai', 'pinned', {
+    baseUrl: 'https://model.example/v1',
+    requireCachedCredentials: true,
+  });
+  expect(mocks.refreshAuth).toHaveBeenCalled();
+});
+
+it.each([
+  { models: [] },
+  {
+    models: [
+      { id: 'pinned', authType: 'openai' },
+      { id: 'pinned', authType: 'anthropic' },
+    ],
+  },
+])(
+  'refuses an absent or ambiguous model before inference',
+  async ({ models }) => {
+    const mocks = config([]);
+    state.config['getAllConfiguredModels'] = () => models;
+    state.config['switchModel'] = vi.fn();
+    await expect(
+      runHostedHarnessTextTurn({
+        ...input,
+        agentDefinition: {
+          agentId: `agent_${'a'.repeat(32)}`,
+          revision: '1',
+          digest: 'b'.repeat(64),
+          model: { id: 'pinned' },
+        },
+      }),
+    ).rejects.toThrow('model_unavailable');
+    expect(mocks.initialize).not.toHaveBeenCalled();
+    expect(mocks.requests).toHaveLength(0);
+  },
+);
+
+it('preserves model_unavailable when early config cleanup fails', async () => {
+  const mocks = config([]);
+  state.config['getAllConfiguredModels'] = () => [];
+  mocks.shutdown.mockRejectedValueOnce(new Error('cleanup failed'));
+  await expect(
+    runHostedHarnessTextTurn({
+      ...input,
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        model: { id: 'pinned' },
+      },
+    }),
+  ).rejects.toBeInstanceOf(HostedModelUnavailableError);
+  expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith({
+    shutdownTelemetry: false,
+    strictResourceCleanup: true,
+  });
+  expect(mocks.initialize).not.toHaveBeenCalled();
+  expect(mocks.requests).toHaveLength(0);
+});
+
+it('keeps agent instructions ahead of refreshed project context', async () => {
+  const mocks = config([{ type: LlmEventType.Finished }]);
+  await runHostedHarnessTextTurn({
+    ...input,
+    agentInstructions: 'AGENT_SECTION',
+    workspaceContext: { read: () => 'PROJECT_SECTION' },
+  });
+  expect(mocks.setUserMemory).toHaveBeenLastCalledWith(
+    '# Agent instructions\n\nAGENT_SECTION\n\nPROJECT_SECTION',
+  );
 });
