@@ -634,6 +634,49 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('names the teammate on the turn-started marker via task-id correlation', () => {
+    // The turn-started marker carries no identity of its own; the display
+    // frame that precedes it does, keyed by the same background task id. In a
+    // live session the consumed display row is suppressed, so this marker is
+    // the row the user actually sees.
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('peer-3', 'user', 'report text', 1, false, {
+        meta: {
+          source: 'background_task_completed',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'teammate-message-2',
+            status: 'message',
+            kind: 'peer',
+          },
+        },
+        agent: {
+          agentName: '/root/correctness',
+          depth: 1,
+          kind: 'teammate',
+        },
+      }),
+      textBlock('turn-1', 'assistant', '', 2, false, {
+        meta: {
+          source: 'background_notification_turn_started',
+          backgroundTurn: {
+            turnId: 'automatic-1',
+            taskId: 'teammate-message-2',
+            kind: 'peer',
+            startedAt: 2,
+          },
+        },
+      }),
+    ]);
+
+    const turnStarted = messages.find(
+      (message) =>
+        message.role === 'system' &&
+        message.source === 'background_notification_turn_started',
+    );
+    expect(turnStarted).toMatchObject({ teammate: { name: 'correctness' } });
+  });
+
   it('keeps vision bridge notices separate from assistant output', () => {
     const notice = {
       status: 'skipped',

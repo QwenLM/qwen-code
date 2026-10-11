@@ -218,6 +218,11 @@ export const SystemMessage = memo(function SystemMessage({
         >
           <MarkerIcon aria-hidden="true" />
         </span>
+        {teammate && (
+          <span className={styles.teammateChip} title={teammate.name}>
+            @{teammate.name}
+          </span>
+        )}
         <span className="shrink-0 text-muted-foreground">
           {t(
             turn?.kind === 'agent'
