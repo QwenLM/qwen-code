@@ -9,6 +9,7 @@ import { parseBranchCheckpointPayload } from '../services/branch-points.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { validateTranscriptRecord } from '../utils/transcript-records.js';
 
 export type ManagedSessionJsonValue =
   | null
@@ -136,6 +137,11 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'child_acceptance',
     'channel_route',
     'channel_delivery',
+    // H4d-b: produced by send_message and the control plane's relay.
+    'session_message',
+    // H4e-b1: a lead's team and its task board.
+    'team_state',
+    'team_task',
   ];
 
 /**
@@ -196,6 +202,26 @@ export function assertManagedSessionChildRunKindEnabled(kind: string): void {
   ) {
     throw new ManagedSessionRecordError(
       `domain child_run kind ${kind} is registered but not enabled for submission.`,
+    );
+  }
+}
+
+/**
+ * Whether a child Session run may continue a completed one (H4d). Both
+ * languages validate continuations and the rules they obey; H4d-b's relay
+ * revives a continuation with its chain's history, so submission is open.
+ */
+export const MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED = true;
+
+/**
+ * The continuation gate. This stands beside {@link
+ * assertManagedSessionChildRunKindEnabled}: a continuation is a `child_run`
+ * of an enabled kind, so the kind gate alone would admit it.
+ */
+export function assertManagedSessionChildContinuationEnabled(): void {
+  if (!MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED) {
+    throw new ManagedSessionRecordError(
+      'child_run continuations are registered but not enabled for submission.',
     );
   }
 }
@@ -397,7 +423,7 @@ function fail(message: string): never {
   throw new ManagedSessionRecordError(message);
 }
 
-function safeErrorValue(value: string): string {
+export function safeErrorValue(value: string): string {
   return stripAnsiAndControl(value).slice(0, MAX_ERROR_VALUE_LENGTH);
 }
 
@@ -1415,6 +1441,119 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
     ...(subject === undefined ? {} : { subject }),
     payload,
   };
+}
+
+/**
+ * The refs an event carries at its schema-declared positions. Anything that
+ * merely has the ref field names without being a declared ref position — a
+ * free-form `json` payload field, for example — is not a dependency.
+ */
+export function managedSessionEventRefs(
+  event: ManagedSessionEvent,
+): ManagedSessionDurableRef[] {
+  const schema = EVENT_SCHEMAS[event.kind];
+  const refs: ManagedSessionDurableRef[] = [];
+  for (const [name, kind] of Object.entries(schema.fields)) {
+    if (kind !== 'ref' && kind !== 'refOrNull' && kind !== 'refs') continue;
+    const value = event.payload[name];
+    if (value === null || value === undefined) continue;
+    if (kind === 'refs') {
+      (value as ManagedSessionJsonValue[]).forEach((item, index) =>
+        refs.push(
+          assertManagedSessionDurableRef(
+            item,
+            `${event.kind}.${name}[${index}]`,
+          ),
+        ),
+      );
+    } else {
+      refs.push(assertManagedSessionDurableRef(value, `${event.kind}.${name}`));
+    }
+  }
+  return refs;
+}
+
+/**
+ * Domains whose body is a whole reader-facing record. The rest carry their own
+ * shape and are not something a reader replays.
+ */
+const RECORD_CARRYING_DOMAINS: ReadonlySet<unknown> = new Set([
+  'goal_state',
+  'file_history',
+  'session_source',
+]);
+
+/** Whether a domain's envelope carries a whole reader-facing record. */
+export function managedSessionDomainCarriesRecord(domain: unknown): boolean {
+  return RECORD_CARRYING_DOMAINS.has(domain);
+}
+
+/**
+ * Where a whole reader-facing record lives, for the channels that carry one.
+ *
+ * A domain body is the authority's envelope wrapping the content, so the record
+ * sits under its own key there, unlike the event channels whose body is the
+ * record itself.
+ *
+ * This list is deliberately wider than the hot `project()`: a reader
+ * rebuilding the whole history needs turn results, compaction summaries and
+ * record-carrying domains materialized, while a live message projection
+ * presents them as events. The writer fences this same list at commit time, so
+ * a channel added here is validated on both sides at once.
+ */
+export function managedSessionReaderFacingBody(event: ManagedSessionEvent):
+  | {
+      readonly ref: ManagedSessionEvent['payload'][string];
+      readonly inDomainEnvelope: boolean;
+    }
+  | undefined {
+  switch (event.kind) {
+    case 'message.committed':
+      return { ref: event.payload['contentRef'], inDomainEnvelope: false };
+    case 'turn.settled':
+      return { ref: event.payload['resultRef'], inDomainEnvelope: false };
+    case 'context.compacted':
+      return { ref: event.payload['summaryRef'], inDomainEnvelope: false };
+    case 'domain.committed':
+      return managedSessionDomainCarriesRecord(event.payload['domain'])
+        ? { ref: event.payload['recordRef'], inDomainEnvelope: true }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The acceptance predicate the writer fence and the cold reader share, so the
+ * two cannot drift: a body the writer commits is a body the reader replays.
+ * Returns the validated record, or the refusal reason for the caller to wrap
+ * in its own error context.
+ */
+export function validateManagedReaderFacingRecord(
+  value: unknown,
+  sessionId: string,
+): { readonly record: ChatRecord } | { readonly error: string } {
+  const { record, diagnostics } = validateTranscriptRecord(value);
+  const candidate = record as Partial<ChatRecord> | undefined;
+  if (record !== undefined && record.sessionId !== sessionId) {
+    return {
+      error: `it belongs to session ${safeErrorValue(record.sessionId)}, not ${safeErrorValue(sessionId)}.`,
+    };
+  }
+  if (
+    record === undefined ||
+    typeof candidate?.cwd !== 'string' ||
+    typeof candidate?.version !== 'string' ||
+    typeof candidate?.timestamp !== 'string' ||
+    diagnostics.length > 0
+  ) {
+    return {
+      error:
+        diagnostics.map((entry) => entry.message).join('; ') ||
+        'missing sessionId/cwd/version/timestamp',
+    };
+  }
+  return { record: candidate as ChatRecord };
 }
 
 /**

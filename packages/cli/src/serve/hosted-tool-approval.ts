@@ -33,12 +33,13 @@ export interface HostedApprovalSettings {
 }
 
 // Listing what each mode pre-approves means a tool added to a profile later
-// is asked about until someone decides otherwise.
+// is asked about until someone decides otherwise. `task_list` only reads the
+// Session's own team board (H4e-b1).
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
-  default: ['read_file'],
-  'auto-edit': ['read_file', 'write_file', 'edit'],
+  default: ['read_file', 'task_list'],
+  'auto-edit': ['read_file', 'write_file', 'edit', 'task_list'],
 };
 
 // `glob` ships with the `/2` search profiles, so those pre-approve it and no

@@ -39,6 +39,7 @@ import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import type { Mem0Settings } from './mem0-settings.js';
+import type { ModPluginConfigs } from '@qwen-code/qwen-code-core/mods/types.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -1618,6 +1619,36 @@ const SETTINGS_SCHEMA = {
     description:
       'Maximum native Advisor requests per session, shared by the executor and its subagents. Failed requests count. 0 means unlimited. Each request sends the conversation to the selected provider and consumes additional tokens. Only user and system settings apply.',
     showInDialog: true,
+  },
+
+  pluginConfigs: {
+    type: 'object',
+    label: 'Plugin Configuration',
+    category: 'Extensions',
+    requiresRestart: true,
+    default: {} as ModPluginConfigs,
+    jsonSchemaOverride: {
+      type: 'object',
+      additionalProperties: {
+        type: 'object',
+        properties: {
+          options: {
+            type: 'object',
+            additionalProperties: {
+              anyOf: [
+                { type: 'string' },
+                { type: 'number' },
+                { type: 'boolean' },
+                { type: 'array', items: { type: 'string' } },
+              ],
+            },
+          },
+        },
+      },
+    },
+    description:
+      'Mod options keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes.',
+    showInDialog: false,
   },
 
   advisorModel: {
@@ -4244,6 +4275,16 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
+      mods: {
+        type: 'boolean',
+        label: 'Claude-compatible Mod commands',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Run the experimental JavaScript and TypeScript Mod command subset from enabled extensions in trusted headless sessions.',
+        showInDialog: false,
+      },
       liveVoice: {
         type: 'object',
         label: 'Live Voice',

@@ -23,6 +23,11 @@ public class ManagedAgentProperties {
     private final Automation automation = new Automation();
     private final Channels channels = new Channels();
     private String agentRevision = "1";
+    // The tool profiles a stored AgentDefinition may select (D8c-1).
+    // hosted-workspace-files/2 joins only after the #13166 glob rollout.
+    private List<String> definitionToolProfiles =
+            List.of("hosted-workspace-files/1");
+    private List<String> definitionModels = List.of();
     private String trustedActorHeader = "";
 
     public Harness getHarness() {
@@ -76,6 +81,21 @@ public class ManagedAgentProperties {
     public void setAgentRevision(String agentRevision) {
         this.agentRevision = agentRevision;
     }
+    public List<String> getDefinitionToolProfiles() {
+        return definitionToolProfiles;
+    }
+    public void setDefinitionToolProfiles(
+            List<String> definitionToolProfiles) {
+        this.definitionToolProfiles = definitionToolProfiles;
+    }
+
+    public List<String> getDefinitionModels() {
+        return definitionModels;
+    }
+
+    public void setDefinitionModels(List<String> definitionModels) {
+        this.definitionModels = definitionModels;
+    }
 
     public String getTrustedActorHeader() {
         return trustedActorHeader;
@@ -107,6 +127,13 @@ public class ManagedAgentProperties {
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
         }
+        // A definition Session publishes its instructions through the
+        // Session Store at Harness create, so the Harness implies the
+        // Store even when Workspace files are off (D8c-2).
+        if (harness.isEnabled() && !sessionStore.isEnabled()) {
+            throw new IllegalStateException(
+                    "Hosted Harness requires the Managed Session Store");
+        }
         if (automation.isEnabled()) {
             // A non-positive value fails at tick time, nearly silently:
             // 0 slots per tick stops every scheduled fire behind one
@@ -127,6 +154,47 @@ public class ManagedAgentProperties {
                         "Automation scan-delay, lease, late-tolerance and lookback must be positive durations.");
             }
         }
+        // The child Workspace capability (#13753 I1) runs Git in this
+        // control plane against an administrator mount, so it needs the
+        // local-process Broker that mounts the storage here.
+        if (runtimeBroker.isChildWorkspacesEnabled()) {
+            // A merge runs once the child Session is closed (#13753 I2), and
+            // only a durable local-process Broker can close one.
+            if (!runtimeBroker.isEnabled()
+                    || !"local-process".equals(runtimeBroker.getProvisioner())
+                    || !"session".equals(runtimeBroker.getIsolationClass())
+                    || !runtimeBroker.isDurableLocalProcess()
+                    || runtimeBroker.getWorkspaceMounts().isEmpty()) {
+                throw new IllegalStateException("Child Workspaces require a Session-isolated"
+                        + " durable local-process Broker with Workspace mounts");
+            }
+            // A suffix-less number binds as milliseconds: refuse it here,
+            // naming the key, rather than time out every Git command.
+            Duration gitTimeout = runtimeBroker.getChildWorkspaceGitTimeout();
+            if (gitTimeout == null || gitTimeout.compareTo(Duration.ofSeconds(1)) < 0
+                    || gitTimeout.compareTo(Duration.ofHours(1)) > 0) {
+                throw new IllegalStateException("child-workspace-git-timeout must be between 1s and 1h");
+            }
+            if (!childWorkspacesSupportedOn(System.getProperty("os.name", ""))) {
+                throw new IllegalStateException("Child Workspaces are not supported on Windows");
+            }
+            // The steps name the files Git reports: a JVM whose file names
+            // are not UTF-8 (a C or POSIX locale) cannot spell most of them.
+            if (!utf8FileNames(System.getProperty("sun.jnu.encoding", ""))) {
+                throw new IllegalStateException("Child Workspaces need UTF-8 file names; run the server"
+                        + " under a UTF-8 locale (sun.jnu.encoding is "
+                        + System.getProperty("sun.jnu.encoding") + ")");
+            }
+        }
+    }
+
+    static boolean utf8FileNames(String encoding) {
+        return "UTF-8".equalsIgnoreCase(encoding) || "UTF8".equalsIgnoreCase(encoding);
+    }
+
+    /** Child Workspaces run their Git steps on POSIX hosts only. */
+    static boolean childWorkspacesSupportedOn(String osName) {
+        return !osName.toLowerCase(Locale.ROOT).startsWith("windows");
     }
 
     public static class Harness {
@@ -641,6 +709,9 @@ public class ManagedAgentProperties {
         private String staticLeaseId = "standalone-lease";
         private long staticEpoch = 1;
         private Map<String, String> environment = new LinkedHashMap<>();
+        private boolean childWorkspacesEnabled;
+        private String childWorkspaceGit = "git";
+        private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
 
         public boolean isEnabled() {
             return enabled;
@@ -767,6 +838,30 @@ public class ManagedAgentProperties {
 
         public boolean isVerifiedWorkspaceRecoveryEnabled() {
             return verifiedWorkspaceRecoveryEnabled;
+        }
+
+        public boolean isChildWorkspacesEnabled() {
+            return childWorkspacesEnabled;
+        }
+
+        public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {
+            this.childWorkspacesEnabled = childWorkspacesEnabled;
+        }
+
+        public String getChildWorkspaceGit() {
+            return childWorkspaceGit;
+        }
+
+        public void setChildWorkspaceGit(String childWorkspaceGit) {
+            this.childWorkspaceGit = childWorkspaceGit;
+        }
+
+        public Duration getChildWorkspaceGitTimeout() {
+            return childWorkspaceGitTimeout;
+        }
+
+        public void setChildWorkspaceGitTimeout(Duration childWorkspaceGitTimeout) {
+            this.childWorkspaceGitTimeout = childWorkspaceGitTimeout;
         }
 
         public void setVerifiedWorkspaceRecoveryEnabled(boolean verifiedWorkspaceRecoveryEnabled) {
