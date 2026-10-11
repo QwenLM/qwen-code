@@ -33,21 +33,29 @@ class HostedChannelGateSupport {
 
     // --- driver phases ---
 
-    ProcessBuilder driverBuilder(Path caseDir, String phase,
+    // One phase can launch several times in a case (resume-cold behind a
+    // fault phase, a retry after a kill): every launch keeps its own
+    // config/log/results trio so a case asking after its first launch
+    // never reads the second launch's evidence.
+    record DriverLaunch(Process process, String tag) {
+    }
+
+    DriverLaunch startDriver(Path caseDir, String phase,
             Map<String, Object> base, Map<String, Object> extra)
             throws IOException {
+        String tag = tagForLaunch(caseDir, phase);
         Map<String, Object> config = new LinkedHashMap<>(base);
         config.put("phase", phase);
         config.putAll(extra);
-        config.put("resultFile", caseDir.resolve("results-" + phase + ".json")
+        config.put("resultFile", caseDir.resolve("results-" + tag + ".json")
                 .toString());
-        Path configFile = caseDir.resolve("driver-" + phase + ".json");
+        Path configFile = caseDir.resolve("driver-" + tag + ".json");
         JSON.writeValue(configFile.toFile(), config);
         ProcessBuilder builder = new ProcessBuilder(node, "--import", "tsx",
                 "integration-tests/helpers/hosted-channel-fault-driver.ts",
                 configFile.toString()).directory(repoRoot.toFile())
                 .redirectErrorStream(true)
-                .redirectOutput(caseDir.resolve("driver-" + phase + ".log")
+                .redirectOutput(caseDir.resolve("driver-" + tag + ".log")
                         .toFile());
         // The Legacy-derived state store keys on the user-global qwen
         // directory: without an isolated HOME the case re-runs against a
@@ -56,7 +64,16 @@ class HostedChannelGateSupport {
         builder.environment().put("HOME", fakeHome.toString());
         builder.environment().put("QWEN_HOME",
                 fakeHome.resolve(".qwen").toString());
-        return builder;
+        return new DriverLaunch(builder.start(), tag);
+    }
+
+    private static String tagForLaunch(Path caseDir, String phase) {
+        int next = 1;
+        while (Files.exists(
+                caseDir.resolve("driver-" + phase + "-" + next + ".log"))) {
+            next++;
+        }
+        return phase + "-" + next;
     }
 
     JsonNode drive(Path caseDir, String phase, Map<String, Object> base)
@@ -66,28 +83,40 @@ class HostedChannelGateSupport {
 
     JsonNode drive(Path caseDir, String phase, Map<String, Object> base,
             Map<String, Object> extra) throws Exception {
-        Process driver = driverBuilder(caseDir, phase, base, extra).start();
-        boolean finished = driver.waitFor(150, TimeUnit.SECONDS);
-        if (!finished) {
+        DriverLaunch launch = startDriver(caseDir, phase, base, extra);
+        Process driver = launch.process();
+        try {
+            boolean finished = driver.waitFor(150, TimeUnit.SECONDS);
+            if (!finished) {
+                driver.destroyForcibly();
+            }
+            String log = safeRead(
+                    caseDir.resolve("driver-" + launch.tag() + ".log"));
+            assertThat(finished).as(phase + " driver timed out:\n%s", log)
+                    .isTrue();
+            assertThat(driver.exitValue()).as(phase + " driver output:\n%s",
+                    log).isZero();
+            assertThat(log).contains(
+                    "FG7_" + phase.replace("-", "_").toUpperCase(Locale.ROOT)
+                            + "_OK");
+            return JSON.readTree(safeRead(
+                    caseDir.resolve("results-" + launch.tag() + ".json")));
+        } catch (InterruptedException failure) {
+            Thread.currentThread().interrupt();
+            throw failure;
+        } finally {
+            // Every exit path — normal, timeout, interrupt, assertion —
+            // reaps the driver: JUnit's @Timeout interrupts the wait.
             driver.destroyForcibly();
         }
-        String log = safeRead(caseDir.resolve("driver-" + phase + ".log"));
-        assertThat(finished).as(phase + " driver timed out:\n%s", log)
-                .isTrue();
-        assertThat(driver.exitValue()).as(phase + " driver output:\n%s", log)
-                .isZero();
-        assertThat(log).contains(
-                "FG7_" + phase.replace("-", "_").toUpperCase(Locale.ROOT)
-                        + "_OK");
-        return resultsOf(caseDir, phase);
     }
 
-    JsonNode resultsOf(Path caseDir, String phase) throws Exception {
+    JsonNode resultsOf(Path caseDir, String tag) throws Exception {
         return JSON.readTree(safeRead(
-                caseDir.resolve("results-" + phase + ".json")));
+                caseDir.resolve("results-" + tag + ".json")));
     }
 
-    void awaitLog(Path caseDir, String name, String marker)
+    void awaitLog(Path caseDir, String name, String marker, Process writer)
             throws Exception {
         Path log = caseDir.resolve(name);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
@@ -95,10 +124,21 @@ class HostedChannelGateSupport {
             if (Files.exists(log) && safeRead(log).contains(marker)) {
                 return;
             }
+            if (!writer.isAlive()) {
+                throw new AssertionError(marker + " in " + name
+                        + ": the driver exited " + writer.exitValue() + ":\n"
+                        + safeRead(log));
+            }
             Thread.sleep(200);
         }
         throw new AssertionError(marker + " in " + name + " timed out:\n"
                 + safeRead(log));
+    }
+
+    /** A MissingNode is empty too — a vacant sends check must be present. */
+    static void assertSendsEmpty(JsonNode results, String label) {
+        assertThat(results.has("sends")).as(label).isTrue();
+        assertThat(results.path("sends").isEmpty()).as(label).isTrue();
     }
 
     static String safeRead(Path file) {

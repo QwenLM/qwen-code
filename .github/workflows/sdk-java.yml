@@ -15,7 +15,9 @@ on:
       - 'packages/core/src/config/**'
       - 'packages/core/src/core/**'
       - 'packages/cli/src/commands/serve.ts'
+      - 'packages/cli/src/commands/channel/**'
       - 'packages/cli/src/serve/**'
+      - 'packages/channels/email/**'
       - 'packages/cli/src/acp-integration/**'
       - 'packages/acp-bridge/**'
       - 'integration-tests/fake-openai-server.ts'
@@ -48,7 +50,9 @@ on:
       - 'packages/core/src/config/**'
       - 'packages/core/src/core/**'
       - 'packages/cli/src/commands/serve.ts'
+      - 'packages/cli/src/commands/channel/**'
       - 'packages/cli/src/serve/**'
+      - 'packages/channels/email/**'
       - 'packages/cli/src/acp-integration/**'
       - 'packages/acp-bridge/**'
       - 'integration-tests/fake-openai-server.ts'
@@ -668,6 +672,7 @@ jobs:
           path: |
             packages/sdk-java/managed-agent-server/target/failsafe-reports/
             packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
+            packages/sdk-java/managed-agent-server/target/fg7-cases/
           retention-days: 7
 
       - name: 'Verify O4 filesystem process and capacity gates'

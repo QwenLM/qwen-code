@@ -83,6 +83,12 @@ interface DriverConfig {
    * ticks: the phase ends only after the armed drop has fired.
    */
   holdAfterDrop?: boolean;
+  /**
+   * With `holdAfterDrop`, keep the zero-send loop alive past the drop and
+   * across a control-plane bounce until this file exists: the crash case's
+   * warm retries must prove they reach the fresh generation.
+   */
+  holdUntilFile?: string;
   maxTicks?: number;
   /** Exit the run as soon as one receipt post hard-fails (restart cases). */
   exitAfterFirstReceiptError?: boolean;
@@ -102,6 +108,7 @@ interface RelayRecord {
   attempt: number;
   dropped: boolean;
   status: number;
+  ts: number;
 }
 
 interface Results {
@@ -121,13 +128,15 @@ interface Results {
     segments: Array<{ ordinal: number; segmentId: string }>;
   }>;
   probeStatus?: number;
+  probeErrorCode?: string;
   pendingAfterAttempt?: number;
 }
 
 /**
- * The production client of the trusted adapter surface plus the gate's
- * evidence: admissions, claim answers and receipt outcomes recorded beside
- * every production call, so the wire stays exactly the wire production uses.
+ * The production client of the trusted adapter surface, wrapped so every
+ * outcome is also written into the results file: the assertions read
+ * identities and counts from it; the rest rides as red-lane forensics in
+ * the failure dump the ITs attach.
  */
 class RecordingControlPlane implements ManagedChannelControlPlane {
   private readonly delegate: HttpManagedChannelControlPlane;
@@ -254,7 +263,6 @@ class FakeImap extends EventEmitter {
 interface AdapterInternals {
   state?: { pending: Array<unknown> };
   poll(): Promise<void>;
-  pullOutbox(): Promise<void>;
 }
 
 const config = JSON.parse(
@@ -326,6 +334,7 @@ const proxy = createServer((req, res) => {
           attempt,
           dropped: drop,
           status: upstream.status,
+          ts: Date.now(),
         });
         if (drop) {
           // The committed answer is consumed upstream; the adapter sees a
@@ -336,9 +345,12 @@ const proxy = createServer((req, res) => {
         }
       }
       relayUpstream(res, upstream, answer);
-    } catch {
+    } catch (cause) {
       // A controller restart or a client abort makes one relay die; the
       // adapter sees a transport failure, which is its own retry signal.
+      // The cause must reach the log — an injected drop and a misrouted
+      // relay read identically at the client without it.
+      console.log(`FG7_RELAY_FAILED ${String(cause)}`);
       res.destroy();
     }
   })();
@@ -496,6 +508,29 @@ async function tickUntilSettled(adapter: ManagedEmailAdapter): Promise<void> {
   for (let tick = 1; tick <= maxTicks; tick++) {
     await tickOrNote(() => adapter.tick());
     if (config.holdAfterDrop === true && droppedForVerb === 1) {
+      if (config.holdUntilFile !== undefined) {
+        // Hold across the bounce: warm retries must reach the restarted
+        // generation before Java releases the case file. The outer bound
+        // sits under the case's own process budget.
+        for (let extra = 0; extra < maxTicks * 2; extra++) {
+          await tickOrNote(() => adapter.tick());
+          await sleep(200);
+          try {
+            await readFile(config.holdUntilFile);
+            break;
+          } catch {
+            // still holding
+          }
+        }
+        // The release lands only after the new generation is already
+        // serving; keep ticking so the warm retry that reaches it is
+        // recorded past the case's bounce mark.
+        for (let extra = 0; extra < 5; extra++) {
+          await tickOrNote(() => adapter.tick());
+          await sleep(200);
+        }
+        return;
+      }
       // The armed fault fired; let a few more rounds prove nothing moves.
       for (let extra = 0; extra < 4; extra++) {
         await tickOrNote(() => adapter.tick());
@@ -525,6 +560,11 @@ async function tickUntilSettled(adapter: ManagedEmailAdapter): Promise<void> {
           quota,
           `exactly ${quota} receipt(s) reported`,
         );
+        assert.equal(
+          new Set(results.receipts.map((receipt) => receipt.deliveryId)).size,
+          quota,
+          `exactly ${quota} distinct deliveries reported`,
+        );
         return;
       }
     } else if (
@@ -548,6 +588,11 @@ async function tickUntilSettled(adapter: ManagedEmailAdapter): Promise<void> {
       results.receipts.length,
       quota,
       `exactly ${quota} receipt(s) reported`,
+    );
+    assert.equal(
+      new Set(results.receipts.map((receipt) => receipt.deliveryId)).size,
+      quota,
+      `exactly ${quota} distinct deliveries reported`,
     );
   } else {
     assert.equal(results.sends.length, 0, 'no send may ever happen');
@@ -631,7 +676,25 @@ try {
         },
       );
       results.probeStatus = refused.status;
-      assert.equal(refused.status, 409, await refused.text());
+      const probeBody = await refused.text();
+      try {
+        // The refusal envelope nests the discriminator: {"error":{"code":...}}
+        const parsed = JSON.parse(probeBody) as {
+          code?: unknown;
+          error?: { code?: unknown };
+        };
+        const code =
+          typeof parsed.error?.code === 'string'
+            ? parsed.error.code
+            : parsed.code;
+        if (typeof code === 'string') {
+          results.probeErrorCode = code;
+        }
+      } catch {
+        // A non-JSON refusal body just leaves the code unset; the status
+        // stays the asserted witness below.
+      }
+      assert.equal(refused.status, 409, probeBody);
       console.log('FG7_PROBE_REFUSED');
       break;
     }

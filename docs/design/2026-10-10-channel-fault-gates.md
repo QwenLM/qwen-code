@@ -7,8 +7,8 @@
 Issue #13802 is the next Stage F slice of #12380: FG6-style multi-process
 fault gates for the **channel domains**, which #13572 enabled for submission
 (`channel_route`, `channel_delivery` in `MANAGED_SESSION_ENABLED_DOMAINS` at
-`managed-session-records.ts:137-138`, verified at HEAD `c3968ace2f`, schema
-at Flyway V57 — the channel tables are V47 and V55). Nothing proves those
+`managed-session-records.ts:137-138`, verified at HEAD `c3968ace2f`; the
+branch's schema head is V60 and the channel tables are V47 and V55). Nothing proves those
 records stay honest when a reply is lost, a process dies mid-send, or the
 provider's answer is ambiguous — and a channel side effect leaves the
 process: a re-send is a user-visible duplicate, and a silent `accepted`
@@ -113,10 +113,10 @@ sessionId, {kind:"cancel_delivery", ...})` directly — the same generic
 
 `one send` always means the fake SMTP observed exactly one physical send
 for the delivery's segments; Java-side ground truth is JDBC over
-`qwen_managed_channel_{instance,binding,claim,route,delivery}`, the Session
-Store journal, and the captured Spring log; every case asserts its fault
-actually fired (proxy drop counter, `FG7B_<case>` SQLException marker, or
-the crash fixture's injection count).
+`qwen_managed_channel_{binding,claim,route,delivery}`, the Session Store
+journal, and the captured Spring log; every case asserts its fault actually
+fired (proxy drop counter, `FG7B_<case>` SQLException marker, or the crash
+class's kill markers).
 
 ### FG7a — lost adapter ⇄ control-plane replies
 
@@ -187,11 +187,11 @@ SQL, and one reconcile pass is driven explicitly (the bean in-JVM; the
 
 ### FG7f — partial and unknown delivery (decision 2)
 
-| Case                    | Injection                                                                                                        | Expect                                                                                                                                                                                                              |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider-ambiguous`    | Fake SMTP accepts the bytes, then fails the answer without a 5xx code (timeout)                                  | The adapter classifies `unknown` and posts it; one send, no retry of the send; the next delivery is unaffected                                                                                                      |
-| `receipt-never-arrived` | Fake SMTP accepts; the adapter stops cold before reporting (driver halts the loop, does not restart its receipt) | The lease sweep settles `unknown`; a later adapter (fresh cold start) does not auto-re-send; explicit resend carries only the unsent segment and delivers                                                           |
-| `out-of-plan-ordinal`   | The driver posts a receipt for ordinal 1 on the one-segment delivery, while the claiming adapter is parked       | Refused deterministically: the funnel's `has no segment` lands as 409 `channel_operation_conflict`; the delivery neither advances nor is re-sent; the correct ordinal 0 receipt then settles `delivered` — one send |
+| Case                    | Injection                                                                                                  | Expect                                                                                                                                                                                                              |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider-ambiguous`    | Fake SMTP accepts the bytes, then fails the answer without a 5xx code (timeout)                            | The adapter classifies `unknown` and posts it; one send, no retry of the send; the record and ledger settle `unknown`                                                                                               |
+| `receipt-never-arrived` | Fake SMTP accepts; the driver process is killed, its receipt never re-posted                               | The lease sweep settles `unknown`; a later adapter (fresh cold start) does not auto-re-send; explicit resend carries only the unsent segment and delivers                                                           |
+| `out-of-plan-ordinal`   | The driver posts a receipt for ordinal 1 on the one-segment delivery, while the claiming adapter is parked | Refused deterministically: the funnel's `has no segment` lands as 409 `channel_operation_conflict`; the delivery neither advances nor is re-sent; the correct ordinal 0 receipt then settles `delivered` — one send |
 
 ## Fixture design
 
@@ -216,7 +216,12 @@ scoped to the case tenant, asserted in the captured Spring output.
 `HostedChannelCrashFixtureMain` mirror `HostedProcessCrashIT`: child JVM,
 `FG7C_*` env, atomic `ready.json` carrying `internalUrl`/`controlUrl`,
 a per-case kill before the next boot, and the
-`/control/expire` + `/control/reconcile` endpoints for the lease.
+`/control/expire` + `/control/reconcile` endpoints for the lease. The shared
+`HostedChannelGateSupport` owns the driver's launch-and-results protocol
+(`driver-<phase>-<n>.json/.log`, `results-<phase>-<n>.json` with per-launch
+tags), the `FG7_<PHASE>_OK` marker derivation, the per-case
+`HOME`/`QWEN_HOME` isolation, the writer-liveness-aware `awaitLog`, and
+every JDBC ground-truth query the gates read.
 
 **Driver.** `integration-tests/helpers/hosted-channel-fault-driver.ts`,
 launched per step as `node --import tsx … <driver.json>` like every FG6
@@ -341,7 +346,7 @@ for (decision 2).
 ## Validation and acceptance
 
 - `npm run build && npm run typecheck`, ESLint clean on the driver,
-  Checkstyle and SpotBugs on both new Java classes, and the module's
+  Checkstyle and SpotBugs on all four new Java files, and the module's
   surefire suite green (1606 tests at the first-verification baseline).
 - Both new classes green on MariaDB 10.11 locally (the CI lane is MySQL
   8.4): 19 cases firing their declared faults — every drop counter,

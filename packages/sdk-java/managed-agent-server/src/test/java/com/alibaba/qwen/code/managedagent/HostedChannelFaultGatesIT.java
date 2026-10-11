@@ -141,14 +141,18 @@ class HostedChannelFaultGatesIT {
                 .as("FG7 requires -Dmysql.url").startsWith("jdbc:mysql:");
         assertThat(System.getProperty("mysql.user"))
                 .as("FG7 requires -Dmysql.user").isNotBlank();
+        assertThat(System.getProperty("node.executable"))
+                .as("Pass -Dnode.executable").isNotBlank();
         String selected = System.getProperty("qwen." + letter + ".case");
         List<String> cases = allCases;
         if (selected != null) {
             assertThat(cases).contains(selected);
             cases = List.of(selected);
         }
+        // Per-letter subroot: wiping it at method start cannot erase the
+        // evidence of a letter (or the crash class) that ran earlier.
         Path casesRoot = Path.of(System.getProperty("user.dir"), "target",
-                "fg7-cases");
+                "fg7-cases", letter);
         deleteRecursively(casesRoot);
         Files.createDirectories(casesRoot);
         String tenant = "hosted-channel-" + UUID.randomUUID();
@@ -365,6 +369,14 @@ class HostedChannelFaultGatesIT {
                 if (!match.find()) {
                     return null;
                 }
+                // qwen serve falls back attemptPort+1 on EADDRINUSE; a
+                // harness on a fallback port invalidates the pre-baked
+                // harness.base-url, so the bound port must be the reserved one.
+                if (Integer.parseInt(match.group(1)) != harnessPort) {
+                    return new IllegalStateException("harness bound port "
+                            + match.group(1) + " instead of the reserved "
+                            + harnessPort + ":\n" + harnessLogSnapshot());
+                }
                 return true;
             }
         });
@@ -407,13 +419,12 @@ class HostedChannelFaultGatesIT {
         String node = System.getProperty("node.executable");
         Path workspace = Files.createDirectories(
                 temporary.resolve("workspace-mount"));
-        int publicPort = freePort();
         var application = new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class);
         application.initializers(context -> context.getBeanFactory()
                 .registerSingleton("fg7Authentication", impersonation(tenant)));
         spring = (ServletWebServerApplicationContext) application.run(
-                "--server.address=127.0.0.1", "--server.port=" + publicPort,
+                "--server.address=127.0.0.1", "--server.port=0",
                 "--spring.datasource.url=" + System.getProperty("mysql.url"),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
                 "--spring.datasource.username=" + System.getProperty("mysql.user"),
@@ -567,10 +578,10 @@ class HostedChannelFaultGatesIT {
 
     private Process startParkedPull(Path caseDir, Map<String, Object> base,
             Path release, int expectedSends) throws Exception {
-        return support.driverBuilder(caseDir, "pull-parked", base,
+        return support.startDriver(caseDir, "pull-parked", base,
                 Map.of("smtpMode", "park", "smtpReleaseFile",
                         release.toString(), "expectedSends", expectedSends))
-                .start();
+                .process();
     }
 
     private void awaitSending(String tenant, String sessionId,
@@ -629,6 +640,11 @@ class HostedChannelFaultGatesIT {
             int read = in.read(buffer);
             assertThat(read).as("the page read began before the abort")
                     .isGreaterThan(0);
+            // The abort must be real: the rest of the page body has to be
+            // sitting in the socket unread, or nothing ever came loose.
+            assertThat(in.read())
+                    .as("the abort left the page body unread")
+                    .isNotEqualTo(-1);
         }
     }
 
@@ -693,9 +709,8 @@ class HostedChannelFaultGatesIT {
                 assertThat(HostedChannelGateSupport.relayCount(results, "claim",
                         false)).as("the adapter kept re-asking the outbox")
                         .isGreaterThanOrEqualTo(2);
-                assertThat(results.path("sends"))
-                        .as("a lost dispatch answer never sends")
-                        .isEmpty();
+                HostedChannelGateSupport.assertSendsEmpty(results,
+                        "a lost dispatch answer never sends");
                 String deliveryId = results.path("admissionInputIds").get(0)
                         .asText() + ":reply";
                 assertThat(support.claimRows(tenant, channelId))
@@ -712,8 +727,8 @@ class HostedChannelFaultGatesIT {
                 assertThat(support.ledger(tenant, channelId, deliveryId)
                         .get("state")).isEqualTo("unknown");
                 JsonNode cold = support.drive(caseDir, "resume-cold", base);
-                assertThat(cold.path("sends"))
-                        .as("a cold adapter never auto-resends").isEmpty();
+                HostedChannelGateSupport.assertSendsEmpty(cold,
+                        "a cold adapter never auto-resends");
                 assertThat(support.deliveryProjection(tenant, sessionId,
                         deliveryId).get("delivery_state")).isEqualTo("unknown");
             }
@@ -728,15 +743,22 @@ class HostedChannelFaultGatesIT {
                         .isGreaterThanOrEqualTo(1);
                 assertThat(results.path("sends")).hasSize(1);
                 String sessionId = support.channelSession(tenant, channelId);
+                String deliveryId = results.path("admissionInputIds").get(0)
+                        .asText() + ":reply";
                 JsonNode record = support.deliveryRecord(tenant, sessionId,
-                        results.path("admissionInputIds").get(0).asText()
-                                + ":reply");
+                        deliveryId);
                 assertThat(record.path("segments").get(0).path("receipt")
                         .path("providerMessageId").asText())
                         .isEqualTo(results.path("sends").get(0)
                                 .path("messageId").asText());
                 assertThat(record.path("run").path("delivery").path("state")
                         .asText()).isEqualTo("delivered");
+                Map<String, Object> row = support.ledger(tenant, channelId,
+                        deliveryId);
+                assertThat(row.get("state")).as("the ledger follows the record")
+                        .isEqualTo("delivered");
+                assertThat(row.get("provider_receipt")).isEqualTo(results
+                        .path("sends").get(0).path("messageId").asText());
             }
             case "cancel-planned", "cancel-replay" -> {
                 JsonNode admitted = support.drive(caseDir, "admit", base);
@@ -760,9 +782,12 @@ class HostedChannelFaultGatesIT {
                         .isEqualTo("cancelled");
                 support.drive(caseDir, "pull", base, Map.of("expectDelivery",
                         false));
-                JsonNode pull = support.resultsOf(caseDir, "pull");
-                assertThat(pull.path("sends"))
-                        .as("a settled cancellation never sends").isEmpty();
+                JsonNode pull = support.resultsOf(caseDir, "pull-1");
+                assertThat(HostedChannelGateSupport.relayCount(pull, "claim",
+                        false)).as("the outbox pull reached the control plane")
+                        .isGreaterThanOrEqualTo(1);
+                HostedChannelGateSupport.assertSendsEmpty(pull,
+                        "a settled cancellation never sends");
                 assertThat(support.claimRows(tenant, channelId)).isZero();
                 assertThat(support.ledgerRows(tenant, channelId))
                         .as("nothing ever reaches the ledger").isZero();
@@ -787,10 +812,10 @@ class HostedChannelFaultGatesIT {
                     assertThat(driver.waitFor(120, TimeUnit.SECONDS))
                             .as("parked driver completion:\n%s",
                                     HostedChannelGateSupport.safeRead(caseDir
-                                            .resolve("driver-pull-parked.log")))
+                                            .resolve("driver-pull-parked-1.log")))
                             .isTrue();
                     JsonNode results = support.resultsOf(caseDir,
-                            "pull-parked");
+                            "pull-parked-1");
                     assertThat(results.path("sends")).hasSize(1);
                     JsonNode record = support.deliveryRecord(tenant, sessionId,
                             deliveryId);
@@ -813,17 +838,17 @@ class HostedChannelFaultGatesIT {
                         .asText() + ":reply";
                 awaitPlanned(tenant, sessionId, deliveryId);
                 Path release = caseDir.resolve("smtp-release");
-                Process driver = support.driverBuilder(caseDir,
+                Process driver = support.startDriver(caseDir,
                         "pull-terminate", base, Map.of("smtpMode", "park",
                                 "smtpReleaseFile", release.toString()))
-                        .start();
+                        .process();
                 try {
                     awaitSending(tenant, sessionId, deliveryId, channelId);
                     cancelDelivery(tenant, sessionId, deliveryId);
                     Files.writeString(release, "go");
                     await("the send's evidence landed", 90,
                             () -> Files.exists(caseDir.resolve(
-                                    "results-pull-terminate.json"))
+                                    "results-pull-terminate-1.json"))
                                     ? true : null);
                     driver.destroyForcibly();
                     support.expireClaims(tenant, channelId);
@@ -839,11 +864,12 @@ class HostedChannelFaultGatesIT {
                             .isTrue();
                     JsonNode cold = support.drive(caseDir, "resume-cold",
                             base);
-                    assertThat(cold.path("sends")).isEmpty();
+                    HostedChannelGateSupport.assertSendsEmpty(cold,
+                            "a cold adapter never auto-resends");
                     assertThat(support.deliveryProjection(tenant, sessionId,
                             deliveryId).get("delivery_state"))
                             .isEqualTo("unknown");
-                    assertThat(support.resultsOf(caseDir, "pull-terminate")
+                    assertThat(support.resultsOf(caseDir, "pull-terminate-1")
                             .path("sends")).hasSize(1);
                 } finally {
                     if (driver.isAlive()) {
@@ -874,8 +900,8 @@ class HostedChannelFaultGatesIT {
                     // first send: parked is the only stable read gate — the
                     // cold attach of a second Session takes as long as it
                     // takes, and any row-count predicate races ahead of it.
-                    support.awaitLog(caseDir, "driver-pull-parked.log",
-                            "FG7_CLAIM_PARKED");
+                    support.awaitLog(caseDir, "driver-pull-parked-1.log",
+                            "FG7_CLAIM_PARKED", driver);
                     abortPageRead(tenant, channelId);
                     List<String> sending = pageIdentify(tenant, channelId, 1);
                     assertThat(sending)
@@ -886,7 +912,7 @@ class HostedChannelFaultGatesIT {
                             .as("parked driver completion").isTrue();
                     assertThat(driver.exitValue())
                             .as(HostedChannelGateSupport.safeRead(caseDir
-                                    .resolve("driver-pull-parked.log")))
+                                    .resolve("driver-pull-parked-1.log")))
                             .isZero();
                     await("both delivered", 60, () -> {
                         for (String delivery : List.of(firstDelivery,
@@ -929,8 +955,8 @@ class HostedChannelFaultGatesIT {
                 Path release = caseDir.resolve("smtp-release");
                 Process driver = startParkedPull(caseDir, base, release);
                 try {
-                    support.awaitLog(caseDir, "driver-pull-parked.log",
-                            "FG7_CLAIM_PARKED");
+                    support.awaitLog(caseDir, "driver-pull-parked-1.log",
+                            "FG7_CLAIM_PARKED", driver);
                     assertThat(readDelivery(tenant, channelId, deliveryId, 200)
                             .path("state").asText())
                             .as("the read follows the ledger, never ahead")
@@ -939,7 +965,7 @@ class HostedChannelFaultGatesIT {
                     assertThat(driver.waitFor(120, TimeUnit.SECONDS)).isTrue();
                     assertThat(driver.exitValue())
                             .as(HostedChannelGateSupport.safeRead(caseDir
-                                    .resolve("driver-pull-parked.log")))
+                                    .resolve("driver-pull-parked-1.log")))
                             .isZero();
                     await("ledger delivered", 60, () -> {
                         Map<String, Object> row = support.ledger(tenant,
@@ -989,12 +1015,12 @@ class HostedChannelFaultGatesIT {
                 String deliveryId = admitted.path("admissionInputIds").get(0)
                         .asText() + ":reply";
                 awaitPlanned(tenant, sessionId, deliveryId);
-                Process driver = support.driverBuilder(caseDir,
-                        "pull-terminate", base, Map.of()).start();
+                Process driver = support.startDriver(caseDir,
+                        "pull-terminate", base, Map.of()).process();
                 try {
                     await("the send's evidence landed", 90,
                             () -> Files.exists(caseDir.resolve(
-                                    "results-pull-terminate.json"))
+                                    "results-pull-terminate-1.json"))
                                     ? true : null);
                     driver.destroyForcibly();
                 } finally {
@@ -1011,11 +1037,13 @@ class HostedChannelFaultGatesIT {
                                         .get("delivery_state"))
                                 ? true : null);
                 JsonNode terminated = support.resultsOf(caseDir,
-                        "pull-terminate");
+                        "pull-terminate-1");
                 assertThat(terminated.path("sends")).hasSize(1);
+                Map<String, Object> originalRow = support.ledger(tenant,
+                        channelId, deliveryId);
                 JsonNode cold = support.drive(caseDir, "resume-cold", base);
-                assertThat(cold.path("sends"))
-                        .as("a cold adapter never auto-resends").isEmpty();
+                HostedChannelGateSupport.assertSendsEmpty(cold,
+                        "a cold adapter never auto-resends");
                 JsonNode resent = support.drive(caseDir, "resend", base,
                         Map.of("resendDeliveryId", deliveryId));
                 assertThat(resent.path("resent").path("possibleDuplicate")
@@ -1035,6 +1063,13 @@ class HostedChannelFaultGatesIT {
                         .isEqualTo("unknown");
                 assertThat(support.ledger(tenant, channelId, resendId)
                         .get("state")).isEqualTo("delivered");
+                Map<String, Object> resendRow = support.ledger(tenant,
+                        channelId, resendId);
+                assertThat(resendRow.get("segment_id"))
+                        .as("the resend repeats the same segment identity")
+                        .isEqualTo(originalRow.get("segment_id"));
+                assertThat(resendRow.get("segment_ordinal"))
+                        .isEqualTo(originalRow.get("segment_ordinal"));
                 assertThat(support.claimRows(tenant, channelId)).isEqualTo(2);
             }
             case "out-of-plan-ordinal" -> {
@@ -1046,13 +1081,16 @@ class HostedChannelFaultGatesIT {
                 Path release = caseDir.resolve("smtp-release");
                 Process driver = startParkedPull(caseDir, base, release);
                 try {
-                    support.awaitLog(caseDir, "driver-pull-parked.log",
-                            "FG7_CLAIM_PARKED");
+                    support.awaitLog(caseDir, "driver-pull-parked-1.log",
+                            "FG7_CLAIM_PARKED", driver);
                     JsonNode probe = support.drive(caseDir, "probe", base,
                             Map.of("probeDeliveryId", deliveryId));
                     assertThat(probe.path("probeStatus").asInt())
                             .as("an out-of-plan ordinal is refused")
                             .isEqualTo(409);
+                    assertThat(probe.path("probeErrorCode").asText())
+                            .as("the refusal is the dense-ordinal one")
+                            .isEqualTo("channel_operation_conflict");
                     assertThat(support.ledger(tenant, channelId, deliveryId)
                             .get("state"))
                             .as("the refusal advances nothing")
@@ -1061,7 +1099,7 @@ class HostedChannelFaultGatesIT {
                     assertThat(driver.waitFor(120, TimeUnit.SECONDS))
                             .as("parked driver completion").isTrue();
                     JsonNode settled = support.resultsOf(caseDir,
-                            "pull-parked");
+                            "pull-parked-1");
                     assertThat(settled.path("sends"))
                             .as("recovery re-reads identity; nothing re-sends")
                             .hasSize(1);
@@ -1159,8 +1197,8 @@ class HostedChannelFaultGatesIT {
                     triggers.clear();
                     JsonNode resumed = support.drive(caseDir, "resume-cold",
                             base);
-                    assertThat(resumed.path("sends"))
-                            .as("recovery never re-sends").isEmpty();
+                    HostedChannelGateSupport.assertSendsEmpty(resumed,
+                            "recovery never re-sends");
                     assertThat(resumed.path("receipts")).hasSize(1);
                     Map<String, Object> row = support.ledger(tenant, channelId,
                             deliveryId);
@@ -1179,9 +1217,8 @@ class HostedChannelFaultGatesIT {
                             "receipt", true)).isEqualTo(1);
                     JsonNode resumed = support.drive(caseDir, "resume-cold",
                             base);
-                    assertThat(resumed.path("sends"))
-                            .as("a cold adapter never re-sends")
-                            .isEmpty();
+                    HostedChannelGateSupport.assertSendsEmpty(resumed,
+                            "a cold adapter never re-sends");
                     assertThat(resumed.path("receipts")).hasSize(1);
                     String deliveryId = first.path("admissionInputIds").get(0)
                             .asText() + ":reply";
