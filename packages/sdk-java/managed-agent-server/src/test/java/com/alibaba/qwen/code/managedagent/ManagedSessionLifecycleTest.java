@@ -933,9 +933,10 @@ class ManagedSessionLifecycleTest {
         AgentStateStore faulted = mock(AgentStateStore.class, delegatesTo(store));
         IllegalStateException failure =
                 new IllegalStateException("completion unavailable");
-        doThrow(failure).when(faulted).completeSessionMutation(anyString(),
-                anyString(), anyString(), anyString(), any(), anyString(),
-                anyString());
+        // The rename flow persists through the dedicated completion call; a
+        // store fault there used to surface as a bare 503 with no log line.
+        doThrow(failure).when(faulted).completeSessionRename(anyString(),
+                anyString(), anyString(), anyString(), anyString(), anyLong());
         ManagedAgentService subject = new ManagedAgentService(faulted,
                 new RequestDigests(), null, harness, null);
         // The 503 used to be the only trace of the failure: zero log lines
