@@ -17163,7 +17163,10 @@ describe('createAcpSessionBridge', () => {
       ]);
       await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
       expect(handle.agent.promptCalls[0]).toMatchObject({
-        prompt,
+        prompt: [
+          { type: 'text', text: 'internal channel instructions' },
+          { type: 'text', text: submittedPrompt },
+        ],
         _meta: {
           'qwen.daemon.promptDisplayText': submittedPrompt,
           'qwen.daemon.submittedPrompt': submittedPrompt,
@@ -17172,6 +17175,67 @@ describe('createAcpSessionBridge', () => {
       expect(handle.agent.promptCalls[0]?._meta).not.toHaveProperty(
         'qwen.channel.prompt',
       );
+
+      promptGate.resolve({ stopReason: 'end_turn' });
+      await promptPromise;
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('neutralizes unsafe controls in a declared Channel display projection', async () => {
+      const promptGate = deferred<PromptResponse>();
+      const handle = makeChannel({ promptImpl: () => promptGate.promise });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      const abort = new AbortController();
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const userChunk = (async () => {
+        for await (const event of events) {
+          if (event.type !== 'session_update') continue;
+          const update = (
+            event.data as {
+              update?: { sessionUpdate?: string; content?: unknown };
+            }
+          ).update;
+          if (update?.sessionUpdate === 'user_message_chunk') return update;
+        }
+        throw new Error('no user_message_chunk observed');
+      })();
+      const submittedPrompt = 'hi\u001b]0;pwned\u0007';
+      const sanitizedDeclaration = 'hi ]0;pwned ';
+      const promptPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [
+            { type: 'text', text: 'internal channel instructions' },
+            { type: 'text', text: 'safe question' },
+          ],
+        },
+        undefined,
+        { submittedPrompt },
+      );
+
+      await expect(userChunk).resolves.toMatchObject({
+        content: { type: 'text', text: sanitizedDeclaration },
+      });
+      expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+        { text: sanitizedDeclaration, state: 'running' },
+      ]);
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.promptDisplayText'],
+      ).toBe(sanitizedDeclaration);
+      // The provenance key keeps the raw declaration for hooks; only the
+      // display projection is neutralized.
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBe(submittedPrompt);
 
       promptGate.resolve({ stopReason: 'end_turn' });
       await promptPromise;
@@ -17248,6 +17312,7 @@ describe('createAcpSessionBridge', () => {
       { name: 'missing', context: {} },
       { name: 'empty', context: { submittedPrompt: '' } },
       { name: 'whitespace', context: { submittedPrompt: ' \n\t ' } },
+      { name: 'zero-width-only', context: { submittedPrompt: '\u200b' } },
       {
         name: 'invalid',
         context: { submittedPrompt: 42 as unknown as string },

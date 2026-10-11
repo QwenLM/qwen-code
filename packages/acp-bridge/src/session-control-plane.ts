@@ -381,6 +381,20 @@ function standaloneWorkingDirectoryMissingError(): RequestError {
 }
 
 /**
+ * Controls neutralized in a submission declaration before it may become the
+ * Channel display projection: C0/DEL except TAB/LF (raw whitespace a
+ * declaration keeps), the C1 block, Unicode line/paragraph separators, every
+ * format character (bidi overrides, zero-widths), and variation selectors.
+ * Applied BEFORE the blankness test so an invisible-only declaration reads as
+ * blank and keeps content-derived display. The class mirrors the one the
+ * `channels/base` display sanitizers apply; it is duplicated here because
+ * acp-bridge cannot import from channels (they depend on this package).
+ */
+const DECLARATION_UNSAFE_DISPLAY_CHARS =
+  // eslint-disable-next-line no-control-regex
+  /[\u0000-\u0008\u000b-\u001f\u007f\u0080-\u009f\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
+
+/**
  * Channel display text comes from the authenticated worker or an explicit
  * submission declaration. It never grants channel-turn classification. Every
  * other source echoes its prompt content verbatim. Single source of truth for
@@ -11035,15 +11049,19 @@ export function createSessionControlPlane(
         }
       }
       const submittedPrompt = context?.submittedPrompt;
+      const declaredSubmission =
+        typeof submittedPrompt === 'string'
+          ? submittedPrompt.replace(DECLARATION_UNSAFE_DISPLAY_CHARS, ' ')
+          : undefined;
       const hasValidDeclaration =
-        typeof submittedPrompt === 'string' &&
-        submittedPrompt.trim().length > 0;
+        declaredSubmission !== undefined &&
+        declaredSubmission.trim().length > 0;
       const hasTextBlock = req.prompt.some(
         (block) => isRecord(block) && block['type'] === 'text',
       );
       const declaredChannelDisplayText =
         context?.channelPrompt !== true && hasValidDeclaration && hasTextBlock
-          ? submittedPrompt
+          ? declaredSubmission
           : undefined;
       const channelDisplayText = getChannelPromptDisplayText(
         entry,
