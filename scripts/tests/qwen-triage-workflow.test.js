@@ -5057,6 +5057,10 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(rawScopeSelection).toMatch(
       /^2\. \*\*One or two wire-oracle harnesses\*\*/m,
     );
+    // The clause protects the central A/B's reservation, so pin that too.
+    expect(scopeSelection).toContain(
+      '**A/B load-bearing proof of the central claim** (always, ~half the budget)',
+    );
     expect(scopeSelection).toContain(
       'The trigger is therefore the diff, not the claim.',
     );
