@@ -6364,6 +6364,7 @@ describe('CoreToolScheduler', () => {
       expect(provenance).toBeDefined();
       expect(provenance?.rawSize).toBeUndefined();
       expect(provenance?.truncated).toBeUndefined();
+      expect(new ToolCallEvent(completed).raw_content_length).toBeUndefined();
     } finally {
       bridgeRejection.value = undefined;
     }
