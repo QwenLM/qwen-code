@@ -4164,7 +4164,6 @@ export class LlmClient {
     }
     if (messageType === SendMessageType.Goal) {
       this.loopDetector.reset(prompt_id);
-      this.toolExplorationBudget.reset();
       this.lastPromptId = prompt_id;
     }
     if (startsInteraction) {

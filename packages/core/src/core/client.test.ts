@@ -11500,6 +11500,48 @@ Other open files:
         });
       });
 
+      it('gives a blocking Stop hook continuation a fresh exploration phase', async () => {
+        // The nested restart is submitted with `type: SendMessageType.Hook`,
+        // which is not an interaction-starting type, so the reset beside the
+        // Stop-hook block is the only thing that clears the read-only phase
+        // across the restart.
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        // The default registry mock knows no tools, so read_file would
+        // classify as unknown and zero the phase on every call.
+        const reg = registryMock();
+        reg.getAllToolNames.mockReturnValue(['read_file']);
+        reg.getTool.mockImplementation((name: string) =>
+          name === 'read_file' ? ({ kind: Kind.Read } as never) : null,
+        );
+        vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(100);
+        let turnIndex = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          const turnNo = turnIndex++;
+          return (async function* () {
+            // Only the first turn reads; the continuation just answers.
+            if (turnNo === 0) {
+              for (let i = 0; i < 2; i++) {
+                yield toolCallRequest(
+                  `call-${i}`,
+                  'read_file',
+                  { path: `f${i}` },
+                  'prompt-stop-hook-exploration',
+                );
+              }
+            }
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })();
+        });
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-exploration');
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        // The first turn's two reads were cleared by the restart instead of
+        // being carried into the continuation.
+        expect(client['toolExplorationBudget']['calls']).toBe(0);
+      });
+
       it('reports stop_hook_active only when a Stop hook blocked the previous turn', async () => {
         const mockMessageBus = installMessageBus(blockStopOnce(), 'Stop');
         notDoneChat();
