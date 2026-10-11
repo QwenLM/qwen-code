@@ -6396,16 +6396,14 @@ export class LlmChat {
       if (userContentAdded) {
         let currentUserContentIndex = self.history.indexOf(currentUserContent);
         const matchesAdmissionContext = (candidateIndex: number) =>
-          (!currentUserContentBefore ||
-            isDeepStrictEqual(
-              self.history[candidateIndex - 1],
-              currentUserContentBefore,
-            )) &&
-          (!currentUserContentAfter ||
-            isDeepStrictEqual(
-              self.history[candidateIndex + 1],
-              currentUserContentAfter,
-            ));
+          isDeepStrictEqual(
+            self.history[candidateIndex - 1],
+            currentUserContentBefore,
+          ) &&
+          isDeepStrictEqual(
+            self.history[candidateIndex + 1],
+            currentUserContentAfter,
+          );
         if (
           currentUserContentIndex < 0 &&
           currentUserContent &&

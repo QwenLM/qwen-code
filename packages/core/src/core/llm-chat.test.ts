@@ -12322,6 +12322,25 @@ describe('LlmChat', async () => {
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
     });
 
+    it('keeps an unrelated equal user turn relocated by history replacement', async () => {
+      const firstStream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'owned user turn' },
+        'unstarted-relocated-replacement',
+      );
+      const replacement: Content[] = [
+        { role: 'user', parts: [{ text: 'other' }] },
+        { role: 'model', parts: [{ text: 'answer' }] },
+        { role: 'user', parts: [{ text: 'owned user turn' }] },
+      ];
+      chat.setHistory(structuredClone(replacement));
+
+      await firstStream.return(undefined);
+
+      expect(chat.getHistory()).toEqual(replacement);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
+
     it('serializes simultaneously admitted MAX_TOKENS recoveries', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
