@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
@@ -15,13 +15,44 @@ import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-run
 import {
   CHILD_NOTIFICATION_INLINE_LIMIT,
   childResultNotificationText,
+  childWorkspaceOutcomeText,
   HostedChildAgentSession,
+  parseChildWorkspaceReceipt,
   type ChildAgentLaunchParams,
 } from './hosted-child-agent-session.js';
+import { HostedChildRunSession } from './hosted-child-run-session.js';
 
 // The H4b gates are real: the kind gate admits `child_agent` and
 // `child_acceptance` sits in the plain enabled list, so this suite drives
-// the hosted orchestrator with no enablement mock.
+// the hosted orchestrator with no enablement mock. One H4c case plants a
+// `workflow` record ahead of that kind's enablement and one plants an H3
+// background Shell; each flag lifts the kind gate for its planting only.
+const enablement = vi.hoisted(() => ({
+  workflowKind: false,
+  shellKind: false,
+}));
+
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionChildRunKindEnabled: (kind: string) => {
+        if (
+          !(kind === 'workflow' && enablement.workflowKind) &&
+          !(kind === 'shell' && enablement.shellKind)
+        ) {
+          actual.assertManagedSessionChildRunKindEnabled(kind);
+        }
+      },
+    };
+  },
+);
+
 const sessionId = '550e8400-e29b-41d4-a716-446655440000';
 const sessionKey = {
   tenantId: 'tenant-1',
@@ -42,6 +73,8 @@ const BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
+  enablement.workflowKind = false;
+  enablement.shellKind = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -126,6 +159,7 @@ function launchParams(
     description: 'audit the diff',
     prompt: 'review the change',
     definition: DEFINITION,
+    workspaceMode: 'shared',
     workingDirectory: '.',
     executionCallId: 'call-1',
     ...overrides,
@@ -185,6 +219,253 @@ describe('childResultNotificationText', () => {
     expect(notification).toContain(
       '<result>first line\nsecond line\n- item A</result>',
     );
+  });
+});
+
+const CHILD_WORKSPACE_ID = 'a'.repeat(32);
+const RESULT_PIN = `refs/qwen/child-workspaces/${CHILD_WORKSPACE_ID}/result`;
+
+function receipt(workspace?: Record<string, unknown>): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      childSessionId: 'session-child',
+      turnId: 'turn-c1',
+      status: 'completed',
+      completedAt: 1,
+      ...(workspace === undefined ? {} : { workspace }),
+    }),
+    'utf8',
+  );
+}
+
+describe('child Workspace receipt (#13753 I2)', () => {
+  it('reads each outcome the relay reports', () => {
+    expect(
+      parseChildWorkspaceReceipt(
+        receipt({
+          mode: 'worktree',
+          childWorkspaceId: CHILD_WORKSPACE_ID,
+          outcome: 'merged',
+          code: 'merged',
+        }),
+      ),
+    ).toEqual({
+      outcome: 'merged',
+      code: 'merged',
+      conflictPaths: [],
+      omittedConflictPaths: 0,
+    });
+    expect(
+      parseChildWorkspaceReceipt(
+        receipt({
+          mode: 'worktree',
+          childWorkspaceId: CHILD_WORKSPACE_ID,
+          outcome: 'conflicted',
+          code: 'conflicted',
+          conflictPaths: ['src/a.ts', 'b.md'],
+          omittedConflictPaths: 3,
+          resultRef: RESULT_PIN,
+        }),
+      ),
+    ).toEqual({
+      outcome: 'conflicted',
+      code: 'conflicted',
+      conflictPaths: ['src/a.ts', 'b.md'],
+      omittedConflictPaths: 3,
+      resultRef: RESULT_PIN,
+    });
+    expect(
+      parseChildWorkspaceReceipt(
+        receipt({
+          mode: 'worktree',
+          childWorkspaceId: CHILD_WORKSPACE_ID,
+          outcome: 'blocked',
+          code: 'child_workspace_diverged',
+        }),
+      ),
+    ).toMatchObject({ outcome: 'blocked', code: 'child_workspace_diverged' });
+  });
+
+  it('answers nothing for a receipt off the shape', () => {
+    const valid = {
+      mode: 'worktree',
+      childWorkspaceId: CHILD_WORKSPACE_ID,
+      outcome: 'merged',
+      code: 'merged',
+    };
+    for (const bytes of [
+      Buffer.from('not json', 'utf8'),
+      Buffer.from('null', 'utf8'),
+      receipt(),
+      receipt({ ...valid, mode: 'shared' }),
+      receipt({ ...valid, outcome: 'landed' }),
+      receipt({ ...valid, code: 'Merged; rm -rf' }),
+      receipt({ ...valid, conflictPaths: 'src/a.ts' }),
+      receipt({ ...valid, conflictPaths: [1] }),
+      receipt({ ...valid, resultRef: 'refs/heads/main' }),
+      receipt({ ...valid, omittedConflictPaths: -1 }),
+      receipt({ ...valid, omittedConflictPaths: 1.5 }),
+      receipt({ ...valid, omittedConflictPaths: '2' }),
+      Buffer.from('{"workspace":[]}', 'utf8'),
+    ]) {
+      expect(parseChildWorkspaceReceipt(bytes)).toBeUndefined();
+    }
+  });
+
+  it('renders the outcome for the model, quoting and bounding the paths', () => {
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'merged',
+        code: 'merged',
+        conflictPaths: [],
+        omittedConflictPaths: 0,
+      }),
+    ).toBe('merged into this Workspace as uncommitted changes.');
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'blocked',
+        code: 'child_workspace_diverged',
+        conflictPaths: [],
+        omittedConflictPaths: 0,
+        resultRef: RESULT_PIN,
+      }),
+    ).toBe(
+      `merge blocked (child_workspace_diverged); the child's changes did not land; the child's work is kept at ${RESULT_PIN}.`,
+    );
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'discarded',
+        code: 'discarded',
+        conflictPaths: [],
+        omittedConflictPaths: 0,
+      }),
+    ).toBe("discarded; the child's changes did not land.");
+    // A child chose these names: display controls are stripped and each
+    // name is quoted, so a newline cannot forge a line of its own.
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'conflicted',
+        code: 'conflicted',
+        conflictPaths: [
+          'src/a.ts',
+          'evil\u202e\nname',
+          'line\u2028para\u2029end',
+        ],
+        omittedConflictPaths: 0,
+        resultRef: RESULT_PIN,
+      }),
+    ).toBe(
+      `merge conflicted at "src/a.ts", "evil\\nname", "line\\u2028para\\u2029end"; the child's changes did not land; the child's work is kept at ${RESULT_PIN}.`,
+    );
+    // The receipt's own omissions count toward the paths left unnamed.
+    expect(
+      childWorkspaceOutcomeText({
+        outcome: 'conflicted',
+        code: 'conflicted',
+        conflictPaths: ['a.ts'],
+        omittedConflictPaths: 4,
+      }),
+    ).toBe(
+      `merge conflicted at "a.ts", and 4 more; the child's changes did not land.`,
+    );
+    const many = childWorkspaceOutcomeText({
+      outcome: 'conflicted',
+      code: 'conflicted',
+      conflictPaths: Array.from(
+        { length: 100 },
+        (_, index) => `${'d'.repeat(200)}/${index}`,
+      ),
+      omittedConflictPaths: 0,
+    });
+    expect(Buffer.byteLength(many, 'utf8')).toBeLessThan(5 * 1024);
+    expect(many).toMatch(/, and \d+ more; /);
+    expect(childWorkspaceOutcomeText(undefined)).toContain(
+      'the merge outcome is unavailable',
+    );
+  });
+
+  it('puts the outcome beside the status in the notification', () => {
+    const notification = childResultNotificationText({
+      taskId: TASK_ID,
+      description: 'audit',
+      text: 'done',
+      workspace: 'merge conflicted at "<a>"; kept.',
+    });
+    expect(notification).toContain(
+      '<status>completed</status>\n<workspace>merge conflicted at &quot;&lt;a&gt;&quot;; kept.</workspace>\n<summary>',
+    );
+    expect(
+      childResultNotificationText({
+        taskId: TASK_ID,
+        description: 'audit',
+        text: 'done',
+      }),
+    ).not.toContain('<workspace>');
+  });
+
+  it("carries a worktree child's outcome into its wake notification", async () => {
+    for (const workspaceMode of ['worktree', 'shared'] as const) {
+      const harness = await createHarness();
+      await withAuthority(harness, async (authority) => {
+        const children = new HostedChildAgentSession(
+          { authority, resources: harness.store },
+          sessionKey,
+        );
+        await children.admit(launchParams({ workspaceMode }));
+        expect(children.record('run-1')!.workspaceMode).toBe(workspaceMode);
+        await children.dispatchStarted('run-1', {
+          dispatchId: 'dispatch-1',
+          runtime: BINDING,
+        });
+        await children.attach('run-1', 'session-child');
+        await children.settleCompleted('run-1', {
+          result: Buffer.from('done', 'utf8'),
+          receipt: receipt({
+            mode: 'worktree',
+            childWorkspaceId: CHILD_WORKSPACE_ID,
+            outcome: 'merged',
+            code: 'merged',
+          }),
+        });
+        await children.accept('run-1', {
+          notification: { description: 'audit the diff' },
+        });
+        const input = authority
+          .readEvents({ afterSequence: 0, limit: 64 })
+          .find((event) => event.kind === 'input.accepted')!;
+        const contentRef = (input.payload as Record<string, unknown>)[
+          'contentRef'
+        ] as Parameters<typeof harness.store.read>[0];
+        const text = JSON.parse(
+          (await harness.store.read(contentRef)).toString('utf8'),
+        ).text as string;
+        // Only the record's own mode decides: a shared child's receipt
+        // never speaks for a Workspace it did not have.
+        if (workspaceMode === 'worktree') {
+          expect(text).toContain(
+            '<workspace>merged into this Workspace as uncommitted changes.</workspace>',
+          );
+        } else {
+          expect(text).not.toContain('<workspace>');
+        }
+      });
+    }
+  });
+
+  it('refuses a replayed launch that names another isolation', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admit(launchParams({ workspaceMode: 'worktree' }));
+      await children.admit(launchParams({ workspaceMode: 'worktree' }));
+      await expect(
+        children.admit(launchParams({ workspaceMode: 'shared' })),
+      ).rejects.toThrow('different evidence');
+      expect(children.record('run-1')!.workspaceMode).toBe('worktree');
+    });
   });
 });
 
@@ -509,6 +790,73 @@ describe('hosted child agent session (H4b)', () => {
       expect(
         children.activeChildRunsOf('scope-main').map((run) => run.childRunId),
       ).toEqual(['run-2']);
+    });
+  });
+
+  // H4c: the quotas count child Sessions, so a workflow child spends the
+  // same concurrency and launch budget a child agent does, while the
+  // child agent funnel itself never reads it as one of its own.
+  it('counts a workflow child against the scope quotas', async () => {
+    enablement.workflowKind = true;
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      const { inputRef } = await children.admit(launchParams());
+      await authority.commitExtensionRecord(
+        {
+          operation: 'commitChildRunRecord',
+          commandId: 'workflow-1:1',
+          sessionKey,
+          contentDigest: 'd'.repeat(64),
+        },
+        {
+          domain: 'child_run',
+          record: {
+            ...children.record('run-1')!,
+            kind: 'workflow',
+            childRunId: 'workflow-1',
+            inputRef,
+          },
+        },
+        { class: 'trusted_entry' },
+      );
+      expect(
+        children
+          .launchedChildRunsOf('scope-main')
+          .map((run) => [run.kind, run.childRunId]),
+      ).toEqual([
+        ['child_agent', 'run-1'],
+        ['workflow', 'workflow-1'],
+      ]);
+      expect(children.activeChildRunsOf('scope-main')).toHaveLength(2);
+      expect(children.record('workflow-1')).toBeUndefined();
+    });
+  });
+
+  // The hosted turn keys a background Shell and a child Session by the same
+  // owner scope, the Session, yet a Shell is no child Session: it spends
+  // neither the concurrency cap nor the launch budget.
+  it('leaves a background Shell of the same scope out of the quotas', async () => {
+    enablement.shellKind = true;
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const store = { authority, resources: harness.store };
+      const children = new HostedChildAgentSession(store, sessionKey);
+      await children.admit(launchParams());
+      await new HostedChildRunSession(store, sessionKey).admit({
+        shellId: 'shell-1',
+        ownerScopeId: 'scope-main',
+        executionCallId: 'call-shell',
+        args: { command: 'sleep 60', is_background: true },
+      });
+      expect(authority.extensionRecordsInDomain('child_run')).toHaveLength(2);
+      expect(
+        children.launchedChildRunsOf('scope-main').map((run) => run.childRunId),
+      ).toEqual(['run-1']);
+      expect(children.activeChildRunsOf('scope-main')).toHaveLength(1);
     });
   });
 

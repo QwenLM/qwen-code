@@ -15,6 +15,7 @@ import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/service
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
+import { ModSession } from './mod-session.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlDispatcher } from './control/ControlDispatcher.js';
 import { ControlService } from './control/ControlService.js';
@@ -82,6 +83,7 @@ class Session {
   private promptIdCounter: number | null = null;
   private inputReader: StreamJsonInputReader;
   private outputAdapter: StreamJsonOutputAdapter;
+  private readonly modSession?: ModSession;
   private controlContext: ControlContext | null = null;
   private dispatcher: ControlDispatcher | null = null;
   private controlService: ControlService | null = null;
@@ -118,6 +120,7 @@ class Session {
       config,
       config.getIncludePartialMessages(),
     );
+    this.modSession = ModSession.create(config, settings, this.outputAdapter);
     this.unsubscribeRecordingFailure = subscribeToHeadlessChatRecordingFailures(
       config,
       this.outputAdapter,
@@ -153,9 +156,11 @@ class Session {
    * carries several turns under a single id: the key the rewind mapping from
    * #9466 anchors on (it fails closed to a positional walk when ids repeat),
    * and the `prompt_id` on persisted `ui_telemetry` records, which is what
-   * the next resume reads back to seed from. File-history snapshots are not
-   * at stake on this path — checkpointing defaults off outside interactive
-   * sessions, so headless turns write none.
+   * the next resume reads back to seed from. Headless turns write no
+   * file-history snapshots themselves, but one retained from an earlier
+   * interactive turn outlives the conversation-only rewind that discarded its
+   * turn, so this seed still reads `file_history_snapshot` ordinals — or the
+   * replacement turn re-wears that identity (#11408).
    *
    * ACP seeds through this same helper (`primeTurnFromHistory`). Interactive
    * mode seeds too, but by its own inline count of resumed user turns
@@ -512,6 +517,7 @@ class Session {
 
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
+        modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
@@ -624,6 +630,7 @@ class Session {
       const promptId = this.getNextPromptId();
       turnAbortController = this.startTurn();
       await runNonInteractive(this.config, this.settings, '', promptId, {
+        modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
@@ -696,6 +703,7 @@ class Session {
         combinedModelText,
         promptId,
         {
+          modSession: this.modSession,
           abortController: turnAbortController,
           adapter: this.outputAdapter,
           controlService: this.controlService ?? undefined,
@@ -971,7 +979,8 @@ class Session {
     }
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    await this.modSession?.close();
     this.unsubscribeRecordingFailure();
   }
 
@@ -1121,6 +1130,6 @@ export async function runNonInteractiveStreamJson(
     await manager.run();
   } finally {
     await settleChatRecording(config, { finalize: true });
-    manager.dispose();
+    await manager.dispose();
   }
 }

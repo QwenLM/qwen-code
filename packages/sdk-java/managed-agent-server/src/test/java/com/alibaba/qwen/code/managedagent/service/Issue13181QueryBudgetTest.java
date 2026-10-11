@@ -50,13 +50,10 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import javax.sql.DataSource;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
@@ -64,8 +61,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.DataWithMediaType;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /**
  * Pinned query budgets for GitHub issue #13181: four managed-agent hot paths
@@ -469,23 +464,18 @@ class Issue13181QueryBudgetTest {
         long after = fixture.store.requireSession(tenant, sessionId)
                 .lastSequence();
         int events = 20;
-        RecordingEmitter emitter = new RecordingEmitter(60_000);
+        EventStreams.RecordingEmitter emitter = EventStreams.RecordingEmitter
+                .withTimeout(60_000);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            ManagedAgentProperties properties = new ManagedAgentProperties();
-            properties.getEvents().setPollInterval(Duration.ofSeconds(60));
-            properties.getEvents().setHeartbeatInterval(Duration.ofSeconds(60));
+            ManagedAgentProperties properties = EventStreams.pinnedProperties();
             // Longer than the completion budget, so no in-loop recheck can
             // fire mid-test even on a stalled runner.
             properties.getEvents()
                     .setReadGrantRecheckInterval(Duration.ofSeconds(60));
-            ManagedEventStreamService streams = new ManagedEventStreamService(
-                    fixture.service, fixture.hub, executor, properties) {
-                @Override
-                SseEmitter emitter() {
-                    return emitter;
-                }
-            };
+            ManagedEventStreamService streams = EventStreams.streams(
+                    fixture.service, fixture.hub, executor, properties,
+                    emitter);
             fixture.ledger.reset();
             streams.publicStream(tenant, "actor", sessionId, after);
             // The first in-loop grant check proves the hub subscription
@@ -525,19 +515,12 @@ class Issue13181QueryBudgetTest {
         long after = fixture.store.requireSession(tenant, sessionId)
                 .lastSequence();
         int events = 10;
-        RecordingEmitter emitter = new RecordingEmitter(60_000);
+        EventStreams.RecordingEmitter emitter = EventStreams.RecordingEmitter
+                .withTimeout(60_000);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            ManagedAgentProperties properties = new ManagedAgentProperties();
-            properties.getEvents().setPollInterval(Duration.ofSeconds(60));
-            properties.getEvents().setHeartbeatInterval(Duration.ofSeconds(60));
-            ManagedEventStreamService streams = new ManagedEventStreamService(
-                    fixture.service, fixture.hub, executor, properties) {
-                @Override
-                SseEmitter emitter() {
-                    return emitter;
-                }
-            };
+            ManagedEventStreamService streams = EventStreams.streams(
+                    fixture.service, fixture.hub, executor, emitter);
             streams.publicStream(tenant, null, sessionId, after);
             for (int index = 0; index < events; index++) {
                 fixture.store.appendPublicEventIfAbsent(tenant, sessionId,
@@ -750,7 +733,7 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void boundWebShellPageBatchesTheCreatorSubmitCapability() {
+    void boundWebShellPageBatchesTheRoleSubmitCapability() {
         Fixture fixture = new Fixture();
         when(fixture.harness.isWorkspaceFilesAvailable()).thenReturn(true);
         String tenant = "tenant-" + UUID.randomUUID();
@@ -766,8 +749,8 @@ class Issue13181QueryBudgetTest {
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')",
                     tenant, actor.getBytes(StandardCharsets.UTF_8));
         }
-        // A second workspace where the actor reads but cannot create: its
-        // session exercises the grant's role term, and the page's two
+        // A second workspace where the actor's role lands below OPERATOR:
+        // its session exercises the grant's role term, and the page's two
         // workspaces make the grant batch's single-query shape
         // discriminable.
         fixture.jdbc.update("INSERT INTO managed_workspace_registry"
@@ -793,34 +776,168 @@ class Issue13181QueryBudgetTest {
                             new WorkspaceSelection(workspace, ".")))
                     .sessionId());
         }
-        // One creator-owned session is closed: the shape gate fences it even
-        // for its creator. The workspace2 grant then drops to READER: its
-        // session exercises the grant term.
+        // An eighth session whose creator has no access row at all — the
+        // caller stays OPERATOR while its creator's grant is gone, the
+        // shape the executable conjunct alone must refuse on.
+        fixture.jdbc.update("INSERT INTO managed_workspace_access"
+                + " (tenant_id, workspace_id, actor_id, role) VALUES (?,"
+                + " 'workspace', ?, 'OPERATOR')", tenant,
+                "ghost".getBytes(StandardCharsets.UTF_8));
+        ids.add(fixture.tx.execute(status -> fixture.store
+                .insertWorkspaceSessionCommand(tenant, "ghost",
+                        "ws-ghost-" + UUID.randomUUID(), "digest",
+                        "qwen-code", null, "w-ghost", List.of(), null,
+                        new WorkspaceSelection("workspace", ".")))
+                .sessionId());
+        fixture.jdbc.update("DELETE FROM managed_workspace_access"
+                + " WHERE tenant_id = ? AND workspace_id = 'workspace'"
+                + " AND actor_id = ?", tenant,
+                "ghost".getBytes(StandardCharsets.UTF_8));
+        // One session is closed: the shape gate fences it. The workspace2
+        // grant then drops to READER: its session exercises the role term.
+        // Only "other", creator of indices 4 and 5, drops with "actor"
+        // keeping OPERATOR, so those two Sessions fail the creator-keyed
+        // facts while the caller's own role is intact.
         fixture.jdbc.update("UPDATE managed_agent_session SET status ="
                 + " 'CLOSED' WHERE tenant_id = ? AND session_id = ?", tenant,
                 ids.get(3));
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
                 + " role = 'READER' WHERE tenant_id = ? AND workspace_id"
                 + " = 'workspace2'", tenant);
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                + " 'READER' WHERE tenant_id = ? AND workspace_id ="
+                + " 'workspace' AND actor_id = ?", tenant,
+                "other".getBytes(StandardCharsets.UTF_8));
         fixture.ledger.reset();
         var page = fixture.service.listWebShellSessions(tenant, "actor",
                 null, 20).data();
-        assertThat(page).hasSize(7);
-        System.out.println("[issue-13181] listWebShellSessions(7 mixed"
-                + " creator rows): " + fixture.ledger.summary());
-        // Page + latest turns + the close batch + the creator batch + the
-        // grant batch across both workspaces: constant, not per row.
+        assertThat(page).hasSize(8);
+        System.out.println("[issue-13181] listWebShellSessions(8 mixed"
+                + " role rows): " + fixture.ledger.summary());
+        // Page + latest turns + the close batch + the grant batch across
+        // both workspaces + the execution-facts batch over the
+        // submit-shaped sessions: constant, not per row.
         assertThat(fixture.ledger.total()).isEqualTo(5);
-        assertThat(fixture.ledger.count(
-                "from managed_workspace_create_command")).isEqualTo(1);
         assertThat(fixture.ledger.count("from managed_workspace_registry"))
                 .isEqualTo(1);
-        // workspaceTurns holds exactly for the caller's own ACTIVE sessions
-        // on a workspace where the grant still allows creation.
+        assertThat(fixture.ledger.count("from managed_agent_session s join"
+                + " managed_workspace_registry")).isEqualTo(1);
+        // workspaceTurns holds exactly for ACTIVE sessions whose caller
+        // holds OPERATOR or above on the Workspace AND whose creator still
+        // holds the execution-registry facts — the two conjuncts split at
+        // indices 4, 5 and 7.
         for (var row : page) {
             int index = ids.indexOf(row.sessionId());
             assertThat(row.capabilities().workspaceTurns())
-                    .isEqualTo(index < 3);
+                    .isEqualTo(index != 3 && index != 6 && index != 4
+                            && index != 5 && index != 7);
+        }
+
+        // A caller whose only grant is READER pays no facts read at all,
+        // the zero-query shape the removed creator chain provided.
+        fixture.jdbc.update("INSERT INTO managed_workspace_access"
+                + " (tenant_id, workspace_id, actor_id, role) VALUES (?,"
+                + " 'workspace', ?, 'READER')", tenant,
+                "reader-only".getBytes(StandardCharsets.UTF_8));
+        fixture.ledger.reset();
+        var readerPage = fixture.service.listWebShellSessions(tenant,
+                "reader-only", null, 20).data();
+        assertThat(fixture.ledger.count("from managed_agent_session s join"
+                + " managed_workspace_registry")).isZero();
+        for (var row : readerPage) {
+            assertThat(row.capabilities().workspaceTurns()).isFalse();
+        }
+    }
+
+    @Test
+    void cwdCapabilitySharesTheGrantAndFactsBatchesRegardlessOfPageSize() {
+        for (int size : new int[] {1, 20}) {
+            Fixture fixture = new Fixture(Clock.systemUTC(), true);
+            when(fixture.harness.isWorkspaceFilesAvailable()).thenReturn(true);
+            String tenant = "cwd-" + UUID.randomUUID();
+            fixture.createCwdSessions(tenant, size);
+            fixture.ledger.reset();
+            var page = fixture.service.listWebShellSessions(tenant, "actor", null, 20).data();
+            assertThat(page).hasSize(size);
+            assertThat(page).allSatisfy(row -> assertThat(JSON.valueToTree(row).path("capabilities").path("cwdChange").asBoolean()).isTrue());
+            assertThat(fixture.ledger.total()).isEqualTo(5);
+            assertThat(fixture.ledger.count("join managed_workspace_registry", "join managed_workspace_create_command")).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void cwdCapabilityMirrorsAdmissionWithoutTheTurnProfileRestrictions() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+        String tenant = "cwd-" + UUID.randomUUID();
+        String id = fixture.createCwdSessions(tenant, 1).getFirst();
+        fixture.jdbc.update("UPDATE managed_agent_session SET agent_id = 'custom' WHERE tenant_id = ? AND session_id = ?", tenant, id);
+        var view = fixture.service.getWebShellSession(tenant, "actor", id);
+        assertThat(view.capabilities().workspaceTurns()).isFalse();
+        assertThat(JSON.valueToTree(view).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+        // Busy admission remains separate from support and authorization.
+        fixture.store.insertTurnCommand(tenant, "SUBMIT", "busy", "digest", id, List.of(Map.of("type", "text", "text", "test")), "digest");
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+    }
+
+    @Test
+    void cwdCapabilityRequiresOperatorRoleAndExactRegistryFacts() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+        String tenant = "cwd-" + UUID.randomUUID();
+        String id = fixture.createCwdSessions(tenant, 1).getFirst();
+        // A non-creator holding OPERATOR on the Workspace sees the
+        // capability, mirroring admission's atLeast(OPERATOR); a READER
+        // does not.
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = 'workspace' AND actor_id = ?", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+        for (String mutation : new String[] {
+                "UPDATE managed_workspace_registry SET state = 'DRAINING'",
+                "UPDATE managed_workspace_registry SET state = 'ACTIVE', workspace_generation = 2",
+                "UPDATE managed_workspace_registry SET workspace_generation = 1, storage_id = 'other-storage'",
+                "UPDATE managed_workspace_registry SET storage_id = 'storage'; UPDATE managed_workspace_access SET role = 'READER'"
+        }) {
+            // This fixture has only one tenant; each mutation proves a separate admission conjunct.
+            for (String statement : mutation.split(";")) fixture.jdbc.update(statement);
+            assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+        }
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'");
+        fixture.jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED'");
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+    }
+
+    @Test
+    void cwdCapabilityChecksTheCallerRoleOnEachWorkspaceOfAMixedPage() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+        String tenant = "cwd-" + UUID.randomUUID();
+        String readRow = fixture.createCwdSessions(tenant, 1).getFirst();
+        fixture.jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-2', 1, 'storage-2', 'Workspace 2', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+        String operateRow = fixture.tx.execute(status -> fixture.store.insertWorkspaceSessionCommand(tenant, "actor", UUID.randomUUID().toString(), "digest", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace-2", "."))).sessionId();
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.ledger.reset();
+        var page = fixture.service.listWebShellSessions(tenant, "other", null, 20).data();
+        java.util.Map<String, Boolean> cwd = new java.util.HashMap<>();
+        for (var row : page) {
+            cwd.put(row.sessionId(), row.capabilities().cwdChange());
+        }
+        assertThat(cwd).hasSize(2).containsEntry(operateRow, true).containsEntry(readRow, false);
+        assertThat(fixture.ledger.count("join managed_workspace_registry", "join managed_workspace_create_command")).isEqualTo(1);
+    }
+
+    @Test
+    void cwdCapabilityDoesNotPayForRegistryFactsWhenDisabledOrReaderOnly() {
+        for (boolean enabled : new boolean[] {false, true}) {
+            Fixture fixture = new Fixture(Clock.systemUTC(), enabled);
+            String tenant = "cwd-" + UUID.randomUUID();
+            fixture.createCwdSessions(tenant, 1);
+            fixture.jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "reader".getBytes(StandardCharsets.UTF_8));
+            fixture.ledger.reset();
+            var page = fixture.service.listWebShellSessions(tenant, "reader", null, 20).data();
+            assertThat(page).hasSize(1);
+            assertThat(JSON.valueToTree(page.getFirst()).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+            assertThat(fixture.ledger.count("join managed_workspace_registry", "join managed_workspace_create_command")).isZero();
         }
     }
 
@@ -1672,6 +1789,10 @@ class Issue13181QueryBudgetTest {
         }
 
         Fixture(Clock clock) {
+            this(clock, false);
+        }
+
+        Fixture(Clock clock, boolean workspaceFilesEnabled) {
             JdbcDataSource raw = new JdbcDataSource();
             raw.setURL("jdbc:h2:mem:repro-" + UUID.randomUUID()
                     + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE;"
@@ -1684,11 +1805,23 @@ class Issue13181QueryBudgetTest {
             tx = new TransactionTemplate(manager);
             ManagedWorkspaceRegistry registry =
                     new ManagedWorkspaceRegistry(jdbc);
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getHarness().setWorkspaceFilesEnabled(workspaceFilesEnabled);
             store = new ManagedAgentStore(jdbc, JSON, clock, hub,
-                    registry, new ManagedAgentProperties());
+                    registry, properties);
             service = new ManagedAgentService(store, new RequestDigests(),
                     mock(HarnessCoordinator.class),
                     harness, registry);
+        }
+
+        List<String> createCwdSessions(String tenant, int count) {
+            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+            List<String> ids = new ArrayList<>();
+            for (int index = 0; index < count; index++) {
+                ids.add(tx.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor", UUID.randomUUID().toString(), "digest", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."))).sessionId());
+            }
+            return ids;
         }
     }
 
@@ -1855,43 +1988,6 @@ class Issue13181QueryBudgetTest {
                             throw error.getCause();
                         }
                     });
-        }
-    }
-
-    /** Captures delivered event ids and stream completion. */
-    static final class RecordingEmitter extends SseEmitter {
-        private static final Pattern ID = Pattern.compile("(?m)^id:(\\d+)$");
-        final List<Long> ids = new CopyOnWriteArrayList<>();
-        final List<Throwable> failed = new CopyOnWriteArrayList<>();
-        final CountDownLatch completed = new CountDownLatch(1);
-
-        RecordingEmitter(long timeoutMillis) {
-            super(timeoutMillis);
-        }
-
-        @Override
-        public void send(SseEventBuilder builder) {
-            StringBuilder text = new StringBuilder();
-            for (DataWithMediaType part : builder.build()) {
-                if (part.getData() instanceof String value) {
-                    text.append(value);
-                }
-            }
-            Matcher matcher = ID.matcher(text);
-            if (matcher.find()) {
-                ids.add(Long.parseLong(matcher.group(1)));
-            }
-        }
-
-        @Override
-        public void complete() {
-            completed.countDown();
-        }
-
-        @Override
-        public void completeWithError(Throwable error) {
-            failed.add(error);
-            completed.countDown();
         }
     }
 }

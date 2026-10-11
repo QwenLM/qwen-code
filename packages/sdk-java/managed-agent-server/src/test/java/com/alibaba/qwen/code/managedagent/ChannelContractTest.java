@@ -12,12 +12,13 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The Stage H5 channel contract must exist in the OpenAPI resource above all
- * else: the task-list route gate proves only that no planned route is
- * mapped, so nothing latched whether the planned channel definitions were
- * present at all — the merge that discarded them stayed green. This gate
- * refuses that regression directly.
+ * else: the route gate proves only that mapped routes are not planned, so
+ * nothing latched whether the channel definitions were present at all — the
+ * merge that discarded them stayed green. This gate refuses that regression
+ * directly, and since H5b/H5c pins the three resources as partial: served,
+ * with their H5-owned shapes, by the channel controller.
  */
-class PlannedChannelContractTest {
+class ChannelContractTest {
 
     private static final JsonNode CONTRACT = loadSpec();
 
@@ -47,7 +48,7 @@ class PlannedChannelContractTest {
             "PublicChannelDeliveryList");
 
     @Test
-    void channelRoutesExistAndStayPlanned() {
+    void channelRoutesExistAndArePartial() {
         for (String path : PATHS) {
             JsonNode route = CONTRACT.get("paths").get(path);
             assertThat(route != null && route.isObject())
@@ -55,14 +56,14 @@ class PlannedChannelContractTest {
                     .isTrue();
             JsonNode status = route.at("/get/x-qwen-implementation-status");
             assertThat(status.isTextual()
-                    && "planned".equals(status.textValue()))
-                    .as("%s stays planned", path)
+                    && "partial".equals(status.textValue()))
+                    .as("%s is served as partial", path)
                     .isTrue();
         }
     }
 
     @Test
-    void channelSchemasExistAndStayPlanned() {
+    void channelSchemasExistAndArePartial() {
         for (String name : SCHEMAS) {
             JsonNode schema = CONTRACT.at("/components/schemas/" + name);
             assertThat(schema.isObject())
@@ -70,8 +71,8 @@ class PlannedChannelContractTest {
                     .isTrue();
             JsonNode status = schema.at("/x-qwen-implementation-status");
             assertThat(status.isTextual()
-                    && "planned".equals(status.textValue()))
-                    .as("%s stays planned", name)
+                    && "partial".equals(status.textValue()))
+                    .as("%s is served as partial", name)
                     .isTrue();
         }
     }

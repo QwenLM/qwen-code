@@ -512,6 +512,51 @@ describe('managed auto-memory prompt helpers', () => {
     expect(prompt).toContain('- Do not write duplicate memories.');
   });
 
+  it.each(['single', 'multi'] as const)(
+    'keeps the save and update contract in the %s-tier full protocol',
+    (tier) => {
+      const memoryDir = '/tmp/project/.qwen/memory';
+      const prompt = buildManagedAutoMemoryPrompt(
+        memoryDir,
+        null,
+        tier === 'multi'
+          ? { memoryDir: '/home/u/.qwen/memories', indexContent: null }
+          : undefined,
+        tier === 'multi'
+          ? { memoryDir: '/tmp/project/.qwen/team', indexContent: null }
+          : undefined,
+      );
+
+      for (const rule of [
+        'Saving a memory is a two-step process:',
+        'You MUST access memory when the user explicitly asks',
+        'Keep one independently retrievable fact or rule per file.',
+        'Keep the name, description, type, category, keywords, and usage_scenarios fields',
+        'Update or remove memories that turn out to be wrong',
+        'Keep each memory body near or below 1,200 characters.',
+      ]) {
+        expect(prompt).toContain(rule);
+      }
+      if (tier === 'multi') {
+        expect(prompt).toContain(
+          '**Step 1** — write the memory to its own file inside the directory chosen by its `<scope>`',
+        );
+        expect(prompt).toContain(
+          '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory',
+        );
+        expect(prompt).toContain('in any of your memory directories');
+        expect(prompt).toContain('— never save them to TEAM');
+      } else {
+        expect(prompt).toContain(
+          '**Step 1** — write the memory to its own file under the matching type subdirectory',
+        );
+        expect(prompt).toContain(
+          `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path)`,
+        );
+      }
+    },
+  );
+
   it('escapes a closing system-reminder tag inside the index catalog', () => {
     // The index is file content wrapped in a `<system-reminder>` envelope; an
     // unescaped closing tag in a MEMORY.md line would end the envelope early

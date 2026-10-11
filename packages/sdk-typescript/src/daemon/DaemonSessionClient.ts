@@ -39,6 +39,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -1062,6 +1063,16 @@ export class DaemonSessionClient {
       ...(opts?.content && opts.content.length > 0
         ? { content: opts.content }
         : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /**
+   * Ask the daemon to deliver this session's queued mid-turn messages now.
+   * See `DaemonClient.sendMidTurnMessagesNow`.
+   */
+  sendMidTurnMessagesNow(): Promise<DaemonSendMidTurnMessagesNowResult> {
+    return this.client.sendMidTurnMessagesNow(this.sessionId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }

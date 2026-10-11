@@ -28,6 +28,7 @@ import type {
   Part,
 } from '@google/genai';
 import {
+  createToolLifecycle,
   type Config,
   type ContentGeneratorConfig,
   type LlmChat,
@@ -319,7 +320,10 @@ import {
   INTERRUPTED_PROMPT_ABORT_REASON,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
-import { createAgentRecordTranscriptUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
+import {
+  createAgentRecordTranscriptUpdate,
+  createTranscriptExecutionLifecycleUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
@@ -377,7 +381,11 @@ import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
-import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
+import {
+  MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX,
+  MID_TURN_RESPONSE_USER_MESSAGE_PREFIX,
+  prefixMidTurnUserMessageParts,
+} from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
   getAvailableCommands,
@@ -500,6 +508,10 @@ const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const MAX_EXTERNAL_RECORD_KEYS = 1_024;
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
+// Cuts a streaming model response short so queued user input the user asked
+// to send now reaches the model; the turn itself goes on (see
+// `#openResponseInterrupt`).
+const MID_TURN_INPUT_ABORT_REASON = 'qwen:mid-turn-input';
 const GOAL_HELD_RECOVERY_COMMANDS =
   'Run:\n/goal pause\nThen, when ready:\n/goal resume';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
@@ -1152,6 +1164,9 @@ const MID_TURN_QUEUE_DRAIN_TIMEOUT_MS = 2_000;
 // into an unrelated turn's context.
 const MID_TURN_QUEUE_RECOVERY_TIMEOUT_MS = 30_000;
 const MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS = 10_000;
+// Bounds resolving the input a finished turn keeps unsent: the turn only
+// records it, so its reply does not wait out media resolution.
+const MID_TURN_KEEP_RESOLVE_TIMEOUT_MS = 2_000;
 // `waitForActiveTurnsToSettle` polls at this interval when the active turn
 // publishes no completion promise to await — `goalProcessing` and
 // `historyMutationActive` both block `#hasActiveTurn()` without one. Yielding
@@ -2245,6 +2260,19 @@ export class Session implements SessionContext {
   // batch so a transient stall can't silently lose them. See
   // `#drainMidTurnUserMessages`.
   private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
+  // The turn the user asked to send queued input now for. Cleared whenever a
+  // drain request goes out, since that request takes everything queued before
+  // it; a request left over from an earlier turn never matches a later one.
+  private midTurnSendNowFor: AbortSignal | undefined;
+  // Pulls queued input for the model response currently open to interruption.
+  private pullForOpenResponse: (() => void) | undefined;
+  // A drain started for an open response and still awaiting its answer. Later
+  // drains wait for it, so the messages it takes are never stranded.
+  private earlyMidTurnDrain: Promise<void> | undefined;
+  // Messages such a drain took, so the turn that took them can keep them in
+  // the conversation if it ends before sending them.
+  private readonly earlyDrainedMidTurnMessages =
+    new WeakSet<DrainedMidTurnMessage>();
   private readonly todoStopGuard: DaemonTodoStopGuard;
   private readonly repeatedToolFailureGuardMode: RepeatedToolFailureGuardMode;
   private todoStopGuardBackgroundBaseline: TodoStopGuardBackgroundBaseline;
@@ -2312,6 +2340,9 @@ export class Session implements SessionContext {
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
   private unsubscribeApprovalModeChange?: () => void;
+  private unsubscribeRequestLifecycle?: () => void;
+  private requestLifecycleSessionId: string;
+  private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
@@ -2460,6 +2491,7 @@ export class Session implements SessionContext {
     ) => boolean = () => false,
   ) {
     this.sessionId = id;
+    this.requestLifecycleSessionId = id;
     // Config releases the restore projection after this Session is created.
     this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
     this.workflowHistory = [...workflowHistory];
@@ -2526,6 +2558,31 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+    this.unsubscribeRequestLifecycle = this.config.onRequestLifecycle?.(
+      (event) => {
+        if (this.disposed) return;
+        const key = JSON.stringify([
+          event.sessionId,
+          event.subagentId ?? null,
+          event.executionId,
+        ]);
+        if (
+          event.sessionId !== this.requestLifecycleSessionId &&
+          !(event.phase === 'ended' && this.requestLifecycleExecutions.has(key))
+        )
+          return;
+        if (event.phase === 'started') {
+          this.requestLifecycleExecutions.add(key);
+        } else {
+          this.requestLifecycleExecutions.delete(key);
+        }
+        void this.sendUpdate(
+          createTranscriptExecutionLifecycleUpdate(event),
+        ).catch((error) =>
+          debugLogger.warn('Failed to send request lifecycle:', error),
+        );
+      },
+    );
 
     this.unsubscribeApprovalModeChange = this.config.onApprovalModeChange?.(
       (mode, prePlanMode) => {
@@ -2629,6 +2686,7 @@ export class Session implements SessionContext {
    */
   rebindGoalRuntimeForNewSession(): void {
     if (this.disposed || this.closing) return;
+    this.requestLifecycleSessionId = this.config.getSessionId();
     this.goalRuntimeUnsubscribe?.();
     this.goalRuntimeUnsubscribe = undefined;
     this.goalHostUnbind?.();
@@ -3312,6 +3370,17 @@ export class Session implements SessionContext {
     }
     void this.#drainCronQueue();
     void this.#drainNotificationQueue();
+  }
+
+  /**
+   * Host request to deliver the queued mid-turn input now. A model response
+   * open to interruption takes it at once; otherwise the next drain does.
+   * Ignored between turns, where the host promotes the queue itself.
+   */
+  sendMidTurnInputNow(): void {
+    if (!this.pendingPrompt) return;
+    this.midTurnSendNowFor = this.pendingPrompt.signal;
+    this.pullForOpenResponse?.();
   }
 
   releaseTodoStopGuardQueuedPromptWait(promptId: string): boolean {
@@ -4645,6 +4714,9 @@ export class Session implements SessionContext {
     this.clearActiveTodoPlanRevision();
     this.unsubscribeApprovalModeChange?.();
     this.unsubscribeApprovalModeChange = undefined;
+    this.unsubscribeRequestLifecycle?.();
+    this.unsubscribeRequestLifecycle = undefined;
+    this.requestLifecycleExecutions.clear();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -5437,6 +5509,9 @@ export class Session implements SessionContext {
     const releasePendingSend = () => {
       admissionCancellation?.removeEventListener('abort', cancelPendingSend);
       pendingSend.signal.removeEventListener('abort', recordCancellation);
+      if (this.midTurnSendNowFor === pendingSend.signal) {
+        this.midTurnSendNowFor = undefined;
+      }
       if (this.pendingPrompt === pendingSend) {
         this.pendingPrompt = null;
         if (!scheduledGoalTurn)
@@ -6092,17 +6167,21 @@ export class Session implements SessionContext {
     // the first session created in this process.
     const execute = () =>
       runWithInvocationContext(invocationContext, () =>
-        sessionIdContext.run(sessionId, () =>
-          this.#executePromptInner(
-            params,
-            pendingSend,
-            responseCapture,
-            modelPrompt,
-            rejectOnLoopDetected,
-            goalTurn,
-            channelTurn,
-          ),
-        ),
+        sessionIdContext.run(sessionId, async () => {
+          try {
+            return await this.#executePromptInner(
+              params,
+              pendingSend,
+              responseCapture,
+              modelPrompt,
+              rejectOnLoopDetected,
+              goalTurn,
+              channelTurn,
+            );
+          } finally {
+            await this.#keepUnsentEarlyMidTurnInput(pendingSend.signal);
+          }
+        }),
       );
     return goalTurn
       ? goalTurnContext.run(goalTurn.permit, execute)
@@ -7024,6 +7103,12 @@ export class Session implements SessionContext {
                 const preparationTracker = new ToolCallPreparationTracker(
                   this.toolCallEmitter,
                 );
+                const responseInterrupt = this.#openResponseInterrupt(
+                  pendingSend.signal,
+                  () =>
+                    functionCalls.length > 0 || preparationTracker.hasToolCall,
+                  !channelTurn,
+                );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
@@ -7061,7 +7146,7 @@ export class Session implements SessionContext {
                     await this.#sendMessageStreamWithAutoCompression(
                       promptId,
                       nextMessage?.parts ?? [],
-                      pendingSend.signal,
+                      responseInterrupt.signal,
                       {
                         modelOverride: fullTurnModelOverride,
                         historyPromptId:
@@ -7113,7 +7198,9 @@ export class Session implements SessionContext {
                     this.#clearPendingRestoreNotices();
                   }
                   requestRouteKey = sendResult.requestRouteKey;
-                  const responseStream = sendResult.responseStream;
+                  const responseStream = responseInterrupt.watch(
+                    sendResult.responseStream,
+                  );
                   nextMessage = null;
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(responseCapture);
@@ -7238,6 +7325,10 @@ export class Session implements SessionContext {
                   // controlled aborts, and so is the bridge's forwarded
                   // interruption token. Other AbortErrors still surface so
                   // infrastructure failures are not hidden as cancellations.
+                  // A response cut short by queued input gets here only when
+                  // the turn itself is stopped meanwhile, and the turn's
+                  // abort reason then decides; otherwise `watch` absorbs
+                  // whatever it throws once cut.
                   const isControlledCancellation =
                     pendingSend.signal.aborted &&
                     (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
@@ -7312,6 +7403,13 @@ export class Session implements SessionContext {
                     '',
                     durationMs,
                   );
+                }
+
+                if (functionCalls.length === 0) {
+                  // Input taken while the response streamed, which may have
+                  // cut it short, is answered within this turn.
+                  nextMessage =
+                    await responseInterrupt.takeInput(onFullTurnModel);
                 }
 
                 if (functionCalls.length > 0) {
@@ -7474,12 +7572,24 @@ export class Session implements SessionContext {
     loopProtectionStopped?: boolean;
   }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
+    // Foreground prompts only: cron and background turns run without external
+    // hooks, and channel turns deliver each response block as it ends.
+    const interruptible = allowExternalHooks && !channelTurn;
     let stopHookIterationCount = 0;
     // Whether the turn reaching the next Stop check was forced by a blocking
     // Stop hook. Kept apart from the iteration count, which also drives the
     // consecutive-block cap and continuation prompt ids.
     let stopHookForcedTurn = false;
     let stopHookReasons: string[] = [];
+    // Queued user input a continuation answered after cutting its response
+    // short replaces the turn, as input drained before a Stop check does.
+    let continuationAnsweredUserInput = false;
+    const onUserInputAnswered = () => {
+      continuationAnsweredUserInput = true;
+      stopHookForcedTurn = false;
+      stopHookIterationCount = 0;
+      stopHookReasons = [];
+    };
     const onFullTurnModel = (model: string) => {
       if (modelOverride === model) {
         return true;
@@ -7543,6 +7653,9 @@ export class Session implements SessionContext {
             rejectOnLoopDetected,
             ...(goalTurn ? { goalTurn } : {}),
             ...(channelTurn ? { channelTurn: true } : {}),
+            ...(interruptible
+              ? { interruptible: true, onUserInputAnswered }
+              : {}),
           },
         );
         if (continuation.kind === 'terminal') return continuation;
@@ -7592,6 +7705,9 @@ export class Session implements SessionContext {
               rejectOnLoopDetected,
               ...(goalTurn ? { goalTurn } : {}),
               ...(channelTurn ? { channelTurn: true } : {}),
+              ...(interruptible
+                ? { interruptible: true, onUserInputAnswered }
+                : {}),
             },
           );
           if (continuation.kind === 'terminal') {
@@ -7704,6 +7820,9 @@ export class Session implements SessionContext {
                 rejectOnLoopDetected,
                 ...(goalTurn ? { goalTurn } : {}),
                 ...(channelTurn ? { channelTurn: true } : {}),
+                ...(interruptible
+                  ? { interruptible: true, onUserInputAnswered }
+                  : {}),
               },
             );
             if (continuation.kind === 'terminal') {
@@ -7808,6 +7927,7 @@ export class Session implements SessionContext {
       }
       // Only a continuation carrying a Stop hook's reason is hook-forced.
       stopHookForcedTurn = Boolean(externalReason);
+      continuationAnsweredUserInput = false;
       const continuation = await this.#runStopContinuation(
         pendingSend,
         continuationPromptId,
@@ -7835,13 +7955,21 @@ export class Session implements SessionContext {
           rejectOnLoopDetected,
           ...(goalTurn ? { goalTurn } : {}),
           ...(channelTurn ? { channelTurn: true } : {}),
+          ...(interruptible
+            ? { interruptible: true, onUserInputAnswered }
+            : {}),
         },
       );
       if (continuation.supersededAutomaticContinuation) {
         // Queued user input replaced the continuation.
         stopHookForcedTurn = false;
       }
-      if (continuation.supersededAutomaticContinuation && externalReason) {
+      if (
+        continuation.supersededAutomaticContinuation &&
+        externalReason &&
+        // Already restarted by the input the continuation answered.
+        !continuationAnsweredUserInput
+      ) {
         stopHookIterationCount--;
         stopHookReasons = stopHookReasons.slice(0, -1);
       }
@@ -7867,6 +7995,10 @@ export class Session implements SessionContext {
       rejectOnLoopDetected?: boolean;
       goalTurn?: AcpGoalTurn;
       channelTurn?: boolean;
+      /** Let queued user input cut its model responses short. */
+      interruptible?: boolean;
+      /** Called when the continuation answers user input it cut in for. */
+      onUserInputAnswered?: () => void;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -7924,6 +8056,11 @@ export class Session implements SessionContext {
       const preparationTracker = new ToolCallPreparationTracker(
         this.toolCallEmitter,
       );
+      const responseInterrupt = this.#openResponseInterrupt(
+        pendingSend.signal,
+        () => functionCalls.length > 0 || preparationTracker.hasToolCall,
+        options.interruptible === true,
+      );
       let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
       const streamStartTime = Date.now();
       let streamFailed = false;
@@ -7960,7 +8097,7 @@ export class Session implements SessionContext {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
           promptIdForSend,
           nextMessage.parts ?? [],
-          pendingSend.signal,
+          responseInterrupt.signal,
           {
             skipCompression:
               skipCompression || (guardForThisSend?.attempt ?? 0) > 1,
@@ -8252,7 +8389,9 @@ export class Session implements SessionContext {
         }
 
         requestRouteKey = sendResult.requestRouteKey;
-        const responseStream = sendResult.responseStream;
+        const responseStream = responseInterrupt.watch(
+          sendResult.responseStream,
+        );
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.responseCapture,
@@ -8448,6 +8587,19 @@ export class Session implements SessionContext {
         );
       }
 
+      if (functionCalls.length === 0) {
+        // Input taken while the response streamed, which may have cut it
+        // short, is answered within this turn.
+        nextMessage = await responseInterrupt.takeInput(
+          options.onFullTurnModel,
+        );
+        if (nextMessage) {
+          nextGuardContinuation = undefined;
+          options.onUserInputAnswered?.();
+          continue;
+        }
+      }
+
       if (functionCalls.length > 0) {
         const toolRun = await this.#runWithFullTurnModel(
           options.getModelOverride?.(),
@@ -8628,6 +8780,10 @@ export class Session implements SessionContext {
         `Failed to emit Todo Stop Guard status: ${this.#formatError(error)}`,
       );
     }
+  }
+
+  isDisposed(): boolean {
+    return this.disposed;
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -9750,8 +9906,13 @@ export class Session implements SessionContext {
     options: {
       watchQueuedPrompt?: boolean;
       onFullTurnModel?: (model: string) => boolean;
+      preserveFallbackOnAbort?: boolean;
+      prefix?: string;
     } = {},
   ): Promise<MidTurnDrainResult> {
+    // An early drain for an open response may still be in flight; let it land
+    // so the messages it took are injected here rather than stranded.
+    if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
     // Flush anything recovered from a PRIOR timed-out drain first: the daemon
     // splices + SSE-publishes synchronously, so on a timeout the browser has
     // already deduped those messages — discarding the late response would lose
@@ -9767,20 +9928,68 @@ export class Session implements SessionContext {
       };
     }
 
+    const drained = await this.#requestMidTurnDrain(
+      this.#midTurnDrainPromptId(),
+      options.watchQueuedPrompt === true,
+    );
+    if (!drained) {
+      // Even on a failed/timed-out drain, still inject anything recovered from
+      // an EARLIER timeout so a transient stall never strands those messages.
+      return {
+        parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
+        hasQueuedPrompt: false,
+        reliable: false,
+      };
+    }
+    const { response } = drained;
+    return {
+      parts: await this.#buildMidTurnParts(
+        [...recovered, ...parseMidTurnDrainResponse(response)],
+        abortSignal,
+        options,
+      ),
+      hasQueuedPrompt:
+        isRecord(response) && response['hasQueuedPrompt'] === true,
+      reliable: isValidMidTurnDrainResponse(
+        response,
+        options.watchQueuedPrompt === true,
+      ),
+    };
+  }
+
+  /** The execution the host drains for: an active background turn, else the invocation. */
+  #midTurnDrainPromptId(): string | undefined {
+    const background = backgroundTurnContext.getStore();
+    return background?.active && background.sessionId === this.sessionId
+      ? background.turn.turnId
+      : getInvocationContext()?.promptId;
+  }
+
+  /**
+   * One drain round trip to the host. Resolves to the host's answer, or to
+   * `undefined` when the drain failed (and was latched off if permanently).
+   */
+  async #requestMidTurnDrain(
+    promptId: string | undefined,
+    watchQueuedPrompt: boolean,
+    sendNow?: {
+      /** Takes what a timed-out drain still hands over afterwards. */
+      onLate: (messages: DrainedMidTurnMessage[]) => void;
+    },
+  ): Promise<{ response: unknown } | undefined> {
+    // This request takes everything queued so far; a send-now request handled
+    // after it goes out sets the request again.
+    this.midTurnSendNowFor = undefined;
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     try {
-      const background = backgroundTurnContext.getStore();
-      const promptId =
-        background?.active && background.sessionId === this.sessionId
-          ? background.turn.turnId
-          : getInvocationContext()?.promptId;
       drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
         sessionId: this.sessionId,
         ...(promptId ? { promptId } : {}),
         // Keep the legacy wire name for ACP host compatibility.
-        ...(options.watchQueuedPrompt
-          ? { todoStopGuardWatchQueuedPrompt: true }
-          : {}),
+        ...(watchQueuedPrompt ? { todoStopGuardWatchQueuedPrompt: true } : {}),
+        // Send-now takes the user's messages only; queue-only steering stays
+        // for the tool boundary.
+        ...(sendNow ? { userInputOnly: true } : {}),
       });
       let timeoutHandle: NodeJS.Timeout | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -9796,20 +10005,7 @@ export class Session implements SessionContext {
         clearTimeout(timeoutHandle);
       }
       this.midTurnDrainTimeoutStrikes = 0;
-      const reliable = isValidMidTurnDrainResponse(
-        response,
-        options.watchQueuedPrompt === true,
-      );
-      return {
-        parts: await this.#buildMidTurnParts(
-          [...recovered, ...parseMidTurnDrainResponse(response)],
-          abortSignal,
-          options,
-        ),
-        hasQueuedPrompt:
-          isRecord(response) && response['hasQueuedPrompt'] === true,
-        reliable,
-      };
+      return { response };
     } catch (error) {
       // The ACP SDK rejects with the raw JSON-RPC error object
       // (`{ code, message, data }`), which is not an `Error` instance, so
@@ -9842,7 +10038,9 @@ export class Session implements SessionContext {
         // down with it. Swallow silently rather than log, since the logger is
         // itself one of the things that can throw here.
         if (drainPromise) {
-          void this.#recoverLateDrain(drainPromise).catch(() => {});
+          void this.#recoverLateDrain(drainPromise, sendNow?.onLate).catch(
+            () => {},
+          );
         }
       }
       // Repeated timeouts are also permanent: a conforming client answers
@@ -9864,13 +10062,7 @@ export class Session implements SessionContext {
       debugLogger.warn(
         `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
       );
-      // Even on a failed/timed-out drain, still inject anything recovered from
-      // an EARLIER timeout so a transient stall never strands those messages.
-      return {
-        parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
-        hasQueuedPrompt: false,
-        reliable: false,
-      };
+      return undefined;
     }
   }
 
@@ -9883,6 +10075,186 @@ export class Session implements SessionContext {
   }
 
   /**
+   * Opens one model response to interruption by queued user input. Send with
+   * `signal` and iterate the stream through `watch`. While the response
+   * streams without a tool call, started or complete, a send-now request
+   * drains the queue at once and, when that yields input, cuts the response
+   * short: `watch` then
+   * ends as if the stream had, with the part already delivered kept in
+   * history as on a cancel. When the response produced no function call,
+   * `takeInput` returns the user message to send next if this response's
+   * drain took input, or null.
+   */
+  #openResponseInterrupt(
+    turnSignal: AbortSignal,
+    hasFunctionCalls: () => boolean,
+    enabled: boolean,
+  ): {
+    signal: AbortSignal;
+    watch: (stream: AsyncGenerator<StreamEvent>) => AsyncGenerator<StreamEvent>;
+    takeInput: (
+      onFullTurnModel?: (model: string) => boolean,
+    ) => Promise<Content | null>;
+  } {
+    if (!enabled) {
+      return {
+        signal: turnSignal,
+        watch: (stream) => stream,
+        takeInput: async () => null,
+      };
+    }
+    const controller = new AbortController();
+    // Captured in the turn's context; send-now requests arrive outside it.
+    const promptId = this.#midTurnDrainPromptId();
+    let open = false;
+    let tookInput = false;
+    const pull = (): void => {
+      if (
+        !open ||
+        this.midTurnSendNowFor !== turnSignal ||
+        // A response that started a tool call is not cut short, so the queue
+        // stays with the host for the tool boundary, or for promotion when a
+        // tool ends the turn.
+        hasFunctionCalls() ||
+        this.earlyMidTurnDrain ||
+        this.midTurnDrainUnavailable ||
+        turnSignal.aborted
+      ) {
+        return;
+      }
+      // Drain before cutting the response: aborting first could leave nothing
+      // to send when the input was already taken or removed.
+      // Messages are already in the buffer every later drain reads first, so
+      // the input is delivered even when the response ends before it can be
+      // cut short.
+      const took = (messages: DrainedMidTurnMessage[]): void => {
+        tookInput = true;
+        for (const message of messages) {
+          this.earlyDrainedMidTurnMessages.add(message);
+        }
+        if (open && !hasFunctionCalls() && !turnSignal.aborted) {
+          controller.abort(MID_TURN_INPUT_ABORT_REASON);
+        }
+      };
+      const drain = (async () => {
+        const drained = await this.#requestMidTurnDrain(promptId, false, {
+          // A late answer counts only while this response still streams;
+          // after that it takes the existing late-recovery path, which
+          // delivers it at the next tool boundary.
+          onLate: (messages) => {
+            if (open) took(messages);
+          },
+        });
+        const messages = drained
+          ? parseMidTurnDrainResponse(drained.response)
+          : [];
+        if (messages.length === 0) return;
+        this.midTurnRecoveredMessages.push(...messages);
+        took(messages);
+      })().catch(() => {});
+      this.earlyMidTurnDrain = drain;
+      void drain.then(() => {
+        if (this.earlyMidTurnDrain === drain) {
+          this.earlyMidTurnDrain = undefined;
+        }
+        // A send-now request handled while this one was out may bring more
+        // input.
+        this.pullForOpenResponse?.();
+      });
+    };
+    const begin = () => {
+      open = true;
+      this.pullForOpenResponse = pull;
+      pull();
+    };
+    const end = () => {
+      open = false;
+      if (this.pullForOpenResponse === pull) {
+        this.pullForOpenResponse = undefined;
+      }
+    };
+    const interrupted = () => controller.signal.aborted && !turnSignal.aborted;
+    return {
+      signal: AbortSignal.any([turnSignal, controller.signal]),
+      async *watch(stream) {
+        begin();
+        try {
+          yield* stream;
+        } catch (error) {
+          // The cut can arrive as the abort reason itself or as a transport's
+          // own abort error, not always an AbortError. Whatever the response
+          // throws once cut is absorbed: it was given up, and a failure that
+          // persists surfaces from the next request.
+          if (!interrupted()) throw error;
+        } finally {
+          end();
+        }
+      },
+      takeInput: async (onFullTurnModel) => {
+        if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
+        // Without input taken here, delivery stays at tool boundaries. A
+        // stopped turn takes nothing more from the host, which promotes what
+        // is still queued; the input already taken is kept when the turn ends.
+        if (!tookInput || turnSignal.aborted) return null;
+        // The user already sees this input as delivered: keep it, as text if
+        // need be, even when the turn is cancelled while it is resolved.
+        const drained = await this.#drainMidTurnInput(turnSignal, {
+          onFullTurnModel,
+          preserveFallbackOnAbort: true,
+          prefix: interrupted()
+            ? MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX
+            : MID_TURN_RESPONSE_USER_MESSAGE_PREFIX,
+        });
+        if (drained.parts.length === 0) return null;
+        this.todoStopGuard.acceptMidTurnUserInput();
+        return { role: 'user', parts: drained.parts };
+      },
+    };
+  }
+
+  /**
+   * Keeps input an early drain took during this turn but never sent. The host
+   * has already handed it over and the user sees it as delivered, so a turn
+   * that is cancelled or fails first records it in the conversation, as a
+   * stopped tool run does, instead of carrying it into a later turn.
+   */
+  async #keepUnsentEarlyMidTurnInput(abortSignal: AbortSignal): Promise<void> {
+    try {
+      if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
+      const unsent = this.midTurnRecoveredMessages.filter((message) =>
+        this.earlyDrainedMidTurnMessages.has(message),
+      );
+      if (unsent.length === 0) return;
+      this.midTurnRecoveredMessages = this.midTurnRecoveredMessages.filter(
+        (message) => !this.earlyDrainedMidTurnMessages.has(message),
+      );
+      const deadline = new AbortController();
+      const timer = setTimeout(
+        () => deadline.abort(),
+        MID_TURN_KEEP_RESOLVE_TIMEOUT_MS,
+      );
+      let parts: Part[];
+      try {
+        parts = await this.#buildMidTurnParts(unsent, abortSignal, {
+          preserveFallbackOnAbort: true,
+          prefix: MID_TURN_RESPONSE_USER_MESSAGE_PREFIX,
+          deadline: deadline.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (parts.length > 0) {
+        this.#getCurrentChat().addHistory({ role: 'user', parts });
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `[mid-turn] failed to keep unsent input [session ${this.sessionId}]`,
+        error,
+      );
+    }
+  }
+
+  /**
    * After a drain times out, the request is still pending; the daemon settles it
    * shortly after (it splices + SSE-publishes synchronously, so the browser has
    * already deduped). Recover that late response for the next batch instead of
@@ -9892,6 +10264,7 @@ export class Session implements SessionContext {
    */
   async #recoverLateDrain(
     pending: ReturnType<AgentSideConnection['extMethod']>,
+    onLate?: (messages: DrainedMidTurnMessage[]) => void,
   ): Promise<void> {
     // Swallow a late rejection regardless of which branch of the race wins.
     pending.catch(() => {});
@@ -9924,6 +10297,7 @@ export class Session implements SessionContext {
         `[mid-turn] recovered ${lateMessages.length} message(s) from a timed-out drain [session ${this.sessionId}]`,
       );
       this.midTurnRecoveredMessages.push(...lateMessages);
+      onLate?.(lateMessages);
     }
   }
 
@@ -9939,8 +10313,14 @@ export class Session implements SessionContext {
     options: {
       onFullTurnModel?: (model: string) => boolean;
       preserveFallbackOnAbort?: boolean;
+      prefix?: string;
+      /** Also ends resolution, which then falls back to the message text. */
+      deadline?: AbortSignal;
     } = {},
   ): Promise<Part[]> {
+    const resolveSignal = options.deadline
+      ? AbortSignal.any([abortSignal, options.deadline])
+      : abortSignal;
     const proposalTurn = this.activeGoalProposalTurn;
     if (
       messages.length > 0 &&
@@ -9949,7 +10329,7 @@ export class Session implements SessionContext {
       proposalTurn.settlementBlocked = true;
     }
     const parts: Part[] = [];
-    for (const message of messages) {
+    for (const [index, message] of messages.entries()) {
       const displayText =
         message.kind === 'text' ? message.message : message.displayText;
       let rawParts: Part[];
@@ -9958,7 +10338,7 @@ export class Session implements SessionContext {
           rawParts = [{ text: message.message }];
         } else {
           rawParts = await withTimeoutSignal(
-            abortSignal,
+            resolveSignal,
             MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
             (signal) =>
               this.#resolvePrompt(message.content, signal, {
@@ -9966,18 +10346,29 @@ export class Session implements SessionContext {
               }),
           );
           // Keep local resolution bounded, then let media bridges own their
-          // longer timeouts while remaining cancellable by the real turn.
+          // longer timeouts while remaining cancellable by the real turn. A
+          // deadline cancels them too, so nothing runs on or reports after
+          // it; their per-turn limits then count this input on its own.
           rawParts = await this.#applyBridgeConversionsIfNeeded(
             rawParts,
             message.content,
-            abortSignal,
+            resolveSignal,
             options.onFullTurnModel,
           );
           // Bridges report cancellation as skipped instead of throwing.
-          abortSignal.throwIfAborted();
+          resolveSignal.throwIfAborted();
         }
       } catch (messageError) {
         if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
+          // Input an early drain took is kept when the turn ends, so give
+          // back what of it this drain did not build.
+          this.midTurnRecoveredMessages.unshift(
+            ...messages
+              .slice(index)
+              .filter((unbuilt) =>
+                this.earlyDrainedMidTurnMessages.has(unbuilt),
+              ),
+          );
           return parts;
         }
         if (!abortSignal.aborted) {
@@ -9994,7 +10385,11 @@ export class Session implements SessionContext {
           rawParts.push({ text: MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT });
         }
       }
-      const built = prefixMidTurnUserMessageParts(rawParts, displayText);
+      const built = prefixMidTurnUserMessageParts(
+        rawParts,
+        displayText,
+        options.prefix,
+      );
       const recorder = this.config.getChatRecordingService();
       if (message.kind === 'structured' && message.attachmentReferences) {
         const everyAttachmentBlockHasAReference =
@@ -13157,6 +13552,18 @@ export class Session implements SessionContext {
         },
       };
       const error = new Error(message);
+      const skippedLifecycle =
+        toolName === ToolNames.TODO_WRITE
+          ? undefined
+          : createToolLifecycle(this.config, callId, toolName);
+      const lifecycle = skippedLifecycle?.finish('error', 'not_started');
+      if (lifecycle) {
+        void this.toolCallEmitter
+          .emitLifecycle(lifecycle)
+          .catch((error) =>
+            debugLogger.debug('Failed to emit skipped tool lifecycle', error),
+          );
+      }
       try {
         queueToolResultRecord(fc, {
           callId,
@@ -13903,6 +14310,38 @@ export class Session implements SessionContext {
       executionStartedAt === undefined
         ? undefined
         : Math.round(performance.now() - executionStartedAt);
+    let lifecycleExecutionDurationMs: number | undefined;
+    let lifecycleExecuted = false;
+    let lifecycleSettled = false;
+    let lifecycleActualStatus: ToolExecutionStatus = 'not_started';
+    let lifecycleTerminalOutcome: 'success' | 'error' | 'cancelled' | undefined;
+    const toolLifecycle =
+      modelFacingToolName === ToolNames.TODO_WRITE
+        ? undefined
+        : createToolLifecycle(this.config, callId, modelFacingToolName);
+    const publishToolLifecycle = (
+      event: ReturnType<NonNullable<typeof toolLifecycle>['start']>,
+    ) => {
+      if (!event || this.disposed) return;
+      void this.toolCallEmitter
+        .emitLifecycle(event)
+        .catch((error) =>
+          debugLogger.debug('Failed to emit tool lifecycle', error),
+        );
+    };
+    const finishToolLifecycle = (
+      outcome: 'success' | 'error' | 'cancelled',
+    ) => {
+      lifecycleTerminalOutcome = outcome;
+      if (lifecycleExecuted && !lifecycleSettled) return;
+      publishToolLifecycle(
+        toolLifecycle?.finish(
+          outcome,
+          lifecycleActualStatus,
+          lifecycleExecutionDurationMs,
+        ),
+      );
+    };
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     // Released when the call ends, however it ends, as the core scheduler does.
@@ -14072,6 +14511,7 @@ export class Session implements SessionContext {
     ) => {
       executionStatus = opts.executionStatus;
       terminalStatus = opts.status;
+      finishToolLifecycle(opts.status);
       spanError = opts.status === 'error' ? error.message : undefined;
       cleanupAgentToolResources();
       const errorParts = errorResponse(
@@ -14920,6 +15360,11 @@ export class Session implements SessionContext {
           }
           let wasAutoModeManualFallback = false;
           let autoModeFallback: AutoModeFallbackConfirmation | undefined;
+          // Set when the fallback came from the deterministic destructive
+          // guard rather than the classifier, whose escalation shares the same
+          // reason code. Mirrors the scheduler's gate so a PermissionRequest
+          // hook cannot waive the guard on this path either.
+          let autoModeFallbackRequiresHuman = false;
           // Recovery state follows the input whose classification was last
           // decided, so approving a fallback resets the right counters.
           const updateAutoModeFallback = (
@@ -14928,7 +15373,10 @@ export class Session implements SessionContext {
           ) => {
             wasAutoModeManualFallback = false;
             autoModeFallback = undefined;
+            autoModeFallbackRequiresHuman = false;
             if (outcome?.kind !== 'fallback') return;
+            autoModeFallbackRequiresHuman =
+              outcome.requiresHumanDecision === true;
             wasAutoModeManualFallback =
               isDenialFallbackReason(outcome.reason) ||
               outcome.reason === 'classifier_unavailable' ||
@@ -15189,7 +15637,8 @@ export class Session implements SessionContext {
 
               if (
                 hookResult.hasDecision &&
-                (!hookResult.shouldAllow || !requiresUserInteraction)
+                (!hookResult.shouldAllow ||
+                  (!requiresUserInteraction && !autoModeFallbackRequiresHuman))
               ) {
                 hookHandled = true;
                 if (hookResult.shouldAllow) {
@@ -15349,8 +15798,8 @@ export class Session implements SessionContext {
                         );
                       }
                       // AUTO mode judges the replacement like any input: its
-                      // own allow rule, else the classifier. Only a block
-                      // overrides this hook's one-time allow.
+                      // own allow rule, else the classifier. A block denies it;
+                      // a destructive guard fallback still needs a human.
                       const replacementParams = replacement.params as Record<
                         string,
                         unknown
@@ -15401,17 +15850,29 @@ export class Session implements SessionContext {
                       trackAgentInvocation();
                     }
 
-                    await confirmationDetails.onConfirm(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    );
-                    const hookConfirmationCancellation =
-                      cancelBeforeExecutionIfAborted(toolName);
-                    if (hookConfirmationCancellation) {
-                      return hookConfirmationCancellation;
+                    if (autoModeFallbackRequiresHuman) {
+                      if (autoModeFallback) {
+                        confirmationDetails =
+                          decorateAutoModeFallbackConfirmation(
+                            confirmationDetails,
+                            autoModeFallback.reason,
+                            autoModeFallback.message,
+                          );
+                      }
+                      hookHandled = false;
+                    } else {
+                      await confirmationDetails.onConfirm(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
+                      const hookConfirmationCancellation =
+                        cancelBeforeExecutionIfAborted(toolName);
+                      if (hookConfirmationCancellation) {
+                        return hookConfirmationCancellation;
+                      }
+                      recordAutoModeFallbackResolution(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
                     }
-                    recordAutoModeFallbackResolution(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    );
                   }
                 } else {
                   return earlyErrorResponse(
@@ -16022,12 +16483,54 @@ export class Session implements SessionContext {
             executeAttempted = true;
             executionStartedAt = performance.now();
             try {
-              const execute = () =>
-                invocation.execute(
-                  activeToolAbortSignal,
-                  onToolProgress,
-                  this.config.getShellExecutionConfig(),
+              const execute = () => {
+                lifecycleExecuted = true;
+                executionStartedAt = performance.now();
+                publishToolLifecycle(
+                  toolLifecycle?.start(Date.now(), toolName),
                 );
+                const settle = (
+                  result?: ToolResult,
+                  error?: unknown,
+                  threw = false,
+                ) => {
+                  lifecycleExecutionDurationMs = elapsedExecutionMs();
+                  lifecycleSettled = true;
+                  const timeout =
+                    result?.error?.type === ToolErrorType.EXECUTION_TIMEOUT ||
+                    (error as { errorType?: ToolErrorType } | undefined)
+                      ?.errorType === ToolErrorType.EXECUTION_TIMEOUT;
+                  lifecycleActualStatus =
+                    activeToolAbortSignal.aborted && !timeout
+                      ? 'cancelled'
+                      : threw || result?.error
+                        ? 'error'
+                        : 'success';
+                  if (lifecycleTerminalOutcome)
+                    finishToolLifecycle(lifecycleTerminalOutcome);
+                };
+                try {
+                  return invocation
+                    .execute(
+                      activeToolAbortSignal,
+                      onToolProgress,
+                      this.config.getShellExecutionConfig(),
+                    )
+                    .then(
+                      (result) => {
+                        settle(result);
+                        return result;
+                      },
+                      (error: unknown) => {
+                        settle(undefined, error, true);
+                        throw error;
+                      },
+                    );
+                } catch (error) {
+                  settle(undefined, error, true);
+                  throw error;
+                }
+              };
               if (toolName !== ToolNames.EXEC) {
                 if (codeModeContext) {
                   let cancelExecution: (() => void) | undefined;
@@ -16582,6 +17085,7 @@ export class Session implements SessionContext {
             );
           }
           terminalStatus = status;
+          finishToolLifecycle(status);
           const succeeded = status === 'success';
           const responseError =
             status === 'error' && toolResult.error

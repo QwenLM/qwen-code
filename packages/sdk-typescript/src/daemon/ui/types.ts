@@ -201,6 +201,8 @@ export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
  * recorded value — a missing field means the session did not record it.
  */
 export interface DaemonTranscriptTimingMeta {
+  /** One application-observable model invocation, independent of response ID. */
+  executionId?: string;
   kind: 'request' | 'tool';
   /**
    * Epoch ms. A request frame has one whenever its end was recorded: a request
