@@ -607,6 +607,54 @@ describe('managed email inbound', () => {
     ]);
   });
 
+  it.each([
+    { status: 403, code: 'workspace_forbidden' },
+    { status: 409, code: 'workspace_unavailable' },
+  ])(
+    'stalls admission on consecutive $code refusals instead of dropping every message (R6-1)',
+    async ({ status, code }) => {
+      // workspace_forbidden (the actor demoted past create) and
+      // workspace_unavailable (the bound workspace no longer ACTIVE) are
+      // instance-scoped like workspace_not_found: every determinant of
+      // the verdict comes from the channel instance row, so each inbound
+      // meets it identically and no retry heals it. They take the same
+      // bounded stall — the first drop stays (R3-1), the second
+      // consecutive verdict holds its claim — not an unbounded
+      // first-occurrence drop destroying every new-thread message behind
+      // one routine log line while the channel reports connected.
+      const lines: string[] = [];
+      const adapter = make({}, { log: (line: string) => lines.push(line) });
+      await adapter.connect();
+      plane.submitInbound = async () => {
+        plane.submitAttempts += 1;
+        throw Object.assign(new Error(`HTTP ${status}`), { status, code });
+      };
+      append(raw('one', 'first'));
+      const held = append(raw('two', 'second'));
+      append(raw('three', 'third'));
+      await adapter.tick();
+      // The first poison claim dropped (R3-1); the second tripped the
+      // stall and is held, so the third was never admitted.
+      expect(state(adapter).pending).toEqual([
+        { uid: held, eventId: `1:${held}` },
+      ]);
+      expect(state(adapter).lastUid).toBe(held);
+      expect(plane.events).toEqual([]);
+      append(raw('four', 'fourth'));
+      await adapter.tick();
+      // The stall gates the search: mail arriving under it is never
+      // admitted to its destruction either.
+      expect(state(adapter).pending).toEqual([
+        { uid: held, eventId: `1:${held}` },
+      ]);
+      expect(state(adapter).lastUid).toBe(held);
+      expect(plane.events).toEqual([]);
+      expect(
+        lines.filter((line) => line.includes('stopped admitting')),
+      ).toHaveLength(1);
+    },
+  );
+
   it('re-probes one held claim per poll while the workspace stall holds (R5-1)', async () => {
     // The held claim's re-drive is the probe that lifts the stall, and
     // one probe per poll is enough: the verdict cannot change within a
