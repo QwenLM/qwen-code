@@ -120,6 +120,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private static final Pattern DEFINITION_REVISION = Pattern.compile(
             "^[1-9][0-9]{0,17}$");
     private final boolean workspaceFilesEnabled;
+    private final boolean workspaceShellEnabled;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final RowMapper<SessionRecord> sessionMapper = (result, row) ->
             new SessionRecord(result.getString("tenant_id"),
@@ -253,6 +254,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.definitionToolProfiles = properties.getDefinitionToolProfiles();
         this.definitionModels = properties.getDefinitionModels();
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
+        this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         if (agentRevision == null || agentRevision.isBlank()
                 || agentRevision.length() > 128) {
@@ -292,10 +294,14 @@ public class ManagedAgentStore implements AgentStateStore {
                 actorId, idempotencyKey);
         if (!existing.isEmpty()) {
             return replayWorkspaceCommand(tenantId, actorId,
-                    requestDigest, existing.getFirst());
+                    requestDigest, existing.getFirst(), false);
         }
         AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision,
                 true);
+        if (!input.isEmpty() && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
+                && !workspaceShellEnabled) {
+            throw workspaceExecutionUnavailable();
+        }
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
@@ -315,6 +321,35 @@ public class ManagedAgentStore implements AgentStateStore {
                 workspace, actorId, pin);
     }
 
+    /** Trusted internal creation; public requests and definitions cannot select this policy. */
+    @Transactional
+    public Admission insertInternalTeamLeadSessionCommand(String tenantId,
+            String actorId, String idempotencyKey, String requestDigest,
+            String title, WorkspaceSelection selection) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
+                actorId, idempotencyKey);
+        if (!existing.isEmpty()) {
+            return replayWorkspaceCommand(tenantId, actorId,
+                    requestDigest, existing.getFirst(), true);
+        }
+        if (!workspaceFilesEnabled) {
+            throw workspaceExecutionUnavailable();
+        }
+        requireCreationScope(tenantId, idempotencyKey, true);
+        ResolvedBinding workspace = workspaces.resolveForCreation(tenantId, actorId, selection);
+        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
+        if (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
+                || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
+                || workspaceMounts.stream().noneMatch(mount -> tenantId.equals(mount.tenantId())
+                        && workspace.binding().getStorageId().equals(mount.storageId()))) {
+            throw workspaceExecutionUnavailable();
+        }
+        return insertSession(tenantId, "CREATE_SESSION", idempotencyKey, requestDigest,
+                "qwen-code", title, List.of(), null, workspace, actorId,
+                new AgentPin(agentRevision, null, approvalMode, WorkspaceToolProfiles.INTERNAL_TEAM_LEAD));
+    }
+
     @Override
     @Transactional
     public Admission replayWorkspaceSessionCommand(String tenantId,
@@ -326,7 +361,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     "idempotency_conflict", "The creation command is missing.");
         }
         return replayWorkspaceCommand(tenantId, actorId, requestDigest,
-                existing.getFirst());
+                existing.getFirst(), false);
     }
 
     private static String childActorOf(String parentSessionId) {
@@ -588,14 +623,17 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private Admission replayWorkspaceCommand(String tenantId, String actorId,
-            String requestDigest, WorkspaceCommand command) {
-        if (!command.requestDigest().equals(requestDigest)) {
+            String requestDigest, WorkspaceCommand command, boolean internalTeamLead) {
+        SessionRecord session = requireSession(tenantId, command.sessionId());
+        if (!command.requestDigest().equals(requestDigest)
+                || internalTeamLead != WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(session.toolProfile())
+                || internalTeamLead && (!"qwen-code".equals(session.agentId())
+                        || session.agentDefinitionDigest() != null)) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "idempotency_conflict",
                     "The idempotency key was reused with different content.");
         }
-        ContextBinding bound = requireSession(tenantId,
-                command.sessionId()).workspace();
+        ContextBinding bound = session.workspace();
         if (bound == null) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "workspace_unavailable", "Workspace binding is missing.");
@@ -684,8 +722,11 @@ public class ManagedAgentStore implements AgentStateStore {
                         "unsupported_feature",
                         "Only the current agent revision can be selected.");
             }
-            return new AgentPin(agentRevision, null, approvalMode,
-                    workspaceBound ? "hosted-workspace-files/1" : null);
+            String toolProfile = workspaceBound
+                    ? (workspaceShellEnabled ? WorkspaceToolProfiles.SHELL
+                            : WorkspaceToolProfiles.FILES)
+                    : null;
+            return new AgentPin(agentRevision, null, approvalMode, toolProfile);
         }
         if (definitions == null) {
             throw ManagedAgentDefinitionStore.notFound();
@@ -815,6 +856,9 @@ public class ManagedAgentStore implements AgentStateStore {
         if (existing.isPresent()) {
             return replayCommand(tenantId, operation, idempotencyKey,
                     requestDigest);
+        }
+        if (WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
+            throw workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
@@ -1168,6 +1212,11 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    public boolean workspaceShellEnabled() {
+        return workspaceShellEnabled;
+    }
+
+    @Override
     @Transactional
     public OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId,
             String actorDigest, String key, String digest, boolean supported) {
@@ -1178,14 +1227,16 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
             OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean closeSupported) {
-        return beginLifecycle(tenantId, sessionId, kind, actorDigest, key, digest, actorId, closeSupported);
+        // H4b child close is the only production caller. Public lifecycle uses
+        // the protocol overload and still refuses a Shell profile.
+        return beginLifecycle(tenantId, sessionId, kind, actorDigest, key, digest, actorId, closeSupported, 0, false);
     }
 
     @Override
     @Transactional
     public OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
             OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
-        return beginLifecycle(tenantId, sessionId, kind, actorDigest, key, digest, actorId, supported, protocolVersion);
+        return beginLifecycle(tenantId, sessionId, kind, actorDigest, key, digest, actorId, supported, protocolVersion, true);
     }
 
     @Override
@@ -1244,6 +1295,9 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new SessionMutation(session, true);
         }
+        if (WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
+            throw workspaceExecutionUnavailable();
+        }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         requireSessionStatus(session.status(), "ARCHIVED");
         requireNoOpenOperation(tenantId, sessionId);
@@ -1264,11 +1318,17 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported) {
-        return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, actorId, supported, 0);
+        return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, actorId, supported, 0, true);
     }
 
     private OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion) {
+        return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, actorId, supported, protocolVersion, true);
+    }
+
+    private OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
+            String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion,
+            boolean refuseShell) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         if (protocolVersion == 1) {
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
@@ -1293,6 +1353,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         "The idempotency key was reused with different content.");
             }
             return new OperationAdmission(existing.get(), true);
+        }
+        if (refuseShell && WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
+            throw workspaceExecutionUnavailable();
         }
         if (hasPendingRenameDelivery(tenantId, sessionId)) {
             throw new ApiException(HttpStatus.CONFLICT, "session_operation_active",

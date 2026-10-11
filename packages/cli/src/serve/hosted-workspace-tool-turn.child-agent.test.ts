@@ -35,6 +35,10 @@ import {
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import {
+  hostedShellLaneAttachesChildAgents,
+  type HostedWorkspaceToolProfile,
+} from './hosted-workspace-profiles.js';
 
 // H4b: the kind gate admits `child_agent` for real, so this suite runs
 // without an enablement mock. The Broker is mocked as in the sibling
@@ -111,7 +115,9 @@ function createTurn(
   promptName = 'prompt',
   hooksMountHeld = false,
   childWorkspaces = false,
+  attachChildAgents = true,
   hooksSession?: HostedHookSession,
+  profile: HostedWorkspaceToolProfile = 'hosted-workspace-team-lead/1',
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -145,13 +151,17 @@ function createTurn(
     },
     undefined,
     {
-      profile: 'hosted-workspace-shell/1',
-      childAgents: {
-        funnel: children,
-        depth,
-        childWorkspaces,
-        queueConsumption: (childRunId) => consumption.push(childRunId),
-      },
+      profile,
+      ...(attachChildAgents
+        ? {
+            childAgents: {
+              funnel: children,
+              depth,
+              childWorkspaces,
+              queueConsumption: (childRunId) => consumption.push(childRunId),
+            },
+          }
+        : {}),
       ...(hookEvents
         ? {
             hooks: {
@@ -258,6 +268,26 @@ beforeEach(async () => {
 afterEach(async () => {
   await session?.close();
   await rm(root, { recursive: true, force: true });
+});
+
+it('advertises child agents only on a shell lane that public admission has not suppressed', () => {
+  expect(hostedShellLaneAttachesChildAgents(true, false)).toBe(true);
+  expect(hostedShellLaneAttachesChildAgents(true, true)).toBe(false);
+  expect(hostedShellLaneAttachesChildAgents(false, false)).toBe(false);
+});
+
+it('hides the agent tool when public shell admission attaches no child orchestrator', async () => {
+  const tools = await createTurn(
+    0,
+    undefined,
+    'prompt',
+    false,
+    false,
+    false,
+    undefined,
+    'hosted-workspace-shell/1',
+  ).declarations(new AbortController().signal);
+  expect(tools.some((tool) => tool.name === 'agent')).toBe(false);
 });
 
 it('declares the agent tool at the root and hides it from a child Session', async () => {
@@ -1408,7 +1438,7 @@ it.each(
       eventName,
       config: { type: 'command' },
     });
-    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     try {
       const result = await executeAgent(
         turn,
@@ -1442,7 +1472,7 @@ it('refuses a background child on a result Hook whose matcher cannot match agent
     config: { type: 'command' },
     matcher: 'read_file',
   });
-  const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+  const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
   try {
     expect(hooks.hasMountableToolResultHooks).toBe(true);
     const result = await executeAgent(
@@ -1509,7 +1539,7 @@ it.each([false, true])(
       session,
       original.getCatalog()!,
     );
-    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     try {
       expect(original.hasMountableToolResultHooks).toBe(true);
       await original.fire(
@@ -1598,7 +1628,7 @@ it('refuses a child while a once Hook is committed but unsettled', async () => {
     session,
     catalog,
   );
-  const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+  const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
   await hooks.ensureReady();
   expect(hooks.mountHeld).toBe(false);
   expect(hooks.hasUnsettledExecutions).toBe(true);
@@ -1627,7 +1657,7 @@ it.each(
   'admits result-Hook controls %# (background=$background)',
   async ({ descriptor, background }) => {
     const hooks = await restoredHooks(descriptor);
-    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     turn.setPromptHookRunner(async (hookConfig, eventName) => ({
       hookConfig,
       eventName,
