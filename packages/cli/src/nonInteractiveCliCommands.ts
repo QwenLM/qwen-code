@@ -20,6 +20,7 @@ import {
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
+import type { ICommandLoader } from './services/types.js';
 import { commandRestrictionNames } from './services/commandUtils.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
@@ -428,6 +429,7 @@ export const handleSlashCommand = async (
   settings: LoadedSettings,
   sessionHooks?: NonInteractiveSlashCommandSessionHooks,
   executionPolicy?: NonInteractiveSlashCommandPolicy,
+  modCommands?: ICommandLoader,
 ): Promise<NonInteractiveSlashCommandResult> => {
   const trimmed = rawQuery.trim();
   if (!trimmed.startsWith('/')) {
@@ -456,6 +458,7 @@ export const handleSlashCommand = async (
         new SkillCommandLoader(config),
         new SavedWorkflowLoader(config),
         new FileCommandLoader(config),
+        ...(modCommands ? [modCommands] : []),
       ];
 
   // Build the disabled-command set (case-insensitive).
@@ -772,6 +775,7 @@ export const getAvailableCommands = async (
   mode: ExecutionMode = 'acp',
   settings?: LoadedSettings,
   executionPolicy?: NonInteractiveSlashCommandPolicy,
+  modCommands?: ICommandLoader,
 ): Promise<SlashCommand[]> => {
   try {
     const sshWorkspace = Boolean(config.getExecutionEnvironment?.());
@@ -785,6 +789,7 @@ export const getAvailableCommands = async (
           new SkillCommandLoader(config),
           new SavedWorkflowLoader(config),
           new FileCommandLoader(config),
+          ...(modCommands ? [modCommands] : []),
         ];
 
     const disabledSlashCommands = config.getDisabledSlashCommands();

@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-task-contract.md) | [简体中文](2026-09-27-managed-agent-task-contract.zh-CN.md)
 
-Status: H0a implemented as a contract only (every route and schema it added, and every property it added to an existing schema, was `planned`); H0b has landed; H0c marks the four task read routes and their schemas `partial` and drops the marker from `capabilities.tasks`, serves the task list and detail and announces task changes ([design](2026-09-27-managed-extension-authority.md)); task events, cancel and H1 to H6 are pending
+Status: H0a implemented as a contract only (every route and schema it added, and every property it added to an existing schema, was `planned`); H0b has landed; H0c marks the four task read routes and their schemas `partial` and drops the marker from `capabilities.tasks`, serves the task list and detail and announces task changes ([design](2026-09-27-managed-extension-authority.md)); H3 serves the task events; H4f serves cancel as `partial` for `child_agent` tasks from `1.40.0` ([design](2026-10-10-managed-task-cancel.md)); the rest of H1 to H6 is pending
 Date: 2026-09-27; contract follow-up: 2026-09-29
 Issue: [#12827](https://github.com/QwenLM/qwen-code/issues/12827), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -274,7 +274,10 @@ in this order (A6):
    then that the Session is `active` (`409 session_not_active` otherwise,
    including `closing`, `closed`, `archived` and `deleting`), then that
    `action_capabilities` includes `cancel`
-   (`409 task_action_unavailable` otherwise).
+   (`409 task_action_unavailable` otherwise), then, for a Workspace-bound
+   Session, that no storage migration fence holds its Workspace
+   (`409 workspace_unavailable` otherwise, as every sibling bound admission
+   answers; added by H4f).
 5. Atomically recheck new-request admission conditions and create the
    operation, serializing competing requests with Session/task transitions.
    A concurrent same-key winner is handled by step 3, not as a new request.
@@ -310,8 +313,8 @@ no `receipt_id`. `completed` carries `admission_stage: harness_confirmed`,
 `delivery_state: blocked` — delivery has stopped, so a definitively rejected
 or unreconciled command is never claimed and driven again — and no
 `receipt_id`; `failed` adds `failure_code`. `blocked` means delivery is
-not attempted again without reconciliation; no other operation kind produces
-it today.
+not attempted again without reconciliation; a Workspace close that cannot
+prove its cleanup (`recovery_blocked`) carries it too.
 
 The task becomes `cancelled` only when cancellation physically settles it. A
 natural completion that wins the race keeps its own terminal outcome; command
@@ -387,6 +390,7 @@ routes already return, the tenant filter's `invalid_tenant` and
 | `409`  | `task_action_unavailable`  | A new key while `action_capabilities` lacks `cancel`, which includes settled tasks. New.                                                                                                                        |
 | `409`  | `session_not_active`       | A new cancel request targets a Session that is not active.                                                                                                                                                      |
 | `409`  | `session_operation_active` | A new cancel request while another operation is open on the Session, as on the lifecycle routes.                                                                                                                |
+| `409`  | `workspace_unavailable`    | A new cancel request on a Workspace-bound Session whose Workspace is fenced by a storage migration, as on the sibling bound admissions (H4f).                                                                   |
 | `409`  | `idempotency_conflict`     | The key was used with a different request.                                                                                                                                                                      |
 
 A caller that cannot read a task gets `404`, not `403`, as API contract

@@ -48,9 +48,13 @@ export const MANAGED_CHILD_LIMITS = Object.freeze({
   maxResultBytes: 64 * 1024,
 } as const);
 
-/** The only workspace isolation policy the first runtime slice admits. */
+/**
+ * The workspace isolation policies a launch may name. `worktree` (#13753
+ * I2) also needs a host that serves child Workspaces; `snapshot` waits for
+ * I3.
+ */
 export const MANAGED_CHILD_ADMITTED_WORKSPACE_MODES: readonly ChildWorkspaceMode[] =
-  Object.freeze(['shared']);
+  Object.freeze(['shared', 'worktree']);
 
 export interface ChildLaunchEnvelope {
   readonly description: string;
@@ -168,10 +172,15 @@ export function admitChildLaunch(params: {
   readonly launchedInScope: number;
   readonly envelopeBytes: number;
   readonly workspaceMode: ChildWorkspaceMode;
+  /** The control plane serves child Workspaces, so `worktree` can run. */
+  readonly childWorkspaces: boolean;
   readonly sameDefinition: boolean;
 }): ChildAdmission {
   if (params.closing) return { admitted: false, reason: 'closing' };
-  if (!MANAGED_CHILD_ADMITTED_WORKSPACE_MODES.includes(params.workspaceMode)) {
+  if (
+    !MANAGED_CHILD_ADMITTED_WORKSPACE_MODES.includes(params.workspaceMode) ||
+    (params.workspaceMode === 'worktree' && !params.childWorkspaces)
+  ) {
     return { admitted: false, reason: 'workspace_mode' };
   }
   if (!params.sameDefinition) {
@@ -207,6 +216,7 @@ export function childLaunchBody(params: {
   readonly rootSessionId: string;
   readonly completion: ChildCompletion;
   readonly inputRef: ManagedSessionDurableRef;
+  readonly workspaceMode: ChildWorkspaceMode;
   readonly workingDirectory: string;
   readonly executionCallId: string;
   readonly definition: DefinitionPin;
@@ -219,7 +229,7 @@ export function childLaunchBody(params: {
     depth: 1,
     completion: params.completion,
     inputRef: params.inputRef,
-    workspaceMode: 'shared',
+    workspaceMode: params.workspaceMode,
     workingDirectory: params.workingDirectory,
     childSessionId: null,
     predecessorChildRunId: null,
@@ -266,6 +276,7 @@ export function childContinuationBody(
     rootSessionId: predecessor.rootSessionId,
     completion: params.completion,
     inputRef: params.inputRef,
+    workspaceMode: predecessor.workspaceMode,
     workingDirectory: predecessor.workingDirectory,
     executionCallId: params.executionCallId,
     definition: predecessor.run.definition!,
@@ -274,7 +285,6 @@ export function childContinuationBody(
     ...launch,
     kind: predecessor.kind,
     depth: predecessor.depth,
-    workspaceMode: predecessor.workspaceMode,
     predecessorChildRunId: predecessor.childRunId,
   });
 }

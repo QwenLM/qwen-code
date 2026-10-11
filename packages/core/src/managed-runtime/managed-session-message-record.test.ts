@@ -9,7 +9,9 @@ import { describe, expect, it } from 'vitest';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
 import { parseSessionMessage } from './managed-session-message-record.js';
 import {
+  MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED,
   MANAGED_SESSION_ENABLED_DOMAINS,
+  assertManagedSessionChildContinuationEnabled,
   assertManagedSessionDomainEnabled,
 } from './managed-session-records.js';
 
@@ -74,17 +76,19 @@ function templateOf(fixture: { id: string; template: string }) {
 }
 
 describe('managed-session-message-record/1 shared contract', () => {
-  it('projects no task and stays disabled for submission', () => {
+  it('projects no task and is enabled for submission (H4d-b)', () => {
     const body = MANAGED_EXTENSION_RECORD_BODIES.session_message!;
     for (const template of ['outbound', 'inbound']) {
       expect(
         body.taskKindOf(parseSessionMessage(fixtures.templates[template])),
       ).toBeNull();
     }
-    expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain('session_message');
-    expect(() => assertManagedSessionDomainEnabled('session_message')).toThrow(
-      'domain session_message is registered but not enabled for submission.',
-    );
+    expect(MANAGED_SESSION_ENABLED_DOMAINS).toContain('session_message');
+    expect(() =>
+      assertManagedSessionDomainEnabled('session_message'),
+    ).not.toThrow();
+    expect(MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED).toBe(true);
+    expect(() => assertManagedSessionChildContinuationEnabled()).not.toThrow();
     expect(fixtures.contract).toBe('managed-session-message-record/1');
   });
 

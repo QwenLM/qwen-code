@@ -929,3 +929,14 @@ export type {
   ExecutionLifecycleEntry,
   ExecutionLifecycleState,
 } from './ui/execution-lifecycle.js';
+
+export {
+  createToolLifecycleState,
+  extractToolLifecycle,
+  reduceToolLifecycle,
+} from './ui/tool-lifecycle.js';
+export type {
+  DaemonToolLifecycle,
+  ToolLifecycleEntry,
+  ToolLifecycleState,
+} from './ui/tool-lifecycle.js';
