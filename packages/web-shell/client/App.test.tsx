@@ -659,6 +659,8 @@ const {
       streamingTailMessages: undefined as unknown[] | undefined,
       queuedPromptHoldHistory: [] as boolean[],
       queuedPrompts: [] as Array<{ id: number; text: string }>,
+      queuedPromptSendNow: (async () => {}) as (id: number) => Promise<void>,
+      latestQueuedPromptDisplayProps: null as Record<string, unknown> | null,
       transcriptHasMore: false,
       promptSettledListeners: new Set<
         (
@@ -1103,6 +1105,7 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
       queuedPrompts: testState.queuedPrompts,
       queuedTexts,
       enqueuePrompt: rawEnqueuePrompt,
+      sendQueuedPromptNow: testState.queuedPromptSendNow,
       removeQueuedPrompt: vi.fn(),
       editQueuedPrompt: vi.fn(),
       editLastQueuedPrompt,
@@ -2608,7 +2611,15 @@ vi.doMock('./components/terminal/TerminalPanel', async () => {
       }),
   };
 });
-mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
+vi.doMock('./components/QueuedPromptDisplay', async () => {
+  const React = await import('react');
+  return {
+    QueuedPromptDisplay: (props: Record<string, unknown>) => {
+      testState.latestQueuedPromptDisplayProps = props;
+      return React.createElement('div');
+    },
+  };
+});
 // Agents' live runs read the daemon over fetch + SSE; inert here so a test
 // that turns collaboration on opens no real connection.
 vi.doMock('./components/workspace-agents/session-agents-api', () => ({
@@ -11626,6 +11637,7 @@ beforeEach(() => {
   testState.streamingTailMessages = undefined;
   testState.queuedPromptHoldHistory = [];
   testState.queuedPrompts = [];
+  testState.latestQueuedPromptDisplayProps = null;
   testState.transcriptHasMore = false;
   testState.promptSettledListeners.clear();
   testState.queuedPromptStreamingState = 'idle';
@@ -13297,6 +13309,31 @@ describe('App conversation indicator keep-alive (#9487)', () => {
     pressEscape(); // arm the two-press cancel
     pressEscape(); // confirm it
     expect(mockSessionActions.cancel).toHaveBeenCalled();
+  });
+});
+
+describe('App queued prompt send-now', () => {
+  it('offers send-now on queued rows only when the daemon advertises it', async () => {
+    const features = mockConnection.capabilities.features;
+    testState.queuedPrompts = [{ id: 1, text: 'follow up' }];
+    try {
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      expect(testState.latestQueuedPromptDisplayProps).toMatchObject({
+        canSendMidTurnNow: false,
+        onSendNow: testState.queuedPromptSendNow,
+      });
+
+      mockConnection.capabilities.features = ['session_mid_turn_send_now'];
+      rerender({ language: 'en' });
+      await flush();
+      expect(testState.latestQueuedPromptDisplayProps).toMatchObject({
+        canSendMidTurnNow: true,
+        onSendNow: testState.queuedPromptSendNow,
+      });
+    } finally {
+      mockConnection.capabilities.features = features;
+    }
   });
 });
 

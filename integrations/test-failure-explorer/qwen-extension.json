@@ -1,0 +1,15 @@
+{
+  "name": "test-failure-explorer",
+  "version": "1.0.0",
+  "mcpServers": {
+    "test-failure-explorer": {
+      "command": "node",
+      "args": ["${extensionPath}${/}dist${/}main.js"],
+      "cwd": "${workspacePath}",
+      "env": {
+        "QWEN_TEST_EXPLORER_WORKSPACE_ROOT": "${workspacePath}"
+      },
+      "includeTools": ["test_report_import", "test_report_query"]
+    }
+  }
+}
