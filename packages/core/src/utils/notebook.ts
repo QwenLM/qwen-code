@@ -398,6 +398,10 @@ export async function readNotebookWithMetadata(
   filePath: string,
 ): Promise<NotebookReadResult> {
   const raw = await fs.promises.readFile(filePath, 'utf-8');
+  return formatNotebookWithMetadata(raw);
+}
+
+export function formatNotebookWithMetadata(raw: string): NotebookReadResult {
   const notebook = parseNotebook(raw);
   const language = getNotebookLanguage(notebook);
 

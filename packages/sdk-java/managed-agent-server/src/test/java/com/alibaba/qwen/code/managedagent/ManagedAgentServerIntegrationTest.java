@@ -1960,6 +1960,16 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
+        public boolean supportsFencedTitles() {
+            return true;
+        }
+
+        @Override
+        public void rename(String tenantId, String sessionId, String title, long revision) {
+            rename(tenantId, sessionId, title);
+        }
+
+        @Override
         public void rename(String tenantId, String sessionId, String title) {
             renames.incrementAndGet();
             if (renameFailures.getAndUpdate(value -> Math.max(0,

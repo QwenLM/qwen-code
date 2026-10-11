@@ -105,10 +105,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
-import {
-  managedExtensionRecordKey,
-  managedTaskId,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
@@ -505,6 +502,15 @@ export function hostedMessageContinuedText(
 ): string {
   return `Child agent ${predecessorTaskId} had completed; continued it as ${taskId} with your message as its next instruction. Its result arrives as a durable notification input; either task id reaches the newest run.`;
 }
+
+/**
+ * H4e-b1: the same tool beside the team tools. A member is addressed while
+ * it runs; one that has finished is not continued while its team is open.
+ */
+export const HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL: FunctionDeclaration = {
+  ...HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
+  description: `${HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.description} A team member is addressed, while it runs, by the task id that task_list shows beside its name (task_…); a member that has finished cannot be continued until its team is deleted.`,
+};
 
 /** H4d-b: a child Session's durable message to the parent that launched it. */
 export const HOSTED_SEND_MESSAGE_TO_PARENT_TOOL: FunctionDeclaration = {
@@ -940,7 +946,11 @@ export class HostedWorkspaceToolTurn {
       // H4d-b: the same Sessions message along their lineage — a parent
       // to the child tasks it launched, a child to its own parent.
       ...(this.sendMessageRole() === 'parent'
-        ? [HOSTED_SEND_MESSAGE_TO_CHILD_TOOL]
+        ? [
+            this.teamsAdmitted()
+              ? HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL
+              : HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
+          ]
         : this.sendMessageRole() === 'child'
           ? [HOSTED_SEND_MESSAGE_TO_PARENT_TOOL]
           : []),
@@ -1735,7 +1745,8 @@ export class HostedWorkspaceToolTurn {
           // The deliberate refusals below keep their texts whenever the
           // Agent call is not admitted.
           agentAdmitted = this.agentsAdmitted();
-          const named = this.teamsAdmitted() && args['name'] !== undefined;
+          const teamsOn = this.teamsAdmitted();
+          const named = teamsOn && args['name'] !== undefined;
           const unsupportedKey = Object.keys(args).find(
             (key) =>
               ![
@@ -1764,7 +1775,7 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
           } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, name, model and subagent_type belong to the legacy Agent tool.`;
+            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, ${teamsOn ? '' : 'name, '}model and subagent_type belong to the legacy Agent tool.`;
           } else if (
             args['isolation'] !== undefined &&
             args['isolation'] !== 'worktree'
@@ -1841,7 +1852,7 @@ export class HostedWorkspaceToolTurn {
             validationError =
               role === 'child'
                 ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
-                : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; teams and other Sessions belong to the legacy tool.`;
+                : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; ${this.teamsAdmitted() ? 'a team member is addressed, while it runs, by the task id that task_list shows beside its name (task_…), and other Sessions belong' : 'teams and other Sessions belong'} to the legacy tool.`;
           } else if (role === 'child' && args['to'] !== 'parent') {
             validationError =
               'Hosted send_message from a child Session addresses only to "parent".';
@@ -3428,9 +3439,7 @@ export class HostedWorkspaceToolTurn {
         signal,
       );
     }
-    const taskId = managedTaskId(
-      managedExtensionRecordKey(key.sessionId, 'child_run', childRunId),
-    );
+    const taskId = managedChildTaskId(key.sessionId, childRunId);
     if (member !== undefined && joining) {
       const joined = await this.teams!.join({
         teamId: member.teamId,
