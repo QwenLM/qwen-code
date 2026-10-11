@@ -36,6 +36,7 @@ import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.APPLY
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.BLOCKED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.CONFLICTED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARD;
+import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARD_PINNED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARDED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARDING;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.FAILED;
@@ -168,6 +169,11 @@ public class ChildWorkspaceService {
         return store.find(tenantId, parentSessionId, childRunId);
     }
 
+    /** Whether this host runs the steps; elsewhere a row waits for a host that does. */
+    public boolean capable() {
+        return warmer.childWorkspaces() != null;
+    }
+
     @Scheduled(scheduler = "childWorkspaceScheduler", fixedDelayString =
             "${qwen.managed-agent.child-workspace.scan-delay:2s}")
     public void scan() {
@@ -205,7 +211,8 @@ public class ChildWorkspaceService {
         return switch (row.state()) {
             case PREPARING, MERGING, APPLYING, APPLIED, DISCARDING -> true;
             case READY -> row.finishRequest() != null;
-            case CONFLICTED, BLOCKED, FAILED -> DISCARD.equals(row.finishRequest());
+            case CONFLICTED, BLOCKED, FAILED -> DISCARD.equals(row.finishRequest())
+                    || DISCARD_PINNED.equals(row.finishRequest());
             default -> false;
         };
     }
@@ -411,8 +418,34 @@ public class ChildWorkspaceService {
         // its work is in the parent's tree.
         boolean merged = "merged".equals(claimed.outcomeCode());
         held(provider, claimed, root -> {
-            provider.git().discard(root, claimed.repositoryRelative(), claimed.childWorkspaceId(),
-                    claimed.resultCommit() != null && !merged);
+            ChildWorktreeGit git = provider.git();
+            String result = claimed.resultCommit();
+            if (result == null && !merged && DISCARD_PINNED.equals(claimed.finishRequest())) {
+                // The discard replaced the merge of a child that completed:
+                // its result is pinned first, as a conflict's is, so the
+                // work is kept although it does not land. The pin never
+                // holds the discard back: a result that cannot be taken (a
+                // worktree or repository that is gone, broken or unsafe, or
+                // a failure that outlasts the retries) leaves an ordinary
+                // discard, which is what the discard was before the pin.
+                try {
+                    ChildWorktreeGit.Repository repository = git.open(root, claimed.repositoryRelative());
+                    result = git.result(root, repository, claimed.childWorkspaceId(), claimed.baseCommit());
+                    git.pin(root, repository, claimed.childWorkspaceId(), "result", result);
+                } catch (ChildWorkspaceException error) {
+                    if (error.retryable() && claimed.attempts() + 1 < MAX_ATTEMPTS) {
+                        throw error;
+                    }
+                    LOG.warn("child workspace discard goes on without the result pin run={} code={}",
+                            claimed.childRunId(), error.code());
+                    result = null;
+                }
+                if (result != null) {
+                    advance(claimed, DISCARDING, columns("result_commit", result));
+                }
+            }
+            git.discard(root, claimed.repositoryRelative(), claimed.childWorkspaceId(),
+                    result != null && !merged);
             return null;
         });
         advance(claimed, DISCARDED, columns("outcome_code",

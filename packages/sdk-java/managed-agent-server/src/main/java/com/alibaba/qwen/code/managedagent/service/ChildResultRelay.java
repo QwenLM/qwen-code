@@ -301,13 +301,19 @@ public class ChildResultRelay {
             // Nothing minted: the run settles unstarted. The commit-time
             // verdict/mint gate refuses this pairing if a creation lands
             // first, and the deferred retry then names the child.
-            settleStopped(row, null, false, true, now);
+            settleStopped(row, null, false, true, false, now);
             return true;
         }
         ChildResultRelayStore.TurnLine turn = relayStore.latestTurn(
                 row.tenantId(), child);
         if (turn == null) {
             throw new RelayRetry("child Session has no Turn yet");
+        }
+        boolean taskCompleted = "COMPLETED".equals(turn.status());
+        // Only for a bound child: a creation whose answer was lost replays
+        // through create(), which refuses a row whose finish was asked.
+        if (taskCompleted && row.childSessionId() != null) {
+            askMerge(row);
         }
         ChildResultRelayStore.JournalTurns journal =
                 relayStore.hasSessionMessages(row.tenantId(), child)
@@ -398,13 +404,23 @@ public class ChildResultRelay {
         // pairing comes from the record's own evidence, replayed if lost.
         boolean started = reconcileAttach(row, child);
         boolean closed = closeChild(row, child, now);
-        settleStopped(row, child, started, closed, now);
+        settleStopped(row, child, started, closed, taskCompleted, now);
         return true;
     }
 
-    /** The cancelled settlement of a stopped run, then its ledger close. */
+    /**
+     * The cancelled settlement of a stopped run, then its ledger close. A
+     * worktree run's child Workspace is discarded (#13753 I2), unless its
+     * task Turn completed before the stop (a message turn the stop
+     * cancelled, or a message wait that ran out, ended the run): that work
+     * is merged, and lands before the run settles.
+     */
     private void settleStopped(RelayRow row, String child, boolean started,
-            boolean closed, long now) {
+            boolean closed, boolean taskCompleted, long now) {
+        if (!childWorkspaceFinished(row, taskCompleted)) {
+            awaitMerge(row, now);
+            return;
+        }
         Map<String, Object> cancel = new LinkedHashMap<>();
         cancel.put("operationId", UUID.randomUUID().toString());
         cancel.put("kind", "close_scope");
@@ -685,19 +701,64 @@ public class ChildResultRelay {
      * asked keeps its place, a child that completed a Turn has its work
      * merged (as a shared child's writes would stay), and any other end
      * discards. Refusals meaning the row already settled are not owed.
+     * Answers whether the run may settle now: a merge holds it until the
+     * row records the outcome, so the merge never lands after the parent
+     * was told the run ended; a discard is never waited for.
      */
-    private void finishChildWorkspace(RelayRow row, boolean completed) {
+    private boolean childWorkspaceFinished(RelayRow row, boolean completed) {
         ChildWorkspaceStore.Row workspace = childWorkspaces.find(
                 row.tenantId(), row.parentSessionId(), row.childRunId());
-        if (workspace == null
-                || ChildWorkspaceStore.MERGE.equals(workspace.finishRequest())) {
+        if (workspace == null) {
+            return true;
+        }
+        if (!ChildWorkspaceStore.MERGE.equals(workspace.finishRequest())) {
+            try {
+                workspace = childWorkspaces.requestFinish(row.tenantId(),
+                        row.parentSessionId(), row.childRunId(),
+                        completed ? ChildWorkspaceStore.MERGE
+                                : ChildWorkspaceStore.DISCARD);
+            } catch (ApiException refused) {
+                if (!SETTLED_FINISH_REFUSALS.contains(refused.getCode())) {
+                    throw refused;
+                }
+                return true;
+            }
+        }
+        return !ChildWorkspaceStore.MERGE.equals(workspace.finishRequest())
+                || workspace.outcomeCode() != null;
+    }
+
+    /**
+     * A merge the run waits for (#13753 I2) is looked at again on the
+     * heartbeat at no cost, or at the close-debt cadence on a host that
+     * cannot run it — one without the close capability or without child
+     * Workspace steps — until a host that can records the outcome.
+     */
+    private void awaitMerge(RelayRow row, long now) {
+        long wait = childCloses.closeSupported() && childWorkspaces.capable()
+                ? HEARTBEAT_MS : CLOSE_DEBT_IDLE_MS;
+        relayStore.scheduleRetry(row, owner, now + wait, now + LEASE_MS, now);
+    }
+
+    /**
+     * Records the merge of a worktree child as soon as its task Turn is
+     * seen completed (#13753 I2), even while message turns still run:
+     * whatever ends the run later merges that work, so a parent's close
+     * meanwhile pins it instead of discarding it. Only recorded, never
+     * waited for here; the row runs it once the child is closed.
+     */
+    private void askMerge(RelayRow row) {
+        ChildWorkspaceStore.Row workspace = childWorkspaces.find(
+                row.tenantId(), row.parentSessionId(), row.childRunId());
+        if (workspace == null || workspace.finishRequest() != null
+                || !ChildWorkspaceStore.READY.equals(workspace.state())) {
             return;
         }
         try {
             childWorkspaces.requestFinish(row.tenantId(), row.parentSessionId(),
-                    row.childRunId(), completed ? ChildWorkspaceStore.MERGE
-                            : ChildWorkspaceStore.DISCARD);
+                    row.childRunId(), ChildWorkspaceStore.MERGE);
         } catch (ApiException refused) {
+            // A discard that came first keeps its place.
             if (!SETTLED_FINISH_REFUSALS.contains(refused.getCode())) {
                 throw refused;
             }
@@ -763,6 +824,9 @@ public class ChildResultRelay {
         Integer messageCount = null;
         if ("COMPLETED".equals(status) || "CANCELLED".equals(status)
                 || "FAILED".equals(status)) {
+            if ("COMPLETED".equals(status)) {
+                askMerge(row);
+            }
             // H4d-b: the child's result is its newest settled API or message
             // turn, and only once nothing on its edge is still on its way.
             // The journal is read first: a turn that messages the parent
@@ -809,7 +873,7 @@ public class ChildResultRelay {
         }
         try {
             settleFrom(row, pending, status, turnId, completedAt, journalTurn,
-                    messageCount, now);
+                    messageCount, "COMPLETED".equals(turn.status()), now);
         } catch (DaemonHttpException error) {
             if (!"child_messages_pending".equals(error.getErrorCode())) {
                 throw error;
@@ -833,7 +897,8 @@ public class ChildResultRelay {
 
     private void settleFrom(RelayRow row, PendingChild pending,
             String status, String turnId, long completedAt,
-            boolean journalTurn, Integer messageCount, long now) {
+            boolean journalTurn, Integer messageCount, boolean taskCompleted,
+            long now) {
         if (settledAlready(row, pending, status, now)) {
             return;
         }
@@ -849,7 +914,15 @@ public class ChildResultRelay {
                 // close capability at all settles on time and keeps the
                 // debt as close_debt instead.
                 boolean closed = closeFinishedChild(row, now);
-                finishChildWorkspace(row, false);
+                // A child whose task Turn completed before a message turn
+                // failed, or before a message it never answered ran out,
+                // keeps its work as a give-up after a completed Turn does;
+                // a merge asked earlier keeps its place. Either lands before
+                // the failure is told.
+                if (!childWorkspaceFinished(row, taskCompleted)) {
+                    awaitMerge(row, now);
+                    return;
+                }
                 Map<String, Object> fail = new LinkedHashMap<>();
                 fail.put("operationId", UUID.randomUUID().toString());
                 fail.put("kind", "fail");
@@ -897,7 +970,8 @@ public class ChildResultRelay {
         }
         if ("failed".equals(settled.path("run").path("state").asText())) {
             boolean closed = closeFinishedChild(row, now);
-            finishChildWorkspace(row, false);
+            // The failure is already told: nothing is left to wait for.
+            childWorkspaceFinished(row, false);
             finishOrRetainDebt(row, row.childSessionId(), closed, "done",
                     "child run already failed", now);
             return true;
@@ -924,8 +998,11 @@ public class ChildResultRelay {
             // never strand the child Session behind a terminal row.
             boolean closed = closeFinishedChild(row, now);
             // The child completed: an over-bound answer is no reason to
-            // lose its work.
-            finishChildWorkspace(row, true);
+            // lose its work, which lands before the failure is told.
+            if (!childWorkspaceFinished(row, true)) {
+                awaitMerge(row, now);
+                return;
+            }
             Map<String, Object> quota = new LinkedHashMap<>();
             quota.put("operationId", UUID.randomUUID().toString());
             quota.put("kind", "fail");
@@ -1006,8 +1083,9 @@ public class ChildResultRelay {
      * outcome becomes the receipt's `workspace`, built only from fields a
      * later discard leaves alone, so a replayed commit is byte-equal.
      * Answers null while the outcome is still owed. A host that lost its
-     * close capability waits at the close-debt cadence: its merge cannot
-     * run, and a result committed without it would hide the child's work.
+     * close capability, or runs no child Workspace steps, waits at the
+     * close-debt cadence: its merge cannot run here, and a result committed
+     * without it would hide the child's work.
      */
     private JsonNode mergedChildWorkspace(RelayRow row, long now) {
         ChildWorkspaceStore.Row workspace = childWorkspaces.find(
@@ -1016,11 +1094,8 @@ public class ChildResultRelay {
             throw new RelayRetry("worktree child has no child Workspace row");
         }
         if (workspace.outcomeCode() == null) {
-            if (!childCloses.closeSupported()) {
-                relayStore.scheduleRetry(row, owner, now + CLOSE_DEBT_IDLE_MS,
-                        now + LEASE_MS, now);
-                return null;
-            }
+            // Asked even on a host that cannot close the child: the request
+            // is durable, so a parent's close meanwhile pins the work.
             try {
                 childWorkspaces.requestFinish(row.tenantId(),
                         row.parentSessionId(), row.childRunId(),
@@ -1033,8 +1108,7 @@ public class ChildResultRelay {
                 }
             }
             closeFinishedChild(row, now);
-            relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
-                    now + LEASE_MS, now);
+            awaitMerge(row, now);
             return null;
         }
         String code = workspace.outcomeCode();
@@ -1226,6 +1300,9 @@ public class ChildResultRelay {
      * facts, not capability-held), then parks the row as `close_debt` —
      * the settlement is nobody's close, so the ledger keeps the owed
      * admission discoverable instead of classifying `unknown` over it.
+     * A worktree run whose merge was asked is the exception (#13753 I2):
+     * the merge needs the child closed and holds the settlement, so that
+     * run waits for a host that can close it.
      */
     private void settleThenClassifyGaveUp(RelayRow row,
             RuntimeException error, long now) {
@@ -1264,11 +1341,15 @@ public class ChildResultRelay {
                         row.parentSessionId(), child, row.childRunId());
             }
             // Giving up on the result never discards a completed child's
-            // work: it lands as a shared child's writes would.
+            // work: it lands as a shared child's writes would, before the
+            // failure is told.
             ChildResultRelayStore.TurnLine last = child == null ? null
                     : relayStore.latestTurn(row.tenantId(), child);
-            finishChildWorkspace(row, last != null
-                    && "COMPLETED".equals(last.status()));
+            if (!childWorkspaceFinished(row, last != null
+                    && "COMPLETED".equals(last.status()))) {
+                awaitMerge(row, now);
+                return;
+            }
             Map<String, Object> fail = new LinkedHashMap<>();
             fail.put("operationId", UUID.randomUUID().toString());
             fail.put("kind", "fail");

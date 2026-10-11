@@ -85,6 +85,7 @@ import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   childLaunchAdmission,
   childWorkspaceAnswerSuffix,
+  childWorkspaceEndedSuffix,
 } from './hosted-child-agent-session.js';
 import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
@@ -3583,7 +3584,8 @@ export class HostedWorkspaceToolTurn {
             request.call.name,
             request.call.callId,
             [],
-            `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
+            `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).` +
+              childWorkspaceEndedSuffix(record),
           );
           if (!journaled?.has(request.call.callId))
             await this.commit('tool_result', ended, model);

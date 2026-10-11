@@ -2,7 +2,7 @@
 
 [English](2026-10-10-managed-child-worktree-admission.md) | [简体中文](2026-10-10-managed-child-worktree-admission.zh-CN.md)
 
-状态：已在本变更中实现。已落地：hosted child agent 可以在自己的 child Workspace 中运行（`isolation: "worktree"`）。relay 在创建 child 之前准备这个 Workspace；child 完成时，在结果提交之前把它合并回来；child 失败或被取消时丢弃它；关闭级联同样丢弃它；回执把合并结果报告给父的模型。仍是设计：I3（`snapshot`，以及串行化的裁定）。这是 [#13753](https://github.com/QwenLM/qwen-code/issues/13753) 的 I2，建立在 I1（[child Workspace 能力](2026-10-09-managed-child-workspace.zh-CN.md)，#13781）、H4b（[child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md)）与 H4c（[workflow child kind](2026-10-09-managed-workflow-child-kind.zh-CN.md)）之上。
+状态：已在本变更中实现，并包含针对其评审延后项的跟进（见下文“评审延后项的跟进”）。已落地：hosted child agent 可以在自己的 child Workspace 中运行（`isolation: "worktree"`）。relay 在创建 child 之前准备这个 Workspace；child 完成时，在结果提交之前把它合并回来；child 失败或被取消时丢弃它；关闭级联同样丢弃它；回执把合并结果报告给父的模型。仍是设计：I3（`snapshot`，以及串行化的裁定）。这是 [#13753](https://github.com/QwenLM/qwen-code/issues/13753) 的 I2，建立在 I1（[child Workspace 能力](2026-10-09-managed-child-workspace.zh-CN.md)，#13781）、H4b（[child Session 运行时](2026-10-07-managed-child-session-runtime.zh-CN.md)）与 H4c（[workflow child kind](2026-10-09-managed-workflow-child-kind.zh-CN.md)）之上。
 
 ## 问题与范围
 
@@ -27,7 +27,7 @@ I1 交付了能力，但没有调用方。本变更把唯一的生产方——ho
 2. **准入时即知晓能力。** 启用 child Workspace 时，Java 在每个 hosted create 与 load 请求（attach、恢复、生命周期 settle）中加入 `childWorkspaces: true`。启动检查现在还要求它们运行在 durable local-process Broker 上，这是唯一能关闭 Workspace Session 的 Broker：合并需要 child 已关闭，所以不能关闭的主机也不能合并。`qwen serve` 把这个标志保存在常驻 Session 上，每次已证明 owner 的 create 或 load 都会刷新它（只认精确的 `true`；生命周期重答只有不带 Agent 工具的 files profile 才会走，它保持原值不变），且从不持久化，因为它描述的是主机而不是 Session。没有它时，`admitChildLaunch` 以现有的 `workspace_mode` 原因拒绝 `worktree` launch，发生在任何提交之前，也不消耗 launch 预算，工具结果会告诉模型去掉 isolation 再 launch。重放的 launch 从不重新准入，所以失去能力的主机仍能回答它已提交的 launch。
 3. **relay 先准备再创建。** 对 `worktree` run，relay 先请求 child Workspace：行被承认，Git 由 child Workspace 扫描执行，从不在 relay 的单线程上执行。行处于 `preparing` 时，relay 按心跳再看一次，不消耗尝试次数。`ready` 的行以 `createChildSession(..., isolated = true)` 创建 child，所以 child 的目录进入创建摘要（I1 决策 13），从已提交 body 重放时也指向同一绑定。被拒绝的布局（`failed`）、以 `blocked` 结束的准备、已被请求收尾的 `ready` 行、因为读到 `ready` 后离开了父的绑定而被该行拒绝的创建，或无法承认该行的主机或父，都会让 run 以 `failed`/`creation_failed`、从未启动的方式 settle，并请求该行（如果之前的尝试承认过）丢弃。lineage 已经记录了 child 的情况（创建的应答丢失）不按此判定：由常规重试与放弃链将其作为已启动处理。
 4. **收尾请求是持久的，在 child 关闭后执行（修订 I1 决策 8）。** 绑定的 child Session 未关闭时，`requestFinish` 不再拒绝。它记录请求；只有当绑定到该 run 的每个 child Session 都处于 `CLOSED`、`ARCHIVED` 或 `DELETED` 时，行才离开 `ready`，在此之前每 5 秒再看一次，不消耗尝试次数。I1 想要的安全性得以保留：没有任何收尾会在运行中的 Session 脚下移除目录，且一旦请求了收尾，创建仍会被拒绝。丢弃可以取代尚未开始的合并请求（行仍为 `ready`），离开 `ready` 的那一步会比对它读到的请求，所以被丢弃取代的合并永远不会执行；行一旦进入 `merging`，合并就会执行到底。
-5. **完成的 worktree child 在结果提交之前合并。** child 的 Turn 完成时，relay 请求合并，承认 child 的关闭，并按心跳等待，直到行记录下结果：`merged`、`conflicted`，或被阻塞的合并的代码。之后它才提交结果（合并结果写入回执）、accept、标记已送达，并重放关闭。等待从不消耗尝试预算；等待期间的故障仍会消耗，和任何 run 一样。放弃的 run 保留 child 已完成的工作：已请求的合并保持其位置，在 Turn 已完成之后才放弃时会请求合并。工作照常落地（就像 `shared` child 的写入那样），run 则像放弃的 `shared` run 一样以 `failed` settle。失去关闭能力的主机按关闭欠账的节奏（5 分钟）等待，而不是提交一个其合并无法执行的结果。先被请求的丢弃（父正在关闭）保持其位置，此时回执报告 `discarded`。
+5. **完成的 worktree child 在结果提交之前合并。** child 的 Turn 完成时，relay 请求合并，承认 child 的关闭，并按心跳等待，直到行记录下结果：`merged`、`conflicted`，或被阻塞的合并的代码。之后它才提交结果（合并结果写入回执）、accept、标记已送达，并重放关闭。等待从不消耗尝试预算；等待期间的故障仍会消耗，和任何 run 一样。放弃的 run 保留 child 已完成的工作：已请求的合并保持其位置，在 Turn 已完成之后才放弃时会请求合并。工作照常落地（就像 `shared` child 的写入那样），run 则像放弃的 `shared` run 一样以 `failed` settle。relay 请求过的合并会扣住该 run 的每一种 settle，而不只是结果：失败（之后失败的 Turn、超出上限的回答、放弃）或停止，都要等行记录下合并结果之后才告知，所以工作绝不会在父被告知 run 已结束之后才落地。失去关闭能力、或不执行 child Workspace 步骤（child Workspace 被关闭）的主机按关闭欠账的节奏（5 分钟）等待：合并无法在那里执行，由能执行它的主机记录结果。合并请求照样会记录，所以期间父的关闭会 pin 住工作（决策 9）。这是没有关闭能力的主机唯一会扣住 settle 的地方：合并需要 child 先关闭。先被请求的丢弃（父正在关闭）保持其位置，此时回执报告 `discarded`。
 6. **回执携带结果。** `worktree` run 的回执增加 `workspace`：`{ mode: "worktree", childWorkspaceId, outcome, code, conflictPaths?, resultRef? }`（见下表）。它由行的 `outcome_code`、`conflict_paths` 与 `result_commit` 构建，这些字段在之后的丢弃中保持不变，所以重放的 `commit_result` 逐字节相同。路径是 child 选定的名字，所以回执把它们控制在 16 KiB 的 JSON 以内，其余的数量记在 `omittedConflictPaths`：回执始终能放进父的 64 KiB 内联资源。为保证这一点，已经结束的合并在之后的丢弃以 `blocked` 结束时也保留其结果（I1 此前只对 `merged` 这样做）；丢弃的失败仍记为最后的错误。`shared` run 的回执不变。记录契约不变：回执是父的不透明资源。
 7. **父的模型看到结果。** 前台工具结果在 child 的结果之后以一行结尾，过大结果被折叠时这一行仍会保留：
    - `[child workspace] merged into this Workspace as uncommitted changes.`
@@ -38,10 +38,12 @@ I1 交付了能力，但没有调用方。本变更把唯一的生产方——ho
 
    恢复的等待与恢复 gap fill 以同一行结束其回答：折叠会在结果之后完整保留这一行。
 
+   已启动、之后失败或被取消的 `worktree` run 没有回执（记录只在有结果时才设置 `terminalReceiptRef`），所以它的回答无法写出合并结果，而是以 `[child workspace] the child's changes did not land, unless the child had finished its work before this end: then its merge ran first. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.` 结尾。决策 5 保证了这句话成立：relay 请求过的合并在失败提交之前就已有结果。从未启动的 run 与 `shared` run 不增加任何内容。
+
    冲突路径是 child 选定的名字：每个先以 JSON 加引号（换行保持为转义，不会自成一行），再剥离显示控制字符，JSON 不转义的行分隔符与段分隔符也被转义，列表在 4 KiB 处截止并以 `and N more` 结尾（计入回执省略的路径）。后台通知在 `<status>` 旁的 `<workspace>` 元素中携带同一句话。两者都读取 acceptance 所指的回执；`shared` run 不增加任何内容。
 
-8. **失败或被取消的 worktree child 被丢弃。** relay 的 fail 分支（失败或被取消的 Turn、没有已完成 Turn 的放弃，见决策 5）在其 `fail` 提交之前请求丢弃；记录按时 settle，丢弃在 child 关闭后执行（决策 4）。已请求的合并保持其位置，所以 child 之后失败的 Turn 不会取代它，relay 也从不在未 pin 的情况下丢弃已完成 child 的工作：超出上限的回答以 `quota_exceeded` settle，并请求合并。只有在该合并开始之前就关闭的父仍会丢弃它（决策 9）。relay 自身处理父已不再活跃的路径也会请求丢弃，所以在父开始关闭时、级联查看之后才被承认的行不会被遗留。表示行已 settle 的拒绝不算欠账；没有行的 run（所有 `shared` run）只做一次查询。relay 从不等待丢弃完成。
-9. **关闭级联只丢弃，不等待。** 级联在停止请求之后请求丢弃 `worktree` run。表示行已 settle 的拒绝（`merged`、`discarded`、合并已在执行）不是失败：正在执行的合并会落地。请求的任何其他失败会像级联其他欠下的步骤一样让父的关闭重新排期，并保持该 run 的 scope 打开（不提交 `close_scope`），这样重新排期的关闭会再次找到这个 run 并再次请求。父的关闭从不等待丢弃执行，所以无法完成的丢弃不会卡住关闭；由行自身的重试与 `blocked` 终态（I1）承接。
+8. **失败或被取消的 worktree child 被丢弃。** relay 的 fail 分支（失败或被取消的 Turn、没有已完成 Turn 的放弃，见决策 5）在其 `fail` 提交之前请求丢弃，停止分支（H4f，公开的任务取消）在其 `close_scope` 之前请求丢弃；记录按时 settle，丢弃在 child 关闭后执行（决策 4）。已请求的合并保持其位置，所以 child 之后失败的 Turn 或停止都不会取代它。任务 Turn 已完成、之后消息 turn 失败、某条未回答的消息等待超时（H4d-b），或停止取消了这样的消息 turn 的 child，会像“Turn 完成后才放弃”一样合并其工作。对已绑定到 run 的 child，relay 一看到任务 Turn 完成就记录这次合并，即使消息 turn 仍在运行，所以父在这段时间关闭会 pin 住工作。（child 绑定之前，例如创建应答丢失时，不记录任何请求：创建的重放不能遇到收尾请求。）relay 自身从不在未 pin 的情况下丢弃已完成 child 的工作（父的关闭仍可能这样做的情形见决策 9）：超出上限的回答会请求合并，待合并有结果后以 `quota_exceeded` settle。在该合并开始之前就关闭的父仍会丢弃它，但会先 pin 住 child 的结果（决策 9）。relay 自身处理父已不再活跃的路径也会请求丢弃，所以在父开始关闭时、级联查看之后才被承认的行不会被遗留。表示行已 settle 的拒绝不算欠账；没有行的 run（所有 `shared` run）只做一次查询。relay 从不等待丢弃完成。
+9. **关闭级联只丢弃，不等待。** 级联在停止请求之后请求丢弃 `worktree` run。表示行已 settle 的拒绝（`merged`、`discarded`、合并已在执行）不是失败：正在执行的合并会落地。请求的任何其他失败会像级联其他欠下的步骤一样让父的关闭重新排期，并保持该 run 的 scope 打开（不提交 `close_scope`），这样重新排期的关闭会再次找到这个 run 并再次请求。父的关闭从不等待丢弃执行，所以无法完成的丢弃不会卡住关闭；由行自身的重试与 `blocked` 终态（I1）承接。取代一个结果尚未 pin 的合并（尚未开始的合并，或在 pin 之前就以 `blocked` 结束的合并）的丢弃会被记为 `discard_pinned`：它先像冲突时那样取出并 pin 住 child 的结果，所以已完成 child 的工作虽然没有落地，仍保留在其结果 ref 上。pin 从不拖住丢弃：取不到结果时（worktree 或仓库已不存在、已损坏或不安全，或失败持续到行的重试用尽，例如 child 留下一个没有提交的嵌套仓库），丢弃按普通丢弃继续，与加入 pin 之前一样。child 的任务 Turn 完成后、relay 下一次查看之前的几秒内父关闭，工作仍会在未 pin 的情况下被丢弃：这时还没有任何地方记录合并。
 10. **兄弟按完成顺序合并。** 每个 child 的合并在该 child 完成时执行，处于 storage 的维护 hold 之下（I1 决策 10），并以当时父的树为准计算，其中包括更早兄弟的合并。之后编辑了相同行的兄弟以 `conflicted` 结束，带上其路径，其工作被 pin 住；除此之外不对兄弟排序。
 11. **lease 规则保持 H4b 的设定。** child Workspace 位于父的 storage 中，所以现有守卫原样适用：Turn 持有挂载时拒绝前台 child，只含 agent 的批次不占用挂载。准备与合并遇到被持有的 storage 时得到 `workspace_busy`，再看一次，不消耗尝试次数。
 
@@ -95,11 +97,26 @@ I1 交付了能力，但没有调用方。本变更把唯一的生产方——ho
 - 不提供 child Workspace 的主机在任何提交之前拒绝 `isolation: "worktree"`。
 - `shared` child 的行为与之前完全一致，`workflow` 仍禁用。
 
+## 评审延后项的跟进
+
+#13841 的评审把以下发现记为延后；本次跟进在不改契约、不加迁移的前提下处理它们：
+
+- **被停止的 worktree run 保留着它的 child Workspace。** 停止分支（H4f，在 I2 之前合入）以 `cancelled` settle run，却没有请求收尾，所以该行一直停在 `ready`，worktree 留在磁盘上。现在它会请求丢弃（决策 8）。
+- **失败在合并落地之前就被告知。** 超出上限、放弃与之后失败的 Turn 这几个分支以 `failed` settle，而它们请求的合并随后才执行，父的模型也看不到 workspace 行。现在合并会扣住这些 settle（决策 5），回答以一行 workspace 说明结尾（决策 7）。
+- **在不执行 child Workspace 步骤的主机上，合并按每个心跳等待。** 现在那里按关闭欠账的节奏等待（决策 5）。等待本身仍没有上限（开放问题 3）。
+- **父关闭时在未 pin 的情况下丢弃已完成 child 的工作**：发生在它取代尚未开始的合并，或在 pin 之前就以 `blocked` 结束的合并时。现在这种丢弃会先 pin 结果（决策 9）。
+
+其验证：
+
+- **Relay**（`ChildResultRelayTest`）：被停止的 worktree run 会丢弃（尚未创建 child，以及 child 已被取消两种情况）；停止会等待 child 已请求的合并，任务已完成后的停止会先合并这些工作；任务完成后即使仍有消息在等待，也会记录合并；已失败的 run 仍会请求丢弃；之后失败的 Turn、超出上限的回答与放弃都会等待它们扣住的合并，并在其有结果后才 settle；任务已完成、消息等待超时的 run 先合并再失败；不执行 child Workspace 步骤的主机请求合并、承认关闭，并按空闲间隔等待；没有关闭能力的主机仍会请求合并。
+- **child Workspace 状态机**（`ChildWorkspaceServiceTest`，H2 与真实仓库）：取代尚未开始的合并的丢弃被记为 `discard_pinned`，重复的丢弃是同一请求，它会 pin 住 child 的结果且不改动父的目录树，而普通丢弃不 pin 任何东西；在 pin 之前就 blocked 的合并由丢弃 pin 住；worktree 消失、worktree 的 `.git` 消失、仓库消失三种情况下丢弃都不 pin 而继续；无法写入 pin 时会重试，最后一次重试之后丢弃不带 pin 继续。
+- **TypeScript**（`hosted-workspace-tool-turn.child-agent.test.ts`、`hosted-child-wait-recovery.test.ts`）：已启动后失败或被取消的 `worktree` run，其前台回答与恢复 gap fill 都以 workspace 行结尾；从未启动的 run 与 `shared` run 不带这一行。
+
 ## 开放问题
 
-1. **冲突 child 的结果 pin 的保留期**仍是 I1 的开放问题 2。以 `blocked` 结束的合并保留其 worktree（以及已生成的结果 pin）供运维处理：其 run settle 之后不会再有任何东西丢弃它（run 尚未 settle 时父关闭，则会丢弃它，见决策 9）。
+1. **冲突 child 的结果 pin 的保留期**仍是 I1 的开放问题 2；丢弃取代合并时生成的 pin（决策 9）也在其中。以 `blocked` 结束的合并保留其 worktree（以及已生成的结果 pin）供运维处理：其 run settle 之后不会再有任何东西丢弃它（run 尚未 settle 时父关闭，则会先 pin 住结果再丢弃它，见决策 9）。
 2. **合并是否应当替父提交** child 的变更，而不是保留为未提交，留待之后的需求。
-3. **合并等待的上限。** 合并等待 child 关闭，结果等待合并。永远无法完成的关闭会一直扣住结果：前台父 Turn 会等到被取消为止，此时已提交的 child 按 H4b 的约定继续运行。放弃等待要么丢弃未被 pin 的工作，要么报告一个行仍可能改变的结果，所以暂不设上限。
+3. **合并等待的上限。** 合并等待 child 关闭，结果等待合并。永远无法完成的关闭会一直扣住结果：前台父 Turn 会等到被取消为止，此时已提交的 child 按 H4b 的约定继续运行。放弃等待要么丢弃未被 pin 的工作，要么报告一个行仍可能改变的结果，所以暂不设上限。这一等待同样扣住已请求合并的 run 的失败、停止与放弃（决策 5）。若所有主机都关闭了 child Workspace，这样的 run 会一直等到重新开启，或等到它的父关闭：此时级联 settle 该 run 并请求丢弃，丢弃会先 pin 结果。
 
 ## 后续工作
 

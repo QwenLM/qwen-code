@@ -295,6 +295,19 @@ export async function childWorkspaceAnswerSuffix(
 }
 
 /**
+ * #13753 I2: what a foreground answer ends with for a worktree run that
+ * started and then failed or was cancelled. Such a record has no receipt,
+ * but the relay settles it only after a merge it asked for (the child had
+ * finished its work) has its outcome, so this Workspace already shows what
+ * landed. Empty for a `shared` run and for one that never started.
+ */
+export function childWorkspaceEndedSuffix(record: ChildAgentRun): string {
+  if (record.workspaceMode !== 'worktree' || record.run.execution !== 'settled')
+    return '';
+  return "\n\n[child workspace] the child's changes did not land, unless the child had finished its work before this end: then its merge ran first. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.";
+}
+
+/**
  * The notification's own budget, far below the 64 KiB inline cap of both
  * the bundled input and the wake turn's subsequent user `managed-message`
  * envelope: design 5 names the notification the summary of an accepted
