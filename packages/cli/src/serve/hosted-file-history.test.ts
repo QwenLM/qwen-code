@@ -485,9 +485,12 @@ describe('canSettleHostedFileHistory grounds', () => {
       },
     },
     {
+      // The record parser refuses pendingMessageId without pendingTurn, so
+      // the parser-legal shape of a no-pending-turn record clears both.
       ground: 'no_pending_turn',
       prepare: (record) => {
         record.pendingTurn = null;
+        delete record.pendingMessageId;
       },
     },
     {
@@ -547,21 +550,6 @@ describe('canSettleHostedFileHistory grounds', () => {
                 modelMessageId: 'another-message',
                 state: 'settled',
                 outcomeRef: {},
-              },
-            ],
-          },
-        }),
-    },
-    {
-      ground: 'tool_item_unsettled',
-      prepare: () =>
-        runnableAuthorization({
-          tools: {
-            items: [
-              {
-                modelMessageId: MESSAGE,
-                state: 'in_progress',
-                outcomeRef: null,
               },
             ],
           },

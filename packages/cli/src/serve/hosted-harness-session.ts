@@ -7048,7 +7048,12 @@ export function registerHostedHarnessSessionRoutes(
       )
         return error(res, 404, 'hosted_file_snapshot_not_found');
       if (saved.pendingTurn || saved.pendingUndo)
-        return error(res, 409, 'hosted_file_history_recovery_required');
+        return error(
+          res,
+          409,
+          'hosted_file_history_recovery_required',
+          saved.pendingUndo ? 'undo_unsettled' : 'file_history_unsettled',
+        );
       const priorUndo = saved.undoReceipts?.find(
         (receipt) => receipt.requestId === requestId,
       );
