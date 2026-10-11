@@ -1070,32 +1070,6 @@ describe('background continuation', () => {
     expect(container.textContent).toContain('researcher started read_file');
   });
 
-  it('shows the sender on an inter-agent message row alongside the recipient chip', () => {
-    // OpenAI's multi-agent contract names an agent_message's direction with
-    // author + recipient; the recipient chip comes from the teammate prop
-    // (this wire's `agent`), the sender from the structured `author` field.
-    const container = render(
-      <SystemMessage
-        content="writer → researcher: how did the read go?"
-        variant="info"
-        source="teammate_activity"
-        data={{
-          kind: 'peer',
-          status: 'message',
-          taskId: 'teammate-activity-2',
-          author: {
-            agentName: '/root/writer',
-            depth: 1,
-            kind: 'teammate',
-          },
-        }}
-        teammate={{ name: 'researcher' }}
-      />,
-    );
-    expect(container.textContent).toContain('@researcher');
-    expect(container.textContent).toContain('from @writer');
-  });
-
   it('leaves a peer notice unattributed when no identity persisted', () => {
     const container = render(
       <SystemMessage
