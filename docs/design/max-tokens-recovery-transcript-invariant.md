@@ -1,5 +1,7 @@
 # MAX_TOKENS recovery transcript invariant
 
+[English](max-tokens-recovery-transcript-invariant.md) | [简体中文](max-tokens-recovery-transcript-invariant.zh-CN.md)
+
 ## Problem
 
 When an assistant response ends with `MAX_TOKENS`, Qwen Code asks the model to continue and coalesces the continuation into the original model turn in memory. Recording each attempt immediately writes adjacent assistant records to the append-only transcript, so resuming the session reconstructs history differently from the live session.
