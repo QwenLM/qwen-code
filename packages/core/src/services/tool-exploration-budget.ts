@@ -32,17 +32,27 @@ export function getToolExplorationKind(
   name: string,
   args: object,
 ): Kind | undefined {
-  const target =
+  const bridged =
     name === ToolNames.TOOL_CALL &&
-    typeof (args as Record<string, unknown>)['name'] === 'string'
-      ? ((args as Record<string, unknown>)['name'] as string)
-      : name;
+    typeof (args as Record<string, unknown>)['name'] === 'string';
+  const target = bridged
+    ? ((args as Record<string, unknown>)['name'] as string)
+    : name;
   const canonical = canonicalToolName(target);
   const resolved = resolveRegisteredToolName(
     canonical,
     registry.getAllToolNames(),
   );
   if (Array.isArray(resolved)) return undefined;
+  // The bridge unconditionally refuses these two targets
+  // (tools/tool-call.ts), so a bridged call to either performs no read and
+  // must stay unclassified like a name the registry refuses.
+  if (
+    bridged &&
+    (resolved === ToolNames.TOOL_SEARCH || resolved === ToolNames.TOOL_CALL)
+  ) {
+    return undefined;
+  }
   // Keyed on the registry's answer: `resolved` is `undefined` when the
   // session never registered this name (LSP disabled, `--exclude-tools`
   // removed `tool_search`), and a name the registry refuses must stay
@@ -66,6 +76,10 @@ export class ToolExplorationBudget {
     } else {
       this.calls = 0;
       this.reminded = false;
+      // Commit the zeroed floor, as reset() does: a rollback later in the
+      // same round-trip must not resurrect the previous phase's count or
+      // reminder latch.
+      this.commit();
     }
   }
 

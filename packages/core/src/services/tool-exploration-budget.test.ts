@@ -69,6 +69,12 @@ describe('ToolExplorationBudget', () => {
     budget.record(Kind.Edit);
     budget.rollback();
     expect(budget.takeReminder(2)).toBeUndefined();
+    // The phase reset above must commit its own zero floor, so the rollback
+    // cannot carry the delivered reminder's latch into the phase that
+    // follows it: a fresh phase earns its own reminder.
+    budget.record(Kind.Read);
+    budget.record(Kind.Read);
+    expect(budget.takeReminder(2)).toBe(TOOL_EXPLORATION_REMINDER);
   });
 
   it('honors a disabled allowance', () => {
@@ -126,6 +132,30 @@ describe('ToolExplorationBudget', () => {
         arguments: {},
       }),
     ).toBeUndefined();
+  });
+
+  it('leaves a bridge-refused discovery target unclassified', () => {
+    // `tool_call` unconditionally refuses `tool_search` and itself
+    // (tools/tool-call.ts), so a bridged call to either performs no read
+    // even though the registry knows the name.
+    const registry = {
+      getAllToolNames: () => ['read_file', 'lsp', 'tool_search', 'tool_call'],
+      getTool: (name: string) =>
+        name === 'tool_call' ? { kind: Kind.Other } : undefined,
+    } as unknown as ToolRegistry;
+    expect(
+      getToolExplorationKind(registry, 'tool_call', {
+        name: 'tool_search',
+        arguments: {},
+      }),
+    ).toBeUndefined();
+    // A bridged target the bridge does accept keeps its classification.
+    expect(
+      getToolExplorationKind(registry, 'tool_call', {
+        name: 'lsp',
+        arguments: {},
+      }),
+    ).toBe(Kind.Read);
   });
 
   it('leaves ambiguous case-insensitive registrations unclassified', () => {
