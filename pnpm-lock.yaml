@@ -22,7 +22,7 @@ overrides:
   '@agentclientprotocol/sdk>zod': 3.25.76
   openapi-typescript>supports-color: 7.2.0
 
-pnpmfileChecksum: sha256-l1PQbhvxdHMTzgESBo4hBKdu/AFRulnZ1lhNZBvIoLo=
+pnpmfileChecksum: sha256-trtCLLPhwoztokHtnTnRXoHkd6XsOy/7b+XeIrWUvEE=
 
 importers:
 
@@ -268,6 +268,27 @@ importers:
       ajv:
         specifier: ^8.17.1
         version: 8.20.0
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(jiti@2.7.0)(jsdom@26.1.0(supports-color@7.2.0))(lightningcss@1.32.0)(msw@2.10.4(@types/node@22.20.1)(typescript@5.8.3))(supports-color@7.2.0)(tsx@4.20.3)(yaml@2.9.0)
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
+
+  integrations/test-failure-explorer:
+    devDependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.30.0
+        version: 1.30.0(supports-color@7.2.0)(zod@3.25.76)
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
       esbuild:
         specifier: ^0.25.0
         version: 0.25.12
