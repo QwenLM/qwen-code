@@ -8,18 +8,20 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import {
-  ApprovalMode,
   TeamEventType,
-  ToolConfirmationOutcome,
-  createDebugLogger,
-  type Config,
-  type TeamManager,
   type TeammateApprovalRequestEvent,
   type TeammateExitedEvent,
   type TeammateJoinedEvent,
+} from '@qwen-code/qwen-code-core/agents/team/team-events.js';
+import type { TeamManager } from '@qwen-code/qwen-code-core/agents/team/TeamManager.js';
+import {
+  ToolConfirmationOutcome,
   type ToolCallConfirmationDetails,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/tools/tools.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,

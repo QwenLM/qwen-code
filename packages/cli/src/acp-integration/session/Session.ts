@@ -460,7 +460,7 @@ import {
   unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
-import { attachTeamSink } from './teamSink.js';
+import { attachTeamSink } from './team-sink.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,

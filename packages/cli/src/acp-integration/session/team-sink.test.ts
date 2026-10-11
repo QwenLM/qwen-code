@@ -5,16 +5,16 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import {
-  ApprovalMode,
   TeamEventType,
-  ToolConfirmationOutcome,
-  type Config,
   type TeammateApprovalRequestEvent,
-  type ToolEditConfirmationDetails,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/agents/team/team-events.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import type { ToolEditConfirmationDetails } from '@qwen-code/qwen-code-core/tools/tools.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { RequestPermissionRequest } from '@agentclientprotocol/sdk';
-import { attachTeamSink, type TeamSinkDeps } from './teamSink.js';
+import { attachTeamSink, type TeamSinkDeps } from './team-sink.js';
 
 type LeaderCallback = (
   modelText: string,
