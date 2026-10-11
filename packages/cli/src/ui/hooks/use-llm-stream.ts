@@ -4903,33 +4903,16 @@ export const useLlmStream = (
             `whose callId already has a functionResponse in history: ` +
             `${dedupedCallIds.join(', ')}`,
         );
-        // Even though the wire-side submission is dropped, the tool DID
-        // run locally — `toolCallCount` and `skillsModifiedInSession`
-        // must reflect that. Without this, deduped skill-write tools
-        // (e.g. write_file under a project SKILLS path) would silently
-        // skip the `skillsModifiedInSession` flip that gates the
-        // skills-reload prompt at end-of-turn. Mirrors the
-        // `recordCompletedToolCall` loop below over `llmTools` —
-        // filter to the same shape (non-client-initiated) so client
-        // tools (which the original loop also skipped) stay skipped.
-        //
-        // Cancelled tools are also skipped: `dedupedTools` includes
-        // anything in a terminal state (success | error | cancelled),
-        // but cancelled means the tool never actually ran end-to-end —
-        // the `allToolsCancelled` branch below would have surfaced
-        // them via `addHistory + reportCancelled` rather than the
-        // completed-call metric, and the metric should match. Without
-        // this filter, a deduped + cancelled tool would inflate
-        // `toolCallCount` for a call that never produced a result
-        // (and could also flip `skillsModifiedInSession` for a
-        // never-executed skill-write).
+        // Preserve local skill-write protection and recall hints, but never
+        // accept the dropped result as experience. Cancelled and client-owned
+        // calls do not belong to this completion bookkeeping.
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
           if (tc.status === 'cancelled') continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
-            tc.response,
+            { ...tc.response, status: tc.status },
           );
         }
         markToolsAsSubmitted(dedupedCallIds);
@@ -5086,7 +5069,7 @@ export const useLlmStream = (
           llmClient?.recordCompletedToolCall(
             toolCall.request.name,
             toolCall.request.args as Record<string, unknown>,
-            toolCall.response,
+            { ...toolCall.response, status: toolCall.status },
           );
         }
         dualOutput?.emitToolResult(toolCall.request, toolCall.response);
@@ -5374,7 +5357,7 @@ export const useLlmStream = (
         llmClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
-          toolCall.response,
+          { ...toolCall.response, status: toolCall.status },
         );
       }
 

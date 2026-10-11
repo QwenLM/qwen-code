@@ -5,7 +5,8 @@
  */
 
 /**
- * E2E Integration Tests for AutoSkill mechanism (per skill-nudge.md L258-320)
+ * E2E Integration Tests for AutoSkill mechanism
+ * (per docs/design/auto-skill-experience-gates.md).
  *
  * Tests the complete workflow from toolCallCount tracking to skill file writing.
  * These tests validate the behavior described in the design document's E2E checklist.

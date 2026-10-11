@@ -3802,35 +3802,96 @@ describe('Session', () => {
       ).toHaveBeenCalledOnce();
     });
 
-    it.each(['accepted', 'concurrent-only', 'failed-after-push'] as const)(
+    it.each([
+      'accepted',
+      'concurrent-only',
+      'failed-after-push',
+      'iterator-failed',
+      'iterator-failed-after-chunk',
+      'rolled-back',
+    ] as const)(
       'forwards only request-owned accepted ACP results (%s)',
       async (mode) => {
         let pushCount = 0;
+        let forwarded: Part[] | undefined;
+        let acceptedBeforeSourceComplete: number | undefined;
         Object.assign(mockChat, { getUserContentPushCount: () => pushCount });
-        mockChat.sendMessageStream = vi.fn(async (_model, request) => {
-          const message = (request as { message: Part[] }).message;
-          if (mode !== 'concurrent-only') {
-            Object.defineProperty(message, userContentPushSnapshotKey, {
-              value: pushCount,
-            });
-          }
-          pushCount += 1;
-          if (mode === 'failed-after-push')
-            throw new Error('fixture provider failed');
-          return createEmptyStream();
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'contents',
+              returnDisplay: 'contents',
+            }),
+          }),
         });
-        await session
-          .prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'ACP acceptance fixture' }],
-          })
-          .catch((error: Error) => {
-            expect(mode).toBe('failed-after-push');
-            expect(error.message).toContain('fixture provider failed');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(async (_model, request) => {
+            const message = (request as { message: Part[] }).message;
+            if (!message[0]?.functionResponse) {
+              return createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'acceptance-call',
+                        name: 'read_file',
+                        args: { path: '/tmp/test.txt' },
+                      },
+                    ],
+                  },
+                },
+              ]);
+            }
+            forwarded = message;
+            if (mode !== 'concurrent-only') {
+              Object.defineProperty(message, userContentPushSnapshotKey, {
+                value: pushCount,
+              });
+            }
+            if (mode !== 'rolled-back') pushCount += 1;
+            if (mode === 'failed-after-push')
+              throw new Error('fixture provider failed');
+            return (async function* () {
+              if (mode === 'iterator-failed')
+                throw new Error('fixture provider failed');
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: { text: 'Done' },
+              };
+              if (mode === 'iterator-failed-after-chunk')
+                throw new Error('fixture provider failed');
+              yield { type: core.StreamEventType.CHUNK, value: { text: '.' } };
+              acceptedBeforeSourceComplete =
+                mockLlmClient.acceptCompletedToolResults.mock.calls.length;
+            })();
           });
+        const result = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'ACP acceptance fixture' }],
+        });
+        if (mode.includes('failed'))
+          await expect(result).rejects.toThrow('fixture provider failed');
+        else await result;
+        expect(forwarded?.[0]?.functionResponse?.id).toBe('acceptance-call');
+        const accepted = mode !== 'concurrent-only' && mode !== 'rolled-back';
         expect(mockLlmClient.acceptCompletedToolResults).toHaveBeenCalledTimes(
-          mode === 'concurrent-only' ? 0 : 1,
+          accepted ? 1 : 0,
         );
+        if (accepted) {
+          expect(
+            mockLlmClient.acceptCompletedToolResults.mock.calls[0][0],
+          ).toBe(forwarded);
+        }
+        if (!mode.includes('failed')) {
+          expect(acceptedBeforeSourceComplete).toBe(accepted ? 1 : 0);
+        }
       },
     );
 
@@ -38757,6 +38818,15 @@ describe('Session', () => {
             }),
             expect.anything(),
           );
+          expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+            'read_file',
+            expect.anything(),
+            expect.objectContaining({
+              executionStatus: 'success',
+              errorType: core.ToolErrorType.EXECUTION_DENIED,
+              resultDisplay: 'success',
+            }),
+          );
           // The stop must produce an observable error result
           expect(
             mockChatRecordingService.recordToolResult,
@@ -44402,6 +44472,15 @@ describe('Session', () => {
           status: 'error',
           execution_status: 'success',
           error_type: core.ToolErrorType.UNHANDLED_EXCEPTION,
+        }),
+      );
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        'postprocess_tool',
+        {},
+        expect.objectContaining({
+          executionStatus: 'success',
+          errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+          resultDisplay: 'completed',
         }),
       );
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(

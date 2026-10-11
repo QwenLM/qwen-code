@@ -461,8 +461,10 @@ import { microcompactHistory } from '../services/microcompaction/microcompact.js
 import {
   collect,
   content,
+  drain,
   fnCall,
   fnResponse,
+  modelChunk,
   modelText,
   streamOf,
   userText,
@@ -9449,8 +9451,18 @@ Other open files:
           taskId: 'task-1',
           promise,
         });
-        // Bump toolCallCount above 0 to verify it resets.
         client['toolCallCount'] = 5;
+        client['experienceSignals'] = {
+          retryArc: true,
+          userSteer: true,
+          hasSubstantiveWork: true,
+        };
+        client['failedExperienceToolNames'].add('edit');
+        client.recordCompletedToolCall(
+          'read_file',
+          undefined,
+          completedOutcome('in-flight'),
+        );
 
         await run(
           [{ text: 'trigger review' }],
@@ -9458,6 +9470,14 @@ Other open files:
         );
 
         expect(client['toolCallCount']).toBe(0);
+        expect(client['experienceSignals']).toEqual({
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: false,
+        });
+        expect(client['failedExperienceToolNames'].size).toBe(0);
+        expect(client['pendingExperienceOutcomes'].has('in-flight')).toBe(true);
+        expect(client['recordedExperienceCallIds'].has('in-flight')).toBe(true);
         expect(client['pendingMemoryTaskPromises'].length).toBeGreaterThan(0);
 
         // Resolve promise so there are no dangling promises.
@@ -9516,6 +9536,265 @@ Other open files:
         expect(client['pendingExperienceOutcomes'].size).toBe(0);
       });
 
+      describe('terminal experience boundaries', () => {
+        let pushCount: number;
+        const readResult = (id: string): Part => ({
+          functionResponse: { id, name: 'read_file', response: {} },
+        });
+        const acceptReads = async (count: number) => {
+          const parts: Part[] = [];
+          for (let i = 0; i < count; i++) {
+            const id = `terminal-read-${i}`;
+            client.recordCompletedToolCall(
+              'read_file',
+              undefined,
+              completedOutcome(id),
+            );
+            parts.push(readResult(id));
+          }
+          await client.addHistory({ role: 'user', parts });
+        };
+
+        beforeEach(() => {
+          pushCount = 0;
+          installChat({
+            getUserContentPushCount: vi.fn(() => pushCount),
+            getHistoryLength: vi.fn().mockReturnValue(0),
+            stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+          });
+        });
+
+        it.each([
+          [5, true, true],
+          [4, true, true],
+          [5, false, true],
+          [5, true, false],
+        ] as const)(
+          'checks terminal recursive steer without another tool (count=%s accepted=%s enabled=%s)',
+          async (count, accepted, enabled) => {
+            await acceptReads(count);
+            vi.mocked(mockConfig.getAutoSkillEnabled).mockReturnValue(enabled);
+            const eligible = count >= 5 && accepted && enabled;
+            if (eligible) {
+              mockMemoryManager.scheduleSkillReview.mockReturnValue({
+                status: 'scheduled',
+                taskId: 'terminal-steer-review',
+              });
+            }
+            let turnCount = 0;
+            mockTurnRunFn.mockImplementation((_model, request) => {
+              turnCount += 1;
+              if (turnCount === 2 && !accepted) {
+                throw new Error('steer failed before history push');
+              }
+              publishPushSnapshot(request, pushCount);
+              pushCount += 1;
+              return textTurn('Done');
+            });
+            const steer: SteerInput = {
+              parts: [{ text: 'explain the result differently' }],
+              accept: vi.fn(),
+              restore: vi.fn(),
+            };
+            const getSteerInput = vi
+              .fn<() => Promise<SteerInput | undefined>>()
+              .mockResolvedValueOnce(steer)
+              .mockResolvedValue(undefined);
+            const result = run(
+              [{ text: 'summarize the files' }],
+              'terminal-steer',
+              {
+                type: SendMessageType.UserQuery,
+                getSteerInput,
+              },
+            );
+            if (accepted) await result;
+            else
+              await expect(result).rejects.toThrow(
+                'steer failed before history push',
+              );
+
+            expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+            expect(
+              accepted ? steer.accept : steer.restore,
+            ).toHaveBeenCalledOnce();
+            expect(
+              accepted ? steer.restore : steer.accept,
+            ).not.toHaveBeenCalled();
+            if (accepted && enabled) {
+              expect(
+                mockMemoryManager.scheduleSkillReview,
+              ).toHaveBeenCalledOnce();
+              const params =
+                mockMemoryManager.scheduleSkillReview.mock.calls[0][0];
+              expect(params).toEqual(
+                expect.objectContaining({
+                  toolCallCount: count,
+                  experienceSignals: {
+                    retryArc: false,
+                    userSteer: true,
+                    hasSubstantiveWork: false,
+                  },
+                }),
+              );
+              if (!eligible) {
+                expect(new MemoryManager().scheduleSkillReview(params)).toEqual(
+                  {
+                    status: 'skipped',
+                    skippedReason: 'below_threshold',
+                  },
+                );
+              }
+            } else {
+              expect(
+                mockMemoryManager.scheduleSkillReview,
+              ).not.toHaveBeenCalled();
+            }
+            expect(client['toolCallCount']).toBe(eligible ? 0 : count);
+          },
+        );
+
+        it.each([
+          [3, true, true],
+          [2, true, true],
+          [19, false, true],
+          [3, true, false],
+        ] as const)(
+          'checks terminal Retry without recounting results (reads=%s recovery=%s enabled=%s)',
+          async (reads, recovery, enabled) => {
+            await acceptReads(reads);
+            vi.mocked(mockConfig.getAutoSkillEnabled).mockReturnValue(enabled);
+            if (recovery) {
+              client.recordCompletedToolCall('read_file', undefined, {
+                ...completedOutcome('terminal-failure'),
+                executionStatus: 'error',
+                error: new Error('read failed'),
+              });
+              await client.addHistory({
+                role: 'user',
+                parts: [readResult('terminal-failure')],
+              });
+            }
+            client.recordCompletedToolCall(
+              'read_file',
+              undefined,
+              completedOutcome('terminal-recovery'),
+            );
+            const parts = [readResult('terminal-recovery')];
+            mockTurnRunFn.mockImplementation((_model, request) => {
+              publishPushSnapshot(request, pushCount);
+              pushCount += 1;
+              return (async function* () {
+                yield* [] as ServerLlmStreamEvent[];
+                throw new Error('provider failed after history push');
+              })();
+            });
+            await expect(
+              run(parts, 'terminal-retry', {
+                type: SendMessageType.ToolResult,
+              }),
+            ).rejects.toThrow('provider failed after history push');
+            const count = reads + (recovery ? 2 : 1);
+            expect(client['toolCallCount']).toBe(count);
+            expect(client['experienceSignals'].retryArc).toBe(recovery);
+            expect(
+              mockMemoryManager.scheduleSkillReview,
+            ).not.toHaveBeenCalled();
+
+            const eligible = count >= 5 && recovery && enabled;
+            if (eligible) {
+              mockMemoryManager.scheduleSkillReview.mockReturnValue({
+                status: 'scheduled',
+                taskId: 'terminal-retry-review',
+              });
+            }
+            mockTurnRunFn.mockImplementation((_model, request) => {
+              publishPushSnapshot(request, pushCount);
+              pushCount += 1;
+              return textTurn('Done');
+            });
+            await run(parts, 'terminal-retry', { type: SendMessageType.Retry });
+
+            if (enabled) {
+              expect(
+                mockMemoryManager.scheduleSkillReview,
+              ).toHaveBeenCalledOnce();
+              const params =
+                mockMemoryManager.scheduleSkillReview.mock.calls[0][0];
+              expect(params).toEqual(
+                expect.objectContaining({
+                  toolCallCount: count,
+                  experienceSignals: {
+                    retryArc: recovery,
+                    userSteer: false,
+                    hasSubstantiveWork: false,
+                  },
+                }),
+              );
+              if (!eligible) {
+                expect(new MemoryManager().scheduleSkillReview(params)).toEqual(
+                  {
+                    status: 'skipped',
+                    skippedReason: 'below_threshold',
+                  },
+                );
+              }
+            } else {
+              expect(
+                mockMemoryManager.scheduleSkillReview,
+              ).not.toHaveBeenCalled();
+            }
+            expect(
+              mockMemoryManager.scheduleMetadataMigration,
+            ).not.toHaveBeenCalled();
+            expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+            expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+            expect(client['toolCallCount']).toBe(eligible ? 0 : count);
+            expect(client['pendingExperienceOutcomes'].size).toBe(0);
+          },
+        );
+      });
+
+      it.each(['retry', 'write'] as const)(
+        'forwards accumulated %s signals to the review gate',
+        async (mode) => {
+          for (let i = 0; i < 5; i++) {
+            const id = `signal-${i}`;
+            client.recordCompletedToolCall(
+              mode === 'write' && i === 4 ? 'write_file' : 'read_file',
+              undefined,
+              {
+                ...completedOutcome(id),
+                ...(mode === 'retry' && i === 0
+                  ? {
+                      executionStatus: 'error' as const,
+                      error: new Error('failed'),
+                    }
+                  : {}),
+              },
+            );
+            await client.addHistory({
+              role: 'user',
+              parts: [
+                { functionResponse: { id, name: 'read_file', response: {} } },
+              ],
+            });
+          }
+          await run([{ text: 'done' }], 'forward-signals');
+          expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+            expect.objectContaining({
+              toolCallCount: 5,
+              skillsModified: false,
+              experienceSignals: {
+                retryArc: mode === 'retry',
+                userSteer: false,
+                hasSubstantiveWork: mode === 'write',
+              },
+            }),
+          );
+        },
+      );
+
       it('should pass confirmBeforePersist from getAutoSkillConfirmEnabled', async () => {
         vi.spyOn(
           client['config'],
@@ -9536,7 +9815,12 @@ Other open files:
         functionResponse: { id, name: 'read_file', response: {} },
       });
 
-      it.each(['accepted', 'concurrent-only', 'failed-after-push'] as const)(
+      it.each([
+        'accepted',
+        'concurrent-only',
+        'failed-after-push',
+        'rolled-back',
+      ] as const)(
         'records a result only after its own history push (%s)',
         async (mode) => {
           let pushCount = 0;
@@ -9549,14 +9833,16 @@ Other open files:
             undefined,
             completedOutcome('one'),
           );
+          let countBeforeSourceComplete: number | undefined;
           mockTurnRunFn.mockImplementation((_model, request) => {
             if (mode !== 'concurrent-only')
               publishPushSnapshot(request, pushCount);
-            pushCount += 1;
+            if (mode !== 'rolled-back') pushCount += 1;
             return (async function* () {
               if (mode === 'failed-after-push')
                 throw new Error('provider failed');
               yield { type: LlmEventType.Content, value: 'Done' };
+              countBeforeSourceComplete = client['toolCallCount'];
             })();
           });
           const result = run([responsePart('one')], 'accepted-result', {
@@ -9565,12 +9851,14 @@ Other open files:
           if (mode === 'failed-after-push')
             await expect(result).rejects.toThrow('provider failed');
           else await result;
-          expect(client['toolCallCount']).toBe(
-            mode === 'concurrent-only' ? 0 : 1,
-          );
+          const accepted = mode !== 'concurrent-only' && mode !== 'rolled-back';
+          expect(client['toolCallCount']).toBe(accepted ? 1 : 0);
           expect(client['pendingExperienceOutcomes'].size).toBe(
-            mode === 'concurrent-only' ? 1 : 0,
+            accepted ? 0 : 1,
           );
+          if (mode !== 'failed-after-push') {
+            expect(countBeforeSourceComplete).toBe(accepted ? 1 : 0);
+          }
         },
       );
 
@@ -9643,6 +9931,112 @@ Other open files:
         expect(client['failedExperienceToolNames'].size).toBe(0);
       });
 
+      it.each([
+        ['truncate', 'tool_0'],
+        ['truncate', undefined],
+        ['restore', 'tool_0'],
+        ['restore', undefined],
+        ['compact', 'tool_0'],
+        ['compact', undefined],
+        ['recreate', 'tool_0'],
+        ['recreate', undefined],
+        ['clear', 'tool_0'],
+        ['clear', undefined],
+        ['switch', 'tool_0'],
+        ['switch', undefined],
+      ] as const)(
+        'counts fresh normalized calls after %s (provider ID=%s)',
+        async (mode, providerId) => {
+          mockConfig.getAutoCompactThreshold = vi
+            .fn()
+            .mockReturnValue(undefined);
+          const complete = async (
+            name: string,
+            args: Record<string, unknown>,
+          ) => {
+            vi.mocked(
+              mockContentGenerator.generateContentStream,
+            ).mockResolvedValueOnce(
+              streamOf(modelChunk([fnCall(name, args, providerId)])),
+            );
+            const chat = client.getChat();
+            await drain(
+              await chat.sendMessageStream(
+                'test-model',
+                { message: [{ text: 'perform the next tool call' }] },
+                'id-lifecycle',
+              ),
+            );
+            const call = chat
+              .getHistoryShallow()
+              .at(-1)
+              ?.parts?.find((part) => part.functionCall)?.functionCall;
+            expect(call?.id).toBeTruthy();
+            const id = call!.id!;
+            client.recordCompletedToolCall(name, args, completedOutcome(id));
+            expect(client['pendingExperienceOutcomes'].has(id)).toBe(true);
+            await client.addHistory({
+              role: 'user',
+              parts: [{ functionResponse: { id, name, response: {} } }],
+            });
+            return id;
+          };
+          const oldId = await complete('read_file', { file_path: '/tmp/old' });
+          client.recordCompletedToolCall(
+            'read_file',
+            { file_path: '/tmp/old' },
+            completedOutcome(oldId),
+          );
+          expect(client['pendingExperienceOutcomes'].size).toBe(0);
+          expect(client['toolCallCount']).toBe(1);
+
+          const summary: Content[] = [
+            userText('Summary without the old tool call'),
+            { role: 'model', parts: [{ text: 'Understood' }] },
+          ];
+          if (mode === 'truncate') client.truncateHistory(0);
+          else if (mode === 'restore') client.setHistory([]);
+          else if (mode === 'compact') client.getChat().setHistory(summary);
+          else if (mode === 'recreate')
+            await client.startChat(summary, SessionStartSource.Compact);
+          else if (mode === 'clear') await client.resetChat();
+          else {
+            vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session');
+            await client.initialize();
+          }
+          const newSession = mode === 'clear' || mode === 'switch';
+          const newId = await complete('write_file', {
+            file_path: '/test/project/root/.qwen/skills/example/SKILL.md',
+            content: 'new work',
+          });
+          if (newSession) expect(newId).toBe(oldId);
+          else expect(newId).not.toBe(oldId);
+          expect(client['toolCallCount']).toBe(newSession ? 1 : 2);
+          expect(client['experienceSignals'].hasSubstantiveWork).toBe(true);
+          expect(client['skillsModifiedInSession']).toBe(true);
+          expect(client['recentCompletedToolNames']).toContain('write_file');
+          client.recordCompletedToolCall(
+            'write_file',
+            undefined,
+            completedOutcome(newId),
+          );
+          await client.addHistory({
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: newId,
+                  name: 'write_file',
+                  response: {},
+                },
+              },
+            ],
+          });
+          expect(client['pendingExperienceOutcomes'].size).toBe(0);
+          expect(client['toolCallCount']).toBe(newSession ? 1 : 2);
+        },
+      );
+
       it('keeps pending completion evidence across compact chat recreation', async () => {
         client.recordCompletedToolCall('edit', undefined, {
           ...completedOutcome('failed'),
@@ -9685,6 +10079,7 @@ Other open files:
             hasSubstantiveWork: true,
           };
           client['failedExperienceToolNames'].add('edit');
+          client['skillsModifiedInSession'] = true;
           if (mode === 'clear') await client.resetChat();
           else {
             vi.spyOn(client['config'], 'getSessionId').mockReturnValue(
@@ -9701,6 +10096,86 @@ Other open files:
           expect(client['failedExperienceToolNames'].size).toBe(0);
           expect(client['pendingExperienceOutcomes'].size).toBe(0);
           expect(client['recordedExperienceCallIds'].size).toBe(0);
+          expect(client['skillsModifiedInSession']).toBe(false);
+        },
+      );
+
+      it('excludes cancelled-after-settle work without closing a retry', async () => {
+        client.recordCompletedToolCall('edit', undefined, {
+          ...completedOutcome('failure'),
+          executionStatus: 'error',
+          error: new Error('edit failed'),
+        });
+        await client.addHistory({
+          role: 'user',
+          parts: [responsePart('failure')],
+        });
+        client.recordCompletedToolCall(
+          'edit',
+          { path: '/test/project/root/.qwen/skills/example/SKILL.md' },
+          { ...completedOutcome('cancelled'), status: 'cancelled' },
+        );
+        await client.addHistory({
+          role: 'user',
+          parts: [responsePart('cancelled')],
+        });
+        expect(client['toolCallCount']).toBe(1);
+        expect(client['experienceSignals'].retryArc).toBe(false);
+        expect(client['failedExperienceToolNames'].has('edit')).toBe(true);
+        expect(client['skillsModifiedInSession']).toBe(false);
+      });
+
+      it.each(['denied', 'not_started'] as const)(
+        'retains recall hints for %s calls without counting experience',
+        (mode) => {
+          client.recordCompletedToolCall('read_file', undefined, {
+            ...completedOutcome(mode),
+            ...(mode === 'denied'
+              ? { errorType: ToolErrorType.EXECUTION_DENIED }
+              : { executionStatus: 'not_started' as const }),
+          });
+          expect(client['recentCompletedToolNames']).toContain('read_file');
+          expect(client['pendingExperienceOutcomes'].size).toBe(0);
+          expect(client['toolCallCount']).toBe(0);
+        },
+      );
+
+      it.each([0, 3])(
+        'uses structured shell exit %s for recovery',
+        async (exitCode) => {
+          client.recordCompletedToolCall('run_shell_command', undefined, {
+            ...completedOutcome('shell-failure'),
+            executionStatus: 'error',
+            error: new Error('command failed'),
+          });
+          await client.addHistory({
+            role: 'user',
+            parts: [responsePart('shell-failure')],
+          });
+          client.recordCompletedToolCall('run_shell_command', undefined, {
+            ...completedOutcome('shell-recovery'),
+            resultDisplay: {
+              type: 'shell_result',
+              version: 1,
+              text: '',
+              output: '',
+              directory: '/tmp',
+              exitCode,
+              signal: null,
+              pid: null,
+              error: null,
+              outcome: 'completed',
+              notices: [],
+              truncated: false,
+              outputFiles: [],
+            },
+          });
+          await client.addHistory({
+            role: 'user',
+            parts: [responsePart('shell-recovery')],
+          });
+          expect(client['toolCallCount']).toBe(2);
+          expect(client['experienceSignals'].retryArc).toBe(exitCode === 0);
         },
       );
 

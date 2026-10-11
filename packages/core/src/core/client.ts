@@ -2821,6 +2821,7 @@ export class LlmClient {
             history,
             this.config.getChatRecordingService(),
             uiTelemetryService,
+            this.recordedExperienceCallIds,
           ),
       );
       chat.enableManualPlanExitNotices();
@@ -3095,11 +3096,11 @@ export class LlmClient {
       return;
     }
 
-    // autoSkill counts tool calls and can trigger on both UserQuery and
-    // ToolResult turns so the threshold can fire mid-session.
+    // Retry can finish a window accepted before the previous provider failed.
     if (
       messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.ToolResult
+      messageType === SendMessageType.ToolResult ||
+      messageType === SendMessageType.Retry
     ) {
       const projectRoot = this.config.getProjectRoot();
       const sessionId = this.config.getSessionId();
@@ -3249,6 +3250,7 @@ export class LlmClient {
   }
 
   private resetSkillReviewWindow(): void {
+    // Pending results and dedup IDs outlive the consumed review window.
     this.toolCallCount = 0;
     this.experienceSignals = {
       retryArc: false,
@@ -3282,9 +3284,15 @@ export class LlmClient {
     response: CompletedToolOutcome,
   ): void {
     if (
-      (response.executionStatus !== 'success' &&
-        response.executionStatus !== 'error') ||
+      response.status === 'cancelled' ||
+      response.executionStatus === 'cancelled' ||
       this.recordedExperienceCallIds.has(response.callId)
+    )
+      return;
+    this.rememberCompletedToolName(toolName);
+    if (
+      response.executionStatus !== 'success' &&
+      response.executionStatus !== 'error'
     )
       return;
     this.recordedExperienceCallIds.add(response.callId);
@@ -3299,7 +3307,6 @@ export class LlmClient {
       }
     }
     if (!didToolCallProduceWork(response)) return;
-    this.rememberCompletedToolName(toolName);
     this.pendingExperienceOutcomes.set(response.callId, {
       toolName,
       outcome: classifyToolExperience(toolName, response),

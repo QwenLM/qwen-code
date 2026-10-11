@@ -13744,6 +13744,7 @@ export class Session implements SessionContext {
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     let completedResultDisplay: ToolResultDisplay | undefined;
+    let terminalErrorType: ToolErrorType | undefined;
     // Released when the call ends, however it ends, as the core scheduler does.
     let builtInvocation: { release?: () => Promise<void> } | undefined;
     let toolType: 'native' | 'mcp' = 'native';
@@ -13911,6 +13912,7 @@ export class Session implements SessionContext {
     ) => {
       executionStatus = opts.executionStatus;
       terminalStatus = opts.status;
+      terminalErrorType = opts.errorType;
       spanError = opts.status === 'error' ? error.message : undefined;
       cleanupAgentToolResources();
       const errorParts = errorResponse(
@@ -16052,6 +16054,7 @@ export class Session implements SessionContext {
                 }
               }
               executeReturned = true;
+              completedResultDisplay = toolResult.returnDisplay;
               try {
                 settledArtifacts = toolResult.artifacts;
               } catch {
@@ -16516,7 +16519,6 @@ export class Session implements SessionContext {
             );
           }
 
-          completedResultDisplay = toolResult.returnDisplay;
           const modelResponseParts = withHookContext(responseParts, status);
           queueToolResultRecord?.(fc, {
             callId,
@@ -16695,7 +16697,8 @@ export class Session implements SessionContext {
             terminalStatus === 'error'
               ? new Error(spanError ?? 'Tool execution failed')
               : undefined,
-          errorType: executionErrorType,
+          status: terminalStatus,
+          errorType: terminalErrorType ?? executionErrorType,
           resultDisplay: completedResultDisplay,
         });
       }

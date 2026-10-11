@@ -2193,7 +2193,7 @@ export async function runNonInteractive(
             .recordCompletedToolCall(
               executionRequest.name,
               executionRequest.args as Record<string, unknown>,
-              toolResponse,
+              { ...toolResponse, status: statusByResponse.get(toolResponse) },
             );
 
           // Capture model override from skill tool results.
