@@ -17,10 +17,7 @@ import {
   HARNESS_MODEL_START_PHASES,
   harnessCheckpointIsAgentWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
-import {
-  managedExtensionRecordKey,
-  managedTaskId,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import {
   assertManagedSessionStableId,
   type ManagedSessionDurableRef,
@@ -33,6 +30,7 @@ import {
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import {
+  childRunEndedText,
   childWorkspaceAnswerSuffix,
   type HostedChildAgentSession,
 } from './hosted-child-agent-session.js';
@@ -47,15 +45,23 @@ import {
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
   hostedAgentBackgroundStartedText,
+  hostedBroadcastCommitted,
   hostedChildRunIdFor,
-  hostedMessageContinuedText,
   hostedMessageToChildText,
   HOSTED_MESSAGE_TO_PARENT_TEXT,
+  hostedRouteAnswer,
   hostedTeamJoinedText,
   hostedRuntimeSessionId,
   journaledToolResultIds,
   truncateHostedGlobResponse,
 } from './hosted-workspace-tool-turn.js';
+import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
+import {
+  HostedChildChains,
+  hostedMemberView,
+  hostedRouteDetails,
+  isEndedMember,
+} from './hosted-member-chain.js';
 import {
   endHostedAction,
   readHostedActionOptions,
@@ -464,12 +470,9 @@ async function answerAbandonedTurnCalls(input: {
         {
           text:
             hostedAgentBackgroundStartedText(
-              managedTaskId(
-                managedExtensionRecordKey(
-                  input.session.authority.sessionHeader.sessionKey.sessionId,
-                  'child_run',
-                  launched.run.executionCallId ?? callKey,
-                ),
+              managedChildTaskId(
+                input.session.authority.sessionHeader.sessionKey.sessionId,
+                launched.run.executionCallId ?? callKey,
               ),
             ) + (member === undefined ? '' : hostedTeamJoinedText(member)),
         },
@@ -523,7 +526,9 @@ async function answerAbandonedTurnCalls(input: {
 /**
  * H4d-b: the answer a send_message call earned when it committed — its
  * outbox entry, or the continuation it launched for a completed child —
- * or undefined when it committed nothing.
+ * or undefined when it committed nothing. H4e-b2 names a member and tells
+ * a run that proved it never started since, and answers a broadcast by
+ * the recipients it committed (decision 9).
  */
 function sentMessageText(
   input: {
@@ -544,20 +549,86 @@ function sentMessageText(
     }),
   );
   if (message?.direction === 'outbound') {
-    return message.route === 'to_parent'
-      ? HOSTED_MESSAGE_TO_PARENT_TEXT
-      : hostedMessageToChildText(
-          input.children?.taskIdOf(message.childRunId) ?? message.childRunId,
-        );
+    if (message.route === 'to_parent') return HOSTED_MESSAGE_TO_PARENT_TEXT;
+    if (input.children === undefined)
+      return hostedMessageToChildText(message.childRunId);
+    const sent = { kind: 'message', childRunId: message.childRunId } as const;
+    return hostedRouteAnswer(input.children, {
+      ...sent,
+      ...hostedRouteDetails(input.session.authority, sent, message.messageId),
+    });
   }
   const continued = input.children?.record(callKey);
   if (continued?.predecessorChildRunId) {
-    return hostedMessageContinuedText(
-      input.children!.taskIdOf(continued.predecessorChildRunId),
-      input.children!.taskIdOf(continued.childRunId),
-    );
+    const sent = {
+      kind: 'continuation',
+      childRunId: continued.childRunId,
+      predecessorChildRunId: continued.predecessorChildRunId,
+    } as const;
+    return hostedRouteAnswer(input.children!, {
+      ...sent,
+      ...hostedRouteDetails(input.session.authority, sent),
+    });
   }
-  return undefined;
+  // H4e-b2 decision 9: a broadcast commits each recipient under its own
+  // position's ids. Every position is probed whatever the journaled
+  // arguments say, since a hook may have rewritten the input that ran.
+  if (input.children === undefined) return undefined;
+  const reached = hostedBroadcastCommitted({
+    authority: input.session.authority,
+    children: input.children,
+    messages: input.messages,
+    senderSessionId: input.session.authority.sessionHeader.sessionKey.sessionId,
+    promptId: input.promptId,
+    callId,
+  });
+  if (reached.length === 0) return undefined;
+  const team = input.session.authority
+    .extensionRecordsInDomain('team_state')
+    .map((entry) => parseTeamState(entry.record))
+    .find((each) => each.lifecycle !== 'deleted');
+  const lines = reached
+    .map(
+      (each) => `- ${each.name ?? `position ${each.position}`}: ${each.text}`,
+    )
+    .join('\n');
+  const arrived = reached.filter((each) => each.arrived).length;
+  const head = `The broadcast was interrupted after it was sent to ${reached.length} member${reached.length === 1 ? '' : 's'}${arrived > 0 ? '; do not send it again to the members it reached' : ''}.`;
+  // The batch rule keeps the roster the broadcast read; a team deleted or
+  // replaced since leaves no roster to tell the rest by, as a live replay
+  // finds (decision 9).
+  if (
+    team === undefined ||
+    reached.some(
+      (each) =>
+        team.members[each.position - 1]?.childRunId !== each.rootChildRunId,
+    )
+  )
+    return `${head} Its team has changed since, so nothing tells who else it was meant for.\n${lines}`;
+  const chains = new HostedChildChains(
+    input.session.authority.extensionRecordsInDomain('child_run'),
+  );
+  // A member the call never committed a send to, or whose send reached a
+  // run that never started, did not get it; one that has ended since
+  // cannot take it by name either.
+  const missed: string[] = [];
+  const ended: string[] = [];
+  for (const [index, member] of team.members.entries()) {
+    const committed = reached.find((each) => each.position === index + 1);
+    if (committed?.arrived) continue;
+    if (isEndedMember(hostedMemberView(chains, member.childRunId)))
+      ended.push(member.name);
+    else missed.push(member.name);
+  }
+  return (
+    `${head}\n${lines}` +
+    (missed.length > 0
+      ? `\nIt did not reach: ${missed.join(', ')}. Send to those members by name if they still need it.`
+      : '') +
+    (ended.length > 0
+      ? `\nIt did not reach ${ended.join(', ')}, which ${ended.length === 1 ? 'has' : 'have'} ended and cannot take it.`
+      : '')
+  );
 }
 
 /** The interruption every settle or resume route below names. */
@@ -808,13 +879,10 @@ export async function fillParkedRoundAgentGaps(input: {
       // receipt: no wait row exists for it, so its consumption belongs to
       // the wake pump — never to this fill.
       if (foldOwed) {
-        const taskId = managedTaskId(
-          managedExtensionRecordKey(
-            input.managed.authority.sessionHeader.sessionKey.sessionId,
-            'child_run',
-            admitted.run.executionCallId ??
-              hostedChildRunIdFor(input.promptId, callId),
-          ),
+        const taskId = managedChildTaskId(
+          input.managed.authority.sessionHeader.sessionKey.sessionId,
+          admitted.run.executionCallId ??
+            hostedChildRunIdFor(input.promptId, callId),
         );
         await writeFold(
           convertToFunctionResponse(name, callId, [
@@ -856,7 +924,7 @@ export async function fillParkedRoundAgentGaps(input: {
                 name,
                 callId,
                 [],
-                `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
+                childRunEndedText(record),
               ),
             );
             filled += 1;
