@@ -8,7 +8,7 @@ Status: implemented in this change. This is the runtime half of slice **H4d** of
 
 H4d-a made every fact a delivery needs a committed record, with commit-time rules in both languages, and left both capabilities disabled because nothing produced them. This slice is the producers:
 
-- **The managed `send_message` tool** on the Hosted Shell lanes: a parent messages the child tasks it launched (`task_id`), a child messages its parent (`to: "parent"`). A running child gets a message, a completed child gets a continuation, and any other ending gets a named refusal (contract follow-up row).
+- **The managed `send_message` tool** on the Hosted Shell lanes: a parent messages the child tasks it launched (`task_id`), a child messages its parent (`to: "parent"`). A running child gets a message, a completed child gets a continuation unless it is a member of an open team (decision 2; H4e-b1), and any other ending gets a named refusal (contract follow-up row).
 - **The message relay** in `managed-agent-server`: claim, target resolution, the receipt with its input and wake, the sender's advances, and crash recovery.
 - **Consumption** of a receipt once the turn that read it settles, and the sender's matching last step.
 - **Revive**: a continuation starts a new child Session that carries its chain's history.
@@ -63,7 +63,7 @@ A parent's message to a running child:
 | 6    | parent  | outbound `consumed`                                                                 | relay             |
 | 7    | parent  | the child run settles from the child's newest turn (decision 8)                     | H4b relay         |
 
-A child's message to its parent runs the same steps with the journals swapped; its step 2 takes the target from the child's lineage, and the parent's step 3 waits until the run attached. A message to a completed child is a continuation launch instead: step 1 commits a `child_run` that names its predecessor, and H4b's pipeline runs it with the composed first input of decision 9.
+A child's message to its parent runs the same steps with the journals swapped; its step 2 takes the target from the child's lineage, and the parent's step 3 waits until the run attached. A message to a completed child (not a member of an open team, decision 2) is a continuation launch instead: step 1 commits a `child_run` that names its predecessor, and H4b's pipeline runs it with the composed first input of decision 9.
 
 ## Bounds
 
@@ -108,7 +108,7 @@ A child's message to its parent runs the same steps with the journals swapped; i
 
 - A parent's message reaches a running child exactly once, across a relay restart, and the child's result reflects the turn that read it.
 - A child's message reaches its parent exactly once, held until the run attached.
-- A message to a completed child continues it as a new run whose first input carries the chain's history; a failed or cancelled child is refused by name.
+- A message to a completed child that is not a member of an open team (H4e-b1) continues it as a new run whose first input carries the chain's history; a failed or cancelled child is refused by name.
 - Accepted and consumed are visible on both sides, each naming the input it stands on; nothing is consumed by a turn that did not complete.
 - A closing sender's messages are never delivered; a child never settles over a message still owed to it.
 - Both gates are open, the recovery allowlist admits `session_message`, and no public contract moves.
@@ -121,10 +121,10 @@ A child's message to its parent runs the same steps with the journals swapped; i
 
 ## Follow-up work
 
-| Slice   | Scope                                                                                                                                         |
-| ------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| H4e     | Teams and the mailbox; the team route of `send_message`.                                                                                      |
-| Unknown | The operator story for a message ledger row classified `unknown` (open question 3); H4f's covers only the child-run ledger.                   |
-| Import  | Transcript import for continuations (open question 1).                                                                                        |
-| Peers   | Named peers outside the lineage, with their authorization proof and route value.                                                              |
-| Scale   | Bound the per-settle edge read (a body cache keyed by resource id) and keep classified outbox entries out of the handover scan's index range. |
+| Slice   | Scope                                                                                                                                                            |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H4e     | Teams and the mailbox; the team route of `send_message`. The lead-side runtime landed as H4e-b1; decision 2 does not continue a finished member of an open team. |
+| Unknown | The operator story for a message ledger row classified `unknown` (open question 3); H4f's covers only the child-run ledger.                                      |
+| Import  | Transcript import for continuations (open question 1).                                                                                                           |
+| Peers   | Named peers outside the lineage, with their authorization proof and route value.                                                                                 |
+| Scale   | Bound the per-settle edge read (a body cache keyed by resource id) and keep classified outbox entries out of the handover scan's index range.                    |

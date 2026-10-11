@@ -22,7 +22,9 @@ import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   HostedTeamRefusal,
   HostedTeamSession,
+  hostedOpenTeamMembership,
   hostedTeamArgumentError,
+  hostedTeamMembership,
   type HostedTeamStore,
 } from './hosted-team-session.js';
 
@@ -131,6 +133,36 @@ function revisions(domain: 'team_state' | 'team_task', recordId: string) {
   return session.authority.extensionRecord(domain, recordId)?.revision;
 }
 
+/** A team_delete stopped after it closed the team, before it deleted it. */
+async function stopDeleteAtClosing(callKey: string): Promise<void> {
+  const store = {
+    authority: session.authority,
+    resources: session.resources,
+  } as HostedTeamStore;
+  const failing = new HostedTeamSession(
+    {
+      ...store,
+      authority: Object.create(session.authority, {
+        commitExtensionRecord: {
+          value: async (
+            ...args: Parameters<
+              HostedTeamStore['authority']['commitExtensionRecord']
+            >
+          ) => {
+            if (args[0].commandId.endsWith(':deleted'))
+              throw new Error('store unavailable');
+            return session.authority.commitExtensionRecord(...args);
+          },
+        },
+      }),
+    },
+    sessionKey,
+  );
+  await expect(failing.run('team_delete', {}, callKey)).rejects.toThrow(
+    'store unavailable',
+  );
+}
+
 describe('team lifecycle', () => {
   it('opens one team named in the Legacy form, keyed by its call', async () => {
     expect(
@@ -200,32 +232,7 @@ describe('team lifecycle', () => {
 
   it('finishes a team that a stopped team_delete left closing', async () => {
     await createTeam();
-    const store = {
-      authority: session.authority,
-      resources: session.resources,
-    } as HostedTeamStore;
-    const failing = new HostedTeamSession(
-      {
-        ...store,
-        authority: Object.create(session.authority, {
-          commitExtensionRecord: {
-            value: async (
-              ...args: Parameters<
-                HostedTeamStore['authority']['commitExtensionRecord']
-              >
-            ) => {
-              if (args[0].commandId.endsWith(':deleted'))
-                throw new Error('store unavailable');
-              return session.authority.commitExtensionRecord(...args);
-            },
-          },
-        }),
-      },
-      sessionKey,
-    );
-    await expect(failing.run('team_delete', {}, 'prompt:del')).rejects.toThrow(
-      'store unavailable',
-    );
+    await stopDeleteAtClosing('prompt:del');
     expect(teams.openTeam()?.lifecycle).toBe('closing');
     expect(teams.admitMember.bind(teams, 'bob')).toThrow(/closing/);
     // A later team_delete finishes it, and that call's replay answers so.
@@ -243,6 +250,29 @@ describe('team lifecycle', () => {
 });
 
 describe('members', () => {
+  // send_message reads the open-team answer; a result's label reads any team.
+  it('finds a member among open teams until its team is deleted', async () => {
+    await createTeam();
+    await addMember('alice');
+    await settle('run-alice');
+    const records = () =>
+      session.authority.extensionRecordsInDomain('team_state');
+    const alice = { teamName: 'review', name: 'alice' };
+    expect(hostedOpenTeamMembership(records(), 'run-alice')).toMatchObject(
+      alice,
+    );
+    await stopDeleteAtClosing('prompt:del');
+    expect(teams.openTeam()?.lifecycle).toBe('closing');
+    expect(hostedOpenTeamMembership(records(), 'run-alice')).toMatchObject(
+      alice,
+    );
+    await teams.run('team_delete', {}, 'prompt:del');
+    expect(teams.openTeam()).toBeUndefined();
+    expect(hostedOpenTeamMembership(records(), 'run-alice')).toBeUndefined();
+    expect(hostedTeamMembership(records(), 'run-alice')).toMatchObject(alice);
+    expect(hostedTeamMembership(records(), 'run-bob')).toBeUndefined();
+  });
+
   it('admits a member only into an active team, by a free sanitized name', async () => {
     expect(() => teams.admitMember('alice')).toThrow(/team_create first/);
     await createTeam();
@@ -391,7 +421,9 @@ describe('the board', () => {
     expect(assigned).toContain(
       'Task #1 updated (status: in_progress, owner: alice).',
     );
-    expect(assigned).toContain('"alice" was not notified');
+    expect(assigned).toContain(
+      '"alice" was not notified: members learn of board changes only once the team mailbox lands, so give a member its work in its launch prompt, or send_message it, while it runs, with the task id that task_list shows beside its name (task_…).',
+    );
     expect(
       await refusal(
         teams.run('task_update', { taskId: '1', owner: '' }, 'prompt:u5'),
@@ -835,7 +867,7 @@ describe('the board', () => {
     ).toEqual(['prompt:call-team#1']);
   });
 
-  it('lists the board with filters and the roster with run states, stop reasons and task ids', async () => {
+  it('lists the board with filters and the roster with run states, stop reasons and running task ids', async () => {
     await createTeam();
     await addMember('alice');
     await addMember('bob');
@@ -870,12 +902,13 @@ describe('the board', () => {
         '#2 [pending] — fix',
         '',
         '--- Team "review" members ---',
+        // Only a running member shows the task id send_message takes.
         `alice: running — ${children.taskIdOf('run-alice')}`,
-        `bob: completed — ${children.taskIdOf('run-bob')}`,
+        'bob: completed',
         // A failed run says why; a member the host never started reads
         // differently from one that failed its work.
-        `carol: failed (creation_failed) — ${children.taskIdOf('run-carol')}`,
-        `dave: cancelled (stop_requested) — ${children.taskIdOf('run-dave')}`,
+        'carol: failed (creation_failed)',
+        'dave: cancelled (stop_requested)',
       ].join('\n'),
     );
     expect(

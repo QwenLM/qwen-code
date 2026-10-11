@@ -23,8 +23,10 @@ import {
   HostedWorkspaceToolTurn,
   HOSTED_AGENT_TOOL,
   HOSTED_AGENT_WORKTREE_TOOL,
+  HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_TEAM_AGENT_TOOL,
   HOSTED_TEAM_AGENT_WORKTREE_TOOL,
+  HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
@@ -614,6 +616,59 @@ it('labels a member result notification with its name', async () => {
   expect(text).toContain('all clean');
 });
 
+// A run keeps the label of the roster it joined: a result the relay accepts
+// after its team was deleted still names its member.
+it('keeps the label on a result accepted after its team was deleted', async () => {
+  const turn = createTurn();
+  await execute(turn, [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  await execute(turn, [member('alice', 'call-alice')]);
+  const childRunId = 'prompt:call-alice';
+  await children.dispatchStarted(childRunId, {
+    dispatchId: 'dispatch-1',
+    runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+  });
+  await children.attach(childRunId, 'session-child');
+  await children.settleCompleted(childRunId, {
+    result: Buffer.from('all clean', 'utf8'),
+    receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+  });
+  expect(
+    await execute(turn, [call('team_delete', {}, 'call-delete')]),
+  ).toContain('deleted.');
+  await children.accept(childRunId, {
+    notification: { description: 'alice task' },
+  });
+  const input = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast((event) => event.kind === 'input.accepted')!;
+  const text = JSON.parse(
+    (
+      await session.resources.read(
+        assertManagedSessionDurableRef(input.payload['contentRef'], 'input'),
+      )
+    ).toString('utf8'),
+  ).text as string;
+  expect(text).toContain(
+    '<kind>child_agent</kind>\n<teammate>alice</teammate>',
+  );
+});
+
+it('declares send_message with team addressing beside the team tools', async () => {
+  const signal = new AbortController().signal;
+  const tools = await createTurn({ messages: true }).declarations(signal);
+  expect(tools.filter((tool) => tool.name === 'send_message')).toEqual([
+    HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL,
+  ]);
+  expect(HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL.description).toBe(
+    `${HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.description} A team member is addressed, while it runs, by the task id that task_list shows beside its name (task_…); a member that has finished cannot be continued until its team is deleted.`,
+  );
+  expect(HOSTED_TEAM_SEND_MESSAGE_TO_CHILD_TOOL.parametersJsonSchema).toBe(
+    HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.parametersJsonSchema,
+  );
+});
+
 // #13841: an isolated member's result names its merge outcome beside its
 // name, and team_delete counts it as running until its run settles, which
 // for an isolated member follows the merge.
@@ -704,7 +759,9 @@ it('messages a running member and refuses to continue a finished one', async () 
     await execute(turn, [
       call('send_message', { to: 'bob', message: 'hi' }, 'call-by-name'),
     ]),
-  ).toContain('a team member is addressed by the task id task_list shows');
+  ).toContain(
+    'a team member is addressed, while it runs, by the task id that task_list shows beside its name (task_…)',
+  );
   await children.dispatchStarted('prompt:call-alice', {
     dispatchId: 'dispatch-1',
     runtime: { runtimeBindingId: 'binding-1', generation: '1' },
@@ -722,12 +779,13 @@ it('messages a running member and refuses to continue a finished one', async () 
     ),
   ]);
   expect(refused).toContain(
-    'ran as \\"alice\\" of team \\"review\\" and has finished; a member of an open team cannot be continued yet',
+    'ran as \\"alice\\" of team \\"review\\" and has finished; a member of an open team cannot be continued yet. For more work, launch a new member with another name while the team takes members; once every member has ended, deleting the team would let this one be continued like any other child agent, but would give up the team\'s board.',
   );
   expect(children.record('prompt:call-more')).toBeUndefined();
   const listing = await execute(turn, [call('task_list', {}, 'call-list')]);
-  expect(listing).toContain(`alice: completed — ${alice}`);
-  expect(listing).toContain(`bob: running — ${bob}`);
+  // Only a running member shows its task id on the roster.
+  expect(listing).toContain(`alice: completed\\nbob: running — ${bob}`);
+  expect(listing).not.toContain(alice);
   // A plain child beside the team continues as before.
   await execute(turn, [
     call(
@@ -760,8 +818,8 @@ it('messages a running member and refuses to continue a finished one', async () 
   expect(children.record('prompt:call-plain-more')).toBeDefined();
 });
 
-// Once its team is deleted, nothing reads the roster for a former member,
-// so it continues as a plain child.
+// Once its team is deleted, no new work routes through its roster, so a
+// former member continues as a plain child.
 it('continues a former member once its team is deleted', async () => {
   const turn = createTurn({ messages: true });
   await execute(turn, [

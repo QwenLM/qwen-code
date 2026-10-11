@@ -14,10 +14,7 @@ import {
   type ChildSessionRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
-import {
-  managedExtensionRecordKey,
-  managedTaskId,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import type {
   CommittedExtensionOperation,
   ManagedSessionActor,
@@ -132,7 +129,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_create',
     description:
-      'Create a pending task on the team board. Members are not told about board changes; give a member its work in its launch prompt, or send_message it by its task id while it runs.',
+      'Create a pending task on the team board. Members are not told about board changes; give a member its work in its launch prompt, or send_message it, while it runs, with the task id that task_list shows beside its name (task_…).',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -218,7 +215,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_list',
     description:
-      'List the team board, optionally filtered, followed by each member with the state of its run (and why a failed or cancelled run ended) and the task id send_message takes while it runs.',
+      'List the team board, optionally filtered, followed by each member with the state of its run (and why a failed or cancelled run ended) and, while it runs, the task id send_message takes.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -383,13 +380,35 @@ export interface HostedTeamMembership {
   readonly name: string;
 }
 
+/** A team is open while active, or closing until it is deleted. */
+function isOpenTeam(team: TeamState): boolean {
+  return team.lifecycle !== 'deleted';
+}
+
 /** The roster entry naming one child run, among a Session's team records. */
 export function hostedTeamMembership(
   teams: ReadonlyArray<{ readonly record: unknown }>,
   childRunId: string,
 ): HostedTeamMembership | undefined {
+  return membershipAmong(teams, childRunId, () => true);
+}
+
+/** The same entry, among the teams not yet deleted. */
+export function hostedOpenTeamMembership(
+  teams: ReadonlyArray<{ readonly record: unknown }>,
+  childRunId: string,
+): HostedTeamMembership | undefined {
+  return membershipAmong(teams, childRunId, isOpenTeam);
+}
+
+function membershipAmong(
+  teams: ReadonlyArray<{ readonly record: unknown }>,
+  childRunId: string,
+  admits: (team: TeamState) => boolean,
+): HostedTeamMembership | undefined {
   for (const entry of teams) {
     const team = parseTeamState(entry.record);
+    if (!admits(team)) continue;
     const member = team.members.find((each) => each.childRunId === childRunId);
     if (member !== undefined)
       return { teamId: team.teamId, teamName: team.name, name: member.name };
@@ -424,7 +443,7 @@ export class HostedTeamSession {
     return this.store.authority
       .extensionRecordsInDomain('team_state')
       .map((entry) => parseTeamState(entry.record))
-      .find((team) => team.lifecycle !== 'deleted');
+      .find(isOpenTeam);
   }
 
   /** The member a child run joined as, in any team of this Session. */
@@ -726,7 +745,7 @@ export class HostedTeamSession {
     const notice =
       notified !== undefined &&
       this.memberState(notified.childRunId) === 'running'
-        ? ` "${owner}" was not notified: members learn of board changes only once the team mailbox lands, so give a member its work in its launch prompt, or send_message it by its task id while it runs.`
+        ? ` "${owner}" was not notified: members learn of board changes only once the team mailbox lands, so give a member its work in its launch prompt, or send_message it, while it runs, with the task id that task_list shows beside its name (task_…).`
         : '';
     return (
       `Task #${number} updated (status: ${task.status}` +
@@ -901,6 +920,8 @@ export class HostedTeamSession {
             // A failed or cancelled run says why, so the lead can tell a
             // member the host never started (an isolated member whose
             // Workspace was not prepared) from one that failed its work.
+            // Only a running member shows its task id: once a member of an
+            // open team has finished, send_message refuses to continue it.
             const state = this.memberState(member.childRunId);
             const reason =
               state === 'failed' || state === 'cancelled'
@@ -909,7 +930,9 @@ export class HostedTeamSession {
             return (
               `${member.name}: ${state}` +
               (reason ? ` (${reason})` : '') +
-              ` — ${managedTaskId(managedExtensionRecordKey(this.key.sessionId, 'child_run', member.childRunId))}`
+              (state === 'running'
+                ? ` — ${managedChildTaskId(this.key.sessionId, member.childRunId)}`
+                : '')
             );
           })
         : ['No members yet.']),
