@@ -95,8 +95,12 @@ and in Stop continuations of foreground, non-channel turns:
    not started a tool call (complete, or with its arguments still streaming),
    the controller aborts with `MID_TURN_INPUT_ABORT_REASON`. LlmChat treats
    this like a cancel: the part already delivered stays in history and the
-   transcript. `watch` absorbs the abort and ends like a normal end of
-   stream.
+   transcript. `watch` absorbs whatever the cut response then throws and
+   ends like a normal end of stream. The abort can reach it as the abort
+   reason itself or as a transport's own abort error, not always an
+   `AbortError`, and the response was given up in any case. A provider
+   failure that persists surfaces from the next request, which carries the
+   input.
 4. After a response without function calls, `takeInput` waits for an early
    drain still in flight and, only when this response's drain took input,
    drains the buffer and the queue and returns the user message. The loop
@@ -183,16 +187,17 @@ A second click on the row while the request is out is ignored.
 ## Validation
 
 - Unit: `Session.test.ts` covers a cut-off response answered in the same
-  turn; a request that arrives before the response opens; a request that
-  finds an empty queue; a response that already called a tool, whose tool
+  turn, also when it ends with an error; an error from a response whose tool
+  call kept it from being cut; a request that arrives before the response
+  opens; a request that finds an empty queue; a response that already called a tool, whose tool
   call is still streaming (in the main loop and in a Stop continuation),
   whose tool call starts while the drain is out, or whose tool ends the turn;
   a drain that answers after the response ended; late answers from a
   timed-out send-now drain during the response, after it, and after the turn;
   input recovered from a timed-out drain; a host that cannot answer drains; a
   Stop-hook continuation, and the Stop-hook state after input cut one short;
-  a Goal continuation; channel turns, their Stop continuations, and
-  background-notification turns; repeated requests while a drain
+  a Goal continuation; channel turns, their Stop continuations, cron turns
+  and background-notification turns; repeated requests while a drain
   is out; a tool-boundary drain that waits for an early drain; input kept
   when the turn is cancelled (as text when its attachment cannot be resolved
   then) or when a tool ends it while the drain is out (within the keep
@@ -207,7 +212,8 @@ A second click on the row while the request is out is ignored.
   messages wait, that a rejected request is logged and changes nothing, that
   the send-now drain leaves queue-only steering queued, that a failed
   send-now drain requeues in the original order without what left the queue
-  meanwhile, and client authorization.
+  meanwhile, still delivering a message whose deletion missed while the drain
+  held it, and client authorization.
   `server.test.ts` and `multi-workspace-sessions.test.ts` cover the route,
   its owner routing and its failure statuses, the SDK tests cover both
   clients, and the Web Shell tests cover the row action, its wiring in the

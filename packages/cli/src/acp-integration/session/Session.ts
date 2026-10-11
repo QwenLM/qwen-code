@@ -9956,6 +9956,10 @@ export class Session implements SessionContext {
         try {
           yield* stream;
         } catch (error) {
+          // The cut can arrive as the abort reason itself or as a transport's
+          // own abort error, not always an AbortError. Whatever the response
+          // throws once cut is absorbed: it was given up, and a failure that
+          // persists surfaces from the next request.
           if (!interrupted()) throw error;
         } finally {
           end();

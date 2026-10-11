@@ -4479,7 +4479,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     }
   });
 
-  it('does not requeue a message that left the queue while a send-now drain failed', async () => {
+  it('does not requeue a queue-only entry settled while a send-now drain failed', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const media = new SessionAttachmentStore();
     const queue: MidTurnQueueEntry[] = [];

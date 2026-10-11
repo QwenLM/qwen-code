@@ -25457,6 +25457,53 @@ describe('Session', () => {
           ).toHaveBeenCalledWith([midTurnPart], 'use plan B instead');
         });
 
+        it('answers the input when the cut response ends with an error', async () => {
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValueOnce({ messages: ['use plan B instead'] })
+            .mockResolvedValue({ messages: [] });
+          let markStreaming!: () => void;
+          const streaming = new Promise<void>((resolve) => {
+            markStreaming = resolve;
+          });
+          let sends = 0;
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockImplementation(
+              async (
+                _model: string,
+                request: { config: { abortSignal: AbortSignal } },
+              ) => {
+                if (sends++ > 0) return createEmptyStream();
+                const signal = request.config.abortSignal;
+                return (async function* () {
+                  yield textChunk;
+                  markStreaming();
+                  await new Promise<void>((resolve) =>
+                    signal.addEventListener('abort', () => resolve(), {
+                      once: true,
+                    }),
+                  );
+                  throw Object.assign(new Error('upstream 429'), {
+                    status: 429,
+                  });
+                })();
+              },
+            );
+
+          const done = startPrompt();
+          await streaming;
+          session.sendMidTurnInputNow();
+
+          // The cut response was given up; the input goes out in its place.
+          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+          const calls = vi.mocked(mockChat.sendMessageStream).mock.calls;
+          expect(calls).toHaveLength(2);
+          expect(calls[1]?.[1].message).toEqual([
+            { text: `${interruptPrefix}use plan B instead` },
+          ]);
+        });
+
         it('cuts a response that has not streamed anything yet', async () => {
           mockClient.extMethod = vi
             .fn()
@@ -26055,11 +26102,60 @@ describe('Session', () => {
             }),
           ).resolves.toEqual({ accepted: true });
           await streaming;
+          const internals = session as unknown as {
+            pullForOpenResponse?: () => void;
+            midTurnSendNowFor?: AbortSignal;
+          };
+          // Nothing opens this response to interruption, and a send-now
+          // request arms nothing while it streams.
+          expect(internals.pullForOpenResponse).toBeUndefined();
           session.sendMidTurnInputNow();
+          expect(internals.midTurnSendNowFor).toBeUndefined();
           await nextTick();
           release();
 
           await vi.waitFor(() => expect(session.isIdle()).toBe(true));
+          expect(
+            drainCalls().filter((call) => call[1]?.['userInputOnly']),
+          ).toEqual([]);
+          expect(state.signal?.aborted).toBe(false);
+        });
+
+        it('never interrupts a cron turn', async () => {
+          let cronCallback: ((job: { prompt: string }) => void) | undefined;
+          mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+          mockConfig.getCronScheduler = vi.fn().mockReturnValue({
+            size: 1,
+            hasPendingWork: true,
+            start: vi.fn((callback: (job: { prompt: string }) => void) => {
+              cronCallback = callback;
+            }),
+            stop: vi.fn(),
+            getExitSummary: vi.fn().mockReturnValue(undefined),
+          });
+          mockClient.extMethod = vi.fn().mockResolvedValue({ messages: [] });
+          const { streaming, release, state } = openResponse([textChunk], 1);
+          const internals = session as unknown as {
+            cronCompletion: Promise<void> | null;
+            pullForOpenResponse?: () => void;
+            midTurnSendNowFor?: AbortSignal;
+          };
+
+          // The first prompt starts the scheduler and settles, so the cron
+          // turn can run.
+          await expect(startPrompt()).resolves.toEqual({
+            stopReason: 'end_turn',
+          });
+          cronCallback!({ prompt: 'scheduled prompt' });
+          await streaming;
+          expect(internals.pullForOpenResponse).toBeUndefined();
+          session.sendMidTurnInputNow();
+          expect(internals.midTurnSendNowFor).toBeUndefined();
+          await nextTick();
+          release();
+
+          await vi.waitFor(() => expect(internals.cronCompletion).toBeNull());
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
           expect(
             drainCalls().filter((call) => call[1]?.['userInputOnly']),
           ).toEqual([]);
@@ -26332,6 +26428,67 @@ describe('Session', () => {
           expect(
             vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1].message,
           ).toEqual([{ text: `${responsePrefix}also check tests` }]);
+        });
+
+        it('surfaces an error from a response its drain did not cut', async () => {
+          let answerDrain: ((value: unknown) => void) | undefined;
+          mockClient.extMethod = vi
+            .fn()
+            .mockImplementationOnce(
+              () =>
+                new Promise((resolve) => {
+                  answerDrain = resolve;
+                }),
+            )
+            .mockResolvedValue({ messages: [] });
+          let markStreaming!: () => void;
+          const streaming = new Promise<void>((resolve) => {
+            markStreaming = resolve;
+          });
+          let announce!: () => void;
+          const announced = new Promise<void>((resolve) => {
+            announce = resolve;
+          });
+          let markPrepared!: () => void;
+          const prepared = new Promise<void>((resolve) => {
+            markPrepared = resolve;
+          });
+          let fail!: () => void;
+          const failing = new Promise<void>((resolve) => {
+            fail = resolve;
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockImplementationOnce(async () =>
+              (async function* () {
+                yield textChunk;
+                markStreaming();
+                await announced;
+                yield {
+                  type: core.StreamEventType.CHUNK,
+                  value: createPreparationResponse('c', 'write_file'),
+                };
+                markPrepared();
+                await failing;
+                throw new Error('upstream 500');
+              })(),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          const done = startPrompt();
+          await streaming;
+          session.sendMidTurnInputNow();
+          await vi.waitFor(() => expect(answerDrain).toBeDefined());
+          announce();
+          await prepared;
+          // The drain takes input, but the tool call keeps the response
+          // from being cut, so its error is the turn's.
+          answerDrain!({ messages: ['also check tests'] });
+          await nextTick();
+          fail();
+
+          await expect(done).rejects.toThrow('upstream 500');
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         });
 
         it('drains once at a time however often send-now arrives', async () => {

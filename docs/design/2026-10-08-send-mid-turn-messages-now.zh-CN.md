@@ -79,7 +79,10 @@ drain（带 `userInputOnly: true` 的 `craft/drainMidTurnQueue`）也不会取�
 3. 只有当 drain 取到了输入、回复仍处于打开状态、并且还没有开始工具调用（无论
    调用已完整产出，还是参数仍在流式生成）时，controller 才以
    `MID_TURN_INPUT_ABORT_REASON` 中止。LlmChat 按取消处理：已经输出的部分保留在
-   历史和 transcript 中。`watch` 吸收这次中止，并像流正常结束一样结束。
+   历史和 transcript 中。`watch` 吸收被截断的回复随后抛出的任何错误，并像流正常
+   结束一样结束。中止到达时可能是中止原因本身，也可能是传输层自己的中止错误，
+   不一定是 `AbortError`，而这个回复无论如何都已被放弃。持续存在的 provider
+   故障会在下一次携带输入的请求中暴露。
 4. 对于没有 function call 的回复，`takeInput` 会等待仍在进行中的提前 drain；只有
    本次回复的 drain 取到了输入时，才取出缓冲区和队列中的内容，返回要发送的用户
    消息，循环在同一回合内发送它。回复被打断时，消息带有前缀
@@ -144,13 +147,13 @@ daemon 声明该能力时，daemon 已接管的 mid-turn 排队行在删除、�
 
 ## 验证
 
-- 单元测试：`Session.test.ts` 覆盖被截断的回复在同一回合内得到回应；回复打开
-  之前到达的请求；请求遇到空队列；回复已经调用工具、工具调用参数仍在流式生成
+- 单元测试：`Session.test.ts` 覆盖被截断的回复在同一回合内得到回应，包括它以
+  错误结束的情况；因工具调用而未被截断的回复抛出的错误；回复打开之前到达的请求；请求遇到空队列；回复已经调用工具、工具调用参数仍在流式生成
   （主循环和 Stop 续跑中）、drain 在途时才开始工具调用，或者工具结束了回合；
   drain 在回复结束后才返回；超时的立即发送 drain 在回复进行中、回复结束后和回合
   结束后才回复；从超时的 drain 恢复的输入；宿主无法响应 drain；Stop hook 续跑，
-  以及输入截断续跑后的 Stop hook 状态；goal 续跑；channel 回合及其 Stop 续跑，
-  以及后台通知回合；drain 在途时
+  以及输入截断续跑后的 Stop hook 状态；goal 续跑；channel 回合及其 Stop 续跑、
+  cron 回合以及后台通知回合；drain 在途时
   重复收到请求；工具边界的 drain 等待提前 drain；回合被取消时保留已取走的输入
   （其附件此时无法解析时以文本保留），以及 drain 在途时工具结束回合时保留已取走
   的输入（文件读取或媒体 bridge 卡住时在保留时限内结束，bridge 在时限到时被
@@ -160,7 +163,8 @@ daemon 声明该能力时，daemon 已接管的 mid-turn 排队行在删除、�
   `bridge.test.ts` 和 `bridgeClient.test.ts` 覆盖只输入消息时不发送请求、只有在
   用户消息等待时立即发送才发出请求、请求被拒绝时会记日志且不改变任何状态、立即
   发送的 drain 不取走 queue-only steering、失败的立即发送 drain 按原顺序放回队列
-  且不放回期间已离开队列的消息，以及客户端校验。`server.test.ts` 和 `multi-workspace-sessions.test.ts` 覆盖路由、
+  且不放回期间已离开队列的消息、drain 持有期间删除未命中的消息仍会投递，以及
+  客户端校验。`server.test.ts` 和 `multi-workspace-sessions.test.ts` 覆盖路由、
   按 owner 的转发及其失败状态码，SDK 测试覆盖两个客户端，Web Shell 测试覆盖排队
   行按钮、它在主应用和 chat pane 中的接线、hook（包括已离开队列的行和重复点击）
   和 session action。去掉上述决策背后 agent 端的任何一道保护都会让测试失败，
