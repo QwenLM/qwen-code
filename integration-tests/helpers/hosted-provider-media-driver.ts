@@ -48,6 +48,8 @@ const digest = (value: string | Buffer) =>
 let brokerUrl = config.brokerUrl;
 let dropStart = false;
 let startDrops = 0;
+let expectedTransportCallId: string | undefined;
+let transportDrops = 0;
 let modelRequests = 0;
 let expectedCallId = '';
 let expectedSplitToolMedia = true;
@@ -60,10 +62,21 @@ let expectedMedia: Array<{
 }> = [];
 let proxyFailure: unknown;
 const proxy = createServer(async (req, res) => {
+  let expectedExecuteDrop = false;
   try {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const bytes = Buffer.concat(chunks);
+    if (
+      expectedTransportCallId !== undefined &&
+      req.method === 'POST' &&
+      req.url === '/internal/managed-runtime/provider/v1/control'
+    ) {
+      const { operation } = JSON.parse(bytes.toString('utf8'));
+      expectedExecuteDrop =
+        operation?.kind === 'execute' &&
+        operation.reference?.callId === expectedTransportCallId;
+    }
     const upstream = await fetch(new URL(req.url!, brokerUrl), {
       method: req.method,
       headers: {
@@ -83,6 +96,12 @@ const proxy = createServer(async (req, res) => {
     res.writeHead(upstream.status, { 'content-type': 'application/json' });
     res.end(response);
   } catch (cause) {
+    if (expectedExecuteDrop && expectedTransportCallId !== undefined) {
+      expectedTransportCallId = undefined;
+      transportDrops++;
+      res.destroy();
+      return;
+    }
     proxyFailure = cause;
     res.destroy();
   }
@@ -347,11 +366,15 @@ try {
       );
       await writeFile(file, replacement.bytes);
     } else {
+      if (name === 'lost-execute') expectedTransportCallId = reference.callId;
       try {
         execution = await client.execute(reference);
       } catch (cause) {
         if (name !== 'lost-execute') throw cause;
+      } finally {
+        expectedTransportCallId = undefined;
       }
+      if (name === 'lost-execute') assert.equal(transportDrops, 1);
     }
     const beforeRecoveryCounts =
       name === 'lost-start' || name === 'lost-execute'
@@ -605,11 +628,12 @@ try {
     });
   }
   assert.equal(startDrops, 1);
+  assert.equal(transportDrops, 1);
   assert.equal(modelRequests, reports.length * 2);
   if (proxyFailure) throw proxyFailure;
   await writeFile(configPath + '.results', JSON.stringify(reports));
   console.log(
-    `HOSTED_PROVIDER_MEDIA_OK cases=${reports.length} modelRequests=${modelRequests} startDrops=${startDrops}`,
+    `HOSTED_PROVIDER_MEDIA_OK cases=${reports.length} modelRequests=${modelRequests} startDrops=${startDrops} transportDrops=${transportDrops}`,
   );
 } finally {
   process.chdir(originalCwd);

@@ -232,7 +232,10 @@ describe('ReadFileTool', () => {
             borrowed = source.fileHandle;
             await fsp.rename(file, `${file}.original`);
             await fsp.writeFile(file, '%PDF-1.7\nreplacement');
-            return operation(source);
+            const reading = vi.spyOn(source.fileHandle, 'read');
+            const result = await operation(source);
+            if (extra) expect(reading).not.toHaveBeenCalled();
+            return result;
           });
         const result = await read(
           file,
@@ -243,6 +246,7 @@ describe('ReadFileTool', () => {
         );
         if (extra) {
           expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+          expect(result.llmContent).toContain('inline media byte limit');
           expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
         } else {
           expect(result.error).toBeUndefined();
@@ -455,12 +459,17 @@ describe('ReadFileTool', () => {
       );
       const explicit = await read({ file_path: file, pages: '1-2' }, mediaTool);
       expect(explicit.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
-      expect(pdfMocks.renderPDFPagesToImages).toHaveBeenLastCalledWith(file, {
-        firstPage: 1,
-        lastPage: 2,
-        signal: abortSignal,
-        maxTotalBase64Bytes: limits.maxInlineMediaBase64Bytes,
-      });
+      expect(pdfMocks.renderPDFPagesToImages).toHaveBeenLastCalledWith(
+        ['linux', 'darwin'].includes(process.platform)
+          ? expect.objectContaining({ read: expect.any(Function) })
+          : file,
+        {
+          firstPage: 1,
+          lastPage: 2,
+          signal: abortSignal,
+          maxTotalBase64Bytes: limits.maxInlineMediaBase64Bytes,
+        },
+      );
       pdfMocks.renderPDFPagesToImages.mockResolvedValue({
         success: true,
         images: [{ data: 'YWJj', mimeType: 'image/jpeg' }],
@@ -510,13 +519,18 @@ describe('ReadFileTool', () => {
           ),
         ).rejects.toThrow(/abort/i);
         expect(pdfMocks.getPDFPageCount).toHaveBeenCalledWith(
-          file,
+          ['linux', 'darwin'].includes(process.platform)
+            ? expect.objectContaining({ read: expect.any(Function) })
+            : file,
           controller.signal,
         );
         if (stage !== 'page-count')
-          expect(pdfMocks.extractPDFText).toHaveBeenCalledWith(file, {
-            signal: controller.signal,
-          });
+          expect(pdfMocks.extractPDFText).toHaveBeenCalledWith(
+            pdfMocks.getPDFPageCount.mock.calls[0]![0],
+            {
+              signal: controller.signal,
+            },
+          );
         if (stage !== 'render')
           expect(pdfMocks.renderPDFPagesToImages).not.toHaveBeenCalled();
       },

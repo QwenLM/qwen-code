@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import type { Config } from '../config/config.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { ApprovalMode } from '../config/config.js';
 import {
   getHookExecutionOwner,
@@ -466,6 +467,7 @@ describe('ManagedToolRuntime', () => {
       getTargetDir: () => directory,
       getWorkspaceContext: () => ({ isPathWithinWorkspace: () => true }),
       getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
+      getFileSystemService: () => new StandardFileSystemService(),
       getFileReadCache: () => new FileReadCache(),
       getFileReadCacheDisabled: () => true,
       getEffectiveInputModalities: () => ({ image: true }),
@@ -570,6 +572,7 @@ describe('ManagedToolRuntime', () => {
       getTargetDir: () => directory,
       getWorkspaceContext: () => ({ isPathWithinWorkspace: () => true }),
       getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
+      getFileSystemService: () => new StandardFileSystemService(),
       getFileReadCache: () => new FileReadCache(),
       getFileReadCacheDisabled: () => true,
       getEffectiveInputModalities: () => ({ pdf: true }),
