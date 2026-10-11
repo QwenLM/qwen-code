@@ -3512,6 +3512,10 @@ describe('LlmChat', async () => {
       // producer→`tryCompress`→`compress()` hops, so dropping either forward
       // or swapping in `actualTokens` must turn it red (#13432).
       expect(reactiveOpts.observedServerCeiling).toBe(128_000);
+      // The kind travels on the same producer→`tryCompress`→`compress()`
+      // hops: an input-bound ceiling must not size an output budget
+      // downstream (#13876).
+      expect(reactiveOpts.observedServerCeilingKind).toBe('total');
       // The route that reported the ceiling must travel with it, or the
       // service cannot tell a retry on that route from a side-query on another
       // one (#13876). Same producer→tryCompress→compress() hop.

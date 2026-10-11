@@ -1784,6 +1784,11 @@ describe('ChatCompressionService.compress cache sharing', () => {
   const COMPACTION_WINDOW = 400_000;
   /** A declared baseUrl other than the main model's, for an endpoint pin. */
   const OTHER_ENDPOINT = 'https://other.example/v1';
+  /**
+   * A ceiling a provider stated on the *input* allowance, not the window:
+   * DashScope's `Range of input length should be [1, 196608]`.
+   */
+  const OBSERVED_INPUT_CEILING = 196_608;
 
   it('keeps reactive overflow recovery off the shared request when the server reports a lower ceiling (#13432)', async () => {
     // Every other canShareCache conjunct holds in this fixture: main model,
@@ -2007,6 +2012,150 @@ describe('ChatCompressionService.compress cache sharing', () => {
       COMPACTION_WINDOW,
     );
     expect(request.model).toBe(`openai:compact-model\0${OTHER_ENDPOINT}`);
+    expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+  });
+
+  it('keeps the inferred window for a distinct compaction model with no usable registry window (#13432)', async () => {
+    // Arm A of the R2-1 family. This side-query reaches a model other than the
+    // main one, so the ceiling the main route reported is not evidence about
+    // it (#13876); and its own registry row carries no `contextWindowSize`, so
+    // there is nothing else to size against but the inferred window. Sized
+    // against the main route's ceiling anyway, the output budget floors at 1
+    // once the payload exceeds it, the truncation guard drops the summary, and
+    // `force` bypassing the failure breaker means the session never compacts.
+    const chunk = 'x'.repeat(4_000);
+    const history = Array.from({ length: 300 }, (_, i) =>
+      i % 2
+        ? modelText(`chunk-${i} ${chunk}`)
+        : userText(`chunk-${i} ${chunk}`),
+    );
+    const { coldSpy, result } = await expectCold(
+      {
+        history,
+        compactionModel: 'compact-model',
+        configuredModels: [{ id: 'compact-model', contextWindowSize: 0 }],
+        contextWindowSize: INFERRED_WINDOW,
+      },
+      {
+        originalTokenCount: SERVER_REPORTED_ACTUAL,
+        precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+        observedServerCeiling: OBSERVED_CEILING,
+      },
+    );
+    const request = coldSpy.mock.calls[0]![1] as {
+      contents: Content[];
+      systemInstruction?: string;
+      model?: string;
+      config?: { maxOutputTokens?: number };
+    };
+    const coldInputEstimate =
+      estimateContentTokens(request.contents) +
+      Math.ceil((request.systemInstruction ?? '').length / 4);
+    // Fixture guard: the payload must exceed the main route's ceiling,
+    // otherwise consuming that ceiling here would not bind and the case would
+    // pass vacuously.
+    expect(coldInputEstimate).toBeGreaterThan(OBSERVED_CEILING);
+    expect(request.model).toBe('compact-model');
+    expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+  });
+
+  it('keeps a distinct compaction model on its own window when it shares the main route (#13432)', async () => {
+    // The same-route sibling of the `\0`-pinned case above: the selector names
+    // another model without an `authType:` prefix or an endpoint pin, so the
+    // side-query reaches a different model over the same endpoint. That model's
+    // registry window governs it, and the main route's ceiling does not — the
+    // two cases must not be distinguishable only by the endpoint check.
+    const chunk = 'x'.repeat(4_000);
+    const history = Array.from({ length: 300 }, (_, i) =>
+      i % 2
+        ? modelText(`chunk-${i} ${chunk}`)
+        : userText(`chunk-${i} ${chunk}`),
+    );
+    const { coldSpy, result } = await expectCold(
+      {
+        history,
+        compactionModel: 'compact-model',
+        configuredModels: [
+          { id: 'compact-model', contextWindowSize: COMPACTION_WINDOW },
+        ],
+        contextWindowSize: INFERRED_WINDOW,
+      },
+      {
+        originalTokenCount: SERVER_REPORTED_ACTUAL,
+        precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+        observedServerCeiling: OBSERVED_CEILING,
+      },
+    );
+    const request = coldSpy.mock.calls[0]![1] as {
+      contents: Content[];
+      systemInstruction?: string;
+      model?: string;
+      config?: { maxOutputTokens?: number };
+    };
+    const coldInputEstimate =
+      estimateContentTokens(request.contents) +
+      Math.ceil((request.systemInstruction ?? '').length / 4);
+    // Fixture guards: the payload exceeds the main route's ceiling (so clamping
+    // against it floors the budget) yet fits the receiving model's own window
+    // (so the too-small-window guard keeps the selector instead of coalescing).
+    expect(coldInputEstimate).toBeGreaterThan(OBSERVED_CEILING);
+    expect(coldInputEstimate + COMPACT_MAX_OUTPUT_TOKENS).toBeLessThanOrEqual(
+      COMPACTION_WINDOW,
+    );
+    expect(request.model).toBe('compact-model');
+    expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+  });
+
+  it('does not size a window from a bound the server stated on the input (#13876)', async () => {
+    // Arm B of the R2-1 family. DashScope rejects the request with `Range of
+    // input length should be [1, 196608]`: that number is the prompt
+    // allowance, and a request is free to stack output on top of it, so
+    // `prompt + max_tokens <= window` is not the server's rule. A reactive
+    // recovery whose slimmed estimate sits just under the ceiling — which is
+    // exactly where the reported rejection put it — then gets a budget of a
+    // few hundred tokens, the truncation guard drops the summary, and the
+    // session never compacts.
+    const chunk = 'x'.repeat(4_000);
+    const history = Array.from({ length: 195 }, (_, i) =>
+      i % 2
+        ? modelText(`chunk-${i} ${chunk}`)
+        : userText(`chunk-${i} ${chunk}`),
+    );
+    const { coldSpy, result } = await expectCold(
+      {
+        history,
+        contextWindowSize: INFERRED_WINDOW,
+        // An estimate-derived anchor keeps this run on the cold path for a
+        // reason independent of the ceiling, so this case isolates the
+        // `budgetWindow` half of the fix.
+        lastPromptTokenCountIsEstimated: true,
+      },
+      {
+        originalTokenCount: SERVER_REPORTED_ACTUAL,
+        precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+        observedServerCeiling: OBSERVED_INPUT_CEILING,
+        observedServerCeilingKind: 'input',
+      },
+    );
+    const request = coldSpy.mock.calls[0]![1] as {
+      contents: Content[];
+      systemInstruction?: string;
+      config?: { maxOutputTokens?: number };
+    };
+    const coldInputEstimate =
+      estimateContentTokens(request.contents) +
+      Math.ceil((request.systemInstruction ?? '').length / 4);
+    // Fixture guards: the payload must still fit the server's input bound (so
+    // the compaction request itself is admissible), and consuming that bound
+    // as a window must floor the budget under the stubbed 500-token output (so
+    // the regression would really drop the summary rather than shrink it).
+    expect(coldInputEstimate).toBeLessThanOrEqual(OBSERVED_INPUT_CEILING);
+    expect(
+      computeCompactionOutputBudget(coldInputEstimate, OBSERVED_INPUT_CEILING),
+    ).toBeLessThanOrEqual(500);
     expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
   });

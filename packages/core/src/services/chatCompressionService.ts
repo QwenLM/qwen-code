@@ -331,6 +331,17 @@ export interface CompressOptions {
    */
   observedServerCeiling?: number;
   /**
+   * What `observedServerCeiling` bounds, from the wording that reported it. An
+   * `'input'` bound names the prompt/input allowance (DashScope's input
+   * range), not the context window, so `prompt + max_tokens <= ceiling` is not
+   * the server's rule and the number must not size the output budget: the
+   * slimmed estimate of a reactive run sits just under an input ceiling by
+   * construction, and clamping against it floors the budget at 1, which the
+   * truncation guard then drops on every send (#13876 keeps the input-side use
+   * of that number). Unset or `'total'` applies the ceiling as before.
+   */
+  observedServerCeilingKind?: 'input' | 'total';
+  /**
    * Route identity of the request that reported `observedServerCeiling`
    * (`Config.getModelRouteIdentity` of the send route). The ceiling is applied
    * only when the side-query resolves to the active main route
@@ -761,9 +772,15 @@ export class ChatCompressionService {
     // an error contradicts, so when the routes do match the lower of the two
     // governs reactive sizing (#13432). Scoped to the reactive sites only
     // (`budgetWindow`, `sharedRequestFits`); the proactive threshold gate above
-    // kept running against the full inferred window.
+    // kept running against the full inferred window. Only a bound the server
+    // stated on the window may size one: its input-bound wording holds the
+    // prompt to a limit `prompt + max_tokens` is allowed to exceed, and
+    // applying it here floors the output budget at 1 for every slimmed
+    // estimate that sits just under it, dropping the summary on every send
+    // (#13876).
     const reactiveContextCeiling =
       opts.observedServerCeiling &&
+      opts.observedServerCeilingKind !== 'input' &&
       sideQueryOnMainRoute &&
       (opts.requestRouteKey === undefined ||
         opts.requestRouteKey === config.getModelRouteIdentity())
