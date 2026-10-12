@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,9 +23,11 @@ const script = join(
   'check-flyway-migrations.js',
 );
 let root;
+let baseRef;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'check-flyway-migrations-'));
+  baseRef = '';
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -43,9 +51,29 @@ function module(name, { sql = [], java = [] } = {}) {
 
 function check(...args) {
   const result = spawnSync(process.execPath, [script, ...args], {
+    cwd: root,
     encoding: 'utf8',
+    env: { ...process.env, FLYWAY_BASE_REF: baseRef },
   });
   return { status: result.status, output: result.stdout + result.stderr };
+}
+
+function snapshot() {
+  const git = (...args) =>
+    execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  git('init', '-q');
+  git('add', '.');
+  git(
+    '-c',
+    'user.name=Flyway test',
+    '-c',
+    'user.email=flyway@example.invalid',
+    'commit',
+    '-q',
+    '-m',
+    'Published migrations',
+  );
+  baseRef = git('rev-parse', 'HEAD');
 }
 
 // The forgery fixtures below create filenames only the POSIX lanes allow
@@ -65,6 +93,61 @@ const newlineNamesWork = (() => {
 })();
 
 describe('check-flyway-migrations', () => {
+  it.each([
+    ['64', '58', 1],
+    ['64', '65', 0],
+    ['9', '10', 0],
+    ['10_2', '10_1', 1],
+    ['10_2', '10_10', 0],
+    ['10_2', '10_2_1', 0],
+    ['9007199254740992', '9007199254740993', 0],
+  ])(
+    'ordering against published V%s checks newly added V%s',
+    (published, added, status) => {
+      module('server', { sql: ['V1__historical.sql'] });
+      module('broker', { java: [`V${published}__published.java`] });
+      snapshot();
+      module('server', { sql: [`V${added}__new.sql`] });
+      const result = check('server', 'broker');
+      expect(result.status).toBe(status);
+      if (status === 1) {
+        expect(result.output).toContain('is not above');
+        expect(result.output).not.toMatch(/^server:.*all versions unique$/m);
+      } else {
+        expect(result.output).toContain('all versions unique');
+      }
+    },
+  );
+
+  it('ordering rejects reusing a normalized published version even after its file is deleted', () => {
+    const broker = module('broker', { java: ['V10_2__published.java'] });
+    snapshot();
+    unlinkSync(
+      join(broker, 'src/main/java/db/migration/V10_2__published.java'),
+    );
+    module('server', { sql: ['V010.02.0__replacement.sql'] });
+    const result = check('server', 'broker');
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('V10.2 is not above V10.2');
+    expect(result.output).not.toContain('migrations claim version');
+  });
+
+  it('ordering rejects an unreadable baseline instead of checking uniqueness alone', () => {
+    module('server', { sql: ['V1__core.sql'] });
+    snapshot();
+    baseRef = 'missing-base-ref';
+    const result = check('server');
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('could not read migration baseline');
+  });
+
+  it('ordering allows the first migration when the baseline contains none', () => {
+    module('server', { sql: ['README.md'] });
+    snapshot();
+    module('server', { java: ['V1__first.java'] });
+    expect(check('server').status).toBe(0);
+  });
+
   it('passes when every version is claimed once across both locations', () => {
     const dir = module('server', {
       sql: ['V1__core.sql', 'V2__store.sql', 'V16__evidence.sql'],

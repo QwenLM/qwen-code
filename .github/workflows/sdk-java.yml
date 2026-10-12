@@ -447,7 +447,15 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
+      - name: 'Fetch base branch for migration ordering'
+        if: "${{ github.event_name == 'pull_request' }}"
+        env:
+          BASE_REF: '${{ github.event.pull_request.base.ref }}'
+        run: 'git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"'
+
       - name: 'Check Flyway migration versions are unique'
+        env:
+          FLYWAY_BASE_REF: "${{ github.event_name == 'pull_request' && 'FETCH_HEAD' || '' }}"
         run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
 
       # Contract version monotonicity, #13804: every pull request that

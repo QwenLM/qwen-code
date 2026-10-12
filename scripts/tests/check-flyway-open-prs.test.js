@@ -186,6 +186,48 @@ async function check(prs, options = {}) {
 }
 
 describe('check-flyway-open-prs', () => {
+  it('ordering rejects a unique lower version across SQL and Java modules', async () => {
+    onMain(java('V64__published.java', BROKER));
+    const { byPr } = await check([pr(10001, [sql('V58__new.sql')])]);
+    expect(byPr[10001]).toMatchObject({
+      state: 'failure',
+      description:
+        'Out of order when merged into main: V58 is not above V64 (newest on main)',
+    });
+  });
+
+  it('ordering turns a previously successful PR red when main advances past it', async () => {
+    onMain(java('V64__published.java', BROKER));
+    const first = await check([pr(10001, [sql('V65__new.sql')])]);
+    expect(first.byPr[10001].state).toBe('success');
+    onMain(java('V66__newer.java', BROKER));
+    const { byPr, posts } = await check([
+      pr(10001, [sql('V65__new.sql')], {
+        current: {
+          state: 'SUCCESS',
+          description: first.byPr[10001].description,
+        },
+      }),
+    ]);
+    expect(posts).toHaveLength(1);
+    expect(byPr[10001]).toMatchObject({
+      state: 'failure',
+      description:
+        'Out of order when merged into main: V65 is not above V66 (newest on main)',
+    });
+  });
+
+  it('ordering rejects a known lower version even when the file list is incomplete', async () => {
+    const { byPr } = await check([
+      pr(10001, [sql('V52__new.sql')], { changedFiles: 3001 }),
+    ]);
+    expect(byPr[10001]).toMatchObject({
+      state: 'failure',
+      description:
+        'Out of order when merged into main: V52 is not above V53 (newest on main)',
+    });
+  });
+
   it('fails a PR whose version main took after its own check passed', async () => {
     const { posts, failed, lines } = await check([
       pr(13325, ['README.md', sql('V53__session_index.sql')]),
@@ -274,7 +316,7 @@ describe('check-flyway-open-prs', () => {
     expect(byPr[10003].description).toBe('No collision with main');
   });
 
-  it('frees a version the PR deletes from main, and fails two claims inside one PR', async () => {
+  it('ordering rejects reusing a deleted published version, and still fails collisions', async () => {
     const { byPr } = await check([
       pr(10001, [
         [sql('V53__workspace_roles.sql'), 'DELETED'],
@@ -288,7 +330,11 @@ describe('check-flyway-open-prs', () => {
         sql('V53__c.sql'),
       ]),
     ]);
-    expect(byPr[10001].state).toBe('success');
+    expect(byPr[10001]).toMatchObject({
+      state: 'failure',
+      description:
+        'Out of order when merged into main: V53 is not above V53 (newest on main)',
+    });
     expect(byPr[10002]).toMatchObject({
       state: 'failure',
       description:

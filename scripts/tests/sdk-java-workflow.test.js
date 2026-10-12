@@ -150,6 +150,32 @@ describe('SDK Java Flyway migration version guard', () => {
     );
   });
 
+  it('fetches the pull request baseline before enforcing migration ordering', () => {
+    const steps = parse(workflow).jobs['flyway-migrations'].steps;
+    const fetchIndex = steps.findIndex(
+      (step) => step.name === 'Fetch base branch for migration ordering',
+    );
+    const checkIndex = steps.findIndex(
+      (step) => step.name === 'Check Flyway migration versions are unique',
+    );
+    expect(fetchIndex).toBeGreaterThan(
+      steps.findIndex((step) => step.name === 'Checkout'),
+    );
+    expect(fetchIndex).toBeLessThan(checkIndex);
+    expect(steps[fetchIndex].if).toBe(
+      "${{ github.event_name == 'pull_request' }}",
+    );
+    expect(steps[fetchIndex].env.BASE_REF).toBe(
+      '${{ github.event.pull_request.base.ref }}',
+    );
+    expect(steps[fetchIndex].run).toContain(
+      'git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"',
+    );
+    expect(steps[checkIndex].env.FLYWAY_BASE_REF).toBe(
+      "${{ github.event_name == 'pull_request' && 'FETCH_HEAD' || '' }}",
+    );
+  });
+
   it('scans every sdk-java module that owns a db/migration directory', () => {
     // The guard's premise is the shared classpath:db/migration namespace —
     // managed-agent-server depends on runtime-broker, so one invocation must
