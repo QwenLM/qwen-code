@@ -128,8 +128,6 @@ function StandaloneNotifications({
   );
   const [currentPermission, setPermission] = useState(permission);
   const [pending, setPending] = useState(false);
-  const pendingRef = useRef(pending);
-  pendingRef.current = pending;
   const [error, setError] = useState(false);
   const enabledRef = useRef(preference.enabled);
   const version = useRef(0);
@@ -219,7 +217,6 @@ function StandaloneNotifications({
   const requestPermissionOnce = useCallback(() => {
     if (
       !activeRef.current ||
-      pendingRef.current ||
       authorizationAttempted.current ||
       permission() !== 'default' ||
       readStoredPreference() === 'false'

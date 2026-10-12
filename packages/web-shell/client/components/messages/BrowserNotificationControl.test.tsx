@@ -143,10 +143,20 @@ it('explains when the preference cannot persist', () => {
   );
 });
 
-it('restores focus after the authorization button disappears', async () => {
+it('keeps authorization help open through pending blur and restores focus after grant', async () => {
   settings.enabled = false;
   settings.permission = 'default';
+  vi.mocked(useBrowserNotificationSettings).mockImplementation(() => ({
+    ...settings,
+  }));
+  let grant!: () => void;
   settings.setEnabled.mockImplementation(async () => {
+    settings.pending = true;
+    render();
+    await new Promise<void>((resolve) => {
+      grant = resolve;
+    });
+    settings.pending = false;
     settings.enabled = true;
     settings.permission = 'granted';
     render();
@@ -155,12 +165,114 @@ it('restores focus after the authorization button disappears', async () => {
   hover();
   const allow = document.querySelector<HTMLButtonElement>(`${popup} button`)!;
   act(() => allow.focus());
-  await act(async () => allow.click());
+  act(() => allow.click());
+  expect(allow.disabled).toBe(true);
+  act(() => allow.blur());
+  act(() =>
+    document.querySelector(popup)!.dispatchEvent(
+      new MouseEvent('pointerout', {
+        bubbles: true,
+        relatedTarget: document.body,
+      }),
+    ),
+  );
+  act(() => vi.advanceTimersByTime(250));
+  expect(document.querySelector(popup)).not.toBeNull();
+  await act(async () => grant());
   expect(document.activeElement).toBe(trigger());
   expect(document.querySelector('[role="status"]')?.textContent).toBe(
     'Enabled for this site.',
   );
 });
+
+it.each(['Enter', ' ', 'ArrowDown'])(
+  'opens help with %s and focuses the portaled content',
+  (key) => {
+    render();
+    act(() => trigger().focus());
+    const event = new KeyboardEvent('keydown', {
+      key,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => trigger().dispatchEvent(event));
+    act(() => vi.advanceTimersByTime(20));
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(document.querySelector(popup));
+  },
+);
+
+it('preserves global shortcuts from the trigger with help open and closed', () => {
+  render();
+  act(() => trigger().focus());
+  const listener = vi.fn();
+  window.addEventListener('keydown', listener);
+  try {
+    for (const open of [true, false]) {
+      if (!open) escape();
+      listener.mockClear();
+      act(() =>
+        trigger().dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'b',
+            ctrlKey: true,
+            bubbles: true,
+          }),
+        ),
+      );
+      expect(listener).toHaveBeenCalledOnce();
+    }
+  } finally {
+    window.removeEventListener('keydown', listener);
+  }
+});
+
+it('keeps unrelated input focus when Escape closes hover-opened help', () => {
+  render();
+  const input = document.createElement('textarea');
+  container.append(input);
+  act(() => input.focus());
+  hover();
+  escape(input);
+  expect(document.querySelector(popup)).toBeNull();
+  expect(document.activeElement).toBe(input);
+});
+
+it.each(['data-plan-interactive', 'data-approval-shortcuts-ignore'])(
+  'preserves native activation of %s controls while help is hover-open',
+  (attribute) => {
+    render(
+      <ToolApproval
+        request={{
+          id: 'diff',
+          content: [
+            { type: 'diff', path: 'test.ts', oldText: 'a', newText: 'b' },
+          ],
+          options: [{ id: 'cancel', label: 'Reject', kind: 'reject_once' }],
+        }}
+        onConfirm={vi.fn()}
+        showBrowserNotifications
+      />,
+    );
+    const target = container.querySelector<HTMLElement>(
+      '[data-plan-interactive]',
+    )!;
+    target.removeAttribute('data-plan-interactive');
+    target.setAttribute(attribute, '');
+    target.tabIndex = 0;
+    act(() => target.focus());
+    hover();
+    for (const key of ['Enter', ' ']) {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => target.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(false);
+    }
+  },
+);
 
 it('exposes the control only on daemon-backed approval cards and preserves a second Escape', () => {
   const onConfirm = vi.fn();

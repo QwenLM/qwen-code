@@ -24,6 +24,8 @@ export function BrowserNotificationControl() {
   const trigger = useRef<HTMLButtonElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const restoredFocus = useRef(false);
+  const pending = useRef(settings?.pending);
+  pending.current = settings?.pending;
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const requestPermissionOnce = settings?.requestPermissionOnce;
   useEffect(() => requestPermissionOnce?.(), [requestPermissionOnce]);
@@ -60,6 +62,7 @@ export function BrowserNotificationControl() {
   const leave = () => {
     cancelClose();
     timer.current = setTimeout(() => {
+      if (pending.current) return;
       if (
         (restoredFocus.current || !trigger.current?.matches(':focus-within')) &&
         !content.current?.matches(':focus-within')
@@ -72,9 +75,6 @@ export function BrowserNotificationControl() {
     <span
       className="ml-auto inline-flex shrink-0"
       data-web-shell-notification-open={open || undefined}
-      onKeyDown={(event) => {
-        if (open || event.key !== 'Escape') event.stopPropagation();
-      }}
     >
       <Popover
         open={open}
@@ -106,8 +106,10 @@ export function BrowserNotificationControl() {
               show();
             }}
             onKeyDown={(event) => {
+              if (event.ctrlKey || event.metaKey || event.altKey) return;
               if (!['Enter', ' ', 'ArrowDown'].includes(event.key)) return;
               event.preventDefault();
+              event.stopPropagation();
               restoredFocus.current = false;
               show();
               requestAnimationFrame(() =>
@@ -130,8 +132,13 @@ export function BrowserNotificationControl() {
           onCloseAutoFocus={(event) => event.preventDefault()}
           onEscapeKeyDown={(event) => {
             event.stopPropagation();
-            trigger.current?.focus({ preventScroll: true });
-            restoredFocus.current = true;
+            if (
+              content.current?.matches(':focus-within') ||
+              trigger.current?.matches(':focus-within')
+            ) {
+              trigger.current?.focus({ preventScroll: true });
+              restoredFocus.current = true;
+            }
           }}
           onPointerEnter={cancelClose}
           onPointerLeave={leave}
@@ -167,12 +174,14 @@ export function BrowserNotificationControl() {
               type="button"
               size="sm"
               disabled={!canAuthorize || settings.pending}
-              onClick={async () => {
+              onClick={async (event) => {
+                const button = event.currentTarget;
                 await settings.setEnabled(true);
-                const active = getShadowAwareActiveElement(content.current);
+                const active = getShadowAwareActiveElement(trigger.current);
                 if (
-                  content.current &&
-                  (!active || active === content.current.ownerDocument.body)
+                  !active ||
+                  active === button ||
+                  active === trigger.current?.ownerDocument.body
                 )
                   trigger.current?.focus({ preventScroll: true });
               }}

@@ -478,12 +478,16 @@ export function AskUserQuestion({
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (
-        e.key !== 'Escape' &&
         e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
-        (!isEditableTarget(e.target) ||
-          (e.key === 'Enter' && (e.ctrlKey || e.metaKey)))
+        ((e.key === 'Enter' && (e.ctrlKey || e.metaKey)) ||
+          (!isEditableTarget(e.target) &&
+            e.target instanceof Element &&
+            e.target.closest('[data-web-shell-ask-option]') &&
+            ((e.key >= '1' && e.key <= '9') ||
+              e.key === 'Enter' ||
+              e.key === ' ')))
       ) {
-        if (e.key === 'Enter' || e.key === ' ') e.preventDefault();
+        e.preventDefault();
         return;
       }
 

@@ -2,6 +2,8 @@
 
 [English](browser-action-notifications.md) | [简体中文](browser-action-notifications.zh-CN.md)
 
+Status: current as of 2026-10-12. Extends turn-end notifications with action reminders and panel authorization; the linked branding and content/navigation designs still specify their unchanged behavior.
+
 ## Problem and scope
 
 Browser task notifications currently cover turn completion and failure. A chat
@@ -28,7 +30,8 @@ is silent, including requests already resolved in history; this change does not
 add catch-up notifications for permission requests missed while disconnected.
 
 Reuse browser permission checks, preference persistence, Web Locks/shared claims,
-branding, localization, and click navigation. The title contains the session name;
+[branding](web-shell/web-shell-browser-notification-branding.md), localization, and
+[content limits and click navigation](web-shell/web-shell-browser-notification-details.md). The title contains the session name;
 the body only says approval or an answer is needed. Do not copy commands, paths,
 question text, choices, or partial assistant responses into these notifications.
 Clicking focuses the window and opens the captured session without answering or
@@ -77,11 +80,15 @@ reminders are outside this change.
 ## Notification access from action panels
 
 ToolApproval and AskUserQuestion share a notification status button in their
-top-right header, including inline and floating variants and split panes. Reuse
+top-right header in the main chat’s floating approval overlay and in split panes. Reuse
 the existing scoped Popover and Button primitives. Hover, keyboard focus, and
 click open an interactive popover without stealing the approval selection.
 Moving into its content keeps it open; Escape closes it without rejecting or
-submitting the action. Isolate its keyboard events from panel shortcuts.
+submitting the action. Preserve focus outside the help; restore its trigger only
+when focus was within the help or trigger. Keep help open during a pending
+authorization request, and restore focus after its action disappears. Isolate
+request-submission shortcuts while preserving navigation, unrelated controls, and
+global shortcuts from the trigger.
 
 The icon and localized status distinguish enabled with site permission, disabled,
 not yet authorized, denied, and unsupported environments. Unavailable notification

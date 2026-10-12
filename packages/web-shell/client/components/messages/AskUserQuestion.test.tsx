@@ -1486,36 +1486,41 @@ describe('AskUserQuestion multi-select', () => {
   });
 });
 
+function renderNotificationQuestion() {
+  vi.stubGlobal('isSecureContext', true);
+  vi.stubGlobal(
+    'Notification',
+    Object.assign(vi.fn(), { permission: 'granted' }),
+  );
+  render();
+  act(() =>
+    root!.render(
+      <I18nProvider language="en">
+        <BrowserTurnNotifications language="en">
+          <AskUserQuestion
+            request={request}
+            onConfirm={onConfirm}
+            onError={onError}
+          />
+        </BrowserTurnNotifications>
+      </I18nProvider>,
+    ),
+  );
+  const option = optionButtons()[0];
+  act(() => option.focus());
+  const bell = container!.querySelector<HTMLButtonElement>(
+    '[aria-label="Task notifications"]',
+  )!;
+  act(() =>
+    bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+  );
+  return { bell, option };
+}
+
 it.each(['Escape', 'Control+Enter'])(
   'isolates %s from the focused question under hover-opened notification help',
   (key) => {
-    vi.stubGlobal('isSecureContext', true);
-    vi.stubGlobal(
-      'Notification',
-      Object.assign(vi.fn(), { permission: 'granted' }),
-    );
-    render();
-    act(() =>
-      root!.render(
-        <I18nProvider language="en">
-          <BrowserTurnNotifications language="en">
-            <AskUserQuestion
-              request={request}
-              onConfirm={onConfirm}
-              onError={onError}
-            />
-          </BrowserTurnNotifications>
-        </I18nProvider>,
-      ),
-    );
-    const option = optionButtons()[0];
-    act(() => option.focus());
-    const bell = container!.querySelector<HTMLButtonElement>(
-      '[aria-label="Task notifications"]',
-    )!;
-    act(() =>
-      bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
-    );
+    const { option } = renderNotificationQuestion();
     expect(document.activeElement).toBe(option);
     expect(
       document.querySelector('[data-web-shell-notification-help]'),
@@ -1529,7 +1534,7 @@ it.each(['Escape', 'Control+Enter'])(
       expect(
         document.querySelector('[data-web-shell-notification-help]'),
       ).toBeNull();
-      expect(document.activeElement).toBe(bell);
+      expect(document.activeElement).toBe(option);
     } else {
       expect(
         document.querySelector('[data-web-shell-notification-help]'),
@@ -1538,3 +1543,46 @@ it.each(['Escape', 'Control+Enter'])(
     }
   },
 );
+
+it('preserves navigation and collapse controls under hover-opened notification help', () => {
+  const { bell, option } = renderNotificationQuestion();
+  pressKey(option, 'ArrowDown', { cancelable: true });
+  expect(document.activeElement).toBe(optionButtons()[1]);
+  const collapse = container!.querySelector<HTMLButtonElement>(
+    '[aria-label="Collapse"]',
+  )!;
+  act(() => collapse.focus());
+  act(() =>
+    bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+  );
+  expect(
+    document.querySelector('[data-web-shell-notification-help]'),
+  ).not.toBeNull();
+  for (const key of ['Enter', ' ']) {
+    expect(pressKey(collapse, key, { cancelable: true }).defaultPrevented).toBe(
+      false,
+    );
+  }
+  act(() => collapse.click());
+  expect(collapse.getAttribute('aria-expanded')).toBe('false');
+  expect(onConfirm).not.toHaveBeenCalled();
+});
+
+it('allows spaces in a custom answer while blocking modifier-Enter under hover-opened help', () => {
+  const { bell, option } = renderNotificationQuestion();
+  pressKey(option, 'Escape', { cancelable: true });
+  act(() => optionButtons().at(-1)!.click());
+  const input = container!.querySelector<HTMLInputElement>('input')!;
+  act(() => input.focus());
+  act(() =>
+    bell.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })),
+  );
+  expect(pressKey(input, ' ', { cancelable: true }).defaultPrevented).toBe(
+    false,
+  );
+  expect(
+    pressKey(input, 'Enter', { ctrlKey: true, cancelable: true })
+      .defaultPrevented,
+  ).toBe(true);
+  expect(onConfirm).not.toHaveBeenCalled();
+});

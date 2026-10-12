@@ -380,6 +380,12 @@ for (const kind of ['approval', 'question'] as const) {
     await expect(help).not.toBeVisible();
     await expect(button).toBeFocused();
     expect(daemon.permissionRequests()).toHaveLength(0);
+    await button.press('ArrowDown');
+    await expect(help).toBeVisible();
+    await expect(help).toBeFocused();
+    await help.press('Escape');
+    await expect(help).not.toBeVisible();
+    await expect(button).toBeFocused();
     await button.click();
     await expect(help).toBeVisible();
     expect(daemon.permissionRequests()).toHaveLength(0);
@@ -442,11 +448,21 @@ test('attempts permission once across panels and reload, then allows a manual gr
     await page.evaluate(() => window.__taskNotificationPermissionRequests),
   ).toBe(1);
   await page.evaluate(() => {
-    window.__taskNextNotificationPermission = 'granted';
+    window.__taskHoldNotificationPermission = true;
   });
   await help
     .getByRole('button', { name: 'Allow notifications', exact: true })
     .click();
+  await expect(
+    help.getByRole('button', { name: 'Allow notifications', exact: true }),
+  ).toBeDisabled();
+  await page.mouse.move(10, 10);
+  await page.waitForTimeout(350);
+  await expect(help).toBeVisible();
+  await expect(help).toContainText('Waiting for your permission…');
+  await page.evaluate(() =>
+    window.__taskResolveNotificationPermission?.('granted'),
+  );
   await expect(help.getByRole('status')).toHaveText('Enabled for this site.');
   await expect(button).toBeFocused();
   await expect(help).toContainText('Enabled for this site.');
@@ -626,7 +642,7 @@ for (const kind of ['approval', 'question'] as const) {
     }
     await page.keyboard.press('Escape');
     await expect(help).not.toBeVisible();
-    await expect(bell).toBeFocused();
+    await expect(option).toBeFocused();
     expect(daemon.permissionRequests()).toHaveLength(0);
     await page.keyboard.press('Escape');
     await expect.poll(() => daemon.permissionRequests().length).toBe(1);

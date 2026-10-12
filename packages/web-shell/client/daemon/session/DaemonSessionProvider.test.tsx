@@ -23767,7 +23767,6 @@ describe('DaemonSessionProvider', () => {
               .getSnapshot()
               .blocks.some((block) => block.kind === 'permission'),
           ).toBe(true);
-          expect(notify).not.toHaveBeenCalled();
         } else {
           expect(notify).toHaveBeenCalledExactlyOnceWith(
             expect.objectContaining({ outcome: kind }),

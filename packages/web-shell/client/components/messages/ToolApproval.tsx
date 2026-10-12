@@ -493,22 +493,24 @@ export function ToolApproval({
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (
-        e.key !== 'Escape' &&
-        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
-        (!isEditableTarget(e.target) ||
-          (e.key === 'Enter' && (e.ctrlKey || e.metaKey)))
-      ) {
-        if (e.key === 'Enter' || e.key === ' ') e.preventDefault();
-        return;
-      }
-
-      if (
         e.target instanceof Element &&
         ((e.key !== 'Escape' && e.target.closest('[data-plan-interactive]')) ||
           e.target.closest('[data-approval-shortcuts-ignore]'))
       ) {
         return;
       }
+      if (
+        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
+        !isEditableTarget(e.target) &&
+        ((e.key >= '1' && e.key <= '9') ||
+          ((e.key === 'Enter' || e.key === ' ') &&
+            e.target instanceof Element &&
+            e.target.closest('[data-web-shell-permission-option]')))
+      ) {
+        e.preventDefault();
+        return;
+      }
+
       const count = displayOptions.length;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
