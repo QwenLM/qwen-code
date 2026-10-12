@@ -1372,8 +1372,9 @@ public class ManagedAgentService {
     private static List<Map<String, Object>> normalizeInput(
             List<Map<String, Object>> input) {
         List<Map<String, Object>> result = new ArrayList<>(input.size());
-        for (Map<String, Object> block : input)
+        for (Map<String, Object> block : input) {
             result.add((Map<String, Object>) normalizeValue(block));
+        }
         return List.copyOf(result);
     }
 
@@ -1383,14 +1384,17 @@ public class ManagedAgentService {
         }
         if (value instanceof Map<?, ?> map) {
             Map<String, Object> copy = new LinkedHashMap<>(map.size());
-            for (Map.Entry<?, ?> entry : map.entrySet())
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
                 copy.put(replaceLoneSurrogates((String) entry.getKey()),
                         normalizeValue(entry.getValue()));
+            }
             return copy;
         }
         if (value instanceof List<?> list) {
             List<Object> copy = new ArrayList<>(list.size());
-            for (Object item : list) copy.add(normalizeValue(item));
+            for (Object item : list) {
+                copy.add(normalizeValue(item));
+            }
             return Collections.unmodifiableList(copy);
         }
         return value;
