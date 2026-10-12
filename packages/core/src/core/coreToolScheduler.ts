@@ -34,6 +34,7 @@ import type {
 } from '../tools/tools.js';
 import type { EditorType } from '../utils/editor.js';
 import type { Config } from '../config/config.js';
+import type { ModToolCheck } from '../mods/tool-events.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
@@ -1510,6 +1511,7 @@ interface CoreToolSchedulerOptions {
    * (owners without an execution allowlist).
    */
   isToolExecutionAllowed?: (toolName: string) => boolean;
+  modToolCheck?: ModToolCheck;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1880,6 +1882,7 @@ export class CoreToolScheduler {
     if (this.nestedToolScheduler) return this.nestedToolScheduler;
     this.nestedToolScheduler = new CoreToolScheduler({
       ...this.schedulerOptions,
+      modToolCheck: undefined,
       onAllToolCallsComplete: async (calls) => {
         for (const call of calls) {
           const resolver = this.nestedResolvers.get(call.request.callId);
@@ -3717,6 +3720,49 @@ export class CoreToolScheduler {
             this.cancelPreExecutionIfAborted(reqInfo.callId, signal, toolSpan)
           ) {
             continue;
+          }
+          const modToolCheck = this.schedulerOptions.modToolCheck;
+          if (modToolCheck) {
+            const decision = await runInRequestGoalContext(reqInfo, () =>
+              modToolCheck(
+                {
+                  tool: canonicalName,
+                  input: structuredClone(toolParams),
+                  tool_use_id: reqInfo.callId,
+                },
+                {
+                  decision:
+                    flowResult.finalPermission === 'default'
+                      ? 'ask'
+                      : flowResult.finalPermission,
+                  ...(flowResult.denyMessage
+                    ? { reason: flowResult.denyMessage }
+                    : {}),
+                },
+                signal,
+              ),
+            );
+            if (
+              this.cancelPreExecutionIfAborted(reqInfo.callId, signal, toolSpan)
+            ) {
+              continue;
+            }
+            if (!['allow', 'ask', 'deny'].includes(decision.decision)) {
+              throw new Error('Invalid Mod tool.check decision.');
+            }
+            if (flowResult.finalPermission !== 'deny') {
+              if (decision.decision === 'deny') {
+                flowResult.finalPermission = 'deny';
+                flowResult.denyMessage =
+                  decision.reason?.trim() ||
+                  `Tool "${reqInfo.name}" is denied by a Mod.`;
+              } else if (
+                decision.decision === 'ask' &&
+                flowResult.finalPermission === 'allow'
+              ) {
+                flowResult.finalPermission = 'ask';
+              }
+            }
           }
           const {
             defaultPermission,
