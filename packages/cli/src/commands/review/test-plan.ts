@@ -215,9 +215,9 @@ const COUNT_RES = [
   // "expect all four files and 471 tests **to pass**". Dropping the modal was
   // measured against this repo's own PR #8176, where the exact claim this
   // command exists to check went unextracted.
-  /\b(\d+)\s+(?:tests?|specs?|assertions?)\s+(?:(?:to|should|will|would|must)\s+)?(?:pass(?:ed|ing|es)?|green|ok)\b/gi,
-  /\btests?:?\s+(\d+)\s+pass(?:ed|ing)?\b/gi,
-  /\b(\d+)\s+pass(?:ed|ing)\b/gi,
+  /\b(?<![\d,])(\d{1,3}(?:,\d{3})+|\d+)\s+(?:tests?|specs?|assertions?)\s+(?:(?:to|should|will|would|must)\s+)?(?:pass(?:ed|ing|es)?|green|ok)\b/gi,
+  /\btests?:?\s+(\d{1,3}(?:,\d{3})+|\d+)\s+pass(?:ed|ing)?\b/gi,
+  /\b(?<![\d,])(\d{1,3}(?:,\d{3})+|\d+)\s+pass(?:ed|ing)\b/gi,
 ];
 
 /**
@@ -722,7 +722,7 @@ function ruleCommand(
 }
 
 function ruleCount(text: string, observed: number[]): TestPlanClaim {
-  const claimed = Number(/(\d+)/.exec(text)?.[1]);
+  const claimed = Number(/([\d,]+)/.exec(text)?.[1].replace(/,/g, ''));
   if (!observed.length || !Number.isFinite(claimed)) {
     return {
       kind: 'count',
