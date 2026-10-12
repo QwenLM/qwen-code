@@ -296,7 +296,11 @@ import { ExtensionsManagerPage } from './components/extensions/ExtensionsManager
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
-import { McpAppHostContext } from './mcpAppHostContext';
+import { McpAppHostContext, McpAppMessagesContext } from './mcpAppHostContext';
+import {
+  useMcpAppMessages,
+  type McpAppPromptSubmission,
+} from './hooks/useMcpAppMessages';
 import {
   isItemVisible,
   isSettingVisible,
@@ -742,11 +746,13 @@ function resolvePreparedSubmit(
 
 interface SendPromptOptionsWithRetry {
   submittedPrompt?: string;
+  source?: 'mcp-app';
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
+  beforeDispatch?: (clientId: string | undefined) => void;
   onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
@@ -1654,6 +1660,7 @@ export interface WebShellProps {
   onSubmitBefore?: (params: {
     sessionId: string | undefined;
     prompt: string;
+    source?: 'mcp-app';
   }) => Promise<void>;
 }
 
@@ -11000,8 +11007,11 @@ export function App({
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
+        source?: 'mcp-app';
+        isCurrent?: () => boolean;
+        beforeDispatch?: (clientId: string | undefined) => void;
         onAdmissionStarted?: (sessionId: string | undefined) => void;
-        onAdmitted?: () => void;
+        onAdmitted?: (admission: { promptId: string }) => void;
         onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
@@ -11016,6 +11026,7 @@ export function App({
           'InvalidStateError',
         );
       }
+      const preserveComposer = opts?.source === 'mcp-app';
       let preparedPrompt = text;
       let preparedInputAnnotations = opts?.inputAnnotations
         ? [...opts.inputAnnotations]
@@ -11073,6 +11084,7 @@ export function App({
       };
       const admissionSourceIsCurrent = (allocatedSessionId?: string) =>
         admissionOwnerIsCurrent(allocatedSessionId) &&
+        (opts?.isCurrent?.() ?? true) &&
         !sessionWriteBlockedRef.current &&
         sessionWriteBlockGenerationRef.current ===
           admissionSource.writeBlockGeneration;
@@ -11084,6 +11096,7 @@ export function App({
               sessionId: admissionSource.sessionId,
               prompt: preparedPrompt,
               inputAnnotations: preparedInputAnnotations,
+              ...(opts?.source ? { source: opts.source } : {}),
             });
             const resolved = resolvePreparedSubmit(
               preparedPrompt,
@@ -11101,6 +11114,7 @@ export function App({
             await submitBefore({
               sessionId: admissionSource.sessionId,
               prompt: preparedPrompt,
+              ...(opts?.source ? { source: opts.source } : {}),
             });
           }
         } catch (err) {
@@ -11119,6 +11133,7 @@ export function App({
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
           // cancelled prompt.
           restoreCancelledSubmitState();
+          if (preserveComposer && !isAbortError(err)) throw err;
           return;
         }
         if (!appMountedRef.current) return;
@@ -11184,6 +11199,7 @@ export function App({
         : existingSessionWorkspaceCwd;
       const isSlashPreparedSubmit = preparedPrompt.trimStart().startsWith('/');
       if (
+        !preserveComposer &&
         !opts?.retry &&
         opts?.optimisticUserMessage !== false &&
         !isSlashPreparedSubmit
@@ -11212,6 +11228,7 @@ export function App({
           snapshot: sessionOwnerGuard.capture(),
         };
       } else if (
+        !preserveComposer &&
         !opts?.retry &&
         opts?.optimisticUserMessage !== false &&
         isSlashPreparedSubmit
@@ -11221,14 +11238,16 @@ export function App({
         // resend the already-succeeded earlier prompt.
         disarmSubmittedPromptRetry();
       }
-      setShowRetryHint(false);
+      if (!preserveComposer) setShowRetryHint(false);
       finishPreparing();
       if (opts?.ownerRef) opts.ownerRef.current = sessionOwnerGuard.capture();
-      clearFollowup();
-      if (opts?.commitComposerAccepted) {
-        opts.commitComposerAccepted();
-      } else if (opts?.clearComposerOnPromptStart) {
-        editorRef.current?.clear();
+      if (!preserveComposer) {
+        clearFollowup();
+        if (opts?.commitComposerAccepted) {
+          opts.commitComposerAccepted();
+        } else if (opts?.clearComposerOnPromptStart) {
+          editorRef.current?.clear();
+        }
       }
       let admissionStarted = false;
       let admitted = false;
@@ -11240,6 +11259,7 @@ export function App({
       // attachments only once it is admitted, so both points try.
       const trackInFlightPrompt = () => {
         if (
+          preserveComposer ||
           inFlightPrompt ||
           opts?.retry ||
           opts?.optimisticUserMessage === false ||
@@ -11262,6 +11282,7 @@ export function App({
         ...(opts?.submittedPrompt !== undefined
           ? { submittedPrompt: opts.submittedPrompt }
           : {}),
+        ...(opts?.source ? { source: opts.source } : {}),
         images,
         files,
         inputAnnotations:
@@ -11270,11 +11291,18 @@ export function App({
             : undefined,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
+        ...(opts?.beforeDispatch
+          ? { beforeDispatch: opts.beforeDispatch }
+          : {}),
         onAdmissionStarted: () => {
-          admissionStarted = true;
           opts?.onAdmissionStarted?.(
             connectionRef.current.sessionId ?? allocatedSessionId,
           );
+          admissionStarted = true;
+          if (preserveComposer) {
+            disarmSubmittedPromptRetry();
+            setShowRetryHint(false);
+          }
         },
         onAdmitted: (admission) => {
           admitted = true;
@@ -11288,7 +11316,7 @@ export function App({
           if (inFlightPrompt && admission?.promptId) {
             inFlightPrompt.promptId = admission.promptId;
           }
-          opts?.onAdmitted?.();
+          opts?.onAdmitted?.(admission);
         },
       };
       if (
@@ -11855,6 +11883,88 @@ export function App({
     editorRef,
     reportError,
     t,
+  });
+
+  const mcpAppQueueBusyRef = useRef(queuedPrompts.length > 0);
+  mcpAppQueueBusyRef.current = queuedPrompts.length > 0;
+  const submitMcpAppMessage = useCallback(
+    async (text: string, submission: McpAppPromptSubmission) => {
+      const sessionId = connectionRef.current.sessionId;
+      const clientId = connectionRef.current.clientId;
+      const workspaceCwd = getComposerWorkspaceCwd();
+      const sourceVersion = composerSourceVersionRef.current;
+      const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
+      const isCurrent = () => {
+        const current = connectionRef.current;
+        return (
+          appMountedRef.current &&
+          !submission.signal.aborted &&
+          submission.isCurrent() &&
+          current.status === 'connected' &&
+          !current.runtimeStopped &&
+          Boolean(sessionId && clientId) &&
+          current.sessionId === sessionId &&
+          current.clientId === clientId &&
+          getComposerWorkspaceCwd() === workspaceCwd &&
+          composerSourceVersionRef.current === sourceVersion &&
+          !sessionWriteBlockedRef.current &&
+          sessionWriteBlockGenerationRef.current === writeBlockGeneration &&
+          !current.standaloneSession?.creationRecovery &&
+          !isSessionWriterBlockedCode(current.standaloneSession?.errorCode) &&
+          !(
+            unknownPromptAdmissionRef.current?.payloadAvailable &&
+            unknownPromptAdmissionRef.current.sessionId === sessionId
+          )
+        );
+      };
+      const assertCurrent = () => {
+        if (!isCurrent()) throw new DOMException('Cancelled', 'AbortError');
+      };
+      const assertIdle = () => {
+        if (
+          streamingStateRef.current !== 'idle' ||
+          sessionHasActivePromptRef.current ||
+          isGoalGateBlocked() ||
+          mcpAppQueueBusyRef.current ||
+          queuedShellCommandsRef.current.length > 0 ||
+          shellSubmitInFlightRef.current
+        ) {
+          throw new Error(t('mcpApp.message.busy'));
+        }
+      };
+      assertCurrent();
+      assertIdle();
+      if (promptPreparationOwnerRef.current) {
+        throw new Error(t('mcpApp.message.busy'));
+      }
+      return sendPrompt(text, undefined, undefined, {
+        source: 'mcp-app',
+        isCurrent,
+        beforeAdmission: async () => {
+          assertCurrent();
+          assertIdle();
+        },
+        beforeDispatch: (dispatchClientId) => {
+          assertCurrent();
+          if (dispatchClientId !== clientId) {
+            throw new DOMException('Session client changed', 'AbortError');
+          }
+        },
+        onAdmissionStarted: () => {
+          assertCurrent();
+          submission.onDispatched();
+        },
+        onAdmitted: submission.onAdmitted,
+      });
+    },
+    [getComposerWorkspaceCwd, isGoalGateBlocked, sendPrompt, t],
+  );
+  const mcpAppMessages = useMcpAppMessages({
+    enabled: connection.status === 'connected' && !connection.runtimeStopped,
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    captureOwner: () => sessionOwnerGuard.capture({ includeRecovery: true }),
+    submit: submitMcpAppMessage,
   });
 
   const enqueuePrompt = useCallback(
@@ -20108,6 +20218,7 @@ export function App({
       {/* prettier-ignore */}
       <BrandProvider value={resolvedBrand}>
       <I18nProvider language={selectedLanguage}>
+        <McpAppMessagesContext.Provider value={mcpAppMessages.context}>
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
           <WebShellPortalRootContext.Provider value={portalRoot}>
@@ -20123,6 +20234,7 @@ export function App({
           data-compact-sidebar={compactShell ? '' : undefined}
           lang={selectedLanguage}
         >
+          {mcpAppMessages.review}
           {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
           {!onToast && (
             <ToastHost
@@ -23184,6 +23296,7 @@ export function App({
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>
+        </McpAppMessagesContext.Provider>
       </I18nProvider>
       </BrandProvider>
     </ThemeProvider>

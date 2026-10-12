@@ -1635,6 +1635,7 @@ describe('EmbeddedApp message edit rewind', () => {
     sessionId?: string;
     prompt: string;
     inputAnnotations: unknown[];
+    source?: 'mcp-app';
   }
 
   function snapshot(turnIndex: number): RewindSnapshotStub {
@@ -1692,6 +1693,39 @@ describe('EmbeddedApp message edit rewind', () => {
   // The daemon-backed edit/rewind shipped with the cutover but nothing ever
   // exercised it: getRewindSnapshots and rewindSession appeared in this file
   // only as mock stubs (#9911).
+  it('keeps a pending composer edit intact when preparing an MCP App message', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({ snapshots: [snapshot(3)] });
+    const prepareSubmit = await startEditing(props, 3);
+
+    await act(async () => {
+      await prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'Analyze selected failures',
+        inputAnnotations: [],
+        source: 'mcp-app',
+      });
+    });
+    expect(sdkMocks.getRewindSnapshots).not.toHaveBeenCalled();
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+
+    const prepareComposer = callback<
+      (submission: PrepareSubmission) => Promise<unknown>
+    >(mocks.embeddedProps.current as CapturedProps, 'prepareSubmit');
+    await act(async () => {
+      await prepareComposer({
+        sessionId: 'session-1',
+        prompt: 'Edited composer message',
+        inputAnnotations: [],
+      });
+    });
+    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-3',
+      { rewindFiles: false },
+    );
+  });
+
   it('rewinds to the snapshot for the edited turn, not the newest one', async () => {
     const props = await renderApp();
     sdkMocks.getRewindSnapshots.mockResolvedValue({

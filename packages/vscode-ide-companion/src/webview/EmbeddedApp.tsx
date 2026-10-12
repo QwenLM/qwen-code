@@ -1612,7 +1612,7 @@ export function EmbeddedApp() {
           }}
           composerRef={composerRef}
           prepareSubmit={async (submission) => {
-            if (editingMessage) {
+            if (editingMessage && submission.source !== 'mcp-app') {
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));

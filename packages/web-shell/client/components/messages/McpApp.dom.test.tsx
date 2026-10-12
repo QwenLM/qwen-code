@@ -4,6 +4,7 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   McpAppHostContext,
+  McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
 } from '../../mcpAppHostContext';
@@ -15,6 +16,10 @@ const appBridgeMocks = vi.hoisted(() => ({
   last: null as {
     onsandboxready?: () => void;
     oninitialized?: () => void;
+    onmessage?: (
+      params: { role: string; content: Array<Record<string, unknown>> },
+      extra: { signal: AbortSignal },
+    ) => Promise<unknown>;
     oncalltool?: (
       params: {
         name: string;
@@ -122,6 +127,164 @@ function renderApp(
 }
 
 describe('McpApp host lifetime', () => {
+  it('advertises messages only for the bound transcript session', () => {
+    const requestMessage = vi.fn().mockResolvedValue({});
+    const { rerender } = renderApp(appDisplay());
+    const wrap = (sessionId: string) => (
+      <McpAppMessagesContext.Provider
+        value={{ sessionId: 'live', clientId: 'client', requestMessage }}
+      >
+        <McpAppSessionContext.Provider value={sessionId}>
+          <McpApp display={appDisplay()} />
+        </McpAppSessionContext.Provider>
+      </McpAppMessagesContext.Provider>
+    );
+    rerender(wrap('live'));
+    expect(appBridgeMocks.lastCapabilities).toMatchObject({
+      message: { text: {} },
+    });
+    expect(appBridgeMocks.last?.onmessage).toBeTypeOf('function');
+    rerender(wrap('historical'));
+    expect(appBridgeMocks.lastCapabilities).not.toHaveProperty('message');
+    expect(appBridgeMocks.last?.onmessage).toBeUndefined();
+  });
+
+  it('validates the role, single text block and UTF-8 byte limit before review', async () => {
+    const requestMessage = vi.fn().mockResolvedValue({});
+    const { rerender } = renderApp(appDisplay());
+    rerender(
+      <McpAppMessagesContext.Provider
+        value={{ sessionId: 's', clientId: 'c', requestMessage }}
+      >
+        <McpAppSessionContext.Provider value="s">
+          <McpApp display={appDisplay()} />
+        </McpAppSessionContext.Provider>
+      </McpAppMessagesContext.Provider>,
+    );
+    const invoke = appBridgeMocks.last!.onmessage!;
+    for (const params of [
+      { role: 'assistant', content: [{ type: 'text', text: 'no' }] },
+      { role: 'system', content: [{ type: 'text', text: 'no' }] },
+      { role: 'user', content: [] },
+      { role: 'user', content: [{ type: 'text', text: '   ' }] },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'a' },
+          { type: 'text', text: 'b' },
+        ],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'image', data: 'x', mimeType: 'image/png' }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'resource', resource: { uri: 'file:///a' } }],
+      },
+      { role: 'user', content: [{ type: 'text', text: '界'.repeat(5462) }] },
+    ]) {
+      expect(
+        await invoke(params, { signal: new AbortController().signal }),
+      ).toEqual({ isError: true });
+    }
+    expect(requestMessage).not.toHaveBeenCalled();
+    const text = '界'.repeat(5461) + 'a';
+    expect(
+      await invoke(
+        { role: 'user', content: [{ type: 'text', text }] },
+        { signal: new AbortController().signal },
+      ),
+    ).toEqual({});
+    expect(requestMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        serverName: 'demo',
+        resourceUri: 'ui://demo/app',
+        text,
+      }),
+    );
+  });
+
+  it('allows one pending message per card and aborts it on resource or client replacement', async () => {
+    let settle!: (result: object) => void;
+    const requestMessage = vi.fn(
+      (_request: { signal: AbortSignal }) =>
+        new Promise<object>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const { rerender } = renderApp(appDisplay());
+    const wrap = (resourceUri: string, clientId = 'c') => (
+      <McpAppMessagesContext.Provider
+        value={{ sessionId: 's', clientId, requestMessage }}
+      >
+        <McpAppSessionContext.Provider value="s">
+          <McpApp display={appDisplay({ resourceUri })} />
+        </McpAppSessionContext.Provider>
+      </McpAppMessagesContext.Provider>
+    );
+    rerender(wrap('ui://demo/app'));
+    const oldBridge = appBridgeMocks.last!;
+    const invoke = oldBridge.onmessage!;
+    const params = {
+      role: 'user',
+      content: [{ type: 'text', text: 'review me' }],
+    };
+    const first = invoke(params, { signal: new AbortController().signal });
+    expect(
+      await invoke(params, { signal: new AbortController().signal }),
+    ).toEqual({ isError: true });
+    expect(requestMessage).toHaveBeenCalledTimes(1);
+    rerender(wrap('ui://demo/replacement'));
+    expect(requestMessage.mock.calls[0][0].signal.aborted).toBe(true);
+    expect(oldBridge.onmessage).toBeUndefined();
+    expect(
+      await invoke(params, { signal: new AbortController().signal }),
+    ).toEqual({ isError: true });
+    settle({ isError: true });
+    await first;
+    const second = appBridgeMocks.last!.onmessage!(params, {
+      signal: new AbortController().signal,
+    });
+    rerender(wrap('ui://demo/replacement', 'new-client'));
+    expect(requestMessage.mock.calls[1][0].signal.aborted).toBe(true);
+    settle({ isError: true });
+    await second;
+  });
+
+  it('propagates RPC cancellation and revokes messages on failed initialization', async () => {
+    appBridgeMocks.sendToolInput.mockRejectedValueOnce(
+      new Error('handoff failed'),
+    );
+    let signal: AbortSignal | undefined;
+    const requestMessage = vi.fn((request: { signal: AbortSignal }) => {
+      signal = request.signal;
+      return Promise.resolve({ isError: true });
+    });
+    const { rerender } = renderApp(appDisplay());
+    rerender(
+      <McpAppMessagesContext.Provider
+        value={{ sessionId: 's', clientId: 'c', requestMessage }}
+      >
+        <McpAppSessionContext.Provider value="s">
+          <McpApp display={appDisplay()} />
+        </McpAppSessionContext.Provider>
+      </McpAppMessagesContext.Provider>,
+    );
+    const bridge = appBridgeMocks.last!;
+    const caller = new AbortController();
+    await bridge.onmessage!(
+      { role: 'user', content: [{ type: 'text', text: 'review' }] },
+      { signal: caller.signal },
+    );
+    caller.abort();
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {
+      bridge.oninitialized?.();
+    });
+    expect(bridge.onmessage).toBeUndefined();
+  });
+
   it.each([
     'sendSandboxResourceReady',
     'sendToolInput',

@@ -399,9 +399,15 @@ summary {
   background: var(--subtle);
 }
 .selection-heading {
+  flex-wrap: wrap;
   color: var(--muted);
   font-size: 10px;
   gap: 6px;
+}
+.analysis-status {
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--muted);
 }
 .selection-heading > span {
   margin-right: auto;

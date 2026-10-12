@@ -12,6 +12,23 @@ export const McpAppSessionContext = createContext<string | undefined>(
   undefined,
 );
 
+export interface McpAppMessageRequest {
+  serverName: string;
+  resourceUri: string;
+  text: string;
+  signal: AbortSignal;
+}
+
+export interface McpAppMessages {
+  sessionId: string;
+  clientId: string;
+  requestMessage(request: McpAppMessageRequest): Promise<{ isError?: boolean }>;
+}
+
+export const McpAppMessagesContext = createContext<McpAppMessages | undefined>(
+  undefined,
+);
+
 export const McpAppToolsContext = createContext<
   | {
       sessionId: string;
