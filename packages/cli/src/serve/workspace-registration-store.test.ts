@@ -773,4 +773,40 @@ describe('WorkspaceRegistrationStore', () => {
       WorkspaceRegistrationStoreError,
     );
   });
+
+  it('skips malformed pinnedAts values, keeps canonical ISO-8601, and rejects a non-object map', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    const id = workspaceRegistrationId('/work/secondary');
+    await store.add('/work/secondary');
+
+    const write = (pinnedAts: unknown) =>
+      fs.writeFile(
+        store.filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          primaryWorkspace: '/work/primary',
+          workspaces: ['/work/secondary'],
+          pinnedAts,
+        }),
+      );
+
+    // Empty / non-string value → warn + skip, entry dropped.
+    await write({ [id]: '' });
+    expect((await store.read()).pinnedAts).toBeUndefined();
+
+    // Loose date that bare Date.parse would accept → now rejected as non-canonical.
+    await write({ [id]: '2026' });
+    expect((await store.read()).pinnedAts).toBeUndefined();
+
+    // Canonical UTC ISO-8601 → kept.
+    await write({ [id]: '2026-01-01T00:00:00.000Z' });
+    expect((await store.read()).pinnedAts?.[id]).toBe(
+      '2026-01-01T00:00:00.000Z',
+    );
+
+    // Non-object pinnedAts → hard reject.
+    await write([]);
+    await expect(store.read()).rejects.toThrow(/pinnedAts must be an object/);
+  });
 });

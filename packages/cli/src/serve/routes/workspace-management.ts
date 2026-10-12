@@ -21,7 +21,6 @@ import { isWithinRoot } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_REGISTERED_WORKSPACES } from '../workspace-inputs.js';
 import type {
-  WorkspaceEntry,
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
@@ -2234,117 +2233,42 @@ export function registerWorkspaceManagementRoutes(
           return;
         }
 
-        // Find the registry entry that owns this registration ID.
-        // Also match by workspaceId to handle cases where the client sends
-        // the canonical path hash instead of a stored path hash (alias paths).
-        let targetEntry: WorkspaceEntry | undefined;
-        if (typeof workspaceRegistry.listAllEntries === 'function') {
-          const entries = workspaceRegistry.listAllEntries();
-          for (const entry of entries) {
-            if (
-              entry.registrationIds.includes(requestedId) ||
-              entry.workspaceId === requestedId
-            ) {
-              targetEntry = entry;
-              break;
-            }
-          }
-        }
-        if (!targetEntry) {
-          // Not found in registry — try the store directly for non-registry workspaces.
-          // Check existence BEFORE mutating to avoid false positives.
-          const snapshot = await workspaceRegistrationStore.read();
-          const exists = snapshot.workspaces.some(
-            (workspace) => workspaceRegistrationId(workspace) === requestedId,
+        // Resolve every registration id that shares this logical workspace
+        // (alias paths register the same workspace under more than one id) and
+        // pin them all in a single atomic store commit, so aliases never drift
+        // and a "not found" is answered from existence rather than from
+        // whether the state happened to change.
+        const targetEntry = workspaceRegistry
+          .listAllEntries()
+          .find(
+            (entry) =>
+              entry.registrationIds?.includes(requestedId) ||
+              entry.workspaceId === requestedId,
           );
-          if (!exists) {
-            res.status(404).json({
-              error: 'Workspace registration not found',
-              code: 'workspace_registration_not_found',
-            });
-            return;
-          }
-          await workspaceRegistrationStore.setPinned(requestedId, isPinned);
-          const updatedSnapshot = await workspaceRegistrationStore.read();
-          const pinnedAt = updatedSnapshot.pinnedAts?.[requestedId];
-          res.json({
-            id: requestedId,
-            isPinned: pinnedAt !== undefined,
-            ...(pinnedAt !== undefined ? { pinnedAt } : {}),
-          });
-          return;
-        }
+        const targetIds = targetEntry
+          ? targetEntry.registrationIds
+          : [requestedId];
 
-        // Verify at least one registration ID exists in the store before mutating.
-        const preSnapshot = await workspaceRegistrationStore.read();
-        const existsInStore = targetEntry.registrationIds.some((regId) =>
-          preSnapshot.workspaces.some(
-            (w) => workspaceRegistrationId(w) === regId,
-          ),
+        const outcome = await workspaceRegistrationStore.setPinnedByIds(
+          targetIds,
+          isPinned,
         );
-        if (!existsInStore) {
+
+        if (outcome.matched === 0) {
           res.status(404).json({
-            error: 'Workspace registration not found in store',
+            error: 'Workspace registration not found',
             code: 'workspace_registration_not_found',
           });
           return;
         }
 
-        // Update pin state for ALL registration IDs of this entry.
-        for (const regId of targetEntry.registrationIds) {
-          await workspaceRegistrationStore.setPinned(regId, isPinned);
-        }
-
-        // Read back the pinnedAt for the requested ID (may be an alias).
-        const snapshot = await workspaceRegistrationStore.read();
-        // Prefer the requestedId's pinnedAt; if it's an alias, find any matching entry.
-        let pinnedAt = snapshot.pinnedAts?.[requestedId];
-        if (pinnedAt === undefined) {
-          for (const regId of targetEntry.registrationIds) {
-            if (snapshot.pinnedAts?.[regId] !== undefined) {
-              pinnedAt = snapshot.pinnedAts[regId];
-              break;
-            }
-          }
-        }
+        const pinnedAt = outcome.pinnedAt;
         res.json({
           id: requestedId,
           isPinned: pinnedAt !== undefined,
           ...(pinnedAt !== undefined ? { pinnedAt } : {}),
         });
       } catch (err) {
-        if (err instanceof WorkspaceRegistrationStoreCommittedError) {
-          // The store already committed the change; treat as success.
-          writeStderrLine(`qwen serve: ${err.message}`);
-          const snapshot = await workspaceRegistrationStore.read();
-          let pinnedAt = snapshot.pinnedAts?.[requestedId];
-          if (pinnedAt === undefined) {
-            // Fallback: scan all entries for this requestedId.
-            if (typeof workspaceRegistry.listAllEntries === 'function') {
-              const entries = workspaceRegistry.listAllEntries();
-              for (const entry of entries) {
-                if (
-                  entry.registrationIds.includes(requestedId) ||
-                  entry.workspaceId === requestedId
-                ) {
-                  for (const regId of entry.registrationIds) {
-                    if (snapshot.pinnedAts?.[regId] !== undefined) {
-                      pinnedAt = snapshot.pinnedAts[regId];
-                      break;
-                    }
-                  }
-                  break;
-                }
-              }
-            }
-          }
-          res.json({
-            id: requestedId,
-            isPinned: pinnedAt !== undefined,
-            ...(pinnedAt !== undefined ? { pinnedAt } : {}),
-          });
-          return;
-        }
         writeStderrLine(
           `qwen serve: failed to update workspace pin state: ${
             err instanceof Error ? err.message : String(err)

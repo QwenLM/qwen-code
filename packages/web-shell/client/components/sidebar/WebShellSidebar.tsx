@@ -7096,6 +7096,7 @@ export function WebShellSidebar({
                                       ws.trusted &&
                                       Boolean(onOpenWorkspaceManagement);
                                     const canPin =
+                                      !lockedWorkspaceCwd &&
                                       !ws.primary &&
                                       ws.registrationIds !== undefined &&
                                       ws.registrationIds.length > 0 &&
