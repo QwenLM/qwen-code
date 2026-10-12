@@ -465,16 +465,36 @@ describe('build artifact — transcript entry (#11031)', () => {
     // every entry ships — no interactive cwd code enters this graph — and
     // measured 1,323,120 before main's host-status copy. After rebasing onto
     // c34b8423, main measures 1,321,586 and this branch 1,324,022; substituting
-    // main's i18n table yields an identical JS remainder. The ceiling leaves
-    // a small margin around that intentional UI; re-measure and lower it if
-    // the entry gets leaner.
+    // main's i18n table yields an identical JS remainder. The selection-copy
+    // menu strings (#13833) land in that same shared table — the menu itself
+    // stays stubbed out of this entry — and measure 1,325,251. The
+    // action-reminder help copy (#13832) entered that same table only after
+    // the 1,325,251 measurement was taken, so the entry was already past the
+    // 1,326,500 ceiling at that re-measure's own merge commit (#13964); the
+    // Managed task panel's copy (#13936) stays stubbed out of this entry.
+    // At 008c0de7 the remainder measures 1,327,531. The read-only Excel
+    // preview puts its ten excel.* strings into that same shared table in
+    // both locales; its parser, worker and markup stay inside the lazily
+    // imported SpreadsheetPreview chunk, so only the copy enters this graph.
+    // That is the +2,000 this branch carried over the 1,325,000 budget, so
+    // the merged ceiling is the two budgets added — 1,331,500 — rather than a
+    // fresh measurement of a merged build. The ceiling leaves a small margin
+    // around that intentional UI; re-measure and lower it if the entry gets
+    // leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    // Trial merge with main at 4cd30565 measures 1,325,565, including the
-    // shared Excel preview translations; the parser remains lazily loaded.
-    expect(js.length).toBeLessThan(1_327_000);
+    expect(js.length).toBeLessThan(1_331_500);
+  });
+
+  it('keeps selection copying and its converter out of the transcript entry', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('data-selection-copy-math');
+    expect(js).not.toContain('selectionCopyListWrapper');
   });
 
   it('carries no Live Voice strings and looks none up', () => {
@@ -497,6 +517,18 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('Talk in this browser');
   });
 
+  it('keeps dictation strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]voice\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('voice.error.noModel');
+    expect(interactive).toContain('Dismiss voice message');
+    expect(interactive).toContain('当前工作区未配置语音模型。');
+  });
+
   it('carries no collaboration strings and looks none up', () => {
     // Same arrangement as Live Voice: the collaboration dictionary is stubbed
     // in this build, which is only safe while no transcript surface asks for
@@ -510,6 +542,14 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(
       keys.filter((key) => js.includes(`"${key}"`) || js.includes(`'${key}'`)),
     ).toEqual([]);
+  });
+
+  it('carries no Managed task-panel strings or lookups', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js.includes('managed.tasks.')).toBe(false);
   });
 
   it('carries no settings strings and looks none up', () => {

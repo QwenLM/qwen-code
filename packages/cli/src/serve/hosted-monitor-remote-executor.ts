@@ -16,7 +16,9 @@ import type {
 // fan-out; this bridge binds those to the loop's executor shape. The watch
 // runs nowhere in this process, so the handle carries no supervised unit
 // and terminate is answered by the maintenance route (consumers of the
-// monitor-stop kind), not re-implemented here.
+// monitor-stop kind), not re-implemented here: it stops nothing itself and
+// reports no proof, which parks the record instead of settling a stop the
+// physical side never confirmed (#13856).
 
 export class HostedMonitorRemoteExecutor implements MonitorWatchExecutor {
   constructor(private readonly publisher: HostedShellPublisher) {}
@@ -33,7 +35,7 @@ export class HostedMonitorRemoteExecutor implements MonitorWatchExecutor {
         unitName: identity.unitName,
         started: true,
       },
-      terminate: () => Promise.resolve(),
+      terminate: () => Promise.resolve(false),
     });
   }
 }
