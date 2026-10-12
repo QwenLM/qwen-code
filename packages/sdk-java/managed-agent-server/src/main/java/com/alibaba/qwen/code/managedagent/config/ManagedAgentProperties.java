@@ -756,6 +756,7 @@ public class ManagedAgentProperties {
 
             void validate() {
                 if (maxAge == null || maxAge.isZero() || maxAge.isNegative()
+                        || maxAge.compareTo(Duration.ofMillis(1)) < 0
                         || scanDelay == null || scanDelay.isZero() || scanDelay.isNegative()
                         || scanDelay.toMillis() < 1 || batchSize < 1 || batchSize > 1000) {
                     throw new IllegalStateException("Runtime Broker retention requires positive max-age and scan-delay"

@@ -836,12 +836,12 @@ executions, Sessions and bindings in bounded batches on a dedicated scheduler;
 it does not stop workers or delete Workspace files. Configure
 `qwen.managed-agent.runtime-broker.retention` with these environment variables:
 
-| Variable                                          | Default | Meaning                                                                                                                           |
-| ------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_ENABLED`    | `false` | Enable cleanup when the Runtime Broker is also enabled                                                                            |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE`    | `30d`   | Minimum age of eligible terminal records; must be positive; unit-less values use days; explicit units such as `12h` are preserved |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_BATCH_SIZE` | `100`   | Per-tick bound on scanned bindings, scanned children and total deleted rows; 1–1000                                               |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_SCAN_DELAY` | `1m`    | Positive delay between ticks, at least 1ms                                                                                        |
+| Variable                                          | Default | Meaning                                                                                                                               |
+| ------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_ENABLED`    | `false` | Enable cleanup when the Runtime Broker is also enabled                                                                                |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE`    | `30d`   | Minimum age of eligible terminal records; must be at least 1ms; unit-less values use days; explicit units such as `12h` are preserved |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_BATCH_SIZE` | `100`   | Per-tick bound on scanned bindings, scanned children and total deleted rows; 1–1000                                                   |
+| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_SCAN_DELAY` | `1m`    | Positive delay between ticks, at least 1ms                                                                                            |
 
 Recovery records, Workspace holders and CSI retirement keep their bindings.
 Child Session lineage also keeps a binding until its canonical parent child_run

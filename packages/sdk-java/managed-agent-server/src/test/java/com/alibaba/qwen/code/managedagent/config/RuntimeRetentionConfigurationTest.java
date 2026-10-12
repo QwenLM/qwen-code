@@ -95,10 +95,19 @@ class RuntimeRetentionConfigurationTest {
                     assertThat(settings.getScanDelay()).isEqualTo(Duration.ofMinutes(2));
                 });
         for (var entry : Map.of("30", Duration.ofDays(30),
-                "12h", Duration.ofHours(12), "30ms", Duration.ofMillis(30)).entrySet()) {
+                "12h", Duration.ofHours(12), "30ms", Duration.ofMillis(30),
+                "1ms", Duration.ofMillis(1)).entrySet()) {
             configured.withPropertyValues("QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE=" + entry.getKey())
                     .run(ctx -> assertThat(ctx.getBean(ManagedAgentProperties.class)
                             .getRuntimeBroker().getRetention().getMaxAge()).isEqualTo(entry.getValue()));
+        }
+        for (String value : new String[] {"1ns", "999999ns"}) {
+            configured.withPropertyValues("QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE=" + value)
+                    .run(ctx -> {
+                        assertThat(ctx).hasFailed();
+                        assertThat(ctx.getStartupFailure()).rootCause()
+                                .isInstanceOf(IllegalStateException.class).hasMessageContaining("at least 1ms");
+                    });
         }
     }
 
