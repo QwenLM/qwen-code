@@ -215,6 +215,17 @@ class ManagedAgentPropertiesTest {
                     assertThat(output).contains(
                             "qwen.managed-agent.harness.turn-deadline");
                 });
+        // A leading '+' is a legal spelling of the same stale override:
+        // the SIMPLE duration pattern accepts it, so the sweep must too.
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.harness.turn-deadline=+1800000")
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    assertThat(output).contains(
+                            "qwen.managed-agent.harness.turn-deadline=+1800000");
+                });
         // A stale 600000 (10 minutes in milliseconds) for the approval
         // timeout is past the 24h range ceiling, so the sweep runs first
         // and the boot still fails with the range message.
@@ -327,9 +338,22 @@ class ManagedAgentPropertiesTest {
                     assertThat(output).doesNotContain(
                             "read-grant-recheck-interval");
                 });
-        // With no Environment the magnitude bands are the fallback, and
-        // PT0S satisfies 0 <= default / 10 — only the zero guard keeps it
-        // out of the mirror band.
+        // The bare, suffix-less spelling of the same zero reads PT0S in
+        // both conventions — the one value the unit flip cannot change.
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.artifacts.read-revalidation-interval=0",
+                        "qwen.managed-agent.events.read-grant-recheck-interval=0")
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    assertThat(output).doesNotContain(
+                            "read-revalidation-interval");
+                    assertThat(output).doesNotContain(
+                            "read-grant-recheck-interval");
+                });
+        // With no Environment there is no written text to read and the
+        // sweep stays silent on a plain `new`.
         ManagedAgentProperties plain = new ManagedAgentProperties();
         plain.getArtifacts().setReadRevalidationInterval(
                 java.time.Duration.ZERO);
@@ -338,6 +362,40 @@ class ManagedAgentPropertiesTest {
         plain.validateWorkspaceFiles();
         assertThat(output).doesNotContain("read-revalidation-interval");
         assertThat(output).doesNotContain("read-grant-recheck-interval");
+    }
+
+    @Test
+    void anEnvironmentKeyStaysOutsideTheBindableSurface() {
+        // qwen.managed-agent.environment is not a setting: it must stay
+        // an unknown, ignored property. An Environment-aware setter on
+        // this bean would surface it as a bindable property whose String
+        // conversion aborts the boot.
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.environment=production")
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> assertThat(started).hasNotFailed());
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void theRemediationExampleEchoesThePreSweepReading(
+            CapturedOutput output) {
+        // A stale 60000 (one minute in milliseconds) on the claim lease
+        // must be answered with its own pre-sweep spelling: a fixed
+        // 30-minute example fits only three of the swept fields.
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.dispatch.lease-duration=60000")
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    assertThat(output).contains(
+                            "qwen.managed-agent.dispatch.lease-duration=60000"
+                                    + " binds as PT16H40M (seconds)");
+                    assertThat(output).contains("for example 60000ms");
+                    assertThat(output).doesNotContain("1800000ms");
+                });
     }
 
     @Test

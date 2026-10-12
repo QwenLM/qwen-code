@@ -14,13 +14,13 @@ import java.util.Locale;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.convert.DurationUnit;
-import org.springframework.context.EnvironmentAware;
 import org.springframework.core.env.Environment;
 
 @ConfigurationProperties("qwen.managed-agent")
-public class ManagedAgentProperties implements EnvironmentAware {
+public class ManagedAgentProperties {
     private static final Logger LOG = LoggerFactory.getLogger(
             ManagedAgentProperties.class);
 
@@ -42,7 +42,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
             List.of("hosted-workspace-files/1");
     private List<String> definitionModels = List.of();
     private String trustedActorHeader = "";
-    // Null on a plain `new`; the sweep then falls back to magnitude bands.
+    // Field injection keeps Environment off the bindable surface: a
+    // setEnvironment setter would surface as a qwen.managed-agent.environment
+    // property whose String conversion aborts the boot. Null on a plain
+    // `new`; the sweep then has no written text to read.
+    @Autowired
     private Environment environment;
 
     public Harness getHarness() {
@@ -118,11 +122,6 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public void setTrustedActorHeader(String trustedActorHeader) {
         this.trustedActorHeader = trustedActorHeader;
-    }
-
-    @Override
-    public void setEnvironment(Environment environment) {
-        this.environment = environment;
     }
 
     @PostConstruct
@@ -232,23 +231,17 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     // A suffix-less override bound milliseconds before the @DurationUnit
     // sweep and now binds seconds, and the written shape is the signal:
-    // with an Environment (every Spring boot) the sweep reads each
-    // seconds-convention field's raw property text, warns when it is a
-    // bare integer and stays quiet on a suffixed value. With no
-    // Environment (a plain `new`) the magnitude bands are the fallback:
-    // a bound value at 1000x its field default or more is that flip's
-    // signature, the mirror band catches the other direction — a bare
-    // value meant in a larger unit binds at least 10x below the default
-    // (zero is unambiguous and never trips) — and a required field ships
-    // no default to compare against, so it warns from one hour up
-    // instead. Warn, never refuse: a deliberate value must still boot.
+    // the sweep reads each seconds-convention field's raw property text
+    // from the Environment, warns when it is a bare integer and stays
+    // quiet on a suffixed value, and never trips on zero — it reads the
+    // same in both conventions. Warn, never refuse: a deliberate value
+    // must still boot.
     private void warnOnSecondScaleOverrides() {
-        warnOnSecondScaleOverrides("qwen.managed-agent.", this,
-                new ManagedAgentProperties(), environment);
+        warnOnSecondScaleOverrides("qwen.managed-agent.", this, environment);
     }
 
     private static void warnOnSecondScaleOverrides(String prefix,
-            Object bound, Object initial, Environment environment) {
+            Object bound, Environment environment) {
         for (Field field : bound.getClass().getDeclaredFields()) {
             if (Modifier.isStatic(field.getModifiers())) {
                 continue;
@@ -263,13 +256,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 continue;
             }
             Object value;
-            Object basis;
             try {
                 Method getter = bound.getClass().getMethod("get"
                         + Character.toUpperCase(field.getName().charAt(0))
                         + field.getName().substring(1));
                 value = getter.invoke(bound);
-                basis = getter.invoke(initial);
             } catch (NoSuchMethodException | IllegalAccessException
                     | InvocationTargetException error) {
                 throw new IllegalStateException(error);
@@ -279,66 +270,31 @@ public class ManagedAgentProperties implements EnvironmentAware {
                     .toLowerCase(Locale.ROOT);
             if (duration) {
                 DurationUnit unit = field.getAnnotation(DurationUnit.class);
-                Duration basisDefault = basis instanceof Duration basisDuration
-                        ? basisDuration : null;
                 if (unit != null && unit.value() == ChronoUnit.SECONDS
                         && value instanceof Duration boundValue) {
                     String written = environment == null ? null
                             : environment.getProperty(property);
                     if (written != null) {
                         // A bare integer is the stale milliseconds-style
-                        // override; a suffixed value never flips units.
+                        // override; a suffixed value never flips units,
+                        // and zero reads the same in both conventions.
                         String text = written.trim();
-                        if (text.matches("-?\\d+")) {
+                        if (text.matches("[+-]?\\d+")
+                                && !boundValue.isZero()) {
                             LOG.warn("{}={} binds as {} (seconds); before"
                                     + " the @DurationUnit sweep the same"
                                     + " suffix-less value bound as"
                                     + " milliseconds ({}). Write an"
                                     + " explicit suffix (for example"
-                                    + " 1800000ms or 30m) to confirm"
-                                    + " the intent.",
+                                    + " {}ms) to confirm the intent.",
                                     property, text, boundValue,
-                                    Duration.ofMillis(Long.parseLong(text)));
+                                    Duration.ofMillis(Long.parseLong(text)),
+                                    text);
                         }
-                    } else if (environment == null && basisDefault != null
-                            && boundValue.compareTo(
-                                    basisDefault.multipliedBy(1000)) >= 0) {
-                        LOG.warn("{} resolved to {}, at least 1000x its"
-                                + " default ({}) — the signature of a stale"
-                                + " milliseconds-style override: a"
-                                + " suffix-less number now binds as"
-                                + " seconds. Write an explicit suffix"
-                                + " (for example 1800000ms) to confirm"
-                                + " the intent.",
-                                property, boundValue, basisDefault);
-                    } else if (environment == null && basisDefault != null
-                            && !boundValue.isZero()
-                            && !boundValue.isNegative()
-                            && boundValue.compareTo(
-                                    basisDefault.dividedBy(10)) <= 0) {
-                        LOG.warn("{} resolved to {}, at least 10x below its"
-                                + " default ({}) — a suffix-less number"
-                                + " now binds as seconds, so a value meant"
-                                + " in a larger unit shrinks this far."
-                                + " Write an explicit suffix (for example"
-                                + " 30m) to confirm the intent.",
-                                property, boundValue, basisDefault);
-                    } else if (environment == null && basisDefault == null
-                            && boundValue.compareTo(Duration.ofHours(1))
-                                    >= 0) {
-                        LOG.warn("{} resolved to {} — this required setting"
-                                + " ships no default to compare against: a"
-                                + " suffix-less number now binds as"
-                                + " seconds, and this scale is the"
-                                + " signature of a stale milliseconds-style"
-                                + " override. Write an explicit suffix"
-                                + " (for example 1800000ms) to confirm"
-                                + " the intent.",
-                                property, boundValue);
                     }
                 }
             } else if (value != null) {
-                warnOnSecondScaleOverrides(property + ".", value, basis,
+                warnOnSecondScaleOverrides(property + ".", value,
                         environment);
             }
         }
