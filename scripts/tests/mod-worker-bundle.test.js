@@ -101,9 +101,10 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
       },
     ],
   });
-  expect(commands).toEqual([
-    { name: 'hello', description: 'Bundled', plugin: 'fixture' },
-  ]);
+  expect(commands).toEqual({
+    tools: false,
+    commands: [{ name: 'hello', description: 'Bundled', plugin: 'fixture' }],
+  });
   expect(
     await dispatch({ type: 'command', command: 'hello', args: '' }),
   ).toEqual({ text: 'bundled:option:undefined' });

@@ -265,9 +265,9 @@ describe('managed-agent-server e2e runner', () => {
     ).toHaveLength(2);
     expect(
       source.match(
-        /\.\.\.\(runtimeTakeover\s*\?\s*\{\s*QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*'true'/g,
+        /\.\.\.\(runtimeTakeover\s*\?\s*\{\s*QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*process\.platform === 'linux' \? 'true' : 'false'/g,
       ),
-      'both durable local process branches must follow runtimeTakeover',
+      'both durable local process branches must follow runtimeTakeover, Linux-gated',
     ).toHaveLength(2);
   });
 
@@ -811,6 +811,10 @@ describe('managed-agent-server e2e runner', () => {
     // pass line on stdout too, so it defers the same way — no eager
     // console.log of a JSON payload remains inside the try at all.
     expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(4);
+    expect(
+      source.match(/approvalResultJson = JSON\.stringify\(/g),
+    ).toHaveLength(1);
+    expect(source.match(/g3SummaryJson = JSON\.stringify\(/g)).toHaveLength(1);
     expect(source.match(/fencedWriterJson = JSON\.stringify\(/g)).toHaveLength(
       1,
     );
@@ -819,6 +823,8 @@ describe('managed-agent-server e2e runner', () => {
     // module-scope binding the deferred print reads is pinned by text:
     // dropped, the print below throws ReferenceError on the success path.
     expect(source).toMatch(/^let resultJson: string \| undefined;$/m);
+    expect(source).toMatch(/^let approvalResultJson: string \| undefined;$/m);
+    expect(source).toMatch(/^let g3SummaryJson: string \| undefined;$/m);
     expect(source).toMatch(/^let fencedWriterJson: string \| undefined;$/m);
     // The behavioural tests inject the signal through this harness's
     // synthesized setter, so the production link — the runner's own
@@ -846,6 +852,11 @@ describe('managed-agent-server e2e runner', () => {
     const print = source.indexOf('console.log(resultJson)');
     expect(failureThrow).toBeGreaterThan(-1);
     expect(signalThrow).toBeGreaterThan(failureThrow);
+    const approvalPrint = source.indexOf('console.log(approvalResultJson)');
+    const summaryPrint = source.indexOf('console.log(g3SummaryJson)');
+    expect(approvalPrint).toBeGreaterThan(signalThrow);
+    expect(summaryPrint).toBeGreaterThan(approvalPrint);
+    expect(summaryPrint).toBeLessThan(print);
     expect(
       print,
       'the success payload must print only after both exit guards',

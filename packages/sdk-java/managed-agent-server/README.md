@@ -97,6 +97,7 @@ All settings below use the `qwen.managed-agent.artifacts` prefix:
 | `max-concurrent-reads`       | `4`     | Maximum simultaneous content responses per server process.                                                                                                                                                                                                                                                                                                                                                                            |
 | `read-timeout`               | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts.                                                                                                                                                                                                                                                                         |
 | `read-revalidation-interval` | `5s`    | How often an in-flight download re-runs the access check (workspace grant, read policy, session lifecycle); `PT0S` re-verifies every chunk. A revocation lands at the first chunk boundary after the window's end; chunks written inside the window still reach the client — up to 1 MiB for a Range request, and up to a full `read-timeout`'s worth of a streaming download. Once the re-check denies, no further chunk is written. |
+| `projection-interval`        | `1s`    | Cadence of the tool-result projection pass (backfill plus claim processing). Bound through a `@Scheduled` placeholder, so a suffix-less number binds as milliseconds — unlike the typed settings above.                                                                                                                                                                                                                               |
 
 A product can replace `ManagedArtifactPolicy` for narrower publication or
 actor rules. Published previews persist in shared events. Policy changes do
@@ -124,6 +125,32 @@ Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-pro
 [简体中文](../../../docs/design/2026-09-29-managed-tool-result-public-projection.zh-CN.md);
 revalidation window: [English](../../../docs/design/2026-10-02-managed-agent-query-amplification.md) |
 [简体中文](../../../docs/design/2026-10-02-managed-agent-query-amplification.zh-CN.md).
+
+## Asynchronous tool publication verification
+
+Apply migration V68 and upgrade all servers before enabling
+`qwen.managed-agent.tool-publication.async-verification-enabled` (default
+`false`). Enable `journal-head-authorization` first; startup rejects async
+admission without it. `verification-concurrency` defaults to `2` and controls
+the dedicated verifier pool, independently of retention and GC.
+
+Updated clients send `X-Qwen-Tool-Publication-Async: 1` and poll the existing
+operation status after HTTP 202. They continue accepting direct receipts from
+old or disabled servers. Older clients remain synchronous. A mode is saved
+when each operation is created, so retries do not change it. `FAILED` carries
+only a safe `error: {status, code}` and must be handled as a terminal error,
+outside network retry handling. The adapter keeps awaiting verified success
+before completing publish, seal, prefix, or finish.
+
+For rollback, disable new async admission and leave the verifier and head
+authorization running until accepted work drains. Do not downgrade the server
+while pending async operations still need verification. Historical async
+success replay returns the prior receipt; actual reads and final integrity
+checks still validate current storage bytes.
+
+Design and client migration contract:
+[English](../../../docs/design/2026-10-07-managed-tool-publication-async-verification.md) |
+[简体中文](../../../docs/design/2026-10-07-managed-tool-publication-async-verification.zh-CN.md).
 
 ## Prerequisites
 
@@ -730,7 +757,6 @@ export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/absolute/authorized/workspace'
 export QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY='/absolute/private/state'
 export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
-export QWEN_MANAGED_AGENT_CLI_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
 Two optional knobs change how the Broker listens and how long it waits for a
@@ -747,11 +773,34 @@ export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='false'
 # a dispatched v3 execution's result. When the window lapses the execution
 # is marked UNKNOWN instead of polling on, so a value shorter than your
 # longest tool call degrades that call to UNKNOWN. A suffix-less number
-# binds as milliseconds, which startup refuses. Raising it above 30m buys
-# nothing on the shipped path: the TypeScript client stops observing a v3
-# execution at its own fixed 30-minute deadline.
+# binds as seconds: startup refuses a value below the 1s floor but accepts
+# a stale milliseconds-style override (1800000 becomes 1800000 seconds),
+# so always write the suffix. Raising it above 30m buys nothing on the
+# shipped path: the TypeScript client stops observing a v3 execution at
+# its own fixed 30-minute deadline.
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
 ```
+
+The same unit rule applies to every `qwen.managed-agent.*` duration setting: a
+suffix-less number binds as seconds unless the setting's `@DurationUnit`
+declares milliseconds. Millisecond-bound settings — `auth.allowed-drift` (so
+a stale `300000` keeps meaning five minutes instead of widening the
+signature-replay window to ~83 hours), the sub-second `events.batch-interval`
+and `events.materialize-interval`,
+`runtime-broker.child-workspace-git-timeout`, `automation.scan-delay`,
+`automation.lease`, `automation.late-tolerance` and `automation.lookback`
+— bind a suffix-less number as milliseconds. Always write the suffix (`90s`,
+`500ms`). At startup the server reads each seconds-convention setting's
+written value and warns on a bare integer — the shape of a stale
+milliseconds-style override — naming what the number binds as now (seconds)
+and what it would have bound before (milliseconds); a suffixed value never
+warns. Cadences bound through `@Scheduled` placeholders —
+`artifacts.projection-interval`, `channels.scan-delay`,
+`child-relay.scan-delay`, `child-workspace.scan-delay`,
+`dispatch.scan-delay`, `events.replay-floor-interval` and
+`message-relay.scan-delay` — also read a bare number as milliseconds,
+and the startup warning cannot see them, so always write the suffix
+there.
 
 When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical
