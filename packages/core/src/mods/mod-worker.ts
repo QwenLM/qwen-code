@@ -256,11 +256,11 @@ class Realm {
 }
 
 function kick(): void {
-  if (pumping) return;
+  if (pumping || !busy) return;
   pumping = true;
   void (async () => {
     try {
-      while (realms.some((realm) => realm.runtime.hasPendingJob())) {
+      while (busy && realms.some((realm) => realm.runtime.hasPendingJob())) {
         for (const realm of realms)
           if (realm.runtime.hasPendingJob()) realm.pump();
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -299,7 +299,12 @@ async function bounded(
     return result;
   } catch (error) {
     call.aborted = true;
-    if (call.budget.expired || String(error).includes('interrupted'))
+    if (
+      call.budget.expired ||
+      (error instanceof Error &&
+        error.name === 'InternalError' &&
+        error.message === 'interrupted')
+    )
       throw new ModTimeoutError();
     throw error;
   } finally {
@@ -319,7 +324,7 @@ async function dispatch(
   parent?: ModInvocation,
 ): Promise<unknown> {
   assertLive(parent);
-  if (++operations > 4096)
+  if (index === 0 && ++operations > 4096)
     throw new Error('Mod dispatch operation limit exceeded.');
   const realm = realms[index];
   if (!realm) return bottom(input);

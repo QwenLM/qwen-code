@@ -168,10 +168,12 @@ cannot perform work after their invocation ends. A worker that cannot acknowledg
 cancellation within 250 milliseconds is terminated, requiring a new session.
 
 There are at most 32 Mod environments, 64 registered commands, 128 registrations
-per plugin, and 4,096 dispatch steps per root call. Each environment has a 64 MiB
+per plugin, and 4,096 root/API event chains per root call. Passing through another
+plugin does not consume an extra event. Each environment has a 64 MiB
 memory limit. Logs and message payloads are also bounded. Registration, compilation
 and configuration failures still reject initialization; ordinary hook failure
-can recover without resetting module state.
+can recover without resetting module state. Guest promise jobs run only while a
+host request is active, including its queued notification drain.
 
 Mods do not run in TUI, ACP, managed/SSH, sandbox or session-agent entry points in
 this version. Safe mode, bare mode and `disableAllHooks` also prevent loading.

@@ -93,6 +93,33 @@ describe('ModRuntime with the real QuickJS worker', () => {
     expect(runtime.getCommands()).toEqual([]);
   });
 
+  it('suspends detached guest jobs between requests without losing logs or state', async () => {
+    const runtime = await create(
+      fixture(`
+        if (e.args === 'start') {
+          void (async () => { for (;;) { await null; count++; } })();
+          $.ui.log('queued'); return {text:'started'};
+        }
+        return {text:String(count)};
+      `),
+    );
+    expect(await runtime.runCommand('hello', 'start', signal())).toBe(
+      'started',
+    );
+    expect(logs.some((log) => log.text === 'queued')).toBe(true);
+    let previous = Number(
+      await runtime.runCommand('hello', 'inspect', signal()),
+    );
+    for (let i = 0; i < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const current = Number(
+        await runtime.runCommand('hello', 'inspect', signal()),
+      );
+      expect(current - previous).toBeLessThan(1000);
+      previous = current;
+    }
+  });
+
   it('allows repeated next calls with equivalent frozen lifecycle input', async () => {
     const runtime = await create(`export function register(on) {
       on('session.start', async ($, e, next) => {

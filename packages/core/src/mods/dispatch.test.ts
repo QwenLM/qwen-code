@@ -73,6 +73,64 @@ describe('Mod middleware through real isolated realms', () => {
     expect(logs.some((log) => /already registered/.test(log.text))).toBe(true);
   });
 
+  it('registers and logs at the group and command capacity', async () => {
+    const runtime = await group(
+      ...Array.from(
+        { length: 32 },
+        (_, i) => `export function register(on) {
+          on('session.start', async ($, e, next) => {
+            await $.command.register({name:'first${i}',description:'First'});
+            await $.command.register({name:'second${i}',description:'Second'});
+            $.ui.log('first${i}'); $.ui.log('second${i}');
+            return next(e);
+          });
+        }`,
+      ),
+    );
+    for (let i = 0; i < 32; i++) {
+      expect(
+        runtime.getCommands('id' + i).map((command) => command.name),
+      ).toEqual(['first' + i, 'second' + i]);
+    }
+    expect(logs.filter((log) => log.to === 'transcript')).toHaveLength(64);
+  });
+
+  it.each([1, 32])(
+    'delivers the same log volume with %s plugins',
+    async (size) => {
+      const runtime = await group(
+        ...Array.from(
+          { length: size - 1 },
+          () => 'export function register() {}',
+        ),
+        provider.replace(
+          "$.ui.log('effect:' + ++count); return {text: count + ':' + e.args};",
+          "for (let i=0; i<200; i++) $.ui.log('line:' + i); return {text:'done'};",
+        ),
+      );
+      expect(await runtime.runCommand('hello', '', signal())).toBe('done');
+      expect(logs.map((log) => log.text)).toEqual(
+        Array.from({ length: 200 }, (_, i) => 'line:' + i),
+      );
+    },
+  );
+
+  it('retains the operation cap for API chains and resets it on the next request', async () => {
+    const runtime = await group(
+      provider.replace(
+        "$.ui.log('effect:' + ++count); return {text: count + ':' + e.args};",
+        "for (let i=0; i<(e.args==='limit'?4200:1); i++) $.ui.log('line:' + i); return {text:'done'};",
+      ),
+    );
+    expect(await runtime.runCommand('hello', 'limit', signal())).toBe('done');
+    expect(logs.map((log) => log.text)).toEqual(
+      Array.from({ length: 4095 }, (_, i) => 'line:' + i),
+    );
+    logs.length = 0;
+    expect(await runtime.runCommand('hello', '', signal())).toBe('done');
+    expect(logs.map((log) => log.text)).toEqual(['line:0']);
+  });
+
   it('allows lifecycle short circuit after all module registrations', async () => {
     const runtime = await group(
       `export function register(on) { on('session.start', ($,e) => ({cwd:e.cwd})); }`,
@@ -134,6 +192,51 @@ describe('Mod middleware through real isolated realms', () => {
       expect(logs.filter((log) => log.to === 'debug')).toHaveLength(2);
     },
   );
+
+  it.each([
+    [
+      "new Error('upload interrupted by server')",
+      'Error: upload interrupted by server',
+    ],
+    ["new Error('interrupted')", 'Error: interrupted'],
+    [
+      "Object.assign(new Error('upload interrupted'), {name:'InternalError'})",
+      'InternalError: upload interrupted',
+    ],
+  ])('preserves guest-thrown error metadata for %s', async (error, message) => {
+    const runtime = await group(
+      wrapper(
+        `throw ${error};`,
+        `return {text: next.error.kind + ':' + next.error.message};`,
+      ),
+      provider,
+    );
+    expect(await runtime.runCommand('hello', '', signal())).toBe(
+      'throw:' + message,
+    );
+    expect(effects()).toEqual([]);
+  });
+
+  it('keeps an outer failure distinct from a nested reentry timeout in the same realm', async () => {
+    const runtime = await group(
+      `export function register(on) {
+        on('*', async ($, e, next) => {
+          const result = await next(e);
+          if (next.event === 'command.run') throw new Error('outer unrelated failure');
+          return result;
+        }).catch(($, e, next) => {
+          if (next.error.kind === 're-entry' && next.event === 'ui.log') while (true) {}
+          if (next.event === 'command.run') return {text: next.error.kind + ':' + next.error.message};
+          return next(e);
+        });
+      }`,
+      provider,
+    );
+    expect(await runtime.runCommand('hello', '', signal())).toBe(
+      'throw:Error: outer unrelated failure',
+    );
+    expect(effects()).toEqual(['effect:1']);
+  });
 
   it.each(['throw new Error("after")', 'return undefined', 'return {text:3}'])(
     'retains the last normal next result after %s',
