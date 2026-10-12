@@ -100,10 +100,6 @@ vi.mock('../terminal/TerminalPanel', () => ({
   ),
 }));
 
-vi.mock('../workspace-agents/ThreadsRoute', () => ({
-  ThreadsRoute: () => <div data-testid="workspace-agent-thread-route" />,
-}));
-
 const sideTaskPanelProps = vi.hoisted(() => ({
   current: undefined as Record<string, unknown> | undefined,
 }));
@@ -402,57 +398,6 @@ afterEach(() => {
       },
     ],
   };
-});
-
-it('does not mount restored agent activity when collaboration is disabled', async () => {
-  const node = document.createElement('div');
-  document.body.appendChild(node);
-  const root = createRoot(node);
-  mounted.push({ root, container: node });
-  const render = () => (
-    <I18nProvider language="en">
-      <ArtifactPanel
-        artifacts={[]}
-        tabs={[
-          {
-            id: 'agent-activity:/repo:thread-1',
-            kind: 'agent_activity',
-            title: 'Team',
-            threadId: 'thread-1',
-            workspaceCwd: '/repo',
-          },
-        ]}
-        activeTabId="agent-activity:/repo:thread-1"
-        reviewChanges={[]}
-        selectedReviewPath={null}
-        onSelectTab={() => {}}
-        onCloseTab={() => {}}
-        onOpenFilePreview={() => {}}
-        onClose={() => {}}
-      />
-    </I18nProvider>
-  );
-
-  act(() => root.render(render()));
-  // Let the lazy `ThreadsRoute` import settle before asserting absence, the
-  // same way the positive half below does: `<Suspense fallback={null}>`
-  // satisfies `toBeNull()` on its own, so without this flush the negative half
-  // still passes with the collaboration gate deleted and pins nothing.
-  await act(async () => {
-    await Promise.resolve();
-  });
-  expect(
-    node.querySelector('[data-testid="workspace-agent-thread-route"]'),
-  ).toBeNull();
-
-  mockWorkspace.capabilities.features = ['agent_collaboration_v1'];
-  act(() => root.render(render()));
-  await act(async () => {
-    await Promise.resolve();
-  });
-  expect(
-    node.querySelector('[data-testid="workspace-agent-thread-route"]'),
-  ).not.toBeNull();
 });
 
 describe('ArtifactPanel context usage tabs', () => {

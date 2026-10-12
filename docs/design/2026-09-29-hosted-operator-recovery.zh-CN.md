@@ -8,7 +8,7 @@
 
 后台 Shell 子进程可能在主进程退出后继续持有捕获管道。结果为 `captureStatus=partial`、`captureReason=producer_lost`；Hosted 回合保留 Workspace holder，因为主进程退出、杀死原进程组和管道 EOF 均不能证明逃逸写入者已停止。保存的工具执行与 Hosted 回执保留不完整结果。同一存储上的其他 Session 收到 `workspace_busy`。
 
-本恢复路径仅适用于原主机上显式启用的 Linux durable `local-process` worker，要求原始 version-2 注册记录、seed、lease 和精确的 Workspace holder。准备后原主机重启也可完成恢复：启动身份变化能证明原 worker 不再运行，却不能代替运维人员核查所有潜在写入者和重新启动来源。旧临时 worker 无法事后补造这些身份。运维人员负责确认旧 worker 与所有潜在 Workspace 写入者已经停止且不会重新启动；软件验证原 worker 身份与退出，但无法找全任意脱离关系的子进程。错误的人工声明不属于本契约的保证。
+本恢复路径仅适用于原主机上的 Linux durable `local-process` worker（默认模式），要求原始 version-2 注册记录、seed、lease 和精确的 Workspace holder。准备后原主机重启也可完成恢复：启动身份变化能证明原 worker 不再运行，却不能代替运维人员核查所有潜在写入者和重新启动来源。旧临时 worker 无法事后补造这些身份。运维人员负责确认旧 worker 与所有潜在 Workspace 写入者已经停止且不会重新启动；软件验证原 worker 身份与退出，但无法找全任意脱离关系的子进程。错误的人工声明不属于本契约的保证。
 
 ## 本地维护协议
 

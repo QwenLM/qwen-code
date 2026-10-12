@@ -22,6 +22,7 @@ class ManagedExtensionExecutionContractTest {
 
     @Test
     void reportsTheWireStatusTheSharedCasesGiveTheHarness() throws IOException {
+        assertEquals(1, read().required("contractVersion").intValue());
         Set<ToolExecutionRecord.State> covered = EnumSet.noneOf(
                 ToolExecutionRecord.State.class);
         for (JsonNode each : read().required("brokerExecutionCases")) {

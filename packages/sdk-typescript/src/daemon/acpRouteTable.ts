@@ -604,6 +604,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (_s, body) => bodyRecord(body),
     },
   },
+  // POST /workspace/trust/grant → _qwen/workspace/trust/grant
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/trust\/grant\/?$/,
+    mapping: {
+      method: '_qwen/workspace/trust/grant',
+      extractParams: () => ({}),
+    },
+  },
   // GET /workspace/permissions → _qwen/workspace/permissions
   {
     httpMethod: 'GET',

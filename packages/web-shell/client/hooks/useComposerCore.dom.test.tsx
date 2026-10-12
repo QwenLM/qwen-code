@@ -2181,8 +2181,18 @@ describe('useComposerCore tags', () => {
         }
         return appendChild.call(this, child);
       });
+    // The failed tooltip root's unmount is only observable from inside the
+    // catch: mount()'s act() drains the deferred microtask before returning.
+    const probeRoot = createRoot(document.createElement('span'));
+    const unmount = vi.spyOn(
+      Object.getPrototypeOf(probeRoot) as Root,
+      'unmount',
+    );
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {
       expect(readFailingChipTitle?.()).toBe('Details');
+      // Root.unmount() flushes sync work across ALL roots, which would re-enter
+      // CodeMirror mid-update (#12826), so it must not run inside the catch.
+      expect(unmount).not.toHaveBeenCalled();
     });
 
     try {
@@ -2198,6 +2208,8 @@ describe('useComposerCore tags', () => {
         '[WebShell] inline tag tooltip render failed',
         error,
       );
+      // Deferred, not skipped: the failed root is still unmounted exactly once.
+      expect(unmount).toHaveBeenCalledTimes(1);
       const chip = document.body.querySelector('[title="Details"]');
       expect(chip).not.toBeNull();
       expect(document.body.querySelector('[role="tooltip"]')).toBeNull();
@@ -2205,6 +2217,8 @@ describe('useComposerCore tags', () => {
       expect(failingTooltip?.style.display).toBe('none');
     } finally {
       warn.mockRestore();
+      unmount.mockRestore();
+      probeRoot.unmount();
       appendChildSpy.mockRestore();
     }
   });

@@ -31,6 +31,22 @@ public interface RuntimeTransport {
         return failed;
     }
 
+    /** Separate CSI receipt; context attestation alone cannot prove the mounted storage. */
+    default CompletionStage<Map<String, Object>> attestCsi(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            Map<String, Object> storage, Map<String, Object> pod) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "workspace_csi_attestation_unavailable", "Workspace CSI attestation is unavailable.", false));
+    }
+
+    /** Explicit comparison inputs are component expectations, not trusted CSI placement provenance. */
+    default CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
+            Map<String, Object> expectedCaptureIdentity) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "workspace_csi_acknowledgement_unavailable", "Workspace CSI acknowledgement is unavailable.", false));
+    }
+
     /**
      * Installs directory context only; does not activate a Session. The
      * Session record must be ACQUIRING or READY and name this binding at its

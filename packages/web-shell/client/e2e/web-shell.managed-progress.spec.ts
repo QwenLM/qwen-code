@@ -39,6 +39,12 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
     },
     environment: { state: 'ready' },
     lastSequence: 0,
+    capabilities: {
+      tasks: true,
+      artifacts: false,
+      actions: false,
+      workspaceTurns: false,
+    },
   };
   function append(type: string, data: Record<string, unknown> = {}) {
     const sequence = events.length + 1;
@@ -262,7 +268,9 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   await fixture.waitForCurrentStream();
   await page.getByRole('button', { name: 'Cancel turn', exact: true }).click();
   await fixture.waitForCurrentStream();
-  expect(fixture.cancellations).toEqual([{ turnId: 'p2' }]);
+  // waitForCurrentStream can pass on the still-running turn's stale cursor
+  // while the cancel POST is still on the wire: poll the actual list.
+  await expect.poll(() => fixture.cancellations).toEqual([{ turnId: 'p2' }]);
   await expect(page.locator('[data-managed-progress]')).toContainText(
     'Cancelling',
   );
@@ -290,4 +298,46 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   expect(new Set(fixture.prompts.map((request) => request.key)).size).toBe(2);
   expect(fixture.daemon.promptRequests()).toHaveLength(0);
   expect(fixture.errors).toEqual([]);
+});
+
+test('a permanently failing pending create exposes a discard path @smoke', async ({
+  page,
+}, testInfo) => {
+  await installManagedScenario(page, testInfo);
+  // Registered after the scenario's catch-all, so it wins for this path:
+  // the create fails permanently and the pending prompt would otherwise
+  // wedge the whole composer on an indefinite retry.
+  const attempts: string[] = [];
+  await page.route(
+    '**/api/agent/web-shell/v1/sessions/create',
+    async (route) => {
+      attempts.push(String(route.request().postDataJSON()?.idempotencyKey));
+      await route.fulfill({
+        status: 500,
+        json: { error: { code: 'create_down', message: 'permanent failure' } },
+      });
+    },
+  );
+
+  await page.getByRole('button', { name: 'New managed task' }).click();
+  const composer = page.getByRole('textbox', {
+    name: 'Message the managed agent',
+  });
+  await composer.fill('Fragile draft');
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+
+  await expect(
+    page.getByText('The request outcome is unconfirmed', { exact: false }),
+  ).toBeVisible();
+  await expect(composer).toBeDisabled();
+
+  await page.getByRole('button', { name: 'Discard this request' }).click();
+  await expect(
+    page.getByText('The request outcome is unconfirmed', { exact: false }),
+  ).toBeHidden();
+  await expect(composer).toBeEnabled();
+  await expect(composer).toHaveValue('Fragile draft');
+
+  // Discard is quiet: no resubmission, no new idempotency key for the draft.
+  expect(attempts).toHaveLength(1);
 });
