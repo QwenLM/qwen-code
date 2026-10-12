@@ -56,7 +56,7 @@ import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
 } from './workflow-prompts.js';
-import { AgentTerminateMode } from './agent-types.js';
+import { AgentTerminateMode, type ToolConfig } from './agent-types.js';
 import type { ContextState } from './agent-headless.js';
 import {
   attachJsonlTranscriptWriter,
@@ -1304,14 +1304,19 @@ async function runOverridePath(
     }
   }
 
-  // A host refusing this run's tools declares the list explicitly: an absent
-  // allowlist is the subagent manager's '*' floor, so leaving it unset would
-  // hand a dispatch that names no tools this host's whole registry. Only a
-  // schema dispatch keeps structured_output, its one way to answer.
-  if (refuseSubagentTools === true) {
-    augmented.tools =
-      opts.schema !== undefined ? [ToolNames.STRUCTURED_OUTPUT] : [];
-  }
+  // A host refusing this run's tools hands the manager the runtime tool list
+  // itself. The definition-level allowlist cannot carry it: an empty one is
+  // the manager's "inherit everything" marker, which convertToRuntimeConfig
+  // turns into '*', so a dispatch that names no tools would get this host's
+  // whole registry. Only a schema dispatch keeps structured_output, its one
+  // way to answer.
+  const refusedToolConfig: ToolConfig | undefined =
+    refuseSubagentTools === true
+      ? {
+          tools: opts.schema !== undefined ? [ToolNames.STRUCTURED_OUTPUT] : [],
+          disallowedTools: [],
+        }
+      : undefined;
 
   // Provision worktree BEFORE createAgentHeadless so the derived Config
   // is in place when convertToRuntimeConfig and buildSubagentContextOverride
@@ -1466,6 +1471,9 @@ async function runOverridePath(
         },
         ...(effort !== undefined
           ? { modelConfigOverrides: { reasoningEffort: effort } }
+          : {}),
+        ...(refusedToolConfig !== undefined
+          ? { toolConfigOverride: refusedToolConfig }
           : {}),
         eventEmitter,
         taskName: String(ctx.get('task_prompt')),

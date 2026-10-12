@@ -2965,6 +2965,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     options?: {
       runConfigOverrides?: unknown;
       modelConfigOverrides?: unknown;
+      toolConfigOverride?: unknown;
       taskName?: string;
       subagentId?: string;
     };
@@ -3098,6 +3099,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             eventEmitter?: unknown;
             runConfigOverrides?: unknown;
             modelConfigOverrides?: unknown;
+            toolConfigOverride?: unknown;
             taskName?: string;
             subagentId?: string;
           },
@@ -3113,6 +3115,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             options: {
               runConfigOverrides: options?.runConfigOverrides,
               modelConfigOverrides: options?.modelConfigOverrides,
+              toolConfigOverride: options?.toolConfigOverride,
               taskName: options?.taskName,
               subagentId: options?.subagentId,
             },
@@ -3909,8 +3912,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     });
 
     // #13858 R4-1: a dispatch that names no tools still takes the override
-    // path for any dispatch-affecting option, where an absent allowlist is
-    // the manager's '*' floor — the refusing host declares it empty.
+    // path for any dispatch-affecting option. The definition allowlist
+    // cannot carry an empty list (the manager reads [] as "inherit
+    // everything" and converts it to '*'), so the refusing host hands the
+    // manager the runtime list itself. hosted-workflow-turn.integration.test
+    // pins the same through the real manager.
     it('refuseSubagentTools declares an empty tool list on the override path', async () => {
       const { calls } = await dispatched(
         {},
@@ -3923,7 +3929,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         true,
       );
       expect(calls).toHaveLength(1);
-      expect(calls[0]!.config.tools).toEqual([]);
+      expect(calls[0]!.options?.toolConfigOverride).toEqual({
+        tools: [],
+        disallowedTools: [],
+      });
     });
 
     it('refuseSubagentTools keeps only structured_output for a schema dispatch', async () => {
@@ -3941,7 +3950,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       // declaration matters here.
       await mgr.result.catch(() => undefined);
       expect(mgr.calls).toHaveLength(1);
-      expect(mgr.calls[0]!.config.tools).toEqual([ToolNames.STRUCTURED_OUTPUT]);
+      expect(mgr.calls[0]!.options?.toolConfigOverride).toEqual({
+        tools: [ToolNames.STRUCTURED_OUTPUT],
+        disallowedTools: [],
+      });
     });
 
     it.each([
