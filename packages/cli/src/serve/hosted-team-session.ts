@@ -15,6 +15,8 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { memberPlanModeRequired } from './hosted-member-chain.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type {
   CommittedExtensionOperation,
   ManagedSessionActor,
@@ -100,6 +102,24 @@ export interface HostedTeamStore {
 /** A model-facing refusal: the call answers with it and commits nothing. */
 export class HostedTeamRefusal extends Error {}
 
+/**
+ * The stop a lead tool requests of a member's head. A user's H4f cancel
+ * commits the same revision (H4e-b3 decision 10), so the lead's request
+ * goes through the child funnel, never through this funnel's store: the
+ * two funnels each own their writes chain. A lane whose Shell profile
+ * suppresses child agents attaches no such funnel; the team surface
+ * there is read-only, and a member it may carry refuses shutdowns. The
+ * command id a `request_shutdown` stop commits under names the call that
+ * asked, so an interrupted turn's recovery tells it apart from someone
+ * else's stop.
+ */
+export interface HostedTeamStops {
+  requestStop(
+    childRunId: string,
+    evidence?: { readonly operation: string; readonly commandId: string },
+  ): Promise<void>;
+}
+
 /** The Legacy board tools' schema bounds, in characters. */
 const SUBJECT_CHARS = 200;
 const DESCRIPTION_CHARS = 10_000;
@@ -129,10 +149,26 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'team_delete',
     description:
-      "Delete this Session's team. Refused while a member is still running: a running member cannot be stopped from here, so wait until task_list shows every member ended.",
+      "Delete this Session's team. Refused while a member is still running: stop it first with request_shutdown and wait until task_list shows it ended.",
     parametersJsonSchema: {
       type: 'object',
       properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'request_shutdown',
+    description:
+      'Stop a team member: its current run settles as if its task were cancelled, and it is not asked. A member that already finished is not touched: it takes no work unless you send it some. Delete the team with team_delete once task_list shows every member ended.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        to: {
+          type: 'string',
+          description: 'The name of the team member to stop.',
+        },
+      },
+      required: ['to'],
       additionalProperties: false,
     },
   },
@@ -268,6 +304,7 @@ const ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = {
     'addBlockedBy',
   ],
   task_list: ['status', 'owner', 'blockedBy'],
+  request_shutdown: ['to'],
 };
 
 function lineError(
@@ -367,6 +404,8 @@ export function hostedTeamArgumentError(
       if (args[key] !== undefined && typeof args[key] !== 'string')
         return `${key} must be a string.`;
   }
+  if (toolName === 'request_shutdown' && typeof args['to'] !== 'string')
+    return 'to must be a string.';
   return undefined;
 }
 
@@ -424,6 +463,7 @@ export class HostedTeamSession {
   constructor(
     private readonly store: HostedTeamStore,
     private readonly key: ManagedSessionKey,
+    private readonly stops?: HostedTeamStops,
   ) {}
 
   team(teamId: string): TeamState | undefined {
@@ -463,9 +503,19 @@ export class HostedTeamSession {
   /**
    * Whether a call committed any part of its team write before its Turn
    * died: the interrupted Turn's settlement must not answer such a call
-   * as one that never ran.
+   * as one that never ran. H4e-b3 decision 14's stop evidence is keyed to
+   * the call that requested it — `shutdown:${callKey}` — never to the
+   * member-head bit, so a stop someone else requested is not credited to
+   * a call that never ran, and the keyed evidence survives a continuation
+   * that later never started.
    */
   committedBy(toolName: string, callKey: string): boolean {
+    if (toolName === 'request_shutdown') {
+      return (
+        this.committed('commitChildRunRecord', `shutdown:${callKey}`) !==
+        undefined
+      );
+    }
     const commands: ReadonlyArray<readonly [string, string]> =
       toolName === 'team_create'
         ? [['createTeam', callKey]]
@@ -517,6 +567,8 @@ export class HostedTeamSession {
           return this.updateTask(callKey, args, turnPrefix);
         case 'task_list':
           return Promise.resolve(this.listTasks(args));
+        case 'request_shutdown':
+          return this.requestShutdown(callKey, args['to'] as string);
         default:
           throw new Error(`${toolName} is not a team tool.`);
       }
@@ -642,7 +694,7 @@ export class HostedTeamSession {
         .map((member) => member.name);
       if (running.length > 0)
         throw new HostedTeamRefusal(
-          `Team "${team.name}" still has running members: ${running.join(', ')}. A running member cannot be stopped from this Session yet; wait until task_list shows it ended, then delete the team.`,
+          `Team "${team.name}" still has running members: ${running.join(', ')}. Stop them with request_shutdown and wait until task_list shows them ended, then delete the team.`,
         );
       if (team.lifecycle === 'active') {
         closing = teamLifecycleBody(team, 'closing');
@@ -661,6 +713,84 @@ export class HostedTeamSession {
       `${callKey}:deleted`,
     );
     return `Team "${team.name}" deleted.`;
+  }
+
+  /**
+   * H4e-b3 decision 10: the lead stops a member. A running head takes the
+   * same stop a user's H4f cancel commits — the member is never asked —
+   * and the child result relay's stop arm settles it. Every answer reads
+   * the head's state, so a re-driven call answers its committed stop
+   * instead of committing a second one. A finished head is not touched:
+   * it takes no work unless the lead sends it some.
+   */
+  private async requestShutdown(
+    callKey: string,
+    rawName: string,
+  ): Promise<string> {
+    const team = this.openTeam();
+    if (team === undefined)
+      throw new HostedTeamRefusal('No active team. Create a team first.');
+    const name = sanitizeName(rawName);
+    if (!name)
+      throw new HostedTeamRefusal(
+        `Teammate name "${rawName}" sanitizes to an empty string. Choose a name with at least one alphanumeric character.`,
+      );
+    const member = team.members.find((each) => each.name === name);
+    if (member === undefined)
+      throw new HostedTeamRefusal(
+        `"${name}" is not a member of team "${team.name}".`,
+      );
+    let view = hostedMemberView(this.chains(), member.childRunId);
+    if (isRunningMember(view) && !view.stopping && view.head !== undefined) {
+      // A lane without the child funnel has nothing to stop through, and
+      // can only carry members read-only; refusing here costs the merge
+      // shape that attaches the surface without the funnel.
+      if (this.stops === undefined)
+        throw new HostedTeamRefusal(
+          `${name} cannot be stopped from this Session.`,
+        );
+      try {
+        // The stop commits on the child funnel's chain, so a settlement
+        // can beat the view it just read: the run ends without a stop
+        // landing, and the winner's answer reads from the new state
+        // rather than crashing as a conflict.
+        await this.stops.requestStop(view.head.childRunId, {
+          operation: 'commitChildRunRecord',
+          commandId: `shutdown:${callKey}`,
+        });
+        return `${name} is being stopped. Delete the team once task_list shows it ended.`;
+      } catch (cause) {
+        if (!(cause instanceof ManagedSessionConflictError)) throw cause;
+        view = hostedMemberView(this.chains(), member.childRunId);
+        if (view.state === 'running' && !view.stopping) throw cause;
+      }
+    }
+    if (view.stoppingBeforeStart)
+      return `${name} is already being stopped, before its latest continuation started: it may end without starting, and ${name} then goes back to its predecessor run. Check task_list once it settles; do not read the member as ended on this stop alone.`;
+    if (view.stopping)
+      return `${name} is already being stopped. Delete the team once task_list shows it ended.`;
+    if (view.state === 'completed' && !view.stopRequestedCompletion)
+      return `${name} has finished: it takes no work unless you send it some, so nothing needed stopping. Its run was not touched.`;
+    const ended = view.stopRequestedCompletion
+      ? 'completed after a stop was requested'
+      : view.state === 'cancelled'
+        ? 'was cancelled'
+        : `has ${view.state}`;
+    return `${name} ${ended}; there is nothing left to stop.`;
+  }
+
+  /**
+   * H4e-b3 decision 9's composition rule, read through the open team:
+   * whether a continuation of this member composes in plan mode.
+   */
+  memberPlanMode(member: HostedTeamMembership): boolean {
+    const team = this.team(member.teamId);
+    if (team === undefined) return false;
+    return memberPlanModeRequired(
+      team,
+      this.store.authority.extensionRecordsInDomain('team_plan'),
+      member.name,
+    );
   }
 
   private async createTask(

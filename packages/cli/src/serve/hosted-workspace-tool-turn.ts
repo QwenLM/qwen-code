@@ -240,11 +240,13 @@ function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
   );
 }
 
-// H3: background admissions exist only while the child_run domain is
-// enabled for commits; otherwise the turn keeps its foreground refusals.
+// H3: background admissions exist only while the child_run domain's shell
+// kind is enabled for commits; otherwise the turn keeps its foreground
+// refusals. The domain itself never joins the plain enabled list — its
+// admission is per kind — so this reads the kind gate (#13856).
 function childRunAdmissionsEnabled(): boolean {
   try {
-    assertManagedSessionDomainEnabled('child_run');
+    assertManagedSessionChildRunKindEnabled('shell');
     return true;
   } catch {
     return false;
@@ -375,13 +377,14 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   {
     name: 'run_shell_command',
     description:
-      'Run a foreground command in the saved Workspace working directory. Complete stdout and stderr are retained; the model receives a bounded preview. Background jobs are unavailable. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
+      'Run a command in the saved Workspace working directory. Complete stdout and stderr are retained; the model receives a bounded preview. With is_background the command runs detached: the call returns a durable handle at once, the process outlives the turn and holds its Runtime until it exits, and its output lands as a task Artifact. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
         command: { type: 'string' },
         timeout: { type: 'integer', minimum: 1, maximum: 600000 },
         description: { type: 'string' },
+        is_background: { type: 'boolean' },
       },
       required: ['command'],
       additionalProperties: false,
@@ -449,7 +452,27 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'team_create',
   'task_create',
   'task_update',
+  'request_shutdown',
 ];
+
+/**
+ * H4e-b3 decision 9 (b3a): what a run in plan mode still admits. This
+ * build declares neither `task_list` for a member (b3b) nor
+ * `exit_plan_mode` (b3d), so the list holds only the reads a member
+ * already has, plus its message to the leader.
+ */
+const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
+  'read_file',
+  'glob',
+  'send_message',
+]);
+
+/**
+ * The b3a plan-mode refusal, worded for a build without `exit_plan_mode`
+ * (decision 5): it says the run may only read and never names it.
+ */
+const HOSTED_PLAN_MODE_REFUSAL =
+  'This run is in plan mode until the leader approves its plan: only read_file, glob and send_message to the leader are admitted. The decision arrives as your next instruction.';
 
 /**
  * H4b: launch one child Session from the Session's own definition. The
@@ -1086,6 +1109,11 @@ export class HostedWorkspaceToolTurn {
   private readonly childConsumption: (childRunId: string) => void;
   private readonly messages?: HostedSessionMessageSession;
   private readonly teams?: HostedTeamSession;
+  /**
+   * H4e-b3 decisions 5/9: this run's first input carried an unescaped
+   * `plan-mode="required"` preamble (assembly read it off the journal).
+   */
+  private readonly memberPlanMode: boolean;
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -1129,6 +1157,11 @@ export class HostedWorkspaceToolTurn {
       };
       messages?: HostedSessionMessageSession;
       teams?: HostedTeamSession;
+      /**
+       * H4e-b3 decisions 5/9: this run's first input carried an unescaped
+       * `plan-mode="required"` preamble; its calls admit reads only.
+       */
+      memberPlanMode?: boolean;
     },
   ) {
     this.mcp = extras?.mcp;
@@ -1145,6 +1178,7 @@ export class HostedWorkspaceToolTurn {
       extras?.childAgents?.queueConsumption ?? (() => undefined);
     this.messages = extras?.messages;
     this.teams = extras?.teams;
+    this.memberPlanMode = extras?.memberPlanMode === true;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
         ? publicationOrShell
@@ -1886,7 +1920,13 @@ export class HostedWorkspaceToolTurn {
         let messageAdmitted = false;
         const team =
           mcpInput === undefined && HOSTED_TEAM_TOOL_NAMES.includes(call.name);
-        if (mcpInput) {
+        // H4e-b3 decision 9: a run whose first input carried an unescaped
+        // plan-mode preamble admits reads only; every other call is
+        // refused before it runs, ahead of any per-tool arm below.
+        if (this.memberPlanMode && !HOSTED_PLAN_MODE_READS.has(call.name)) {
+          validationError = HOSTED_PLAN_MODE_REFUSAL;
+          input = { ...call.args };
+        } else if (mcpInput) {
           input = { ...mcpInput.input };
         } else if (isShell) {
           const args = call.args;
@@ -3363,7 +3403,15 @@ export class HostedWorkspaceToolTurn {
     // fresh accept starts it, and a replay after a restart — whose
     // journal already carries the receipt — must resume it, or the
     // watch's lines, terminal conditions and settle never arrive.
-    if (this.monitors!.record(executionCallId)?.stopReason === null) {
+    const monitorRecord = this.monitors!.record(executionCallId);
+    // A parked watch has stopReason null like a live one, but its quota or
+    // idle window already ended it as unproven — resuming it would commit a
+    // post-quota observation the record refuses, silently. Only a live
+    // record is resumed (#13856 R1-55).
+    if (
+      monitorRecord?.stopReason === null &&
+      monitorRecord.run.state !== 'recovery_blocked'
+    ) {
       await this.resumeMonitorWatch(executionCallId);
     }
     let ref: ManagedSessionDurableRef;
@@ -3868,8 +3916,15 @@ export class HostedWorkspaceToolTurn {
     // H4e-b2 decision 5: a member's launch prompt opens with its preamble,
     // part of the envelope and so of its bound. A replay goes on with the
     // committed envelope, whose preamble may follow a team changed since.
+    // H4e-b3 decision 9: the plan-mode attribute follows the roster entry —
+    // a fresh join has none in this build; a re-driven launch reads it.
     const launchPrompt =
-      member === undefined ? prompt : teamMemberPreamble(member) + prompt;
+      member === undefined
+        ? prompt
+        : teamMemberPreamble(
+            member,
+            joining ? false : this.teams!.memberPlanMode(member),
+          ) + prompt;
     // The envelope bound is enforced by the admission's byte_limit
     // refusal — but the encoder throws a size error before that branch
     // can ever answer. Translate the throw into the same refusal: an
@@ -4895,6 +4950,17 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
+  // #13856: the broker refused the release because a live background run
+  // provably holds the Runtime — the designed hold, not a wedge. The turn
+  // settles clean and the Runtime Session stays owed to the close, which
+  // drains it; the busy path keeps the honesty contract untouched.
+  private held = false;
+
+  /** The turn ended with its Runtime Session held by a live run. */
+  get runtimeHeld(): boolean {
+    return this.held;
+  }
+
   async finish(): Promise<void> {
     if (this.uncertain)
       throw new HostedToolRecoveryRequiredError('Tool outcome is unknown.');
@@ -4906,6 +4972,15 @@ export class HostedWorkspaceToolTurn {
       if (!this.mcp && !this.hooks) await this.broker.release();
       this.acquired = false;
     } catch (cause) {
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 409 &&
+        cause.code === 'runtime_session_held'
+      ) {
+        this.held = true;
+        this.acquired = false;
+        return;
+      }
       this.uncertain = true;
       throw new HostedToolRecoveryRequiredError(cause);
     }

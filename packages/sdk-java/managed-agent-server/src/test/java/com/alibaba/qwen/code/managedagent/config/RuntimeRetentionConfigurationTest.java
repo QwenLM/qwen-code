@@ -94,6 +94,9 @@ class RuntimeRetentionConfigurationTest {
                     assertThat(settings.getBatchSize()).isEqualTo(23);
                     assertThat(settings.getScanDelay()).isEqualTo(Duration.ofMinutes(2));
                 });
+        configured.withPropertyValues("QWEN_MANAGED_AGENT_RUNTIME_RETENTION_SCAN_DELAY=30")
+                .run(ctx -> assertThat(ctx.getBean(ManagedAgentProperties.class)
+                        .getRuntimeBroker().getRetention().getScanDelay()).isEqualTo(Duration.ofMillis(30)));
         for (var entry : Map.of("30", Duration.ofDays(30),
                 "12h", Duration.ofHours(12), "30ms", Duration.ofMillis(30),
                 "1ms", Duration.ofMillis(1)).entrySet()) {
