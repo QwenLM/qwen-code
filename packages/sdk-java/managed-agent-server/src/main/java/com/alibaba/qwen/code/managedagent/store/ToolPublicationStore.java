@@ -5,6 +5,8 @@ import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.t
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -18,9 +20,11 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import javax.sql.DataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -57,6 +61,9 @@ public final class ToolPublicationStore {
     }
 
     record ProducerBinding(JsonNode binding, ToolExecutionRecord execution) {
+    }
+
+    private record PublicationTarget(Row row, JsonNode binding, RuntimeBindingRecord runtime) {
     }
 
     private record Original(RuntimeBindingRecord runtime, ToolExecutionRecord execution,
@@ -162,32 +169,83 @@ public final class ToolPublicationStore {
     private ProducerBinding producerBindingLocked(String scope, String publicationId,
             String publicationToken, Access access) {
         String suppliedHash = ToolPublicationContract.tokenHash(publicationToken);
+        return producerBindingWithHashLocked(scope, publicationId, suppliedHash, null, access);
+    }
+
+    ProducerBinding producerVerificationBindingLocked(String scope, String publicationId,
+            String bindingDigest, String tokenHash) {
+        try {
+            require(bindingDigest != null && tokenHash != null, "Accepted verification identity is missing");
+            // Completing an accepted claim. CLAIM still allows a settled CSI execution
+            // after retirement; PRODUCE would fail that claim permanently.
+            return producerBindingWithHashLocked(scope, publicationId, tokenHash, bindingDigest,
+                    Access.CLAIM, true);
+        } catch (IllegalArgumentException error) {
+            throw new ApiException(HttpStatus.CONFLICT, "managed_tool_publication_fenced",
+                    "Original publication authority is fenced", error);
+        }
+    }
+
+    private ProducerBinding producerBindingWithHashLocked(String scope, String publicationId,
+            String suppliedHash, String expectedBindingDigest, Access access) {
+        return producerBindingWithHashLocked(scope, publicationId, suppliedHash,
+                expectedBindingDigest, access, false);
+    }
+
+    private ProducerBinding producerBindingWithHashLocked(String scope, String publicationId,
+            String suppliedHash, String expectedBindingDigest, Access access,
+            boolean deferActivationLapse) {
         Row row = publicationRow(scope, publicationId);
-        JsonNode binding = ToolPublicationContract.parseBytes("binding",
-                row.binding().getBytes(StandardCharsets.UTF_8));
-        require(ToolPublicationContract.bindingDigest(binding).equals(row.digest())
+        JsonNode binding = storedBinding(row.binding(), row.digest(), "Publication grant conflicts");
+        require((expectedBindingDigest == null || expectedBindingDigest.equals(row.digest()))
                 && equalHash(suppliedHash, row.tokenHash()) && "OPEN".equals(row.state()),
                 "Publication grant conflicts");
-        Original original = lockOriginal(binding);
+        Original original;
+        try {
+            original = lockOriginal(binding);
+        } catch (RuntimeException error) {
+            // Accepted tasks must leave the queue when their original CSI
+            // authority is gone; credential/SQL failures may recover elsewhere.
+            boolean missingRuntime = error instanceof IllegalStateException && error.getCause() == null
+                    && ("Runtime binding slot is unavailable".equals(error.getMessage())
+                    || "Original Runtime binding is unavailable".equals(error.getMessage()));
+            boolean fencedCsi = error instanceof RuntimeBrokerException broker
+                    && "workspace_csi_unavailable".equals(broker.getCode()) && !broker.isRetryable();
+            if (expectedBindingDigest != null && (missingRuntime || fencedCsi)) {
+                throw new ApiException(HttpStatus.CONFLICT, "managed_tool_publication_runtime_unavailable",
+                        "Original publication runtime is unavailable");
+            }
+            throw error;
+        }
         lockTenant(row.tenant());
         return producerBindingAfterParentLocked(scope, publicationId, suppliedHash, row,
-                binding, original, access);
+                binding, original, access, deferActivationLapse);
     }
 
     private ProducerBinding producerBindingAfterParentLocked(String scope, String publicationId,
             String suppliedHash, Row row, JsonNode binding, Original original, Access access) {
+        return producerBindingAfterParentLocked(scope, publicationId, suppliedHash, row,
+                binding, original, access, false);
+    }
+
+    private ProducerBinding producerBindingAfterParentLocked(String scope, String publicationId,
+            String suppliedHash, Row row, JsonNode binding, Original original, Access access,
+            boolean deferActivationLapse) {
         JsonNode key = binding.get("sessionKey");
         ToolPublicationRetentionStore.requireLive(jdbc, row.tenant(), row.session());
         require(row.tenant().equals(text(key, "tenantId"))
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
-        var head = jdbc.queryForMap("SELECT workspace_id, state, writer_id, writer_generation,"
+        var head = jdbc.queryForMap("SELECT workspace_id, state, storage_version, writer_id, writer_generation,"
                         + " CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS writer_live,"
                         + " recovery_status, activation_epoch, journal_revision,"
                         + " activation_id, activation_phase, activation_event_epoch, activation_expires_at,"
                         + " activation_head_revision"
                         + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 row.tenant(), row.session());
+        require(((Number) head.get("storage_version")).intValue() >= 1
+                && ((Number) head.get("storage_version")).intValue() <= ManagedSessionReaderVersion.SUPPORTED,
+                "Managed Session storage version is unsupported.");
         var current = jdbc.queryForMap("SELECT token_hash, state, expires_at, binding_digest, binding_json,"
                 + " tenant_id, workspace_id, session_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
                 + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
@@ -196,8 +254,7 @@ public final class ToolPublicationStore {
         require(((Number) current.get("quarantined")).intValue() == 0, "Publication is quarantined");
         if (access != Access.SETTLE) {
             require(equalHash(suppliedHash, (String) current.get("token_hash"))
-                    && "OPEN".equals(current.get("state")) && current.get("expires_at") != null
-                    && ((Number) current.get("expires_at")).longValue() > nowEpoch,
+                    && "OPEN".equals(current.get("state")) && current.get("expires_at") != null,
                     "Publication grant changed or expired");
         }
         require(row.digest().equals(current.get("binding_digest"))
@@ -208,9 +265,19 @@ public final class ToolPublicationStore {
         require(row.workspace().equals(head.get("workspace_id")) && "ACTIVE".equals(head.get("state"))
                 && text(binding, "writerId").equals(head.get("writer_id"))
                 && ((Number) head.get("writer_generation")).longValue() == binding.get("writerGeneration").longValue()
-                && ((Number) head.get("writer_live")).intValue() == 1 && "READY".equals(head.get("recovery_status"))
+                && ((Number) head.get("writer_live")).intValue() == 1
                 && ((Number) head.get("activation_epoch")).longValue() == binding.get("activationEpoch").longValue(),
                 "Original Session owner is fenced");
+        require("READY".equals(head.get("recovery_status")), "Original Session owner is fenced");
+        // The grant expiry is min(writer lease, activation horizon), so a
+        // real activation lapse expires the grant on the same clock and
+        // this check runs before the activation deferral below.
+        if (access != Access.SETTLE && ((Number) current.get("expires_at")).longValue() <= nowEpoch) {
+            if (deferActivationLapse) {
+                throw new ActivationLapsedException();
+            }
+            require(false, "Publication grant changed or expired");
+        }
         long activationUntil;
         // The stamp says which journal revision the columns were written
         // from; a pre-V36 binary's commit bumps journal_revision without
@@ -225,20 +292,31 @@ public final class ToolPublicationStore {
                     && text(binding, "activationId").equals(head.get("activation_id"))
                     && head.get("activation_event_epoch") instanceof Number epoch
                     && epoch.longValue() == binding.get("activationEpoch").longValue()
-                    && head.get("activation_expires_at") instanceof Number expires
-                    && expires.longValue() > nowEpoch, "Original activation is fenced");
-            activationUntil = ((Number) head.get("activation_expires_at")).longValue();
+                    && head.get("activation_expires_at") instanceof Number,
+                    "Original activation is fenced");
+            activationUntil = requireCurrentActivation(
+                    ((Number) head.get("activation_expires_at")).longValue(), nowEpoch,
+                    deferActivationLapse);
         } else {
             activationUntil = requireLegacyActivation(row.tenant(), row.session(), binding,
                     ((Number) head.get("journal_revision")).longValue(),
-                    nowEpoch, head);
+                    nowEpoch, head, deferActivationLapse);
         }
         nowEpoch = ToolPublicationRetentionStore.now(jdbc);
         Integer writerLive = jdbc.queryForObject("SELECT CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6)"
                 + " THEN 1 ELSE 0 END FROM qwen_managed_session_journal_head"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", Integer.class, row.tenant(), row.session());
-        require(writerLive != null && writerLive == 1 && activationUntil > nowEpoch,
-                "Original Session or activation expired");
+        if (writerLive == null || writerLive != 1) {
+            require(false, "Original Session or activation expired");
+        }
+        if (activationUntil <= nowEpoch) {
+            // Renewal keeps the activation id and epoch, so a lapsed horizon can
+            // recover. An expired writer lease is not renewable and stays above.
+            if (deferActivationLapse) {
+                throw new ActivationLapsedException();
+            }
+            require(false, "Original Session or activation expired");
+        }
         if (access != Access.SETTLE) {
             require(((Number) current.get("expires_at")).longValue() > nowEpoch, "Publication grant expired");
         }
@@ -253,7 +331,7 @@ public final class ToolPublicationStore {
      */
     private long requireLegacyActivation(String tenant, String session,
             JsonNode binding, long journalRevision, long nowEpoch,
-            java.util.Map<String, Object> head) {
+            java.util.Map<String, Object> head, boolean deferActivationLapse) {
         JsonNode found = null;
         for (long revision = journalRevision; revision > 0 && found == null; revision--) {
             // The locking head read can see a newer revision than this transaction's snapshot.
@@ -284,8 +362,8 @@ public final class ToolPublicationStore {
         require("active".equals(text(found, "phase"))
                 && text(binding, "activationId").equals(text(found, "activationId"))
                 && binding.get("activationEpoch").longValue() == found.path("epoch").asLong()
-                && expiresAt != null && expiresAt > nowEpoch,
-                "Original activation is fenced");
+                && expiresAt != null, "Original activation is fenced");
+        expiresAt = requireCurrentActivation(expiresAt, nowEpoch, deferActivationLapse);
         backfillActivation(tenant, session, text(found, "activationId"),
                 text(found, "phase"), found.path("epoch").asLong(),
                 expiresAt, journalRevision,
@@ -343,11 +421,10 @@ public final class ToolPublicationStore {
         String session = text(key, "sessionId");
         String tenantKey = hash(tenant);
         String scope = hash(JSON.createArrayNode().add(tenant).add(workspace).add(session).toString());
-        JsonNode hint = request.get("binding");
-        if (hint == null) {
-            hint = savedBinding(scope, text(request, "publicationId"));
-        }
-        lockOriginal(hint);
+        JsonNode candidate = request.get("binding");
+        String id = candidate == null ? text(request, "publicationId") : text(candidate, "publicationId");
+        PublicationTarget target = lockPublicationPlacement(key, id, candidate);
+        lockOriginal(target.binding(), false, target.runtime());
         // Every mutation uses this order, including no-start capacity release.
         jdbc.update("INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
                 + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, tenant);
@@ -358,8 +435,6 @@ public final class ToolPublicationStore {
         var writer = sessions.lockPublicationWriter(tenant, workspace, session,
                 text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken);
         String operation = text(request, "operation");
-        JsonNode candidate = request.get("binding");
-        String id = candidate == null ? text(request, "publicationId") : text(candidate, "publicationId");
         List<Row> rows = jdbc.query("SELECT * FROM qwen_tool_publication"
                         + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
                 (r, index) -> new Row(r.getString("tenant_id"), r.getString("workspace_id"),
@@ -371,6 +446,10 @@ public final class ToolPublicationStore {
         if (row != null) {
             require(tenant.equals(row.tenant()) && workspace.equals(row.workspace())
                     && session.equals(row.session()), "Publication scope conflicts");
+            if (target.row() != null) {
+                require(target.row().binding().equals(row.binding()) && target.row().digest().equals(row.digest()),
+                        "Publication binding changed");
+            }
         }
         if ("reserve".equals(operation)) {
             long bytes = request.get("captureBytes").longValue();
@@ -418,8 +497,7 @@ public final class ToolPublicationStore {
                     "OPEN", expires, bytes));
         }
         require(row != null, "Publication does not exist");
-        JsonNode binding = ToolPublicationContract.parseBytes("binding", row.binding().getBytes(StandardCharsets.UTF_8));
-        require(ToolPublicationContract.bindingDigest(binding).equals(row.digest()), "Stored binding is corrupt");
+        JsonNode binding = storedBinding(row.binding(), row.digest(), "Stored binding is corrupt");
         if ("renew".equals(operation)) {
             require("OPEN".equals(row.state()) && equalHash(tokenHash, row.tokenHash()), "Publication is fenced");
             require(text(owner, "writerId").equals(text(binding, "writerId"))
@@ -676,7 +754,8 @@ public final class ToolPublicationStore {
                 item = value;
             }
         }
-        require(item != null && "run_shell_command".equals(text(item, "toolName"))
+        require(item != null && ("run_shell_command".equals(text(item, "toolName"))
+                || "monitor".equals(text(item, "toolName")))
                 && "in_progress".equals(text(item, "state"))
                 && "runtime".equals(text(item, "outcomeSource"))
                 && text(b, "modelCallId").equals(text(item, "functionCallId"))
@@ -708,8 +787,10 @@ public final class ToolPublicationStore {
     }
 
     private Original lockOriginal(JsonNode b, boolean acknowledgement) {
-        RuntimeBindingRecord runtime = bindings.findById(text(b, "runtimeBindingId"));
-        require(runtime != null, "Original Runtime binding is missing");
+        return lockOriginal(b, acknowledgement, publicationRuntime(b));
+    }
+
+    private Original lockOriginal(JsonNode b, boolean acknowledgement, RuntimeBindingRecord runtime) {
         WorkspaceCsiReservationStore.Retirement retirement = null;
         ToolExecutionRecord execution;
         if (WorkspaceCsiReservationStore.PROVISIONER_KIND.equals(runtime.getRequest().getProvisionerKind())) {
@@ -780,21 +861,94 @@ public final class ToolPublicationStore {
     }
 
     private Row publicationRow(String scope, String publicationId) {
+        Row row = findPublicationRow(scope, publicationId);
+        require(row != null, "Publication does not exist");
+        return row;
+    }
+
+    private Row findPublicationRow(String scope, String publicationId) {
         List<Row> rows = jdbc.query("SELECT * FROM qwen_tool_publication WHERE scope_key = ?"
                         + " AND publication_id = ?",
                 (r, index) -> new Row(r.getString("tenant_id"), r.getString("workspace_id"),
                         r.getString("session_id"), r.getString("binding_json"), r.getString("binding_digest"),
                         r.getString("token_hash"), r.getString("state"), r.getObject("expires_at", Long.class),
                         r.getLong("capture_bytes")), scope, publicationId);
-        require(rows.size() == 1, "Publication does not exist");
-        return rows.get(0);
+        require(rows.size() <= 1, "Publication is ambiguous");
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    void lockStagedPlacement(JsonNode key, String publicationId) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            transactions.executeWithoutResult(status -> lockPublicationPlacement(key, publicationId));
+        }
+    }
+
+    void lockPublicationPlacement(JsonNode key, String publicationId) {
+        lockPublicationPlacement(key, publicationId, null);
+    }
+
+    private PublicationTarget lockPublicationPlacement(JsonNode key, String publicationId, JsonNode candidate) {
+        String scope = hash(JSON.createArrayNode().add(text(key, "tenantId"))
+                .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());
+        Row row = findPublicationRow(scope, publicationId);
+        JsonNode binding = candidate;
+        if (row != null) {
+            require(row.tenant().equals(text(key, "tenantId")) && row.workspace().equals(text(key, "workspaceId"))
+                    && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
+            binding = storedBinding(row.binding(), row.digest(), "Stored binding is corrupt");
+            require(candidate == null || ToolPublicationContract.bindingDigest(candidate).equals(row.digest()),
+                    "Reservation replay conflicts");
+        }
+        require(binding != null, "Publication does not exist");
+        require(binding.path("sessionKey").equals(key) && publicationId.equals(text(binding, "publicationId")),
+                "Publication scope conflicts");
+        RuntimeBindingRecord runtime = publicationRuntime(binding);
+        WorkspaceLifecycleStore.lockPlacement(jdbc, text(key, "tenantId"));
+        return new PublicationTarget(row, binding, runtime);
+    }
+
+    private RuntimeBindingRecord publicationRuntime(JsonNode binding) {
+        RuntimeBindingRecord runtime = bindings.findById(text(binding, "runtimeBindingId"));
+        require(runtime != null, "Original Runtime binding is missing");
+        JsonNode key = binding.path("sessionKey");
+        var scope = runtime.getRequest().getScope();
+        require(runtime.getBindingId().equals(text(binding, "runtimeBindingId"))
+                && scope.getTenantId().equals(text(key, "tenantId"))
+                && scope.getWorkspaceId().equals(text(key, "workspaceId"))
+                && runtime.getGeneration() == Long.parseLong(text(binding, "bindingGeneration")),
+                "Broker execution identity conflicts");
+        if (bindings instanceof JdbcRuntimeBindingRepository nativeBindings
+                && nativeBindings.usesDataSource(jdbc.getDataSource())) {
+            var rows = jdbc.queryForList("SELECT binding_id, tenant_id, workspace_id, runtime_generation,"
+                    + " provisioner_kind FROM qwen_runtime_binding WHERE binding_id = ?", runtime.getBindingId());
+            require(rows.size() == 1, "Original Runtime binding is missing");
+            var row = rows.getFirst();
+            require(runtime.getBindingId().equals(row.get("binding_id"))
+                    && scope.getTenantId().equals(row.get("tenant_id"))
+                    && scope.getWorkspaceId().equals(row.get("workspace_id"))
+                    && row.get("runtime_generation") instanceof Number generation
+                    && generation.longValue() == runtime.getGeneration()
+                    && runtime.getRequest().getProvisionerKind().equals(row.get("provisioner_kind")),
+                    "Original persisted Runtime scope conflicts");
+        }
+        return runtime;
+    }
+
+    static void requireLockedBinding(Map<String, Object> row, JsonNode expected) {
+        JsonNode binding = storedBinding((String) row.get("binding_json"),
+                (String) row.get("binding_digest"), "Publication binding changed");
+        require(binding.equals(expected), "Publication binding changed");
+    }
+
+    private static JsonNode storedBinding(String value, String digest, String message) {
+        JsonNode binding = ToolPublicationContract.parseBytes("binding", value.getBytes(StandardCharsets.UTF_8));
+        require(ToolPublicationContract.bindingDigest(binding).equals(digest), message);
+        return binding;
     }
 
     private JsonNode savedBinding(String scope, String publicationId) {
         Row row = publicationRow(scope, publicationId);
-        JsonNode binding = ToolPublicationContract.parseBytes("binding", row.binding().getBytes(StandardCharsets.UTF_8));
-        require(ToolPublicationContract.bindingDigest(binding).equals(row.digest()), "Stored binding is corrupt");
-        return binding;
+        return storedBinding(row.binding(), row.digest(), "Stored binding is corrupt");
     }
 
     void lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
@@ -811,16 +965,16 @@ public final class ToolPublicationStore {
             JsonNode finished, boolean acknowledgement) {
         String scope = hash(JSON.createArrayNode().add(text(key, "tenantId"))
                 .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());
-        Row row = publicationRow(scope, publicationId);
-        JsonNode binding = savedBinding(scope, publicationId);
-        require(binding.path("sessionKey").equals(key), "Publication scope conflicts");
-        RuntimeBindingRecord runtime = bindings.findById(text(binding, "runtimeBindingId"));
-        require(runtime != null, "Original Runtime binding is missing");
+        PublicationTarget target = lockPublicationPlacement(key, publicationId, null);
+        Row row = target.row();
+        JsonNode binding = target.binding();
+        require(binding.equals(finished.path("binding")), "Original finished binding conflicts");
+        RuntimeBindingRecord runtime = target.runtime();
         if (!WorkspaceCsiReservationStore.PROVISIONER_KIND.equals(runtime.getRequest().getProvisionerKind())) {
             require(!acknowledgement, "Original acknowledgement requires CSI authority");
             return null;
         }
-        Original original = lockOriginal(binding, acknowledgement);
+        Original original = lockOriginal(binding, acknowledgement, runtime);
         require(!acknowledgement || original.retirement() != null,
                 "Original acknowledgement requires CSI retirement");
         lockTenant(row.tenant());
@@ -833,8 +987,7 @@ public final class ToolPublicationStore {
             }
             return left.equals(right) ? 0 : 1;
         }, savedResult);
-        require(binding.equals(finished.path("binding")) && sameResult,
-                "Original settled Broker result conflicts with terminal result");
+        require(sameResult, "Original settled Broker result conflicts with terminal result");
         JsonNode terminal = finished.path("terminal");
         var publication = jdbc.queryForMap("SELECT producer_phase, finish_operation_id, finish_digest,"
                 + " terminal_resource_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
@@ -909,6 +1062,22 @@ public final class ToolPublicationStore {
             grant.put("expiresAt", row.expiresAt());
         }
         return ToolPublicationContract.parse("grant", grant);
+    }
+
+    private static long requireCurrentActivation(Long expiresAt, long nowEpoch, boolean deferLapse) {
+        if (expiresAt == null || expiresAt <= nowEpoch) {
+            if (deferLapse && expiresAt != null) {
+                throw new ActivationLapsedException();
+            }
+            require(false, "Original activation is fenced");
+        }
+        return expiresAt;
+    }
+
+    private static final class ActivationLapsedException extends RuntimeException {
+        private ActivationLapsedException() {
+            super("Original activation expired");
+        }
     }
 
     private static String hash(String text) {

@@ -878,6 +878,139 @@ function autoApprovePendingTools(
 }
 
 describe('CoreToolScheduler', () => {
+  it.each(['success', 'sync_error', 'async_error'])(
+    'observes actual execution boundary and settled status (%s)',
+    async (mode) => {
+      const order: string[] = [];
+      const execute = vi.fn(() => {
+        order.push('execute');
+        if (mode === 'sync_error') throw new Error('sync failure');
+        return mode === 'async_error'
+          ? Promise.reject(new Error('async failure'))
+          : Promise.resolve(textResult('done'));
+      });
+      const tool = new MockTool({
+        name: 'boundary_tool',
+        execute,
+        getDefaultPermission: async () => 'allow',
+      });
+      const onSettled = vi.fn(
+        (_id: string, status: ToolExecutionStatus, duration: number) => {
+          order.push('settled');
+          expect(status).toBe(mode === 'success' ? 'success' : 'error');
+          expect(duration).toBeGreaterThanOrEqual(0);
+        },
+      );
+      const { scheduler, onAllToolCallsComplete } = schedulerWithCallbacks(
+        makeSchedulerConfig(makeToolRegistry(tool), {
+          getApprovalMode: () => ApprovalMode.YOLO,
+        }),
+        {
+          onToolExecutionStarted: (id, epoch) => {
+            expect(id).toBe('boundary');
+            expect(epoch).toBeGreaterThan(0);
+            order.push('started');
+          },
+          onToolExecutionSettled: onSettled,
+        },
+      );
+      await scheduleBatch(
+        scheduler,
+        toolRequest('boundary', tool.name, {}, 'prompt'),
+      );
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(order).toEqual(['started', 'execute', 'settled']);
+      expect(onSettled).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps observed execution success when PostToolUse changes the final result', async () => {
+    const settled = vi.fn();
+    const tool = new MockTool({
+      name: 'post_boundary_tool',
+      execute: async () => textResult('done'),
+      getDefaultPermission: async () => 'allow',
+    });
+    const messageBus = hookBus(async (request) => {
+      if (request.eventName === 'PostToolUse') {
+        expect(settled).toHaveBeenCalledWith(
+          'post-boundary',
+          'success',
+          expect.any(Number),
+        );
+        return hookResponse('post-stop', {
+          continue: false,
+          stopReason: 'post hook stopped',
+        });
+      }
+      return hookResponse('allow', { decision: 'allow' });
+    });
+    const { scheduler, onAllToolCallsComplete } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(tool), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+        getDisableAllHooks: () => false,
+        getMessageBus: () => messageBus,
+      }),
+      { onToolExecutionSettled: settled },
+    );
+    await scheduleBatch(
+      scheduler,
+      toolRequest('post-boundary', tool.name, {}, 'prompt'),
+    );
+    await vi.waitFor(() =>
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+    );
+    expect(
+      firstBatch<CompletedToolCall>(onAllToolCallsComplete)[0],
+    ).toMatchObject({
+      status: 'error',
+      response: { executionStatus: 'success' },
+    });
+    expect(settled).toHaveBeenCalledOnce();
+  });
+
+  it('keeps execution observer unsettled until an abort-ignoring tool actually returns', async () => {
+    let resolveExecution!: (result: ToolResult) => void;
+    const execute = vi.fn(
+      () =>
+        new Promise<ToolResult>((resolve) => {
+          resolveExecution = resolve;
+        }),
+    );
+    const tool = new MockTool({
+      name: 'late_boundary_tool',
+      execute,
+      getDefaultPermission: async () => 'allow',
+    });
+    const started = vi.fn();
+    const settled = vi.fn();
+    const { scheduler } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(tool), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+      }),
+      { onToolExecutionStarted: started, onToolExecutionSettled: settled },
+    );
+    const controller = new AbortController();
+    const scheduled = scheduler.schedule(
+      [toolRequest('late-boundary', tool.name, {}, 'prompt')],
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    controller.abort();
+    expect(started).toHaveBeenCalledOnce();
+    expect(settled).not.toHaveBeenCalled();
+    resolveExecution(textResult('late completion'));
+    await scheduled;
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce());
+    expect(settled).toHaveBeenCalledWith(
+      'late-boundary',
+      'cancelled',
+      expect.any(Number),
+    );
+  });
+
   beforeEach(() => {
     debugLoggerInfoSpy.mockClear();
     boundaryObserveMock.mockClear();
@@ -1197,6 +1330,8 @@ describe('CoreToolScheduler', () => {
     deferredHiddenNames?: ReadonlySet<string>;
     includeToolSearch?: boolean;
     isToolExecutionAllowed?: (name: string) => boolean;
+    isInteractive?: boolean;
+    inputFormat?: InputFormat;
   }) {
     let autoModeDenialState = options.autoModeDenialState ?? {
       ...ZERO_DENIAL_STATE,
@@ -1284,8 +1419,8 @@ describe('CoreToolScheduler', () => {
           getWorkspaceContext: () => ({
             isPathWithinWorkspace: () => false,
           }),
-          isInteractive: () => true,
-          getInputFormat: () => undefined,
+          isInteractive: () => options.isInteractive ?? true,
+          getInputFormat: () => options.inputFormat,
           getExperimentalZedIntegration: () => false,
           getActiveTodoWorkChainOwner: options.getActiveTodoWorkChainOwner,
           // Threaded into resolveDeferredToolCall so the bridge's exclusion
@@ -5495,6 +5630,101 @@ describe('CoreToolScheduler', () => {
     expect(setAutoModeDenialState).toHaveBeenCalledWith(denialState());
     expect(execute).toHaveBeenCalledOnce();
   });
+
+  it('does not let a PermissionRequest hook allow waive a destructive-command escalation', async () => {
+    // Counterpart to the test above. The escalation shares its reason code with
+    // the classifier arm, so without `requiresHumanDecision` this hook allow
+    // would schedule a command the deterministic guard classified as
+    // work-destroying, with no human in the loop.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails('Run command', 'git reset --hard', 'git', onConfirmSpy),
+          ),
+        execute,
+      }),
+      {
+        messageBus: permissionRequestHookBus({ behavior: 'allow' }),
+        disableHooks: false,
+        // One below maxTotalDenials, so this denial reaches the session cap and
+        // the destructive arm escalates instead of hard-blocking.
+        autoModeDenialState: denialState({ totalBlock: 19 }),
+        setAutoModeDenialState: vi.fn(),
+      },
+    );
+
+    await harness.scheduler.schedule(
+      shellRequest('destructive-hook-waiver', 'git reset --hard'),
+      new AbortController().signal,
+    );
+
+    // The hook fired and answered `allow`, but the call must still be waiting
+    // on a human rather than scheduled. `reportedCalls` flattens every snapshot
+    // ever emitted, and this test schedules exactly one call, so the last
+    // snapshot is that call's current state.
+    await vi.waitFor(() =>
+      expect(reportedCalls(harness.onToolCallsUpdate).at(-1)?.status).toBe(
+        'awaiting_approval',
+      ),
+    );
+    expect(onConfirmSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('denies a destructive-command escalation in non-interactive STREAM_JSON instead of offering it to the host', async () => {
+    // Counterpart to the test above for the other programmatic approver.
+    // STREAM_JSON is exempt from the non-interactive deny because a host can
+    // answer `can_use_tool`, but that host is not a human — so handing it this
+    // dialog lets `{behavior:'allow'}` resolve to ProceedOnce and run the
+    // work-destroying command. Without a human channel the escalation must
+    // deny, as it did before the escalation existed.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails('Run command', 'git reset --hard', 'git', onConfirmSpy),
+          ),
+        execute,
+      }),
+      {
+        isInteractive: false,
+        inputFormat: InputFormat.STREAM_JSON,
+        // One below maxTotalDenials, so this denial reaches the session cap and
+        // the destructive arm escalates instead of hard-blocking.
+        autoModeDenialState: denialState({ totalBlock: 19 }),
+        setAutoModeDenialState: vi.fn(),
+      },
+    );
+
+    await scheduleAndSettle(
+      harness,
+      shellRequest('destructive-stream-json', 'git reset --hard'),
+    );
+
+    const [denied] = firstBatch<CompletedToolCall>(
+      harness.onAllToolCallsComplete,
+    );
+    expect(denied.status).toBe('error');
+    expect(denied.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+    // `awaiting_approval` is the only status PermissionController's
+    // update callback picks up to emit `can_use_tool`, so never reaching it
+    // is what keeps the escalation off the wire.
+    expect(
+      reportedCalls(harness.onToolCallsUpdate).map((c) => c.status),
+    ).not.toContain('awaiting_approval');
+    expect(onConfirmSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   /** Read-kind MockTools by name; each runs a mock or resolves a result. */
   function readToolMap(
     executes: Record<string, Mock | ToolResult>,

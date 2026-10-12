@@ -182,4 +182,68 @@ class QwenHostedHarnessColdCancelRegressionTest {
             connector.close();
         }
     }
+    // H4f × H4d-b: a stopped run's message stop runs when the child's task
+    // already ended, so no CANCELLING Turn exists, and it was authorized
+    // when the stop committed, so a demoted grant does not refuse it. Real
+    // authorization over a migrated database, not a mock that allows all.
+    @Test
+    @Transactional
+    void aMessageStopAttachesWithoutACancellingTurnOrACurrentGrant() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String boot = "11111111-1111-4111-8111-111111111111";
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
+                        + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
+                        + " VALUES (?, 'ws-a', 1, 'storage-a', 'Workspace', ?, ?, 'ACTIVE')",
+                tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, 'ws-a', ?, 'OPERATOR')",
+                tenant, "actor-a".getBytes(StandardCharsets.UTF_8));
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setToken("test-token");
+        properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
+        ManagedAgentStore store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> { }, registry, properties);
+        String session = store.insertWorkspaceSessionCommand(tenant, "actor-a", "create", "digest",
+                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+        store.insertTurnCommand(tenant, "SUBMIT", "submit", "digest", session,
+                List.of(Map.of("type", "text", "text", "go")), "payload");
+        jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
+
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(boot);
+        when(client.loadSession(any())).thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(boot);
+        when(attached.getApprovalMode()).thenReturn("yolo");
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode(tenant, session)).thenReturn("yolo");
+        WorkspaceExecutionStore execution = new WorkspaceExecutionStore(jdbc, transactionManager);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, store, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        try {
+            var record = store.requireSession(tenant, session);
+            // Neither of the other grants would take this stop.
+            assertThatThrownBy(() -> execution.authorizeCancellation(record))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            assertThatThrownBy(() -> execution.authorizePassiveAttachment(record))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            Map<String, Object> stop = Map.of(
+                    "operationId", "66666666-6666-4666-8666-666666666666", "kind", "stop");
+            connector.runMessageOperation(tenant, session, stop);
+            verify(client).loadSession(any());
+            verify(client).runMessageOperation(attached, stop);
+            // The Session's own structure still decides: a closed one is refused.
+            jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED'"
+                    + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+            assertThatThrownBy(() -> execution.authorizeCommittedStop(
+                    store.requireSession(tenant, session)))
+                    .isInstanceOf(RuntimeBrokerException.class);
+        } finally {
+            connector.close();
+        }
+    }
 }

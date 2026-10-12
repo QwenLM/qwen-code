@@ -375,6 +375,131 @@ describe('agent-transcript', () => {
       return exists() ? readJsonl() : [];
     }
 
+    it('persists lifecycle transitions once without adding model messages', () => {
+      const base = {
+        v: 1 as const,
+        kind: 'tool' as const,
+        sessionId: 'session-1',
+        executionId: 'exec-1',
+        callId: 'call-1',
+        toolName: 'read',
+        subagentId: 'agent-x',
+      };
+      const begun = {
+        ...base,
+        phase: 'started' as const,
+        executionStatus: 'running' as const,
+        startedAt: 100,
+      };
+      const ended = {
+        ...base,
+        phase: 'ended' as const,
+        executionStatus: 'success' as const,
+        outcome: 'success' as const,
+        startedAt: 100,
+        endedAt: 120,
+        executionDurationMs: 20,
+      };
+      const records = write([
+        (e) => {
+          for (let i = 0; i < 2; i++)
+            e.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+              ...ev,
+              callId: 'call-1',
+              outputChunk: '',
+              lifecycle: begun,
+              timestamp: 100,
+            });
+        },
+        (e) =>
+          e.emit(AgentEventType.TOOL_RESULT, {
+            ...ev,
+            callId: 'call-1',
+            name: 'read',
+            success: true,
+            lifecycle: ended,
+            timestamp: 120,
+          }),
+        (e) =>
+          e.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+            ...ev,
+            callId: 'call-1',
+            outputChunk: '',
+            lifecycle: ended,
+            timestamp: 120,
+          }),
+      ]);
+      expect(records).toHaveLength(2);
+      expect(
+        records.every(
+          (r) =>
+            r.type === 'system' && r.subtype === 'ui_telemetry' && !r.message,
+        ),
+      ).toBe(true);
+      expect(records[1].systemPayload).toEqual({
+        uiEvent: { ...ended, 'event.name': 'tool_lifecycle' },
+      });
+    });
+
+    it.each([false, true])(
+      'drains late lifecycle after cleanup or releases at deadline (%s)',
+      (expire) => {
+        vi.useFakeTimers();
+        try {
+          const { emitter, cleanup } = start();
+          const base = {
+            v: 1 as const,
+            kind: 'tool' as const,
+            sessionId: 'session-1',
+            executionId: 'late',
+            callId: 'call',
+            toolName: 'read',
+          };
+          emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+            ...ev,
+            callId: 'call',
+            outputChunk: '',
+            lifecycle: {
+              ...base,
+              phase: 'started',
+              executionStatus: 'running',
+              startedAt: 100,
+            },
+            timestamp: 100,
+          });
+          cleanup();
+          expect(
+            emitter.rawListeners(AgentEventType.TOOL_OUTPUT_UPDATE),
+          ).toHaveLength(1);
+          if (expire) vi.advanceTimersByTime(30_000);
+          emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+            ...ev,
+            callId: 'call',
+            outputChunk: '',
+            lifecycle: {
+              ...base,
+              phase: 'ended',
+              executionStatus: 'cancelled',
+              outcome: 'cancelled',
+              startedAt: 100,
+              endedAt: 120,
+              executionDurationMs: 20,
+            },
+            timestamp: 120,
+          });
+          expect(readJsonl()).toHaveLength(expire ? 1 : 2);
+          expect(
+            emitter.rawListeners(AgentEventType.TOOL_OUTPUT_UPDATE),
+          ).toHaveLength(0);
+          expect(emitter.rawListeners(AgentEventType.TOOL_RESULT)).toHaveLength(
+            0,
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('stamps base fields on every subagent record', () => {
       const records = write([roundText('Hello')]);
       expect(records).toHaveLength(1);

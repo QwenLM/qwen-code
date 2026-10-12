@@ -24,6 +24,7 @@ import {
   childAcceptanceConsumedBody,
   childAttachBody,
   childCancelBody,
+  childContinuationBody,
   childDeliveryBody,
   childDispatchBody,
   childFailBody,
@@ -63,6 +64,7 @@ function launch(): ChildAgentRun {
     rootSessionId: '550e8400-e29b-41d4-a716-446655440000',
     completion: 'sent',
     inputRef: INPUT,
+    workspaceMode: 'shared',
     workingDirectory: '.',
     executionCallId: 'call-1',
     definition: DEFINITION,
@@ -153,13 +155,37 @@ describe('managed child operations (H4b)', () => {
       closing: false,
       depth: 1,
       activeInScope: 0,
+      launchedInScope: 0,
       envelopeBytes: 100,
       workspaceMode: 'shared',
+      childWorkspaces: false,
       sameDefinition: true,
     };
 
     it('admits the default launch', () => {
       expect(admitChildLaunch(base)).toEqual({ admitted: true });
+    });
+
+    it('admits a worktree launch only on a host that serves child Workspaces', () => {
+      expect(
+        admitChildLaunch({
+          ...base,
+          workspaceMode: 'worktree',
+          childWorkspaces: true,
+        }),
+      ).toEqual({ admitted: true });
+      expect(admitChildLaunch({ ...base, workspaceMode: 'worktree' })).toEqual({
+        admitted: false,
+        reason: 'workspace_mode',
+      });
+      // The capability never widens the mode set: snapshot waits for I3.
+      expect(
+        admitChildLaunch({
+          ...base,
+          workspaceMode: 'snapshot',
+          childWorkspaces: true,
+        }),
+      ).toEqual({ admitted: false, reason: 'workspace_mode' });
     });
 
     it('refuses each violation with its own reason', () => {
@@ -174,6 +200,10 @@ describe('managed child operations (H4b)', () => {
           'count_limit',
         ],
         [
+          { launchedInScope: MANAGED_CHILD_LIMITS.maxLaunchesPerScope },
+          'budget_exhausted',
+        ],
+        [
           { envelopeBytes: MANAGED_CHILD_LIMITS.maxEnvelopeBytes + 1 },
           'byte_limit',
         ],
@@ -184,6 +214,24 @@ describe('managed child operations (H4b)', () => {
           reason,
         });
       }
+    });
+
+    it('spends the launch budget on every launch, ended ones included', () => {
+      expect(
+        admitChildLaunch({
+          ...base,
+          launchedInScope: MANAGED_CHILD_LIMITS.maxLaunchesPerScope - 1,
+        }),
+      ).toEqual({ admitted: true });
+      // A spent budget never recovers, so it wins over the concurrency
+      // cap, which a later launch may find cleared.
+      expect(
+        admitChildLaunch({
+          ...base,
+          activeInScope: MANAGED_CHILD_LIMITS.maxActivePerScope,
+          launchedInScope: MANAGED_CHILD_LIMITS.maxLaunchesPerScope,
+        }),
+      ).toEqual({ admitted: false, reason: 'budget_exhausted' });
     });
   });
 
@@ -209,6 +257,25 @@ describe('managed child operations (H4b)', () => {
         target: 'session',
         state: 'accepting',
       });
+    });
+
+    it('records the launch workspace mode the producer names', () => {
+      const worktree = childLaunchBody({
+        childRunId: 'run-1',
+        ownerScopeId: 'scope-main',
+        rootSessionId: '550e8400-e29b-41d4-a716-446655440000',
+        completion: 'sent',
+        inputRef: INPUT,
+        workspaceMode: 'worktree',
+        workingDirectory: '.',
+        executionCallId: 'call-1',
+        definition: DEFINITION,
+      });
+      expect(isChildRunStart(worktree)).toBe(true);
+      expect((parseChildRun(worktree) as ChildAgentRun).workspaceMode).toBe(
+        'worktree',
+      );
+      expect(worktree).toEqual({ ...launch(), workspaceMode: 'worktree' });
     });
 
     it('builds the cancel cascade as a valid chain', () => {
@@ -368,6 +435,7 @@ describe('managed child operations (H4b)', () => {
         rootSessionId: '550e8400-e29b-41d4-a716-446655440000',
         completion: 'tool',
         inputRef: INPUT,
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: 'call-1',
         definition: DEFINITION,
@@ -377,6 +445,63 @@ describe('managed child operations (H4b)', () => {
         terminalReceiptRef: RECEIPT,
       });
       expect(accepting.parentExecutionCallId).toBe('call-1');
+    });
+  });
+
+  describe('continueChildRun (H4d)', () => {
+    it('opens a new run that keeps the predecessor identities', () => {
+      const completed = chain(
+        (previous) =>
+          childDispatchBody(previous, {
+            dispatchId: 'dispatch-1',
+            runtime: BINDING,
+          }),
+        (previous) =>
+          childAttachBody(previous, { childSessionId: 'session-child' }),
+        (previous) =>
+          childSettleCompletedBody(previous, {
+            resultRef: RESULT,
+            terminalReceiptRef: RECEIPT,
+          }),
+      ).at(-1)!;
+      const next = ref('managed-input', 'input-2');
+      const continuation = childContinuationBody(completed, {
+        childRunId: 'run-2',
+        completion: 'tool',
+        inputRef: next,
+        executionCallId: 'call-2',
+      });
+      expect(isChildRunStart(continuation)).toBe(true);
+      expect(continuation).toEqual({
+        ...launch(),
+        childRunId: 'run-2',
+        completion: 'tool',
+        inputRef: next,
+        predecessorChildRunId: 'run-1',
+        run: { ...launch().run, executionCallId: 'call-2' },
+      });
+      expect(Object.isFrozen(continuation)).toBe(true);
+      // The kind, depth and isolation follow the predecessor, never the
+      // launch defaults.
+      const nested = childContinuationBody(
+        {
+          ...completed,
+          kind: 'workflow',
+          depth: 2,
+          workspaceMode: 'snapshot',
+        },
+        {
+          childRunId: 'run-2',
+          completion: 'sent',
+          inputRef: next,
+          executionCallId: 'call-2',
+        },
+      );
+      expect(nested).toMatchObject({
+        kind: 'workflow',
+        depth: 2,
+        workspaceMode: 'snapshot',
+      });
     });
   });
 });
