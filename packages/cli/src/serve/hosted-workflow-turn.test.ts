@@ -296,6 +296,11 @@ describe('runHostedWorkflowTurn', () => {
     expect(loadCalls).toHaveLength(1);
     expect(loadCalls[0]).toHaveLength(9);
     expect((loadCalls[0]![1] as { safeMode?: boolean }).safeMode).toBe(true);
+    // #13858: the agents' chats open without this Harness's cwd listing.
+    expect(
+      (loadCalls[0]![0] as { model?: { skipStartupContext?: boolean } }).model
+        ?.skipStartupContext,
+    ).toBe(true);
     expect(loadCalls[0]![8]).toBe(true);
     expect(loadCalls[0]![9]).toBeUndefined();
     expect(vi.mocked(loadSettings).mock.calls[0]![1]).toMatchObject({

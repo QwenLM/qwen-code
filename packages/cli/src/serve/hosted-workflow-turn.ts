@@ -217,8 +217,17 @@ export async function runHostedWorkflowTurn(input: {
   // a script with agent() calls needs the sibling text turn's lifecycle,
   // not a bare loadCliConfig (runHostedHarnessTextTurn's own per-turn
   // pattern, mirrored).
+  //
+  // Every agent() chat opens with this config's startup context unless it
+  // is skipped: this Harness's cwd and a listing of it, which is host
+  // filesystem metadata and never the Session's Workspace. The sibling text
+  // turn replaces that prelude with the Session's own history; these agents
+  // have none to replace it with, so they start without it.
   const config = await loadCliConfig(
-    settings.merged,
+    {
+      ...settings.merged,
+      model: { ...settings.merged.model, skipStartupContext: true },
+    },
     argv,
     input.cwd,
     undefined,
