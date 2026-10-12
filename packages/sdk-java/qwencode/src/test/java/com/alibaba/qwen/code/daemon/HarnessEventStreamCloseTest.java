@@ -149,9 +149,13 @@ class HarnessEventStreamCloseTest {
         reader.join(TimeUnit.SECONDS.toMillis(10));
         assertFalse(reader.isAlive(),
                 "the blocked read did not end when its stream closed");
-        // A local close is not the server ending the stream.
-        IllegalStateException closed = assertInstanceOf(
-                IllegalStateException.class, outcome.get());
+        // A local close is not the server ending the stream: the read
+        // blocked on the socket is cut at the transport layer, so the
+        // parked consumer gets a DaemonTransportException, while a
+        // caller arriving after the close still gets the closed guard's
+        // IllegalStateException.
+        DaemonTransportException closed = assertInstanceOf(
+                DaemonTransportException.class, outcome.get());
         assertEquals("HarnessEventStream is closed", closed.getMessage());
         client.close();
     }

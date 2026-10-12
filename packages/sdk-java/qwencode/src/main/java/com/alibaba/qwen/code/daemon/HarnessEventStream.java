@@ -98,16 +98,22 @@ public final class HarnessEventStream implements AutoCloseable {
                 client.observeEvent(session, event);
                 return event;
             } catch (IOException e) {
-                if (closed.get()) {
-                    // close() ended the blocked read.
-                    throw new IllegalStateException(
-                            "HarnessEventStream is closed", e);
-                }
-                closeQuietly();
                 if (idleTimedOut.get()) {
+                    // The watchdog aborted the stream: the parked consumer
+                    // gets the idle-timeout signal whether or not the
+                    // watchdog's close() has landed yet.
                     throw new DaemonTransportException(
                             "Hosted Harness SSE idle timeout", e);
                 }
+                if (closed.get()) {
+                    // A caller-initiated close() ended the blocked read.
+                    // The parked consumer gets a transport failure; a
+                    // caller arriving after the close gets the closed
+                    // guard's signal instead.
+                    throw new DaemonTransportException(
+                            "HarnessEventStream is closed", e);
+                }
+                closeQuietly();
                 throw new DaemonTransportException(
                         "Hosted Harness SSE stream failed", e);
             } catch (RuntimeException e) {
