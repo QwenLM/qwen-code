@@ -7,7 +7,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { openNoFollow } from '../utils/no-follow-open.js';
-import { MOD_MAX_BYTES } from './types.js';
+import { MOD_MAX_BYTES, type ModDefinition } from './types.js';
+import { parseModDependencies } from './dependencies.js';
 
 function isContainedFile(root: string, file: string): boolean {
   const relative = path.relative(root, file);
@@ -19,7 +20,10 @@ function isContainedFile(root: string, file: string): boolean {
   );
 }
 
-async function readWithin(root: string, file: string): Promise<string> {
+export async function readModFile(
+  root: string,
+  file: string,
+): Promise<{ entry: string; source: string }> {
   if (!isContainedFile(root, file)) {
     throw new Error('Mod file must stay inside the installed extension.');
   }
@@ -31,10 +35,16 @@ async function readWithin(root: string, file: string): Promise<string> {
       throw new Error('Mod files cannot be symbolic links.');
     }
     if (current === file && !stat.isFile()) {
-      throw new Error('Mod input must be a regular file.');
+      throw Object.assign(new Error('Mod input must be a regular file.'), {
+        code: stat.isDirectory() ? 'EISDIR' : undefined,
+      });
     }
   }
-  const handle = await openNoFollow(file);
+  const entry = await fs.realpath(file);
+  if (!isContainedFile(root, entry)) {
+    throw new Error('Mod file must stay inside the installed extension.');
+  }
+  const handle = await openNoFollow(entry);
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > MOD_MAX_BYTES) {
@@ -43,7 +53,7 @@ async function readWithin(root: string, file: string): Promise<string> {
     const buffer = Buffer.alloc(MOD_MAX_BYTES + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     if (bytesRead > MOD_MAX_BYTES) throw new Error('Mod file is too large.');
-    return buffer.subarray(0, bytesRead).toString('utf8');
+    return { entry, source: buffer.subarray(0, bytesRead).toString('utf8') };
   } finally {
     await handle.close();
   }
@@ -58,7 +68,7 @@ async function readManifest(
       throw new Error('Mod manifest path must be relative to the extension.');
     }
     const value: unknown = JSON.parse(
-      await readWithin(root, path.resolve(root, relative)),
+      (await readModFile(root, path.resolve(root, relative))).source,
     );
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw new Error('Mod manifest must be a JSON object.');
@@ -72,7 +82,7 @@ async function readManifest(
 
 export async function loadModSource(
   extensionPath: string,
-): Promise<string | undefined> {
+): Promise<ModDefinition | undefined> {
   const root = await fs.realpath(extensionPath);
   const qwen = await readManifest(root, 'qwen-extension.json');
   // External Qwen hook manifests belong to the existing classic hook loader.
@@ -106,20 +116,25 @@ export async function loadModSource(
     modules.length !== 1 ||
     typeof modules[0] !== 'string' ||
     path.isAbsolute(modules[0]) ||
-    !/\.(?:js|mjs)$/.test(modules[0])
+    !/\.(?:[cm]?js|[cm]?ts)$/.test(modules[0])
   ) {
-    throw new Error('Mods currently require one relative .js or .mjs module.');
+    throw new Error(
+      'Mods require one relative JavaScript or TypeScript module.',
+    );
   }
-  for (const manifest of [qwen, claude]) {
-    for (const key of ['userConfig', 'dependencies']) {
-      const value = manifest?.[key];
-      if (value !== undefined && Object.keys(Object(value)).length > 0) {
-        throw new Error(`Mod ${key} is not supported yet.`);
-      }
-    }
-  }
-  return readWithin(
+  const manifest = { ...claude, ...qwen };
+  const entry = path.resolve(root, path.dirname(hooksPath), modules[0]);
+  return {
     root,
-    path.resolve(root, path.dirname(hooksPath), modules[0]),
-  );
+    ...(await readModFile(root, entry)),
+    userConfig: manifest['userConfig'],
+    dependencies: parseModDependencies(manifest['dependencies']),
+  };
+}
+
+export async function loadModDependencies(extensionPath: string) {
+  const root = await fs.realpath(extensionPath);
+  const qwen = await readManifest(root, 'qwen-extension.json');
+  const claude = await readManifest(root, '.claude-plugin/plugin.json');
+  return parseModDependencies({ ...claude, ...qwen }['dependencies']);
 }

@@ -638,15 +638,9 @@ class HostedTeamLeadMySqlIT {
     private String createLead(String marker) throws Exception {
         TransactionTemplate transaction = new TransactionTemplate(spring.getBean(PlatformTransactionManager.class));
         ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
-        String session = transaction.execute(status -> {
-            var created = store.insertWorkspaceSessionCommand(tenant, "actor", "create-" + marker, DIGEST,
-                    "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace-0", "child"));
-            // No public route creates a Shell-laned Session: set the profile
-            // before anything can read the row.
-            jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-shell/1'"
-                    + " WHERE tenant_id = ? AND session_id = ?", tenant, created.sessionId());
-            return created.sessionId();
-        });
+        String session = transaction.execute(status -> store.insertInternalTeamLeadSessionCommand(
+                tenant, "actor", "create-" + marker, DIGEST, null,
+                new WorkspaceSelection("workspace-0", "child")).sessionId());
         leadSession = session;
         waiting().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofSeconds(1)).ignoreExceptions().untilAsserted(() ->
                 request("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type",
@@ -761,7 +755,6 @@ class HostedTeamLeadMySqlIT {
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
-                "--qwen.managed-agent.runtime-broker.cli-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage-0",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace));

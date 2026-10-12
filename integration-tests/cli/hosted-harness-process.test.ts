@@ -178,12 +178,15 @@ function expectNoTools(request: Record<string, unknown>) {
 
 function assertCompleted(events: Event[], promptId: string, text: string) {
   const visible = events.filter((event) => event.promptId === promptId);
+  // Assistant text streams as durable message.delta chunks; the committed
+  // message then projects as managed_journal_event, not a second chunk.
   expect(visible.map((event) => event.type)).toEqual([
     'session_update',
+    'managed_journal_event',
     'turn_complete',
   ]);
   expect(visible[0].data.update?.content.text).toBe(text);
-  expect(visible[1].data.stopReason).toBe('end_turn');
+  expect(visible[2].data.stopReason).toBe('end_turn');
 }
 
 async function replay(after: number, epoch: string, last: number) {
@@ -262,18 +265,28 @@ describe(
       const visible = events.filter(
         (event) => event.promptId === body.promptId,
       );
+      // The answer streams as a durable message.delta chunk; the committed
+      // message carries the same messageId and projects as the journal
+      // record instead of a second chunk.
       expect(visible.map((event) => event.type)).toEqual([
         'session_update',
+        'managed_journal_event',
         'turn_complete',
       ]);
       expect(visible[0].data.update?.content.text).toBe('HOSTED_REPLY');
-      expect(visible[1].data.stopReason).toBe('end_turn');
+      expect(visible[2].data.stopReason).toBe('end_turn');
       const committed = (await store!.scan()).events;
       expect(events.map((event) => event.id)).toEqual(
         committed.map((event) => event.sequence),
       );
+      expect(
+        committed.find((event) => event.sequence === visible[0].id),
+      ).toMatchObject({
+        kind: 'message.delta',
+        payload: { role: 'assistant', text: 'HOSTED_REPLY' },
+      });
       const message = committed.find(
-        (event) => event.sequence === visible[0].id,
+        (event) => event.sequence === visible[1].id,
       )!;
       expect(message).toMatchObject({
         kind: 'message.committed',
@@ -293,7 +306,7 @@ describe(
         message: { role: 'model', parts: [{ text: 'HOSTED_REPLY' }] },
       });
       expect(
-        committed.find((event) => event.sequence === visible[1].id),
+        committed.find((event) => event.sequence === visible[2].id),
       ).toMatchObject({
         kind: 'turn.settled',
         payload: {
