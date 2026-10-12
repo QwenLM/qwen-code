@@ -1324,7 +1324,9 @@ export interface BridgeClientRequestContext {
    * user echo, and the warm turn-status prompt text derived from the pending
    * entry) when no worker projection is supplied; it never reaches the
    * recorded display text and confers no worker authority. Declarations
-   * longer than `MAX_SUBMITTED_PROMPT_CHARS` are treated as absent.
+   * longer than `MAX_SUBMITTED_PROMPT_CHARS` do not project display text;
+   * the provenance key `qwen.daemon.submittedPrompt` still carries the
+   * declaration verbatim, bounded only by the transport body limit.
    * `promptDisplayText` still wins when both are present.
    */
   submittedPrompt?: string;

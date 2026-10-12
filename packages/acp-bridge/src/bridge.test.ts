@@ -17218,11 +17218,12 @@ describe('createAcpSessionBridge', () => {
         throw new Error('no user_message_chunk observed');
       })();
       // One representative per class alternative: BEL/ESC for the C0 halves,
-      // NEL for C1, DEL, and U+2028 neutralized to spaces; TAB, LF, and the
-      // grapheme-rendering variation selector are retained by contract.
+      // NEL for C1, DEL, U+2028, and U+2029 neutralized to spaces; TAB, LF,
+      // and the grapheme-rendering variation selector are retained by
+      // contract.
       const submittedPrompt =
-        'a\u0007b\u001bc\u0085d\u007fe\u2028f\u2764\ufe0fg\th\ni';
-      const sanitizedDeclaration = 'a b c d e f\u2764\ufe0fg\th\ni';
+        'a\u0007b\u001bc\u0085d\u007fe\u2028f\u2764\ufe0fg\th\nij\u2029k';
+      const sanitizedDeclaration = 'a b c d e f\u2764\ufe0fg\th\nij k';
       const promptPromise = bridge.sendPrompt(
         session.sessionId,
         {
@@ -17286,12 +17287,12 @@ describe('createAcpSessionBridge', () => {
           }
         }
       })();
-      // ZWJ, ZWNJ, a variation selector, and CGJ join or select a neighbor's
-      // rendering; neutralizing them would split the family emoji and the
-      // Persian word on the live display while the model receives the text
-      // intact.
+      // ZWJ, ZWNJ, the BMP and astral variation selectors, and CGJ join or
+      // select a neighbor's rendering; neutralizing them would split the
+      // family emoji and the Persian word on the live display while the
+      // model receives the text intact.
       const submittedPrompt =
-        'family \u{1f468}\u200d\u{1f469}\u200d\u{1f466} pair mi\u200crauad key 1\ufe0f\u20e3 a\u034fb';
+        'family \u{1f468}\u200d\u{1f469}\u200d\u{1f466} pair mi\u200crauad key 1\ufe0f\u{e0100}\u20e3 a\u034fb';
       const promptPromise = bridge.sendPrompt(
         session.sessionId,
         {
@@ -17480,8 +17481,16 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-      const sendWithDeclaration = (submittedPrompt: string) => {
-        const start = performance.now();
+      // An all-invisible in-cap declaration is the neutralization scan's
+      // worst case below the cap. The eligibility pre-gate runs first, so a
+      // non-channel session must never pay the scan on the daemon's single
+      // event loop. The gate is performance-only — the display stays
+      // content-derived either way — so no behavior difference can pin it;
+      // the witness is that the declaration never reaches a
+      // String.prototype.replace receiver, not a wall-clock budget.
+      const declaration = '\u200b'.repeat(MAX_SUBMITTED_PROMPT_CHARS);
+      const replaceSpy = vi.spyOn(String.prototype, 'replace');
+      try {
         const promptPromise = bridge.sendPrompt(
           session.sessionId,
           {
@@ -17489,27 +17498,17 @@ describe('createAcpSessionBridge', () => {
             prompt: [{ type: 'text', text: 'question' }],
           },
           undefined,
-          { submittedPrompt },
+          { submittedPrompt: declaration },
         );
-        const admissionMs = performance.now() - start;
-        return { promptPromise, admissionMs };
-      };
-
-      // Warm up one-time admission costs so neither measured arm pays them.
-      await sendWithDeclaration('warmup').promptPromise;
-      const prose = sendWithDeclaration(
-        'ordinary prose sentence. '.repeat(40_000),
-      );
-      await prose.promptPromise;
-      // An all-invisible megabyte is the neutralization scan's worst case; a
-      // session that cannot project a declaration must never pay it on the
-      // daemon's single event loop.
-      const invisible = sendWithDeclaration('\u200b'.repeat(1_000_000));
-      await invisible.promptPromise;
-
-      expect(invisible.admissionMs).toBeLessThan(
-        Math.max(20, prose.admissionMs * 10),
-      );
+        // Admission is synchronous, so the spy has already observed any
+        // scan by the time sendPrompt returns.
+        expect(
+          replaceSpy.mock.contexts.some((receiver) => receiver === declaration),
+        ).toBe(false);
+        await promptPromise;
+      } finally {
+        replaceSpy.mockRestore();
+      }
       await bridge.shutdown();
     });
 
@@ -17541,47 +17540,29 @@ describe('createAcpSessionBridge', () => {
         }
       })();
 
-      const sendWithDeclaration = (submittedPrompt: string) => {
-        const start = performance.now();
-        const promptPromise = bridge.sendPrompt(
-          session.sessionId,
-          {
-            sessionId: session.sessionId,
-            prompt: [{ type: 'text', text: 'machine wrapper' }],
-          },
-          undefined,
-          { submittedPrompt },
-        );
-        const admissionMs = performance.now() - start;
-        // Admission creates the pending entry synchronously; capture it
-        // before the immediately-resolving mock settles the turn.
-        const pendingText = bridge.getPendingPrompts(session.sessionId)[0]
-          ?.text;
-        return { promptPromise, admissionMs, pendingText };
-      };
-
       // A visible over-cap declaration is treated as absent: the pending
       // text and the echo stay content-derived instead of projecting it.
-      // This first send also warms the one-time admission costs.
-      const visible = sendWithDeclaration(
-        'v'.repeat(MAX_SUBMITTED_PROMPT_CHARS + 1),
+      // The flip is the cap's witness — the cap runs before the
+      // neutralization scan, so an over-cap declaration never pays it; a
+      // skipped scan has no observable difference a unit assertion can pin.
+      const promptPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'machine wrapper' }],
+        },
+        undefined,
+        { submittedPrompt: 'v'.repeat(MAX_SUBMITTED_PROMPT_CHARS + 1) },
       );
-      expect(visible.pendingText).toBe('machine wrapper');
-      await visible.promptPromise;
+      // Admission creates the pending entry synchronously; capture it
+      // before the immediately-resolving mock settles the turn.
+      expect(bridge.getPendingPrompts(session.sessionId)[0]?.text).toBe(
+        'machine wrapper',
+      );
+      await promptPromise;
       abort.abort();
       await drain;
       expect(userChunks).toEqual([{ type: 'text', text: 'machine wrapper' }]);
-
-      // An all-invisible megabyte is the neutralization scan's worst case;
-      // the cap keeps an eligible session from paying it on the daemon's
-      // single event loop.
-      const prose = sendWithDeclaration('a'.repeat(1_000_000));
-      await prose.promptPromise;
-      const invisible = sendWithDeclaration('\u200b'.repeat(1_000_000));
-      await invisible.promptPromise;
-      expect(invisible.admissionMs).toBeLessThan(
-        Math.max(20, prose.admissionMs * 10),
-      );
       await bridge.shutdown();
     });
 
