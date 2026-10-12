@@ -372,10 +372,10 @@ public final class JdbcRuntimeSessionRepository
 
     static void requireCandidate(RuntimeSessionRecord candidate) {
         if (candidate == null || candidate.getVersion() != 0
-                || candidate.getState()
-                        != RuntimeSessionRecord.State.ACQUIRING) {
+                || (candidate.getState() != RuntimeSessionRecord.State.ACQUIRING
+                        && candidate.getState() != RuntimeSessionRecord.State.RELEASED)) {
             throw new IllegalArgumentException(
-                    "candidate must be a new acquiring Session");
+                    "candidate must be a new acquiring Session or release tombstone");
         }
     }
 

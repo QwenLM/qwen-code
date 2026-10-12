@@ -19,6 +19,7 @@ import type {
   ManagedAgentRuntimeState,
   ManagedAgentSessionPhase,
   ManagedAgentSessionSummary,
+  ManagedTaskCancelOperation,
 } from './managed-agent-provider';
 
 export interface JavaManagedAgentProviderOptions
@@ -98,6 +99,61 @@ export function createJavaManagedAgentProvider(
     storageKey: storageKey(options),
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    tasks: {
+      list: (sessionId, request) =>
+        client.listTasks(
+          { sessionId, cursor: request.cursor, limit: request.limit },
+          request.signal,
+        ),
+      async get(sessionId, taskId, request) {
+        const task = await client.getTask(
+          { sessionId, taskId },
+          request.signal,
+        );
+        if (task.sessionId !== sessionId || task.taskId !== taskId)
+          throw new Error('Task identity mismatch');
+        return task;
+      },
+      listEvents: (sessionId, taskId, request) =>
+        client.listTaskEvents(
+          { sessionId, taskId, after: request.after, limit: request.limit },
+          request.signal,
+        ),
+      ...(options.productScope?.trim()
+        ? {
+            cancel: {
+              async submit(sessionId, taskId, command) {
+                return requireTaskCancelOperation(
+                  await client.cancelTask(
+                    {
+                      sessionId,
+                      taskId,
+                      idempotencyKey: command.idempotencyKey,
+                      requestId: managedRequestId(),
+                    },
+                    command.signal,
+                  ),
+                  sessionId,
+                  taskId,
+                );
+              },
+              async query(sessionId, taskId, operationId, request) {
+                const operation = requireTaskCancelOperation(
+                  await client.queryOperation(
+                    { sessionId, operationId },
+                    request.signal,
+                  ),
+                  sessionId,
+                  taskId,
+                );
+                if (operation.operationId !== operationId)
+                  throw new Error('Task cancel operation identity mismatch');
+                return operation;
+              },
+            },
+          }
+        : {}),
+    },
     ...(options.productScope?.trim()
       ? {
           cwdChange: {
@@ -383,6 +439,7 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
+      ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
         sessionActive &&
@@ -468,6 +525,22 @@ function toPhase(
 function titleFor(text: string): string {
   const title = text.trim().replace(/\s+/g, ' ');
   return title.length <= 80 ? title : `${title.slice(0, 77)}...`;
+}
+
+function requireTaskCancelOperation(
+  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
+  sessionId: string,
+  taskId: string,
+): ManagedTaskCancelOperation {
+  if (
+    operation.type !== 'task_cancel' ||
+    operation.sessionId !== sessionId ||
+    operation.taskId !== taskId ||
+    !operation.operationId ||
+    operation.status === 'cancelled'
+  )
+    throw new Error('Task cancel operation identity mismatch');
+  return operation as ManagedTaskCancelOperation;
 }
 
 function storageKey(options: JavaManagedAgentProviderOptions): string {

@@ -93,6 +93,10 @@ public class WorkspaceLifecycleStore {
     }
 
     public static void requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session) {
+        requireIdleJournal(jdbc, json, tenant, session, false);
+    }
+
+    public static void requireIdleJournal(JdbcTemplate jdbc, ObjectMapper json, String tenant, String session, boolean allowCleanup) {
         var heads = jdbc.queryForList("SELECT compacted_through_revision, journal_revision"
                 + " FROM qwen_managed_session_journal_head"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenant, session);
@@ -112,13 +116,18 @@ public class WorkspaceLifecycleStore {
         // a revision this transaction's snapshot cannot see fails the check
         // closed, rather than admitting over a live turn it cannot see.
         final long[] maxScanned = {0};
+        var cleanup = new java.util.HashMap<String, String>();
         jdbc.query("SELECT journal_revision, record_bytes FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                 + " ORDER BY journal_revision", row -> {
                 maxScanned[0] = Math.max(maxScanned[0], row.getLong("journal_revision"));
                 for (String line : new String(row.getBytes("record_bytes"), StandardCharsets.UTF_8).split("\n")) {
+
                     try {
                         JsonNode event = json.readTree(line).path("managedSession");
                         String turn = event.path("payload").path("turnId").asText();
+                        if ("hosted.cleanup".equals(event.path("kind").asText())) {
+                            cleanup.put(event.path("payload").path("cleanupId").asText(), event.path("payload").path("state").asText());
+                        }
                         if ("input.accepted".equals(event.path("kind").asText())) {
                             pending.add(turn);
                         } else if ("turn.settled".equals(event.path("kind").asText())) {
@@ -136,7 +145,7 @@ public class WorkspaceLifecycleStore {
         if (maxScanned[0] < headRevision) {
             throw blocked("workspace_lifecycle_journal_unverified");
         }
-        if (!pending.isEmpty()) {
+        if (!pending.isEmpty() || !allowCleanup && cleanup.values().stream().anyMatch(state -> !"confirmed".equals(state))) {
             throw new ApiException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn.");
         }
     }
@@ -150,6 +159,11 @@ public class WorkspaceLifecycleStore {
                 operation.tenantId(), operation.sessionId(), operation.operationId());
         if (saved != null) {
             return parse(saved);
+        }
+        try {
+            requireIdleJournal(jdbc, json, operation.tenantId(), operation.sessionId());
+        } catch (ApiException blocked) {
+            return null;
         }
         JsonNode header = header(operation.tenantId(), operation.sessionId());
         var receipt = envelope(operation);
@@ -233,6 +247,7 @@ public class WorkspaceLifecycleStore {
     }
 
     private void verifyEffects(OperationRecord operation, JsonNode receipt) {
+        requireIdleJournal(jdbc, json, operation.tenantId(), operation.sessionId());
         if (receipt.path("protocolVersion").asInt() != 1 || !receipt.path("sessionKey").equals(sessionKey(operation))
                 || !operation.operationId().equals(receipt.path("operationId").asText())
                 || !operation.kind().name().toLowerCase(java.util.Locale.ROOT).equals(receipt.path("kind").asText())

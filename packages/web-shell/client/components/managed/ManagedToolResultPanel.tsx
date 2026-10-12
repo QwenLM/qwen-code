@@ -219,7 +219,7 @@ interface CachedPage {
   prefix: Uint8Array;
 }
 
-function ManagedArtifactContent({
+export function ManagedArtifactContent({
   artifact,
   reader,
   clientId,
