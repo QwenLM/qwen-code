@@ -1,4 +1,4 @@
-# Experimental Mod commands
+# Experimental Mods
 
 Qwen Code can run a small subset of the Claude Code Mod API in headless sessions.
 This feature is opt-in and requires a trusted workspace and an enabled Claude or
@@ -77,13 +77,14 @@ are supported. A stream-json process retains module variables between turns.
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
+| Tools      | Intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                                              |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                                       |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
-JSX/TSX, runtime package imports, built-in command interception, tools, context,
+JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
 state/store, rendering, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet.
 
@@ -95,7 +96,7 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among `session.start`, `session.end`, `command.run`,
-`command.register` and `ui.log`. Use an exact name, a prefix such as `command.*`,
+`command.register`, `ui.log`, `tool.call` and `tool.check`. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. Other concrete events and the
 patterns `!*` and `!!...` are rejected.
 
@@ -114,6 +115,87 @@ the chain; consumers run before their declared dependency providers. A handler
 can answer early, including at `session.start`, preventing later handlers from
 running. Only command `args` can be rewritten on `command.run`; lifecycle and
 command identity fields stay pinned.
+
+## Tool interception
+
+`tool.call` receives the Qwen tool's arguments as flat fields alongside `tool`
+and `tool_use_id`. Names, argument schemas and output records use Qwen's native
+contracts, so a Mod written for Claude's built-in tools may need adaptation.
+There is no separate `tool.result` event; inspect or change the value returned
+by `await next(e)`:
+
+```javascript
+export function register(on) {
+  on('tool.call', { tool: 'write_file' }, async ($, e, next) => {
+    if (!e.file_path.endsWith('.txt'))
+      return { deny: 'Only text files are allowed' };
+    return next({ ...e, content: e.content.trim() });
+  });
+
+  on('tool.check', async ($, e, next) => {
+    const verdict = await next(e);
+    if (e.tool === 'run_shell_command') {
+      return { decision: 'deny', reason: 'Shell is disabled by this Mod' };
+    }
+    return verdict;
+  });
+}
+```
+
+Every ordinary `tool.call` next starts a fresh native tool attempt: validation,
+classic hooks, permissions, approvals and invocation guards all still apply.
+Additional attempts count against `--max-tool-calls`; catch replay adds no
+attempt. Sessions with tool middleware serialize tool calls, including parallel
+next calls, because rewritten arguments may introduce side effects. One root
+call permits at most 64 native attempts and 32 outstanding host operations.
+The 60-second root limit includes native execution and time spent waiting for
+approval. Returning before an outstanding next completes cancels that work and
+waits for it to settle.
+
+`tool.check` receives `{tool, input, tool_use_id}` after native validation and
+classic input rewrites. All fields are pinned. Its next returns a declarative
+`{decision: 'allow' | 'ask' | 'deny', reason?}` without executing the tool.
+Qwen merges the answer restrictively: a Mod cannot upgrade a native deny or
+ask to allow. A Mod ask follows the current approval mode's existing decision
+flow; required human interaction and classic forced asks remain authoritative.
+This is deliberately stricter than Claude's consumer permission overrides.
+If a native PermissionRequest hook rebuilds the arguments, they are checked
+again. A Mod-authored `rule`, `hook` or `ceiling` cannot create host permissions.
+
+Return `{deny: reason}` to block, or `{result: value}` to supply a JSON result
+without executing. Native next returns `{ref, result, text, isError?}`.
+`result` is the native function response record, commonly `{output: ...}` or
+`{error: ...}`. A returned ref with an unchanged result retains the original
+response, including images and host metadata; changing text or error flags
+beside that reference does not alter it. To change output, return a new result:
+`{result: {output: 'Replacement text'}}`. Records containing only string
+`output`/`error` fields retain that shape; other JSON is serialized in full into
+an `output` string so native output budgets still apply. The host owns the
+function response: JSON is never interpreted as IDs, media parts or execution facts.
+Unknown refs and `isReadOnly` claims do not grant provenance. Results too large
+for the Mod payload contain an omission notice and a ref; returning that pair
+unchanged preserves the complete native response.
+
+Native errors, approval requirements and cancellation cannot be turned into
+successful execution by changing the Mod result. A denial after next cannot
+undo a tool's effects: Qwen reports that the tool already ran. The same applies
+when an earlier attempt ran and a later attempt was refused. Context injection
+and request metadata are not supported.
+
+Tool identity, invocation IDs, consent and host metadata are pinned. Native
+argument names that collide with `tool`, `tool_use_id`, `agentId`, `consent`,
+`requestMeta` or `$shadowed` are preserved in a host-created, pinned `$shadowed`
+record and restored for execution. Valid deferred `tool_call` requests expose
+the resolved target's name and arguments while retaining the wrapper's native
+permission gates. Invalid wrappers, unknown tools, fixed-policy calls and the
+synthetic `structured_output` terminal tool stay on their original paths.
+`tool_search` and `search_memory` also stay native so guest-authored results cannot
+inherit their native output-budget exemptions.
+Goal tool calls also keep the native path: this stage does not allow Mod-authored
+results to enter a Goal's catalog as external evidence.
+Child agents and nested code-mode schedulers do not inherit this middleware.
+
+## Command recovery
 
 ```javascript
 export function register(on) {
