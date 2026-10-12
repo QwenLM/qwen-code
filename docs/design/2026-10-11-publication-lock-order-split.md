@@ -68,13 +68,19 @@ to check placement precedes retention, and preserve its exact replay and
 outcome bytes. Keep the ordinary missing-Session reservation and its exact
 replay available.
 
+Exercise discovered-binding and persisted Runtime generation conflicts
+separately so each comparison refuses before placement.
+
 Under `mysql-integration`, contend with a real same-tenant ordinary Session
 authorization holding placement. Cover ambient receipt, ambient admission plus
 receipt, standalone admission, standalone renew and ambient renew. Wait for
 InnoDB to report the competing transaction's lock wait before releasing the
-placement owner. Reversing placement and retention in standalone `apply` or
-`prepareAdmission` must fail these tests. Receipt cases also preserve exact
-replay and outcome bytes.
+placement owner. Assert the contending JDBC connection requests placement
+before retention, excluding locks already released by standalone preflight on
+other connections. An early subject failure must report its original cause.
+Reversing placement and retention in standalone `apply` or `prepareAdmission`
+must fail at the ordering assertion. Receipt cases also preserve exact replay
+and outcome bytes.
 
 Run the affected publication/admission tests, static Java checks, packaging,
 root build/typecheck, independent database verification and two clean full-diff

@@ -22,6 +22,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
@@ -30,6 +31,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.sql.DataSource;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -171,7 +173,13 @@ class ToolPublicationLockOrderMySqlIT {
                 // InnoDB refreshes its transaction table only after 100 ms without a read.
                 Thread.sleep(200);
             }
+            if (waiting == 0 && result.isDone()) {
+                result.get(30, TimeUnit.SECONDS);
+            }
             assertThat(waiting).as("Publication waits for the placement owner").isPositive();
+            assertThat(source.subjectPlacementLocks.get())
+                    .as("Placement precedes retention in the contending transaction")
+                    .containsExactly("placement");
             source.releaseOwner.countDown();
             owner.get(30, TimeUnit.SECONDS);
             return result.get(30, TimeUnit.SECONDS);
@@ -196,6 +204,7 @@ class ToolPublicationLockOrderMySqlIT {
         private final CountDownLatch ownerPlacement = new CountDownLatch(1);
         private final CountDownLatch releaseOwner = new CountDownLatch(1);
         private final AtomicBoolean paused = new AtomicBoolean();
+        private final AtomicReference<List<String>> subjectPlacementLocks = new AtomicReference<>();
         private volatile boolean enabled;
 
         private OwnerPauseDataSource(DataSource source) {
@@ -213,6 +222,8 @@ class ToolPublicationLockOrderMySqlIT {
         }
 
         private Connection wrap(Connection connection) {
+            // Standalone preflight releases locks on other connections before contention.
+            List<String> requestedLocks = new ArrayList<>();
             return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {Connection.class},
                     (proxy, method, args) -> {
                         try {
@@ -224,6 +235,15 @@ class ToolPublicationLockOrderMySqlIT {
                             return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {PreparedStatement.class},
                                     (prepared, call, values) -> {
                                         try {
+                                            if (enabled && call.getName().startsWith("execute")
+                                                    && "subject".equals(Thread.currentThread().getName())) {
+                                                if (sql.startsWith("INSERT INTO qwen_runtime_placement_guard")) {
+                                                    requestedLocks.add("placement");
+                                                    subjectPlacementLocks.set(List.copyOf(requestedLocks));
+                                                } else if (sql.startsWith("INSERT INTO qwen_tool_publication_tenant")) {
+                                                    requestedLocks.add("retention");
+                                                }
+                                            }
                                             Object value = call.invoke(statement, values);
                                             if (enabled && call.getName().startsWith("execute")
                                                     && "owner".equals(Thread.currentThread().getName())

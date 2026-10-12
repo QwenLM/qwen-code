@@ -343,7 +343,8 @@ class ToolPublicationStoreTest {
 
     @ParameterizedTest
     @CsvSource({"row-scope,apply", "row-scope,prepare", "binding-key,apply", "binding-key,prepare",
-            "binding-id,apply", "binding-id,prepare", "digest,apply", "digest,prepare",
+            "binding-id,apply", "binding-id,prepare", "binding-generation,apply", "binding-generation,prepare",
+            "digest,apply", "digest,prepare",
             "runtime-tenant,apply", "runtime-tenant,prepare", "runtime-workspace,apply", "runtime-workspace,prepare",
             "runtime-generation,apply", "runtime-generation,prepare",
             "runtime-provisioner,apply", "runtime-provisioner,prepare"})
@@ -359,12 +360,14 @@ class ToolPublicationStoreTest {
         }
         switch (conflict) {
             case "row-scope" -> jdbc.update("UPDATE qwen_tool_publication SET tenant_id = 'other-tenant'");
-            case "binding-key", "binding-id" -> {
+            case "binding-key", "binding-id", "binding-generation" -> {
                 ObjectNode changed = binding.deepCopy();
                 if ("binding-key".equals(conflict)) {
                     ((ObjectNode) changed.path("sessionKey")).put("tenantId", "other-tenant");
-                } else {
+                } else if ("binding-id".equals(conflict)) {
                     changed.put("publicationId", "other-publication");
+                } else {
+                    changed.put("bindingGeneration", "2");
                 }
                 jdbc.update("UPDATE qwen_tool_publication SET binding_json = ?, binding_digest = ?",
                         changed.toString(), ToolPublicationContract.bindingDigest(changed));
@@ -394,6 +397,7 @@ class ToolPublicationStoreTest {
         })).isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("digest".equals(conflict) ? "Stored binding is corrupt"
                         : conflict.startsWith("runtime-") ? "Original persisted Runtime scope conflicts"
+                        : "binding-generation".equals(conflict) ? "Broker execution identity conflicts"
                         : "Publication scope conflicts");
         assertThat(jdbc.queryForList("SELECT * FROM qwen_runtime_placement_guard")).isEmpty();
         assertThat(producerTables()).usingRecursiveComparison().isEqualTo(before);

@@ -57,12 +57,17 @@ Workspace、generation 和 provisioner 冲突会在选择 placement 前拒绝，
 实际执行的 SQL，检查 placement 先于 retention，并保留精确重放和 outcome
 字节。普通缺少 Session 的 reservation 和精确重放继续可用。
 
+分别验证发现态 binding 和持久化 Runtime 的 generation 冲突，确保每个
+比较都会在获取 placement 前拒绝。
+
 在 `mysql-integration` 下，与持有 placement 的同租户真实普通 Session
 authorization 竞争。覆盖外层 receipt、同一外层事务的 admission 加 receipt、
 独立 admission、独立 renew 和外层 renew。在 InnoDB 报告竞争事务的锁等待后
-才释放 placement 持有者。将独立 `apply` 或 `prepareAdmission` 中的
-placement 与 retention 顺序颠倒时，这些测试必须失败。Receipt 用例也保留
-精确重放和 outcome 字节。
+才释放 placement 持有者。断言竞争的 JDBC 连接先请求 placement，再请求
+retention，排除独立 preflight 在其他连接上已释放的锁。被测事务提前失败时
+必须报告其原始原因。将独立 `apply` 或 `prepareAdmission` 中的 placement
+与 retention 顺序颠倒时，必须在顺序断言处失败。Receipt 用例也保留精确
+重放和 outcome 字节。
 
 执行受影响 publication/admission 测试、Java 静态检查、打包、根目录
 build/typecheck、独立数据库验证和两次干净的完整 diff 自审。报告实际数据库
