@@ -573,6 +573,21 @@ export function createProductionDispatch(
     if (typeof prompt !== 'string' || prompt.length === 0) {
       throw new Error('agent() requires a non-empty string prompt.');
     }
+    // A host refusing this run's tools (the managed workflow child) also
+    // refuses every option that reaches its own filesystem or processes:
+    // an agentType resolves (and may start the MCP servers of) a definition
+    // on this host, and isolation / workingDir provision or bind a worktree
+    // here. They are refused before any of that resolves.
+    if (refuseSubagentTools === true) {
+      const hostBound = HOST_BOUND_AGENT_OPTS.filter(
+        (key) => opts[key] !== undefined,
+      );
+      if (hostBound.length > 0) {
+        throw new Error(
+          `agent({${hostBound.join(', ')}}): unavailable in this workflow — its agents carry no tools and use nothing on this host, so only text-only agent() calls (optionally with model, effort or schema) can run.`,
+        );
+      }
+    }
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
     // retry loop. The wrapper owns the per-attempt AbortController +
     // AgentEventEmitter; it chains the caller's `signal` into the
@@ -656,6 +671,12 @@ export function createProductionDispatch(
     );
   };
 }
+
+/**
+ * agent() options that reach the dispatching host's own filesystem or
+ * processes; a host refusing its subagents' tools refuses these too.
+ */
+const HOST_BOUND_AGENT_OPTS = ['agentType', 'isolation', 'workingDir'] as const;
 
 /** Identity resolved once per dispatch — see resolveWorkflowAgentIdentity. */
 interface WorkflowAgentIdentity {
@@ -1281,6 +1302,15 @@ async function runOverridePath(
         ),
       );
     }
+  }
+
+  // A host refusing this run's tools declares the list explicitly: an absent
+  // allowlist is the subagent manager's '*' floor, so leaving it unset would
+  // hand a dispatch that names no tools this host's whole registry. Only a
+  // schema dispatch keeps structured_output, its one way to answer.
+  if (refuseSubagentTools === true) {
+    augmented.tools =
+      opts.schema !== undefined ? [ToolNames.STRUCTURED_OUTPUT] : [];
   }
 
   // Provision worktree BEFORE createAgentHeadless so the derived Config

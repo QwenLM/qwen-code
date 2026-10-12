@@ -47,7 +47,7 @@ import {
   type JournalEntry,
   type WorkflowJournal,
 } from './workflow-journal.js';
-import { resolveBuiltinToolName } from '../../tools/tool-names.js';
+import { resolveBuiltinToolName, ToolNames } from '../../tools/tool-names.js';
 import { fnCall, fnResponse } from '../../test-utils/model-fixtures.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
@@ -3907,6 +3907,68 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       );
       expect(mgr.calls).toHaveLength(0);
     });
+
+    // #13858 R4-1: a dispatch that names no tools still takes the override
+    // path for any dispatch-affecting option, where an absent allowlist is
+    // the manager's '*' floor — the refusing host declares it empty.
+    it('refuseSubagentTools declares an empty tool list on the override path', async () => {
+      const { calls } = await dispatched(
+        {},
+        'scan',
+        { model: 'qwen3-coder-plus' },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.config.tools).toEqual([]);
+    });
+
+    it('refuseSubagentTools keeps only structured_output for a schema dispatch', async () => {
+      const mgr = dispatchVia(
+        {},
+        'scan',
+        { schema: { type: 'object' } },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      // The fake agent never answers through structured_output; only its
+      // declaration matters here.
+      await mgr.result.catch(() => undefined);
+      expect(mgr.calls).toHaveLength(1);
+      expect(mgr.calls[0]!.config.tools).toEqual([ToolNames.STRUCTURED_OUTPUT]);
+    });
+
+    it.each([
+      [{ agentType: 'Explore' }, 'agentType'],
+      [{ isolation: 'worktree' as const }, 'isolation'],
+      [{ workingDir: '/elsewhere' }, 'workingDir'],
+    ])(
+      'refuseSubagentTools refuses %o before resolving anything on this host',
+      async (opts, name) => {
+        const lookup = vi.fn(async () => null);
+        const mgr = dispatchVia(
+          { lookup },
+          'scan',
+          opts,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
+        );
+        await expect(mgr.result).rejects.toThrow(
+          `agent({${name}}): unavailable in this workflow`,
+        );
+        expect(lookup).not.toHaveBeenCalled();
+        expect(mgr.calls).toHaveLength(0);
+      },
+    );
 
     it.each([
       [
