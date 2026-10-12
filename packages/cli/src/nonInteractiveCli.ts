@@ -92,6 +92,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
+import { ModSession } from './nonInteractive/mod-session.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -452,6 +453,7 @@ async function emitNonInteractiveFinalMessage(params: {
  * @param controlService - Optional control service for future permission handling.
  */
 export interface RunNonInteractiveOptions {
+  modSession?: ModSession;
   abortController?: AbortController;
   adapter?: JsonOutputAdapterInterface;
   userMessage?: CLIUserMessage;
@@ -592,14 +594,19 @@ export async function runNonInteractive(
       adapter = new JsonOutputAdapter(config);
     }
     const ownsAdapter = options.adapter === undefined;
+    const modSession =
+      options.modSession ?? ModSession.create(config, settings, adapter);
+    const ownsModSession = options.modSession === undefined;
     const unsubscribeRecordingFailure = ownsAdapter
       ? subscribeToHeadlessChatRecordingFailures(config, adapter)
       : undefined;
     let chatRecordingSettlement: Promise<void> | undefined;
     const settleBeforeTerminalOutput = (): Promise<void> => {
-      chatRecordingSettlement ??= settleChatRecording(config, {
-        finalize: ownsAdapter,
-      }).then(() => undefined);
+      chatRecordingSettlement ??= (async () => {
+        if (ownsModSession) await modSession?.close();
+        modSession?.flushLogs();
+        await settleChatRecording(config, { finalize: ownsAdapter });
+      })();
       return chatRecordingSettlement;
     };
     const emitResult = async (
@@ -612,6 +619,7 @@ export async function runNonInteractive(
       // the error still surfaces instead of losing both result and error.
       adapter.emitResult(result);
       options.onResultEmitted?.();
+      await modSession?.flushOutput();
     };
 
     // Get readonly values once at the start
@@ -1119,6 +1127,16 @@ export async function runNonInteractive(
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
 
+      try {
+        await modSession?.initialize(abortController.signal);
+      } catch (error) {
+        adapter.emitMessage(
+          await buildSystemMessage(config, sessionId, permissionMode, settings),
+        );
+        modSession?.flushLogs();
+        throw error;
+      }
+
       if (options.controlService) {
         config
           .getWorkflowRunRegistry()
@@ -1149,8 +1167,10 @@ export async function runNonInteractive(
         sessionId,
         permissionMode,
         settings,
+        modSession,
       );
       adapter.emitMessage(systemMessage);
+      modSession?.flushLogs();
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
@@ -1238,6 +1258,14 @@ export async function runNonInteractive(
             abortController,
             config,
             settings,
+            undefined,
+            undefined,
+            modSession,
+          );
+          await modSession?.syncSession(
+            slashCommandResult.resolvedCommand?.name === 'clear'
+              ? 'clear'
+              : 'resume',
           );
           switch (slashCommandResult.type) {
             case 'submit_prompt':
@@ -3408,6 +3436,8 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      if (ownsModSession) await modSession?.close();
+      await modSession?.flushOutput();
       await failClosedActiveGoalTurn(
         'Headless Goal host stopped before its permit was released',
       );

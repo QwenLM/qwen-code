@@ -9,6 +9,7 @@ import { parseBranchCheckpointPayload } from '../services/branch-points.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { validateTranscriptRecord } from '../utils/transcript-records.js';
 
 export type ManagedSessionJsonValue =
   | null
@@ -68,6 +69,7 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'domain.committed',
   'message.delta',
   'message.retracted',
+  'operation.replayed',
 ] as const;
 
 export type ManagedSessionEventKind =
@@ -130,10 +132,49 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'mcp_operation',
     'hook_registration',
     'hook_execution',
+    'schedule',
+    'automation_run',
     'child_acceptance',
     'channel_route',
     'channel_delivery',
+    // H4d-b: produced by send_message and the control plane's relay.
+    'session_message',
+    // H4e-b1: a lead's team and its task board.
+    'team_state',
+    'team_task',
   ];
+
+/**
+ * The Schedule target modes a Session may actually commit today (H6b).
+ * `schedule` and `automation_run` are enabled as domains, but a definition
+ * names the mode its runs execute in, and the authority admits a definition
+ * revision only for a mode listed here — every revision, not only the
+ * first, because the mode is not a fixed key of the chain; runs bind to a
+ * committed definition, so they are gated with it. `per_run` joins when
+ * the H4 child Session pipeline carries it. The Java store validates both
+ * bodies since H6a and deploys before any writer, keeping the server-first
+ * order.
+ */
+export const MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES = Object.freeze([
+  'persistent',
+] as const);
+
+/**
+ * The Schedule mode gate. This stands beside {@link
+ * assertManagedSessionDomainEnabled} for the two automation domains:
+ * enablement is decided per target mode, and the definition names the mode.
+ */
+export function assertManagedSessionScheduleSessionModeEnabled(
+  sessionMode: string,
+): void {
+  if (
+    !(
+      MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES as readonly string[]
+    ).includes(sessionMode)
+  ) {
+    throw new ManagedSessionModeGateError(sessionMode);
+  }
+}
 
 /**
  * The `child_run` body kinds a caller may actually submit today (H4b).
@@ -161,6 +202,26 @@ export function assertManagedSessionChildRunKindEnabled(kind: string): void {
   ) {
     throw new ManagedSessionRecordError(
       `domain child_run kind ${kind} is registered but not enabled for submission.`,
+    );
+  }
+}
+
+/**
+ * Whether a child Session run may continue a completed one (H4d). Both
+ * languages validate continuations and the rules they obey; H4d-b's relay
+ * revives a continuation with its chain's history, so submission is open.
+ */
+export const MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED = true;
+
+/**
+ * The continuation gate. This stands beside {@link
+ * assertManagedSessionChildRunKindEnabled}: a continuation is a `child_run`
+ * of an enabled kind, so the kind gate alone would admit it.
+ */
+export function assertManagedSessionChildContinuationEnabled(): void {
+  if (!MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED) {
+    throw new ManagedSessionRecordError(
+      'child_run continuations are registered but not enabled for submission.',
     );
   }
 }
@@ -331,11 +392,38 @@ export class ManagedSessionRecordError extends Error {
   }
 }
 
+/**
+ * The writer died on an earlier append: nothing new will ever commit, so
+ * callers must not read this as a retriable or a shape conflict.
+ */
+export class ManagedSessionWritesStoppedError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_writes_stopped';
+
+  constructor(cause: Error) {
+    super(
+      `session log writes stopped after an earlier failure: ${cause.message}`,
+    );
+    this.name = 'ManagedSessionWritesStoppedError';
+  }
+}
+
+/** A target mode the mode gate has not enabled for submission. */
+export class ManagedSessionModeGateError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_mode_disabled';
+
+  constructor(sessionMode: string) {
+    super(
+      `schedule session mode ${sessionMode} is not enabled for submission.`,
+    );
+    this.name = 'ManagedSessionModeGateError';
+  }
+}
+
 function fail(message: string): never {
   throw new ManagedSessionRecordError(message);
 }
 
-function safeErrorValue(value: string): string {
+export function safeErrorValue(value: string): string {
   return stripAnsiAndControl(value).slice(0, MAX_ERROR_VALUE_LENGTH);
 }
 
@@ -918,6 +1006,14 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         recordRef: 'ref',
       },
     },
+    'operation.replayed': {
+      fields: {
+        domain: 'text',
+        recordId: 'id',
+        revision: 'sequence',
+        recordRef: 'ref',
+      },
+    },
   };
 
 /**
@@ -944,6 +1040,7 @@ const EVENT_ACTORS: Readonly<
   'config.bound': ['trusted_entry'],
   'lifecycle.changed': ['trusted_entry'],
   'domain.committed': ['trusted_entry'],
+  'operation.replayed': ['trusted_entry'],
 };
 
 const ACTIVATION_SUBJECT_KINDS: Readonly<
@@ -966,6 +1063,7 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'config.bound': false,
   'lifecycle.changed': false,
   'domain.committed': false,
+  'operation.replayed': false,
 };
 
 function assertField(
@@ -1224,6 +1322,25 @@ function assertPayloadRules(
       }
       return;
     }
+    case 'operation.replayed': {
+      const domain = assertEnum(
+        payload['domain'],
+        MANAGED_SESSION_DOMAINS,
+        `${at}.domain`,
+      );
+      const recordRef = payload[
+        'recordRef'
+      ] as unknown as ManagedSessionDurableRef;
+      if (recordRef.kind !== `managed-${domain}`) {
+        fail(`${at}.recordRef.kind must be managed-${domain}.`);
+      }
+      if (recordRef.schemaVersion !== MANAGED_SESSION_DOMAIN_RECORD_VERSION) {
+        fail(
+          `${at}.recordRef.schemaVersion must be ${MANAGED_SESSION_DOMAIN_RECORD_VERSION}.`,
+        );
+      }
+      return;
+    }
     case 'input.accepted':
     case 'tool.intent':
     case 'message.delta':
@@ -1324,6 +1441,119 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
     ...(subject === undefined ? {} : { subject }),
     payload,
   };
+}
+
+/**
+ * The refs an event carries at its schema-declared positions. Anything that
+ * merely has the ref field names without being a declared ref position — a
+ * free-form `json` payload field, for example — is not a dependency.
+ */
+export function managedSessionEventRefs(
+  event: ManagedSessionEvent,
+): ManagedSessionDurableRef[] {
+  const schema = EVENT_SCHEMAS[event.kind];
+  const refs: ManagedSessionDurableRef[] = [];
+  for (const [name, kind] of Object.entries(schema.fields)) {
+    if (kind !== 'ref' && kind !== 'refOrNull' && kind !== 'refs') continue;
+    const value = event.payload[name];
+    if (value === null || value === undefined) continue;
+    if (kind === 'refs') {
+      (value as ManagedSessionJsonValue[]).forEach((item, index) =>
+        refs.push(
+          assertManagedSessionDurableRef(
+            item,
+            `${event.kind}.${name}[${index}]`,
+          ),
+        ),
+      );
+    } else {
+      refs.push(assertManagedSessionDurableRef(value, `${event.kind}.${name}`));
+    }
+  }
+  return refs;
+}
+
+/**
+ * Domains whose body is a whole reader-facing record. The rest carry their own
+ * shape and are not something a reader replays.
+ */
+const RECORD_CARRYING_DOMAINS: ReadonlySet<unknown> = new Set([
+  'goal_state',
+  'file_history',
+  'session_source',
+]);
+
+/** Whether a domain's envelope carries a whole reader-facing record. */
+export function managedSessionDomainCarriesRecord(domain: unknown): boolean {
+  return RECORD_CARRYING_DOMAINS.has(domain);
+}
+
+/**
+ * Where a whole reader-facing record lives, for the channels that carry one.
+ *
+ * A domain body is the authority's envelope wrapping the content, so the record
+ * sits under its own key there, unlike the event channels whose body is the
+ * record itself.
+ *
+ * This list is deliberately wider than the hot `project()`: a reader
+ * rebuilding the whole history needs turn results, compaction summaries and
+ * record-carrying domains materialized, while a live message projection
+ * presents them as events. The writer fences this same list at commit time, so
+ * a channel added here is validated on both sides at once.
+ */
+export function managedSessionReaderFacingBody(event: ManagedSessionEvent):
+  | {
+      readonly ref: ManagedSessionEvent['payload'][string];
+      readonly inDomainEnvelope: boolean;
+    }
+  | undefined {
+  switch (event.kind) {
+    case 'message.committed':
+      return { ref: event.payload['contentRef'], inDomainEnvelope: false };
+    case 'turn.settled':
+      return { ref: event.payload['resultRef'], inDomainEnvelope: false };
+    case 'context.compacted':
+      return { ref: event.payload['summaryRef'], inDomainEnvelope: false };
+    case 'domain.committed':
+      return managedSessionDomainCarriesRecord(event.payload['domain'])
+        ? { ref: event.payload['recordRef'], inDomainEnvelope: true }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The acceptance predicate the writer fence and the cold reader share, so the
+ * two cannot drift: a body the writer commits is a body the reader replays.
+ * Returns the validated record, or the refusal reason for the caller to wrap
+ * in its own error context.
+ */
+export function validateManagedReaderFacingRecord(
+  value: unknown,
+  sessionId: string,
+): { readonly record: ChatRecord } | { readonly error: string } {
+  const { record, diagnostics } = validateTranscriptRecord(value);
+  const candidate = record as Partial<ChatRecord> | undefined;
+  if (record !== undefined && record.sessionId !== sessionId) {
+    return {
+      error: `it belongs to session ${safeErrorValue(record.sessionId)}, not ${safeErrorValue(sessionId)}.`,
+    };
+  }
+  if (
+    record === undefined ||
+    typeof candidate?.cwd !== 'string' ||
+    typeof candidate?.version !== 'string' ||
+    typeof candidate?.timestamp !== 'string' ||
+    diagnostics.length > 0
+  ) {
+    return {
+      error:
+        diagnostics.map((entry) => entry.message).join('; ') ||
+        'missing sessionId/cwd/version/timestamp',
+    };
+  }
+  return { record: candidate as ChatRecord };
 }
 
 /**
