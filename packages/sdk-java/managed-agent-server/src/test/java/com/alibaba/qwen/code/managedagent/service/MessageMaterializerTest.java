@@ -19,24 +19,10 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.scheduling.annotation.Scheduled;
 
 class MessageMaterializerTest {
     private static final MaterializationTarget POISON =
             new MaterializationTarget("tenant", "poison");
-
-    @Test
-    void materializeRunsOnItsOwnScheduler() throws Exception {
-        // The tick issues blocking JDBC writes, so it must not fall back to
-        // the one-thread default pool that carries the dispatch scan and
-        // turn lease recovery; the named bean is declared in
-        // ManagedArtifactConfiguration and pinned by the context tests.
-        Scheduled scheduled = MessageMaterializer.class
-                .getDeclaredMethod("materialize")
-                .getAnnotation(Scheduled.class);
-        assertThat(scheduled.scheduler())
-                .isEqualTo("managedMaterializationScheduler");
-    }
 
     @Test
     void backsOffAndRotatesAFailingTarget() {

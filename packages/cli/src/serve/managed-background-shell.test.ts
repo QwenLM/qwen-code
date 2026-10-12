@@ -123,6 +123,7 @@ function fakeSink(): FakeSink {
       sink.pid = pid;
     },
     setProcessResult(_result: unknown) {},
+    setStopRequested() {},
     failCapture() {
       sink.failed = true;
     },

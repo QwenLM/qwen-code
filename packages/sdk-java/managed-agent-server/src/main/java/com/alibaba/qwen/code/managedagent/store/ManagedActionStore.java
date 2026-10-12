@@ -152,6 +152,11 @@ public class ManagedActionStore {
             int eventCount,
             byte[] bytes,
             Function<String, StoredResource> resources) {
+        apply(tenantId, workspaceId, sessionId, firstSequence, eventCount, bytes, resources, new java.util.HashMap<>());
+    }
+
+    void apply(String tenantId, String workspaceId, String sessionId, long firstSequence,
+            int eventCount, byte[] bytes, Function<String, StoredResource> resources, Map<String, JsonNode> hostedReferences) {
         int index = -1;
         for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
             index++;
@@ -233,14 +238,17 @@ public class ManagedActionStore {
                     "createdAt",
                     "expiresAt",
                     "options"));
-            if (options.path("v").asLong() == 2) {
+            if (options.path("v").asLong() == 2 || options.path("v").asLong() == 3 && options.has("inputRef")) {
                 optionFields.add("inputRef");
+            }
+            if (options.path("v").asLong() == 3) {
+                optionFields.add("continuationRef");
             }
             closed(options, optionFields.toArray(String[]::new));
             require(
                     safeNumber(options.path("v"))
                             && (options.path("v").asLong() == 1
-                                    || options.path("v").asLong() == 2)
+                                    || options.path("v").asLong() == 2 || options.path("v").asLong() == 3)
                             && id.equals(options.path("requestId").asText())
                             && safeNumber(options.path("inputRevision"))
                             && options.path("inputRevision").asLong()
@@ -264,8 +272,11 @@ public class ManagedActionStore {
                 closed(option, "id", "label");
                 require(text(option.path("label")));
             }
-            if (options.path("v").asLong() == 2) {
+            if (options.has("inputRef")) {
                 resource(options.path("inputRef"), "managed-tool-input", resources);
+            }
+            if (options.path("v").asLong() == 3) {
+                ManagedHostedRecoveryRecords.reference(options.path("continuationRef"), "hosted-approval-continuation", tenantId, workspaceId, sessionId, resources, hostedReferences);
             }
             Action previous = find(tenantId, sessionId, id).orElse(null);
             require(

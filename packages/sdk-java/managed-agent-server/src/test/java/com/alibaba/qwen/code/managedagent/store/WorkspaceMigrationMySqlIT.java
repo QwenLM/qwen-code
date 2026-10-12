@@ -64,7 +64,7 @@ class WorkspaceMigrationMySqlIT {
                 + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
                 String.class, lastRank)).containsExactly("48", "49", "50",
                 "51", "52", "53", "54", "55", "56", "57", "60", "62", "64",
-                "65", "66", "67", "68");
+                "65", "66", "67", "68", "69");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isZero();
     }
@@ -267,6 +267,19 @@ class WorkspaceMigrationMySqlIT {
         }
     }
 
+    @Test
+    void upgradesMain56WithoutChangingAppliedMigrations() {
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("56").load().migrate();
+        var applied = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
+        int lastRank = jdbc.queryForObject("SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
+        assertThat(jdbc.queryForList("SELECT * FROM flyway_schema_history"
+                + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
+        assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
+                + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
+                String.class, lastRank)).containsExactly("57", "60", "62", "64", "65", "66", "67", "68", "69");
+    }
+
     private void seed(String tenant, String session, String state) {
         jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
                 + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
@@ -278,19 +291,19 @@ class WorkspaceMigrationMySqlIT {
                 + " session_id, created_at) VALUES (?, ?, ?, 'digest', ?, 1)", tenant, new byte[] {1}, session, session);
     }
 
-    // A database that ran main's migrations through V67 must accept the
+    // A database that ran main's migrations through V68 must accept the
     // upgrade that brings the new migration: a lower-numbered resolved-but-
     // unapplied version fails validate-on-migrate, so the new migration
     // must sort after main's latest (review round 9 re-review, R8-1).
     @Test
     void theBudgetExemptMigrationAppliesAfterMainsLatest() {
         Flyway.configure().dataSource(data)
-                .locations("classpath:db/migration").target("67").load()
+                .locations("classpath:db/migration").target("68").load()
                 .migrate();
         var result = Flyway.configure().dataSource(data)
                 .locations("classpath:db/migration").load().migrate();
         assertThat(result.migrationsExecuted).isEqualTo(1);
-        assertThat(result.migrations.getFirst().version).isEqualTo("68");
+        assertThat(result.migrations.getFirst().version).isEqualTo("69");
     }
 
     @AfterEach

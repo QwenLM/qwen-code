@@ -1197,7 +1197,7 @@ class HostedHarnessClientTest {
         server.removeContext("/capabilities");
         server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
                 capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                        "\"hostedHarness\":{\"titleProtocolVersion\":1,"), false));
+                        "\"hostedHarness\":{\"titleProtocolVersion\":1,\"features\":[\"hosted_approval_resume_v1\",\"hosted_model_round_recovery_v1\"],"), false));
         AtomicReference<String> body = new AtomicReference<>();
         server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
             body.set(readBody(exchange));
@@ -1205,6 +1205,9 @@ class HostedHarnessClientTest {
                     + "\",\"persisted\":true,\"managedRenameRevision\":\"7\"}");
         });
         try (HostedHarnessClient client = newClient()) {
+            assertEquals(1, client.capabilities().getTitleProtocolVersion());
+            assertEquals(List.of("hosted_approval_resume_v1", "hosted_model_round_recovery_v1"),
+                    client.capabilities().getFeatures());
             client.updateSessionTitle(createSession(client), "A", 7);
         }
         assertTrue(body.get().contains("\"managedRenameRevision\":\"7\""));
