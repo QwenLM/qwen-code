@@ -62,9 +62,10 @@ import {
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import type {
-  HarnessAgentWaitRun,
-  HarnessCommandWaitRun,
+import {
+  harnessCommandLocked,
+  type HarnessAgentWaitRun,
+  type HarnessCommandWaitRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
@@ -4892,17 +4893,18 @@ export class HostedWorkspaceToolTurn {
    * Turn; once one call of the Turn timed out, every later command call
    * of it refuses at once.
    */
-  /** Decision 4's lock is the wait group's own durable state, not just
-   * Turn memory: a replacement owner of the same Turn re-arms from the
-   * carried group, so a timed-out leader stays unanswering for every
-   * later command, across restarts as across seconds. */
+  /** Decision 4's lock is the Turn's durable state, not just Turn
+   * memory: every checkpoint of the Turn carries it, so a replacement
+   * owner re-arms from whichever one it resumes, and a timed-out leader
+   * stays unanswering for every later command, across restarts as across
+   * seconds. */
   private async syncCommandTimedOutFromDurable(): Promise<void> {
     if (this.commandTimedOut) return;
     const authorization =
       await this.session.authority.harnessRunAuthorization();
     if (
       authorization.status === 'runnable' &&
-      authorization.checkpoint.commandWait?.timedOut === true
+      harnessCommandLocked(authorization.checkpoint, this.promptId)
     )
       this.commandTimedOut = true;
   }
@@ -4957,11 +4959,20 @@ export class HostedWorkspaceToolTurn {
       return parts;
     };
     if (this.commandTimedOut) {
-      const parts = await answer(SESSION_COMMAND_LEADER_UNANSWERING_TEXT, true);
+      // The lock refuses only a call that sent nothing. A call whose
+      // outbound already exists is the one whose own wait timed out,
+      // named again by a re-driven batch: its journal answers it.
+      const parts =
+        commands.command(commandId) === undefined
+          ? await answer(SESSION_COMMAND_LEADER_UNANSWERING_TEXT, true)
+          : await this.answerCommandByJournal(
+              commands,
+              request,
+              commandId,
+              model,
+            );
       // The locked run still folds, or the Turn's wait never completes —
-      // its answer rides the batch the same as a call that ran. The fold
-      // re-stamps the fresh group's lock, so the refusal outlives this
-      // owner too.
+      // its answer rides the batch the same as a call that ran.
       await this.harness.resolveAwaitCommand(commandId, { timedOut: true });
       return parts;
     }
@@ -5046,8 +5057,8 @@ export class HostedWorkspaceToolTurn {
           commandId,
           model,
         );
-        // Decision 4's lock rides the fold: a replacement owner of this
-        // Turn re-arms from the group and refuses the next command too.
+        // The fold restates the Turn's lock: a replacement owner of this
+        // Turn re-arms from it and refuses the next command too.
         await this.harness.resolveAwaitCommand(commandId, {
           timedOut: true,
         });
@@ -5195,6 +5206,38 @@ export class HostedWorkspaceToolTurn {
       const deadline = anchor + COMMAND_WAIT_MS;
       for (;;) {
         const record = commands.command(run.commandId);
+        if (this.commandTimedOut) {
+          if (record === undefined) {
+            // A call the lock refused before it sent anything: the same
+            // fixed answer the live arm gives every later call.
+            const locked = convertToFunctionErrorResponse(
+              run.toolName,
+              run.functionCallId,
+              [],
+              SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
+            );
+            if (!journaled.has(run.functionCallId))
+              await this.commit('tool_result', locked, model);
+          } else {
+            // The call whose own wait timed out: the dead owner stamped
+            // the lock at detection and may have died before settling
+            // it. Its journal answers it — a planned entry cancelled as
+            // not sent, a handed-over one unknown — never the later
+            // calls' refusal, or the entry stays live for the relay to
+            // deliver after the wait has ended.
+            await this.answerCommandByJournal(
+              commands,
+              request,
+              run.commandId,
+              model,
+              journaled,
+            );
+          }
+          await this.harness.resolveAwaitCommand(run.commandId, {
+            timedOut: true,
+          });
+          break;
+        }
         if (record === undefined) {
           // The checkpoint names a call whose outbound was never
           // committed — the dead owner exited between the two steps,
@@ -5211,20 +5254,6 @@ export class HostedWorkspaceToolTurn {
           if (!journaled.has(run.functionCallId))
             await this.commit('tool_result', unsent, model);
           await this.harness.resolveAwaitCommand(run.commandId);
-          break;
-        }
-        if (this.commandTimedOut) {
-          const locked = convertToFunctionErrorResponse(
-            run.toolName,
-            run.functionCallId,
-            [],
-            SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
-          );
-          if (!journaled.has(run.functionCallId))
-            await this.commit('tool_result', locked, model);
-          await this.harness.resolveAwaitCommand(run.commandId, {
-            timedOut: true,
-          });
           break;
         }
         if (signal.aborted) {

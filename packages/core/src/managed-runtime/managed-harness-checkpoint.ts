@@ -262,12 +262,19 @@ export interface HarnessCommandWaitRun {
 export interface HarnessCommandWaitGroup {
   readonly runs: readonly HarnessCommandWaitRun[];
   readonly holdsWorkspaceMount: boolean;
-  /**
-   * Decision 4's durable lock: once one call of the Turn timed out the
-   * fold that carried it stamps this, so a replacement owner of the same
-   * Turn refuses the next command at once instead of minting a new wait.
-   */
-  readonly timedOut: boolean;
+}
+
+/**
+ * Decision 4's durable lock (H4e-b3): once one command call of a Turn
+ * timed out, every later command call of that Turn is refused at once.
+ * It is the Turn's state, not the wait group's — a later command batch
+ * replaces the group and Runtime work clears it — so it rides every
+ * checkpoint of the Turn that stamped it, and a replacement owner re-arms
+ * from whichever checkpoint it resumes. A checkpoint of another Turn
+ * drops it.
+ */
+export interface HarnessCommandLockGroup {
+  readonly turnId: string;
 }
 
 export interface HarnessOutputGroup {
@@ -302,6 +309,7 @@ export interface HarnessCheckpointV1 {
   readonly approval: HarnessApprovalGroup | null;
   readonly agentWait: HarnessAgentWaitGroup | null;
   readonly commandWait: HarnessCommandWaitGroup | null;
+  readonly commandLock: HarnessCommandLockGroup | null;
   readonly output: HarnessOutputGroup;
   readonly followUp: HarnessFollowUpGroup;
 }
@@ -340,6 +348,7 @@ const ROOT_KEYS = [
   'approval',
   'agentWait',
   'commandWait',
+  'commandLock',
   'output',
   'followUp',
 ] as const;
@@ -1044,11 +1053,7 @@ function parseCommandWait(
   // null — the same mixed-version rule as the agent wait.
   if (value === null || value === undefined) return null;
   const record = object(value, 'commandWait');
-  assertNoUnknownKeys(
-    record,
-    ['runs', 'holdsWorkspaceMount', 'timedOut'],
-    'commandWait',
-  );
+  assertNoUnknownKeys(record, ['runs', 'holdsWorkspaceMount'], 'commandWait');
   const runs = jsonArray(record['runs'], 'commandWait.runs').map(
     (item, index) => parseCommandWaitRun(item, `commandWait.runs[${index}]`),
   );
@@ -1067,17 +1072,59 @@ function parseCommandWait(
   if (typeof mount !== 'boolean') {
     fail('commandWait.holdsWorkspaceMount must be a boolean.');
   }
-  // Checkpoints written before the lock existed carry no key: a wait
-  // that never stamped it reads as not timed out, never as unknown.
-  const timedOut = record['timedOut'];
-  if (timedOut !== undefined && typeof timedOut !== 'boolean') {
-    fail('commandWait.timedOut must be a boolean.');
-  }
+  return { runs, holdsWorkspaceMount: mount };
+}
+
+function parseCommandLock(
+  value: ManagedSessionJsonValue | undefined,
+): HarnessCommandLockGroup | null {
+  // Absent means unlocked: only a Turn that timed out writes the key.
+  if (value === null || value === undefined) return null;
+  const record = object(value, 'commandLock');
+  assertNoUnknownKeys(record, ['turnId'], 'commandLock');
   return {
-    runs,
-    holdsWorkspaceMount: mount,
-    timedOut: timedOut === true,
+    turnId: assertManagedSessionStableId(
+      record['turnId'],
+      'commandLock.turnId',
+    ),
   };
+}
+
+/**
+ * The lock `previous` hands to the next checkpoint of `turnId` (by default
+ * its own Turn): kept within the Turn that stamped it, dropped by any
+ * other Turn's checkpoint.
+ */
+function carriedCommandLock(
+  previous: HarnessCheckpointV1,
+  turnId: string | null = previous.identity.turnId,
+): HarnessCommandLockGroup | null {
+  return previous.commandLock !== null && previous.commandLock.turnId === turnId
+    ? previous.commandLock
+    : null;
+}
+
+/**
+ * Decision 4's lock for the checkpoint's own Turn. Only a Turn-bound
+ * checkpoint can carry it: a command wait always names its Turn.
+ */
+export function harnessCommandLockOf(
+  checkpoint: HarnessCheckpointV1,
+): HarnessCommandLockGroup {
+  if (checkpoint.identity.turnId === null) {
+    throw new ManagedSessionRecordError(
+      'a command timeout lock requires the Turn it binds.',
+    );
+  }
+  return { turnId: checkpoint.identity.turnId };
+}
+
+/** Whether decision 4's lock binds the Turn `turnId`. */
+export function harnessCommandLocked(
+  checkpoint: HarnessCheckpointV1,
+  turnId: string,
+): boolean {
+  return checkpoint.commandLock?.turnId === turnId;
 }
 
 function parseParentHistory(
@@ -1414,6 +1461,7 @@ function parseHarnessCheckpointObject(
     approval: parseApproval(record['approval']),
     agentWait: parseAgentWait(record['agentWait']),
     commandWait: parseCommandWait(record['commandWait']),
+    commandLock: parseCommandLock(record['commandLock']),
     output: parseOutput(record['output']),
     followUp: parseFollowUp(record['followUp']),
   };
@@ -1518,26 +1566,17 @@ export function encodeHarnessCheckpointV1(
 ): Buffer {
   // Mixed-version compat (#13708): a pre-`agentWait` reader rejects
   // unknown root keys, and an absent key parses as null on both sides —
-  // so the key rides only the checkpoints that actually carry the group.
-  // `commandWait` (H4e-b3) follows the same rule, so a pre-b3b Harness
-  // never meets a checkpoint it cannot read until the phase is used.
-  if (checkpoint.agentWait === null && checkpoint.commandWait === null) {
-    const {
-      agentWait: _agentWait,
-      commandWait: _commandWait,
-      ...rest
-    } = checkpoint;
-    return Buffer.from(JSON.stringify(rest), 'utf8');
+  // so each optional group's key rides only the checkpoints that actually
+  // carry it. `commandWait` and `commandLock` (H4e-b3) follow the same
+  // rule, so a pre-b3b Harness never meets a checkpoint it cannot read
+  // until a member command is used.
+  const record: Partial<Record<keyof HarnessCheckpointV1, unknown>> = {
+    ...checkpoint,
+  };
+  for (const key of ['agentWait', 'commandWait', 'commandLock'] as const) {
+    if (record[key] === null) delete record[key];
   }
-  if (checkpoint.agentWait === null) {
-    const { agentWait: _omitted, ...rest } = checkpoint;
-    return Buffer.from(JSON.stringify(rest), 'utf8');
-  }
-  if (checkpoint.commandWait === null) {
-    const { commandWait: _omitted, ...rest } = checkpoint;
-    return Buffer.from(JSON.stringify(rest), 'utf8');
-  }
-  return Buffer.from(JSON.stringify(checkpoint), 'utf8');
+  return Buffer.from(JSON.stringify(record), 'utf8');
 }
 
 function formatHarnessIdentity(input: {
@@ -1643,6 +1682,7 @@ export function createInitialHarnessCheckpoint(input: {
     approval: null,
     agentWait: null,
     commandWait: null,
+    commandLock: null,
     output: {
       llmContentRef: null,
       physicalStatus: null,
@@ -1701,6 +1741,7 @@ export function createNextTurnReadyHarnessCheckpoint(input: {
     approval: null,
     agentWait: null,
     commandWait: null,
+    commandLock: carriedCommandLock(input.previous, input.turnId),
     output: {
       llmContentRef: null,
       physicalStatus: null,
@@ -1745,6 +1786,7 @@ export function createAwaitActionHarnessCheckpoint(input: {
     approval: input.approval,
     agentWait: null,
     commandWait: null,
+    commandLock: carriedCommandLock(input.previous),
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -1824,6 +1866,7 @@ export function createAwaitAgentHarnessCheckpoint(input: {
     approval: null,
     agentWait: input.agentWait,
     commandWait: null,
+    commandLock: carriedCommandLock(input.previous),
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -1904,6 +1947,7 @@ export function createAwaitCommandHarnessCheckpoint(input: {
     approval: null,
     agentWait: null,
     commandWait: input.commandWait,
+    commandLock: carriedCommandLock(input.previous),
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -1974,10 +2018,13 @@ export function createConsumedCommandWaitHarnessCheckpoint(input: {
     commandWait: {
       runs,
       holdsWorkspaceMount: input.previous.commandWait.holdsWorkspaceMount,
-      // The lock is sticky: once any fold of this wait stamped it, every
-      // later fold of the same group carries it.
-      timedOut: input.timedOut === true || input.previous.commandWait.timedOut,
     },
+    // A fold carrying the timeout stamps the Turn's lock; any other fold
+    // keeps the lock the Turn already holds.
+    commandLock:
+      input.timedOut === true
+        ? harnessCommandLockOf(input.previous)
+        : carriedCommandLock(input.previous),
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -2045,6 +2092,7 @@ export function createConsumedAgentWaitHarnessCheckpoint(input: {
     approval: null,
     agentWait: { runs },
     commandWait: null,
+    commandLock: carriedCommandLock(input.previous),
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -2089,6 +2137,7 @@ export function createAwaitRuntimeHarnessCheckpoint(input: {
     approval: null,
     agentWait: null,
     commandWait: null,
+    commandLock: carriedCommandLock(input.previous),
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -2166,6 +2215,7 @@ export function createResultsReadyHarnessCheckpoint(input: {
     approval: null,
     agentWait: null,
     commandWait: null,
+    commandLock: carriedCommandLock(input.previous),
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -2217,6 +2267,7 @@ export function createTurnSettledHarnessCheckpoint(input: {
     approval: null,
     agentWait: null,
     commandWait: null,
+    commandLock: carriedCommandLock(input.previous),
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -2305,6 +2356,7 @@ export function createConsumedRuntimeResultsHarnessCheckpoint(input: {
     approval: null,
     agentWait: null,
     commandWait: null,
+    commandLock: carriedCommandLock(input.previous),
     output: input.previous.output,
     followUp: input.previous.followUp,
   };
@@ -2365,6 +2417,7 @@ export function createModelOutputCommittedHarnessCheckpoint(input: {
     approval: null,
     agentWait: input.previous.agentWait,
     commandWait: input.previous.commandWait,
+    commandLock: carriedCommandLock(input.previous),
     output: input.previous.output,
     followUp: input.previous.followUp,
   };

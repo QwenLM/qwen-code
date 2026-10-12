@@ -22,6 +22,8 @@ import {
   HARNESS_DURABLE_WAIT_BOUNDARY,
   HARNESS_MODEL_START_PHASES,
   HARNESS_TURN_COMPLETE_BOUNDARY,
+  harnessCommandLocked,
+  harnessCommandLockOf,
   type HarnessActionSource,
   type HarnessAgentWaitRun,
   type HarnessCheckpointV1,
@@ -264,22 +266,23 @@ export interface ManagedHarnessHandle {
    * the continuation advances to `model_output_committed`. Returns null
    * when no durable wait is in progress; rejects when the open durable
    * wait is not the command wait; restating an already-folded call
-   * answers the same checkpoint. `options.timedOut` is decision 4's
-   * durable lock: a fold carrying it stamps the group, so a replacement
-   * owner of the same Turn refuses the next command at once.
+   * answers the same checkpoint. `options.timedOut` stamps decision 4's
+   * durable lock on the Turn, so a replacement owner of the same Turn
+   * refuses the next command at once.
    */
   resolveAwaitCommand(
     commandId: string,
     options?: { readonly timedOut?: boolean },
   ): Promise<HarnessCheckpointV1 | null>;
   /**
-   * Stamps decision 4's durable lock on the parked command wait's group
-   * at detection time — before its first tool result commits. A crash in
-   * the window between the result and its fold keeps the group's stamp
-   * either way, so a replacement owner refuses the next command; the
+   * Stamps decision 4's durable lock on the parked command wait's Turn at
+   * detection time — before the timed-out call settles or answers. The
+   * lock is the Turn's, never the wait group's: every later checkpoint of
+   * the Turn carries it, through later command batches and Runtime work
+   * alike, so a replacement owner refuses the Turn's next command; the
    * evidence of that refusal is structural, never a scan of journaled
    * text. No-op where the open durable wait is not a command wait, and
-   * never folds any run. Restating it on an already-stamped group is a
+   * never folds any run. Restating it on an already-locked Turn is a
    * silent replay.
    */
   markCommandWaitTimeout(): Promise<HarnessCheckpointV1 | null>;
@@ -920,7 +923,6 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         commandWait: {
           runs,
           holdsWorkspaceMount: options.holdsWorkspaceMount,
-          timedOut: false,
         },
       });
       await this.commitHarnessCheckpoint(
@@ -1149,18 +1151,15 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         return null;
       }
       if (
-        previous.commandWait === null ||
-        previous.commandWait.timedOut === true
+        previous.identity.turnId !== null &&
+        harnessCommandLocked(previous, previous.identity.turnId)
       ) {
         return previous;
       }
       const identity = this.nextCheckpointIdentity();
       const checkpoint: HarnessCheckpointV1 = {
         ...previous,
-        commandWait: {
-          ...previous.commandWait,
-          timedOut: true,
-        },
+        commandLock: harnessCommandLockOf(previous),
         identity: {
           ...previous.identity,
           checkpointId: identity.checkpointId,

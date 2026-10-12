@@ -18,6 +18,7 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
+import type { HarnessCommandWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
@@ -269,6 +270,55 @@ afterEach(async () => {
   await session?.close();
   await rm(rootDir, { recursive: true, force: true });
 });
+
+/**
+ * Parks `calls` on the command checkpoint the way the live batch does
+ * before its first call runs — the state an owner leaves behind when it
+ * dies mid-wait.
+ */
+async function parkCalls(
+  calls: ReadonlyArray<{ callId: string; toolName: string }>,
+): Promise<HarnessCommandWaitRun[]> {
+  const runs = calls.map(({ callId, toolName }) => ({
+    commandId: commandIdOf(callId),
+    functionCallId: callId,
+    toolName,
+    modelMessageId: `assistant-${calls[0]!.callId}`,
+    folded: false,
+  }));
+  const argsRef = await session.resources.publish(
+    'managed-command-args',
+    Buffer.from('{}', 'utf8'),
+  );
+  await createManagedHarnessHandle(session).commitAwaitCommand(
+    runs,
+    { turnId: 'prompt', promptId: 'prompt' },
+    {
+      holdsWorkspaceMount: false,
+      attempt: { attemptId: runs[0]!.modelMessageId, routeRef: argsRef },
+    },
+  );
+  return runs;
+}
+
+/** Every tool result the prompt journaled, serialized for assertions. */
+async function journaledResults(): Promise<string> {
+  return JSON.stringify(
+    (await session.sink.project())
+      .filter(
+        (entry) =>
+          entry.daemonPromptId === 'prompt' && entry.type === 'tool_result',
+      )
+      .flatMap((entry) => entry.message?.parts ?? []),
+  );
+}
+
+async function runnableCheckpoint() {
+  const authorization = await session.authority.harnessRunAuthorization();
+  if (authorization.status !== 'runnable')
+    throw new Error(`expected runnable, got ${authorization.status}`);
+  return authorization.checkpoint;
+}
 
 function texts(parts: Part[]): string {
   // Refusal parts are functionResponse-shaped, so assert on the whole
@@ -539,9 +589,8 @@ it('on resume folds a checkpointed call whose outbound never committed, as not s
 });
 
 // Decision 4's lock is durable: once one command of the Turn timed out
-// the fold carries the stamp, so a replacement owner of the same prompt
-// refuses the next command at once — and re-stamps the fresh group, so
-// the lock outlives every owner.
+// the Turn carries the stamp, so a replacement owner of the same prompt
+// refuses the next command at once — and so does every owner after it.
 it('keeps a timed-out Turn locked across owners', async () => {
   await seedFirstInput(
     teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
@@ -567,7 +616,7 @@ it('keeps a timed-out Turn locked across owners', async () => {
   const stamped = await session.authority.harnessRunAuthorization();
   if (stamped.status !== 'runnable')
     throw new Error(`expected runnable, got ${stamped.status}`);
-  expect(stamped.checkpoint.commandWait?.timedOut).toBe(true);
+  expect(stamped.checkpoint.commandLock).toEqual({ turnId: 'prompt' });
 
   // The replacement owner: the same prompt, a fresh Turn.
   const restarted = createTurn();
@@ -579,9 +628,9 @@ it('keeps a timed-out Turn locked across owners', async () => {
   const restamped = await session.authority.harnessRunAuthorization();
   if (restamped.status !== 'runnable')
     throw new Error(`expected runnable, got ${restamped.status}`);
-  expect(restamped.checkpoint.commandWait?.timedOut).toBe(true);
+  expect(restamped.checkpoint.commandLock).toEqual({ turnId: 'prompt' });
 
-  // And the owner after that, from the re-stamped group alone.
+  // And the owner after that, from the Turn's lock alone.
   const next = createTurn();
   const again = await execute(next, [
     call({ status: 'pending' }, 'call-final', 'task_list'),
@@ -618,7 +667,7 @@ it('does not arm the timeout lock from reply text shaped like the timeout eviden
   const checkpoint = await session.authority.harnessRunAuthorization();
   if (checkpoint.status !== 'runnable')
     throw new Error(`expected runnable, got ${checkpoint.status}`);
-  expect(checkpoint.checkpoint.commandWait?.timedOut).toBe(false);
+  expect(checkpoint.checkpoint.commandLock).toBeNull();
 
   // The next command mints an outbound like any fresh call of the Turn.
   const second = execute(createTurn(), [
@@ -670,8 +719,8 @@ it('does not arm the timeout lock from a not-sent journal answer', async () => {
   const checkpoint = await session.authority.harnessRunAuthorization();
   if (checkpoint.status !== 'runnable')
     throw new Error(`expected runnable, got ${checkpoint.status}`);
-  // The wait ended on the stamped group: the lock is what it should be.
-  expect(checkpoint.checkpoint.commandWait?.timedOut).toBe(true);
+  // The wait ended on the stamped Turn: the lock is what it should be.
+  expect(checkpoint.checkpoint.commandLock).toEqual({ turnId: 'prompt' });
 
   // A takeover of this Turn re-arms from the stamp, and refuses the next
   // call — even though the journaled text alone would never prove it.
@@ -681,6 +730,299 @@ it('does not arm the timeout lock from a not-sent journal answer', async () => {
   ]);
   expect(texts(parts)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
   expect(commands.command(commandIdOf('call-2'))).toBeUndefined();
+});
+
+// Decision 4 stamps the lock at detection, before the timed-out call
+// settles: an owner that dies in between leaves the lock on and the
+// entry still planned. The recovered wait answers that call by its
+// journal — cancelled, so the relay can no longer deliver it — and never
+// by the refusal meant for the Turn's later calls.
+it('on resume settles a timed-out planned call by its journal, never by the lock', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const [run] = await parkCalls([
+    { callId: 'call-cut', toolName: 'task_create' },
+  ]);
+  await commands.runCommand({
+    commandId: run!.commandId,
+    kind: 'board_write',
+    args: { subject: 'x', description: 'y' },
+    executionCallId: 'call-cut',
+    closing: false,
+  });
+  await createManagedHarnessHandle(session).markCommandWaitTimeout();
+  expect(commands.command(run!.commandId)?.run.delivery?.state).toBe('planned');
+
+  await createTurn().resumeCommandWaitRuns(
+    [run!],
+    false,
+    'model',
+    new AbortController().signal,
+  );
+  const answered = await journaledResults();
+  expect(answered).toContain('was not sent and nothing happened');
+  expect(answered).not.toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+  expect(commands.command(run!.commandId)?.run.delivery?.state).toBe(
+    'cancelled',
+  );
+  // The relay can no longer hand over a command whose wait has ended.
+  await expect(commands.handover(run!.commandId, PARENT)).rejects.toThrow(
+    /cannot be handed/,
+  );
+  const settled = await runnableCheckpoint();
+  expect(settled.continuation.phase).toBe('model_output_committed');
+  expect(settled.commandLock).toEqual({ turnId: 'prompt' });
+  // The lock still holds for the Turn's next call.
+  const next = await execute(createTurn(), [
+    call({ status: 'pending' }, 'call-next', 'task_list'),
+  ]);
+  expect(texts(next)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+  expect(commands.command(commandIdOf('call-next'))).toBeUndefined();
+});
+
+it('on resume settles a timed-out handed-over call as unknown, never by the lock', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const [run] = await parkCalls([
+    { callId: 'call-cut', toolName: 'task_create' },
+  ]);
+  await commands.runCommand({
+    commandId: run!.commandId,
+    kind: 'board_write',
+    args: { subject: 'x', description: 'y' },
+    executionCallId: 'call-cut',
+    closing: false,
+  });
+  await commands.handover(run!.commandId, PARENT);
+  await createManagedHarnessHandle(session).markCommandWaitTimeout();
+
+  await createTurn().resumeCommandWaitRuns(
+    [run!],
+    false,
+    'model',
+    new AbortController().signal,
+  );
+  const answered = await journaledResults();
+  expect(answered).toContain(
+    'reached the leader, but its reply did not arrive',
+  );
+  expect(answered).not.toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+  expect(commands.command(run!.commandId)?.run.delivery?.state).toBe('unknown');
+  expect((await runnableCheckpoint()).continuation.phase).toBe(
+    'model_output_committed',
+  );
+});
+
+// The owner died after the settle but before the call's own answer: the
+// journal already says unknown, and that evidence is the call's answer.
+it('on resume answers a timed-out call settled before its answer from the settled state', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const [run] = await parkCalls([
+    { callId: 'call-cut', toolName: 'task_create' },
+  ]);
+  await commands.runCommand({
+    commandId: run!.commandId,
+    kind: 'board_write',
+    args: { subject: 'x', description: 'y' },
+    executionCallId: 'call-cut',
+    closing: false,
+  });
+  await commands.handover(run!.commandId, PARENT);
+  await createManagedHarnessHandle(session).markCommandWaitTimeout();
+  await commands.settle(run!.commandId, 'unknown');
+
+  await createTurn().resumeCommandWaitRuns(
+    [run!],
+    false,
+    'model',
+    new AbortController().signal,
+  );
+  const answered = await journaledResults();
+  expect(answered).toContain("The command's outcome is unknown");
+  expect(answered).not.toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+});
+
+// In one batch the timed-out call answers by its journal while the call
+// the lock refused before it sent anything answers the fixed text, as
+// the live arm would have.
+it('on resume answers a locked batch call that never sent with the leader-unanswering text', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board twice',
+  );
+  const runs = await parkCalls([
+    { callId: 'call-cut', toolName: 'task_create' },
+    { callId: 'call-held', toolName: 'task_list' },
+  ]);
+  await commands.runCommand({
+    commandId: runs[0]!.commandId,
+    kind: 'board_write',
+    args: { subject: 'x', description: 'y' },
+    executionCallId: 'call-cut',
+    closing: false,
+  });
+  await commands.handover(runs[0]!.commandId, PARENT);
+  await createManagedHarnessHandle(session).markCommandWaitTimeout();
+
+  await createTurn().resumeCommandWaitRuns(
+    runs,
+    false,
+    'model',
+    new AbortController().signal,
+  );
+  const results = (await session.sink.project())
+    .filter(
+      (entry) =>
+        entry.daemonPromptId === 'prompt' && entry.type === 'tool_result',
+    )
+    .map((entry) => JSON.stringify(entry.message?.parts ?? []));
+  const cut = results.find((each) => each.includes('call-cut'));
+  const held = results.find((each) => each.includes('call-held'));
+  expect(cut).toContain('reached the leader, but its reply did not arrive');
+  expect(held).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+  expect(commands.command(runs[1]!.commandId)).toBeUndefined();
+});
+
+// A re-driven batch names the timed-out call again: its outbound exists,
+// so the lock does not speak for it — its journal does.
+it('answers a re-driven timed-out call by its journal under the lock', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const first = execute(createTurn(), [
+    call({ subject: 'x', description: 'y' }, 'call-live', 'task_create'),
+  ]);
+  const commandId = commandIdOf('call-live');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  await commands.handover(commandId, PARENT);
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.now() + 121_000);
+  await first;
+  vi.useRealTimers();
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
+
+  const again = await execute(createTurn(), [
+    call({ subject: 'x', description: 'y' }, 'call-live', 'task_create'),
+  ]);
+  expect(texts(again)).toContain("The command's outcome is unknown");
+  expect(texts(again)).not.toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+});
+
+// The lock is the Turn's, never the wait group's: the Turn's next batch
+// parks a fresh group before its refusal folds, and an owner that dies
+// in that window must not leave the Turn unlocked.
+it("keeps the Turn locked when the owner dies between the next batch's park and its refusal", async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const first = execute(createTurn(), [
+    call({ subject: 'x', description: 'y' }, 'call-live', 'task_create'),
+  ]);
+  const commandId = commandIdOf('call-live');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.now() + 121_000);
+  await first;
+  vi.useRealTimers();
+
+  const runs = await parkCalls([
+    { callId: 'call-parked', toolName: 'task_list' },
+  ]);
+  expect((await runnableCheckpoint()).commandLock).toEqual({
+    turnId: 'prompt',
+  });
+  await createTurn().resumeCommandWaitRuns(
+    runs,
+    false,
+    'model',
+    new AbortController().signal,
+  );
+  expect(await journaledResults()).toContain(
+    SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
+  );
+  expect(commands.command(runs[0]!.commandId)).toBeUndefined();
+  const next = await execute(createTurn(), [
+    call({ status: 'pending' }, 'call-next', 'task_list'),
+  ]);
+  expect(texts(next)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+  expect(commands.command(commandIdOf('call-next'))).toBeUndefined();
+});
+
+// Ordinary Runtime work of the same Turn clears the wait group; a
+// takeover after it must still find the Turn locked.
+it('keeps the Turn locked across Runtime work and a takeover after it', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const first = execute(createTurn(), [
+    call({ subject: 'x', description: 'y' }, 'call-live', 'task_create'),
+  ]);
+  const commandId = commandIdOf('call-live');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.now() + 121_000);
+  await first;
+  vi.useRealTimers();
+
+  const routeRef = await session.resources.publish(
+    'managed-route',
+    Buffer.from('{"model":"model"}', 'utf8'),
+  );
+  await createManagedHarnessHandle(session).commitAwaitRuntime({
+    functionCallId: 'call-read',
+    toolName: 'read_file',
+    executionCallId: 'ex-read',
+    invocationBindingId: 'bind-read',
+    capabilityVersion: 'cap-1',
+    policyVersion: 'pol-1',
+    mediaVersion: null,
+    modelMessageId: 'assistant-read',
+    partIndex: 0,
+    ordinal: 0,
+    inputDigest: createHash('sha256').update('{}').digest('hex'),
+    progressCursor: null,
+    attemptId: 'assistant-read',
+    routeRef,
+  });
+  expect((await runnableCheckpoint()).commandWait).toBeNull();
+  await session.replaceActivation();
+  const successor = createManagedHarnessHandle(session);
+  await successor.resolveAwaitRuntime('ex-read', routeRef);
+  await successor.consumeRuntimeResults();
+  expect((await runnableCheckpoint()).commandLock).toEqual({
+    turnId: 'prompt',
+  });
+
+  const next = await execute(createTurn(), [
+    call({ status: 'pending' }, 'call-next', 'task_list'),
+  ]);
+  expect(texts(next)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+  expect(commands.command(commandIdOf('call-next'))).toBeUndefined();
 });
 
 // A budget refusal is a normal local answer, so it owes the parked wait
