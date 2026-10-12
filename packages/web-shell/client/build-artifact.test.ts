@@ -438,6 +438,18 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('Talk in this browser');
   });
 
+  it('keeps dictation strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]voice\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('voice.error.noModel');
+    expect(interactive).toContain('Dismiss voice message');
+    expect(interactive).toContain('当前工作区未配置语音模型。');
+  });
+
   it('carries no collaboration strings and looks none up', () => {
     // Same arrangement as Live Voice: the collaboration dictionary is stubbed
     // in this build, which is only safe while no transcript surface asks for
