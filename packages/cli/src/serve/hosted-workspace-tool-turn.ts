@@ -335,26 +335,22 @@ function teamAdmissionsEnabled(): boolean {
 }
 
 /**
- * Walk one `args` value once: the classes the launch's later stages
- * answer late — a number below the normal-double floor the digest
- * substrate refuses (`JSON number outside the canonical range`), and
- * nesting past the sandbox's own ARGS_MAX_DEPTH. The model fixes the
- * value and retries; nothing commits and no slot or quota is spent.
+ * Walk one `args` value for nesting the launch could not commit. The
+ * value sits one level under the tool input the protocol digest walks, so
+ * the walk starts there and refuses exactly where that digest would throw
+ * (64 levels under the input; the sandbox's own ARGS_MAX_DEPTH is the
+ * same bound, counted from `args`, so it is never the tighter one). The
+ * model fixes the value and retries; nothing commits and no slot or quota
+ * is spent.
  */
 function workflowArgsRefusal(value: unknown): string | undefined {
   const stack: Array<{ node: unknown; depth: number }> = [
-    { node: value, depth: 0 },
+    { node: value, depth: 1 },
   ];
   while (stack.length > 0) {
     const { node, depth } = stack.pop()!;
     if (depth > ARGS_MAX_DEPTH) {
-      return `Hosted workflow args nest deeper than the sandbox bound of ${ARGS_MAX_DEPTH} (depth_limit).`;
-    }
-    if (typeof node === 'number') {
-      if (node !== 0 && Math.abs(node) < 2.2250738585072014e-308) {
-        return 'Hosted workflow args carry a number outside the canonical JSON range.';
-      }
-      continue;
+      return `Hosted workflow args nest more than ${ARGS_MAX_DEPTH - 1} levels deep, past what the launch can commit (depth_limit).`;
     }
     if (node === null || typeof node !== 'object') {
       continue;
@@ -1181,6 +1177,26 @@ export function fitChildResultInline(
     if (fits(folded)) return folded;
   }
   throw new Error('Child agent result cannot be recorded inline.');
+}
+
+interface HostedEncodedToolInput {
+  payloadJson: string;
+  inputBytes: Buffer;
+  digest: string;
+}
+
+/** The encoding of a refused call, which nothing downstream reads. */
+const UNENCODED_TOOL_INPUT: HostedEncodedToolInput = Object.freeze({
+  payloadJson: '',
+  inputBytes: Buffer.alloc(0),
+  digest: 'sha256:',
+});
+
+class HostedToolInputInlineLimitError extends Error {
+  constructor() {
+    super('Hosted tool input exceeds the inline Session Store limit.');
+    this.name = 'HostedToolInputInlineLimitError';
+  }
 }
 
 interface HostedPreparedRequest {
@@ -2139,8 +2155,10 @@ export class HostedWorkspaceToolTurn {
             request.call.name,
           ) ||
           // A call refused at the canonical-digest ceiling (#13803 D1) has
-          // no argument digest a restore could re-verify.
-          request.argsDigest === undefined,
+          // no argument digest a restore could re-verify, and one refused
+          // past the inline limit has no encoding to publish.
+          request.argsDigest === undefined ||
+          request.inputBytes.length === 0,
       )
     )
       return undefined;
@@ -2674,8 +2692,7 @@ export class HostedWorkspaceToolTurn {
             // rather than wedging the child's first Turn on its compile:
             // a failed child Session is the answer for a run that fails,
             // never for one that could never start. The args value walks
-            // first: the digest substrate refuses a subnormal number and
-            // the sandbox refuses nesting past its own depth bound — the
+            // first: nesting the launch cannot commit refuses here — the
             // model fixes the value and retries at no quota or slot spent.
             const argsRefusal = workflowArgsRefusal(args['args']);
             if (argsRefusal !== undefined) {
@@ -2802,11 +2819,24 @@ export class HostedWorkspaceToolTurn {
           }
         }
         // The inline Session Store limit keeps rejecting exactly as main
-        // does — only the canonical-digest ceiling becomes this call's own
-        // refusal, never a wedge for the whole Turn (review D1/R2-12).
-        const encoded = this.encodeToolInput(
-          mcpInput ?? { toolName: call.name, input },
-        );
+        // does for the ordinary tools. A call that already carries its own
+        // refusal never reads its encoding, and a workflow launch is this
+        // profile's own surface: for either the limit becomes the call's
+        // refusal, never a failure of the whole Turn (review D1/R2-12).
+        let encoded: HostedEncodedToolInput;
+        try {
+          encoded = this.encodeToolInput(
+            mcpInput ?? { toolName: call.name, input },
+          );
+        } catch (cause) {
+          if (
+            !(cause instanceof HostedToolInputInlineLimitError) ||
+            (validationError === undefined && call.name !== 'workflow')
+          )
+            throw cause;
+          validationError ??= `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`;
+          encoded = UNENCODED_TOOL_INPUT;
+        }
         // H3: the publication evidence chain pins the canonical input
         // digest for Monitor calls exactly like Shell calls.
         let argsDigest: string | undefined;
@@ -2819,7 +2849,8 @@ export class HostedWorkspaceToolTurn {
           argsDigest = `sha256:${managedToolDigest(input)}`;
         } catch (cause) {
           if (!(cause instanceof ManagedToolProtocolError)) throw cause;
-          validationError = `Hosted tool input cannot commit as protocol evidence: ${cause.message}`;
+          // An arm's own, more specific refusal of the same input stands.
+          validationError ??= `Hosted tool input cannot commit as protocol evidence: ${cause.message}`;
         }
         return {
           call,
@@ -3942,7 +3973,10 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
-  private encodeToolInput(payload: { toolName: string; input: unknown }) {
+  private encodeToolInput(payload: {
+    toolName: string;
+    input: unknown;
+  }): HostedEncodedToolInput {
     const payloadJson = JSON.stringify(payload);
     const inputBytes = Buffer.from(
       JSON.stringify({
@@ -3956,9 +3990,7 @@ export class HostedWorkspaceToolTurn {
       inputBytes.length >
       HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
     )
-      throw new Error(
-        'Hosted tool input exceeds the inline Session Store limit.',
-      );
+      throw new HostedToolInputInlineLimitError();
     return {
       payloadJson,
       inputBytes,

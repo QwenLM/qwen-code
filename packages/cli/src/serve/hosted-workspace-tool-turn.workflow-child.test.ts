@@ -682,38 +682,80 @@ it('answers an over-size envelope with the byte_limit refusal, not recovery', as
   );
 });
 
-it('refuses args outside the canonical JSON range before any record commits', async () => {
-  // args.v = 5e-324 is the exact value the real stack looped on: admitted
-  // there, it wedged the relay mid-creation (R1-7); the same single walk
-  // refuses it here, a subnormal nested anywhere in the tree alike.
-  for (const args of [{ v: 5e-324 }, { v: { nested: [1e-320] } }]) {
-    const responses = await executeWorkflow(
-      createTurn(),
-      call({ script: SCRIPT, args }),
-    );
-    expect(JSON.stringify(responses)).toContain(
-      'Hosted workflow args carry a number outside the canonical JSON range.',
-    );
-    expect(
-      session.authority.extensionRecordsInDomain('child_run'),
-    ).toHaveLength(0);
-  }
+// #13858 R1-3/R4-6: the Java digest substrate renders every finite double
+// the way JSON.stringify does — subnormals included (5e-324 is the value
+// the real stack once looped on, R1-7) — so the launch admits them.
+it('admits subnormal args, which both digest substrates render alike', async () => {
+  const responses = await executeWorkflow(
+    createTurn(),
+    call({ script: SCRIPT, args: { v: 5e-324, nested: [1e-320, 1.5e-308] } }),
+  );
+  expect(JSON.stringify(responses)).toContain('Workflow child started');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    1,
+  );
+});
+
+// #13858 R3-6/R2-11: args sit one level under the tool input the protocol
+// digest walks, so the walk refuses exactly where that digest would throw:
+// 63 levels under args commit, 64 refuse with the model-correctable text.
+it('refuses args nested past what the launch can commit, at the digest bound', async () => {
+  const deep = (levels: number): unknown =>
+    levels === 0 ? 1 : [deep(levels - 1)];
+  const admitted = await executeWorkflow(
+    createTurn(),
+    call({ script: SCRIPT, args: deep(63) }),
+  );
+  expect(JSON.stringify(admitted)).toContain('Workflow child started');
+  const refused = await executeWorkflow(
+    createTurn(),
+    call({ script: SCRIPT, args: { v: deep(63) } }),
+  );
+  expect(JSON.stringify(refused)).toContain(
+    'Hosted workflow args nest more than 63 levels deep, past what the launch can commit (depth_limit).',
+  );
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    1,
+  );
 });
 
 it('answers a protocol-ceiling call with a per-call refusal, not a wedged Turn (D1)', async () => {
-  // Sixty-three-deep args are under the admission's own depth bound but
-  // past the protocol's MAX_JSON_DEPTH after its two wrapper levels: the
-  // encode/digest used to throw out of prepareRequests and take the whole
-  // parent Turn down (hosted_turn_failed, R2-12); now it is the call's
-  // own refusal and nothing is committed.
-  const deep = <T>(depth: number, leaf: T): unknown[] =>
-    depth <= 1 ? [leaf] : [deep(depth - 1, leaf)];
+  // A non-finite number (a model's 1e999) passes the admission walk but
+  // has no canonical form: the digest used to throw out of
+  // prepareRequests and take the whole parent Turn down
+  // (hosted_turn_failed, R2-12); now it is the call's own refusal and
+  // nothing is committed.
   const responses = await executeWorkflow(
     createTurn(),
-    call({ script: SCRIPT, args: { v: deep(63, 1) } }),
+    call({ script: SCRIPT, args: { v: Number.POSITIVE_INFINITY } }),
   );
   expect(JSON.stringify(responses)).toContain(
-    'Hosted tool input cannot commit as protocol evidence: Managed Tool JSON exceeds depth limit.',
+    'Hosted tool input cannot commit as protocol evidence',
+  );
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+// #13858 R2-12: a script under the 32 KiB bound whose escapes double past
+// the inline limit once encoded, and a script over the bound alike, answer
+// a model-correctable byte_limit refusal instead of failing the Turn.
+it('refuses an escape-dense or oversize script per call once its encoding passes the inline limit', async () => {
+  // Every `\"` pair is two source bytes that each cost four once the input
+  // is JSON-encoded twice for the Session Store.
+  const dense = 'return "' + '\\"'.repeat(9000) + '";';
+  expect(Buffer.byteLength(dense, 'utf8')).toBeLessThan(32 * 1024);
+  const responses = await executeWorkflow(
+    createTurn(),
+    call({ script: dense }),
+  );
+  expect(JSON.stringify(responses)).toContain(
+    'exceed the 65536-byte inline Session Store limit once encoded (byte_limit)',
+  );
+  const oversize = `return ${JSON.stringify('"'.repeat(40 * 1024))};`;
+  const over = await executeWorkflow(createTurn(), call({ script: oversize }));
+  expect(JSON.stringify(over)).toContain(
+    `Hosted workflow script exceeds ${32 * 1024} bytes (byte_limit).`,
   );
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
