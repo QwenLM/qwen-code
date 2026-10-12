@@ -985,6 +985,8 @@ let dumpPort: number | undefined;
 // the post-finally throws, so an interrupt can never put a clean pass
 // on stdout for a run the operator explicitly stopped.
 let resultJson: string | undefined;
+let approvalResultJson: string | undefined;
+let g3SummaryJson: string | undefined;
 // The freeze arm's wake record reads as a pass line too, so it defers the
 // same way and prints after the main result, as in the base's ordering.
 let fencedWriterJson: string | undefined;
@@ -2126,20 +2128,18 @@ try {
         runtimeAfter,
         cleanupConfirmed,
       });
-      console.log(
-        JSON.stringify(
-          {
-            mode: verificationMode,
-            originalAction: originalApprovalId,
-            originalBatch: originalApprovalPlan!.batchId,
-            originalBinding: originalApprovalPlan!.runtime.bindingId,
-            executions: executions.length,
-            terminal: expectedTerminal,
-            cleanupConfirmed,
-          },
-          null,
-          2,
-        ),
+      approvalResultJson = JSON.stringify(
+        {
+          mode: verificationMode,
+          originalAction: originalApprovalId,
+          originalBatch: originalApprovalPlan!.batchId,
+          originalBinding: originalApprovalPlan!.runtime.bindingId,
+          executions: executions.length,
+          terminal: expectedTerminal,
+          cleanupConfirmed,
+        },
+        null,
+        2,
       );
     } else if (inflightFailover) {
       const recoveredTurn = await waitForTerminal(
@@ -2790,7 +2790,7 @@ try {
         oldHarnessHomeDeleted: !existsSync(harnessHome),
       };
       saveEvidence('summary.json', summary);
-      console.log(JSON.stringify(summary, null, 2));
+      g3SummaryJson = JSON.stringify(summary, null, 2);
     }
   } else {
     const idempotencyKey = `create-${Date.now()}`;
@@ -3041,6 +3041,8 @@ if (failure) throw failure;
 // payload stays a variable until both guards have run, so the decision
 // precedes the record.
 if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
+if (approvalResultJson !== undefined) console.log(approvalResultJson);
+if (g3SummaryJson !== undefined) console.log(g3SummaryJson);
 if (resultJson !== undefined) {
   console.log(resultJson);
   if (fencedWriterJson !== undefined) console.log(fencedWriterJson);
