@@ -374,3 +374,24 @@ it('labels a permission title and shows an unresolved permission as pending', as
   expect(container.textContent).toContain('pending');
   expect(container.textContent).not.toContain('unrecorded');
 });
+
+it('displays and copies a request execution ID', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  const container = await render({
+    kind: 'request',
+    key: 'req:execution',
+    turnIndex: 1,
+    depth: 0,
+    status: 'ok',
+    timing: { durationMs: 10 },
+    executionId: 'execution-1',
+  });
+  expect(container.textContent).toContain('Execution ID');
+  expect(container.textContent).toContain('execution-1');
+  await click(container, 'Copy displayed content');
+  expect(writeText.mock.lastCall?.[0]).toContain('Execution ID: execution-1');
+});

@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -14,13 +13,12 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.springframework.stereotype.Component;
 
 @Component
-public class SessionEventHub implements CommittedEventPublisher {
+public class SessionEventHub {
     // Events kept per Session; a subscriber further behind reads the store.
     static final int CAPACITY = 512;
     private final Map<SessionKey, SessionBuffer> buffers =
             new ConcurrentHashMap<>();
 
-    @Override
     public void publish(List<EventRecord> events) {
         if (events.isEmpty()) {
             return;

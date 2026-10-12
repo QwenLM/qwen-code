@@ -116,6 +116,48 @@ it('preserves payload identity separately from the explicitly selected v3 input 
   });
 });
 
+it('reserves a Tool v3 original under the logical turn id and the mapped Runtime Session', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, body) => {
+    requests.push(body);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        runtimeBindingId: 'binding',
+        bindingGeneration: '7',
+        status: { state: 'prepared' },
+      },
+    };
+  });
+  await broker.prepareV3(
+    'runtime-call',
+    `sha256:${'b'.repeat(64)}`,
+    `sha256:${'a'.repeat(64)}`,
+    'publication',
+    'arun_x:input',
+  );
+  expect(requests).toHaveLength(1);
+  // The publication store compares the persisted execution's turn id
+  // against the reserve reference's promptId (`Broker execution
+  // identity conflicts` when they split), while the Runtime identity
+  // stays the mapped one — one pair, two axes.
+  expect(requests[0]).toMatchObject({
+    idempotencyKey: 'turn:runtime-call',
+    turnId: 'arun_x:input',
+    toolCallId: 'runtime-call',
+    requestDigest: `sha256:${'a'.repeat(64)}`,
+    toolProtocol: 'v3',
+    publicationId: 'publication',
+    reference: {
+      sessionId: 'turn',
+      promptId: 'arun_x:input',
+      callId: 'runtime-call',
+      argsDigest: `sha256:${'b'.repeat(64)}`,
+    },
+  });
+});
+
 it.each([undefined, 'b'.repeat(64)])(
   'keeps the original Runtime owner separate from the prompt and input digest (%s)',
   async (inputDigest) => {

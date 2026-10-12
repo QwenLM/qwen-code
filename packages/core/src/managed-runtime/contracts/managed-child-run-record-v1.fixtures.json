@@ -92,6 +92,49 @@
       "terminalReceiptRef": null,
       "workspaceMode": "shared",
       "workingDirectory": "."
+    },
+    "workflow": {
+      "childRunId": "run-1",
+      "childSessionId": null,
+      "completion": "sent",
+      "depth": 1,
+      "inputRef": {
+        "resourceId": "input-1",
+        "kind": "managed-input",
+        "schemaVersion": 1,
+        "byteLength": 2,
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "kind": "workflow",
+      "ownerScopeId": "scope-1",
+      "predecessorChildRunId": null,
+      "resultRef": null,
+      "resultVersion": 1,
+      "rootSessionId": "session-1",
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": {
+          "definitionId": "workflow-1",
+          "definitionRevision": 3,
+          "definitionDigest": "9999999999999999999999999999999999999999999999999999999999999999"
+        },
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "intent",
+        "runtime": null,
+        "delivery": {
+          "target": "session",
+          "state": "planned"
+        }
+      },
+      "stopReason": null,
+      "stopRequested": false,
+      "terminalReceiptRef": null,
+      "workspaceMode": "shared",
+      "workingDirectory": "."
     }
   },
   "cases": [
@@ -113,10 +156,10 @@
       "id": "kind-unknown",
       "domain": "child_run",
       "patch": {
-        "kind": "workflow"
+        "kind": "unregistered"
       },
       "valid": false,
-      "error": "must be one of shell, child_agent in schema version 1",
+      "error": "must be one of shell, child_agent, workflow in schema version 1",
       "start": false
     },
     {
@@ -1167,6 +1210,47 @@
     {
       "template": "child_agent",
       "domain": "child_run",
+      "id": "agent-creation-failed-named",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "creation_failed",
+        "run": {
+          "state": "failed",
+          "execution": "not_started_proven",
+          "dispatchId": "dispatch-1",
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-close-unstarted-named",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "stop_requested",
+        "stopRequested": true,
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "dispatchId": "dispatch-1",
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
       "id": "agent-child-failed",
       "patch": {
         "childSessionId": "session-2",
@@ -1283,13 +1367,13 @@
     {
       "template": "child_agent",
       "domain": "child_run",
-      "id": "agent-kind-workflow",
+      "id": "agent-kind-unknown",
       "patch": {
-        "kind": "workflow"
+        "kind": "unregistered"
       },
       "valid": false,
       "start": false,
-      "error": "must be one of shell, child_agent in schema version 1"
+      "error": "must be one of shell, child_agent, workflow in schema version 1"
     },
     {
       "template": "child_agent",
@@ -2236,6 +2320,236 @@
       "valid": false,
       "start": false,
       "error": "cannot hand over a result before the run ends"
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-start",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-tool-completion",
+      "patch": { "completion": "tool" },
+      "valid": true,
+      "start": true
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-dispatched",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-attached",
+      "patch": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-settled",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" },
+          "delivery": { "target": "session", "state": "accepting" }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-creation-failed",
+      "patch": {
+        "stopReason": "creation_failed",
+        "run": {
+          "state": "failed",
+          "execution": "not_started_proven",
+          "dispatchId": "dispatch-1",
+          "delivery": { "target": "session", "state": "cancelled" }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-child-failed",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "child_failed",
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" },
+          "delivery": { "target": "session", "state": "cancelled" }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-quota-exceeded",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "quota_exceeded",
+        "run": {
+          "state": "failed",
+          "reason": "budget_exhausted",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" },
+          "delivery": { "target": "session", "state": "cancelled" }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-cancelled-after-execution",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopRequested": true,
+        "stopReason": "stop_requested",
+        "run": {
+          "state": "cancelled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" },
+          "delivery": { "target": "session", "state": "cancelled" }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-start-without-definition",
+      "patch": { "run": { "definition": null } },
+      "valid": false,
+      "start": false,
+      "error": "must pin its workflow definition from launch"
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-dispatched-without-definition",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" },
+          "definition": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must pin its workflow definition from launch"
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-cancelled-without-definition",
+      "patch": {
+        "stopRequested": true,
+        "stopReason": "stop_requested",
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "definition": null,
+          "delivery": { "target": "session", "state": "cancelled" }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "must pin its workflow definition from launch"
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-extra-key",
+      "patch": { "extra": "x" },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-no-delivery",
+      "patch": { "run": { "delivery": null } },
+      "valid": false,
+      "start": false,
+      "error": "delivery must target the parent session"
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-depth-nine",
+      "patch": { "depth": 9 },
+      "valid": false,
+      "start": false,
+      "error": "depth must be an integer from 1 to 8"
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-start-without-definition",
+      "patch": { "run": { "definition": null } },
+      "valid": true,
+      "start": true
     }
   ],
   "successors": [
@@ -3820,6 +4134,244 @@
         "stopRequested": true
       },
       "valid": true
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-admit-dispatch",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-dispatch-attach",
+      "before": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-settle-result",
+      "before": {
+        "childSessionId": "session-2",
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" },
+          "delivery": { "target": "session", "state": "accepting" }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-delivery-accept",
+      "before": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" },
+          "delivery": { "target": "session", "state": "accepting" }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" },
+          "delivery": { "target": "session", "state": "accepted" }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-delivery-consume",
+      "before": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" },
+          "delivery": { "target": "session", "state": "accepted" }
+        }
+      },
+      "after": {
+        "childSessionId": "session-2",
+        "stopReason": "completed",
+        "resultRef": {
+          "resourceId": "result-1",
+          "kind": "managed-child-result",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "terminalReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "dispatchId": "dispatch-1",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" },
+          "delivery": { "target": "session", "state": "consumed" }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-cancel-before-dispatch",
+      "before": {},
+      "after": {
+        "stopRequested": true,
+        "stopReason": "stop_requested",
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "delivery": { "target": "session", "state": "cancelled" }
+        }
+      },
+      "valid": true
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-kind-changed",
+      "before": {},
+      "after": { "kind": "child_agent" },
+      "valid": false
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-definition-changed",
+      "before": {},
+      "after": {
+        "run": {
+          "definition": {
+            "definitionId": "workflow-1",
+            "definitionRevision": 4,
+            "definitionDigest": "8888888888888888888888888888888888888888888888888888888888888888"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
+      "template": "workflow",
+      "domain": "child_run",
+      "id": "workflow-identity-changed",
+      "before": {},
+      "after": { "childRunId": "run-2" },
+      "valid": false
     }
   ],
   "childAgentKeys": [

@@ -18,6 +18,7 @@ import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js'
 import {
   readManagedSessionTitleInfoSync,
   readManagedSessionSourceSync,
+  readSessionTitleInfoFromFileSync,
 } from '../utils/sessionStorageUtils.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
@@ -134,6 +135,51 @@ function renameCommand(commandId: string) {
 }
 
 describe('managed session metadata', () => {
+  it('fences delayed hosted titles across cold reopen and recorder renames', async () => {
+    const harness = await createHarness();
+    const write = (
+      authority: LocalManagedSessionAuthority,
+      revision: string,
+      title: string,
+    ) =>
+      authority.commitDomainRecord(
+        renameCommand(`hosted-title:${revision}`),
+        {
+          domain: 'session_metadata',
+          content: { title, managedRenameRevision: revision },
+        },
+        { class: 'trusted_entry' },
+      );
+    await withAuthority(harness, async (authority) => {
+      await write(authority, '2', 'B');
+      const sequence = authority.committedSequence;
+      await expect(write(authority, '1', 'A')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      expect(authority.committedSequence).toBe(sequence);
+      await write(authority, '2', 'B');
+      expect(authority.committedSequence).toBe(sequence);
+      await authority.commitDomainRecord(
+        renameCommand('recorder-title'),
+        { domain: 'session_metadata', content: { title: 'Manual' } },
+        { class: 'trusted_entry' },
+      );
+    });
+    await withAuthority(harness, async (authority) => {
+      const sequence = authority.committedSequence;
+      await expect(write(authority, '1', 'A')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      expect(authority.committedSequence).toBe(sequence);
+      await write(authority, '3', 'A');
+    });
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      )?.title,
+    ).toBe('A');
+  });
   it('projects a renamed title into the synchronous directory read', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
@@ -481,6 +527,41 @@ describe('managed session metadata', () => {
     });
   });
 
+  it('keeps the authority-composed envelope over colliding content keys', async () => {
+    const harness = await createHarness();
+    let recordRef!: ManagedSessionDurableRef;
+    await withAuthority(harness, async (authority) => {
+      recordRef = (
+        await authority.commitDomainRecord(
+          renameCommand('cmd-rename-collide'),
+          {
+            domain: 'session_metadata',
+            content: {
+              title: 'x',
+              revision: 999,
+              previousRecordRef: 'bogus',
+              operationId: 'caller-chosen',
+            },
+          },
+          { class: 'trusted_entry' },
+        )
+      ).recordRef;
+    });
+
+    const body = JSON.parse(
+      (await harness.store.read(recordRef)).toString('utf8'),
+    ) as {
+      operationId: string;
+      revision: number;
+      previousRecordRef: unknown;
+      title: string;
+    };
+    expect(body.operationId).toBe('cmd-rename-collide');
+    expect(body.revision).toBe(1);
+    expect(body.previousRecordRef).toBeNull();
+    expect(body.title).toBe('x');
+  });
+
   it.each([
     ['session_metadata', 'missing'],
     ['session_metadata', 'incomplete'],
@@ -501,6 +582,14 @@ describe('managed session metadata', () => {
                   ? { title: value, titleSource: 'manual' }
                   : {
                       record: {
+                        uuid: `rec-source-${value}`,
+                        parentUuid: null,
+                        sessionId,
+                        timestamp: '2026-09-01T10:00:00.000Z',
+                        type: 'system',
+                        subtype: 'session_source',
+                        cwd: '/workspace',
+                        version: 'test',
                         systemPayload: { sourceType: 'fork', sourceId: value },
                       },
                     },
@@ -682,13 +771,51 @@ describe('managed session metadata', () => {
     ).toBeUndefined();
   });
 
+  it('defers to the legacy reader when marker text is glued onto a legacy line', async () => {
+    const harness = await createHarness();
+    // A torn append can glue unparseable marker-looking text onto a valid
+    // legacy line; quoted marker text is not a Managed header record.
+    const customTitle = JSON.stringify({
+      uuid: 'legacy-1',
+      parentUuid: null,
+      sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'system',
+      subtype: 'custom_title',
+      customTitle: 'Legacy title',
+      titleSource: 'manual',
+    });
+    await fs.writeFile(
+      harness.transcriptPath,
+      `${customTitle} and the raw bytes "subtype":"managed_session_header_v1" landed here\n`,
+      'utf8',
+    );
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toBeUndefined();
+    // The callers compose managed ?? legacy, so the custom title survives.
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ) ?? readSessionTitleInfoFromFileSync(harness.transcriptPath),
+    ).toEqual({ title: 'Legacy title', source: 'manual' });
+  });
+
   it('refuses a registered domain that is not enabled', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
       await expect(
         authority.commitDomainRecord(
-          renameCommand('cmd-schedule'),
-          { domain: 'schedule', content: {} },
+          renameCommand('cmd-team-message'),
+          // team_message is in the domain vocabulary but not in the
+          // enabled list. child_run is per-kind exempt here; every
+          // H-family body hits the extension funnel first instead.
+          { domain: 'team_message', content: {} },
           { class: 'trusted_entry' },
         ),
       ).rejects.toThrow(/registered but not enabled for submission/);
@@ -963,6 +1090,14 @@ describe('maintenance on a sealed managed session', () => {
         domain: 'session_source',
         content: {
           record: {
+            uuid: 'rec-source-channel',
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-09-01T10:00:00.000Z',
+            type: 'system',
+            subtype: 'session_source',
+            cwd: '/workspace',
+            version: 'test',
             systemPayload: { sourceType: 'channel', sourceId: 'managed' },
           },
         },

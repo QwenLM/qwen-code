@@ -169,6 +169,7 @@ const DOMAINS = [
 ];
 const RESOURCE_KINDS = new Set([
   'managed-definition',
+  'managed-agent-instructions',
   'managed-root',
   'managed-input',
   'managed-admission',
@@ -995,6 +996,12 @@ export async function verifyRecoverySession(
         'checkpoint closure owner conflicts',
       );
       await enqueueRefs(state, io);
+    } else if (ref.kind === 'managed-agent-instructions') {
+      requireValue(
+        bytes.byteLength <= 64 * 1024,
+        'agent instructions exceed 64 KiB',
+      );
+      new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     } else if (ref.kind === 'managed-api-history') {
       const history = json(bytes);
       requireValue(Array.isArray(history), 'invalid API history');
