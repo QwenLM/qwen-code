@@ -456,7 +456,7 @@ selected broker.
 | Duplicate delivery of one envelope                | Consumer dedup `(tenantId, sessionId, stream, sequence)` against the SQL watermark; the duplicate is a no-op. Activation enqueue stays idempotent. The `stream` is the delivered lane (`public_event` from `last_sequence`, `authoritative_journal` from the journal-commit sequence). |
 | Reordered delivery within one Session             | The per-stream sequence watermark + gap detection; consumer re-reads Snapshot-plus-tail from SQL before applying anything newer. A later record never lands ahead of an unseen earlier one from MQ alone.                                                                              |
 | Broker redelivery after processed-but-ACK-lost    | Same as duplicate delivery.                                                                                                                                                                                                                                                            |
-| Consumer crash before processing                  | Broker redelivers (per selected broker's at-least-once path — must be verified in §5.1 before MQ2); the Session is woken late but from SQL truth.                                                                                                                                      |
+| Consumer crash before processing                  | Broker redelivers (per selected broker's at-least-once path — verified at doc level 2026-10-12, §5.1; re-checked against staging at MQ2-start); the Session is woken late but from SQL truth.                                                                                          |
 | Consumer crash after a local effect, before ACK   | Duplicate path on restart; every local effect is idempotent on committed identities.                                                                                                                                                                                                   |
 | Producer crash between SQL commit and publish     | Message never sent; the committed SQL delivery line is still complete. Recovery comes from SQL-side scans (overflow/re-read discipline), as today for `SessionEventHub`. MQ is not recreated as an outbox of truth.                                                                    |
 | Broker short outage                               | Producer retries with bounded buffer; local post-commit SSE unaffected; wake latency degrades only.                                                                                                                                                                                    |
@@ -472,9 +472,10 @@ selected broker.
 - **Do not let the broker become the browser cursor.** SSE replay cursors and
   the persisted replay floor stay SQL-based (V14 `managed_event_replay`
   pattern).
-- **LiteTopic semantics risk.** §5.1 lists UNVERIFIED delivery/ordering
-  items; if verification fails, MQ2 falls back to Redis Streams under the same
-  seam rather than relaxing the invariants.
+- **LiteTopic semantics risk.** §5.1's doc-level verification resolved the
+  delivery/ordering items on 2026-10-12; the residual exposure is the
+  MQ2-start staging re-check — if that fails, MQ2 falls back to Redis Streams
+  under the same seam rather than relaxing the invariants.
 - **Wake-intent carrier.** The canonical design names `WakeIntent`; the repo
   today carries the committed `wake.requested` record kind, and #12827's open
   question 3 (Session inbox vs new record) stays unsettled until #13300 lands.
