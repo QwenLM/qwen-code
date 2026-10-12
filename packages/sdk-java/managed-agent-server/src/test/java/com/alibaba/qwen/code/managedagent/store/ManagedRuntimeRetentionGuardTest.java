@@ -25,6 +25,8 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Map;
 import java.util.UUID;
 import javax.sql.DataSource;
@@ -253,6 +255,100 @@ class ManagedRuntimeRetentionGuardTest {
             connection.rollback();
             assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isTrue();
         }
+    }
+
+    @Test
+    void settledBackgroundVolumeWithOtherSessionNoiseDoesNotTimeoutTheGuard() throws Exception {
+        backgroundEvidence();
+        jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'succeeded', settled_at = 2");
+        var executions = new JdbcToolExecutionRepository(source);
+        assertThat(executions.settlePrepared(executions.findByExecutionCallId("call:process"),
+                Map.of("executionStatus", "success"), Instant.parse("2000-01-01T00:00:00Z"))).isNotNull();
+        duplicateBackgroundRows("qwen_tool_execution", "execution_call_id", "call:process", 2999, false);
+        duplicateBackgroundRows("qwen_managed_session_extension_record", "record_id", "run", 2999, false);
+        duplicateBackgroundRows("qwen_managed_session_extension_record", "record_id", "run", 20_000, true);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution", Long.class)).isEqualTo(3000L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE execution_state = 'SETTLED'",
+                Long.class)).isEqualTo(3000L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_extension_record", Long.class)).isEqualTo(23_000L);
+        try (var connection = source.getConnection()) {
+            jdbc.execute(connection.getMetaData().getDatabaseProductName().equals("H2") ? "ANALYZE"
+                    : "ANALYZE TABLE qwen_tool_execution, qwen_managed_session_extension_record");
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
+        }
+    }
+
+    @Test
+    void backgroundOwnersRemainDistinctUnderPermissiveCollation() throws Exception {
+        backgroundEvidence();
+        projection("tenant", "HARNESS", "background_shell");
+        new JdbcToolExecutionRepository(source).findOrCreate(ToolExecutionRecord.prepared("upper:process", "upper-key",
+                "binding", 4, "HARNESS", "runtime", "turn", "call", "digest",
+                Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", "digest")));
+        try (var connection = source.getConnection()) {
+            String ddl = connection.getMetaData().getDatabaseProductName().equals("H2")
+                    ? "ALTER TABLE %s ALTER COLUMN %s VARCHAR_IGNORECASE(512)"
+                    : "ALTER TABLE %s MODIFY %s VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL";
+            jdbc.execute(String.format(ddl, "qwen_tool_execution", "harness_session_id"));
+            jdbc.execute(String.format(ddl, "qwen_managed_session_extension_record", "session_id"));
+            var folded = jdbc.queryForList("SELECT DISTINCT harness_session_id FROM qwen_tool_execution", String.class);
+            assertThat(folded).hasSize(1);
+            String unsettled = folded.getFirst().equals("harness") ? "HARNESS" : "harness";
+            jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'succeeded', settled_at = 2");
+            jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'pending', settled_at = NULL"
+                    + " WHERE session_scope_key = ?", ManagedSessionStore.sessionScopeKey("tenant", unsettled));
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isTrue();
+            jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'succeeded', settled_at = 2");
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
+        }
+    }
+
+    private void duplicateBackgroundRows(String table, String key, String value, int count, boolean noise)
+            throws Exception {
+        try (var connection = source.getConnection();
+                var select = connection.prepareStatement("SELECT * FROM " + table + " WHERE " + key + " = ? LIMIT 1")) {
+            select.setString(1, value);
+            try (var rows = select.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                var columns = new ArrayList<String>();
+                var seed = new ArrayList<Object>();
+                for (int index = 1; index <= rows.getMetaData().getColumnCount(); index++) {
+                    columns.add(rows.getMetaData().getColumnName(index));
+                    seed.add(rows.getObject(index));
+                }
+                String sql = "INSERT INTO " + table + " (" + String.join(",", columns) + ") VALUES ("
+                        + String.join(",", Collections.nCopies(columns.size(), "?")) + ")";
+                try (var insert = connection.prepareStatement(sql)) {
+                    for (int index = 0; index < count; index++) {
+                        String id = (noise ? "noise-" : "volume-") + index;
+                        var row = new ArrayList<>(seed);
+                        if (table.equals("qwen_tool_execution")) {
+                            String call = id + ":process";
+                            row.set(columns.indexOf("execution_call_id"), call);
+                            row.set(columns.indexOf("execution_call_id_hash"), brokerHash(call));
+                            row.set(columns.indexOf("idempotency_key"), id);
+                            row.set(columns.indexOf("idempotency_key_hash"), brokerHash(id));
+                        } else {
+                            String owner = noise ? "noise-owner-" + index / 20 : "harness";
+                            row.set(columns.indexOf("session_id"), owner);
+                            row.set(columns.indexOf("session_scope_key"), ManagedSessionStore.sessionScopeKey("tenant", owner));
+                            row.set(columns.indexOf("record_id"), id);
+                            row.set(columns.indexOf("record_key"), ManagedExtensionProjection.recordKey(owner, "child_run", id));
+                        }
+                        for (int column = 0; column < row.size(); column++) {
+                            insert.setObject(column + 1, row.get(column));
+                        }
+                        insert.addBatch();
+                    }
+                    insert.executeBatch();
+                }
+            }
+        }
+    }
+
+    private static String brokerHash(String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        return ToolPublicationContract.sha256(ByteBuffer.allocate(4 + bytes.length).putInt(bytes.length).put(bytes).array());
     }
 
     private void backgroundEvidence() {

@@ -20,7 +20,7 @@ Operator recovery、Workspace holder 和 CSI retirement 保护整个 binding，�
 
 子 Session 的 lineage 在父 child_run 的 canonical projection 缺失或 settled_at 为空时保护 binding。即使子会话已停止、没有 tool execution 或 Workspace holder，cascade 与 relay 的修复仍可能需要原 binding 身份。在 sweep 同连接上按主键读取 lineage 和父 projection，并精确校验原始身份。Lineage 在子会话 warm 前提交，终态 run 不可重新打开；已提交的 settled_at 结束此项保护。Session lineage、父记录和永久 relay ledger 均保留。
 
-存在 `<call>:process` execution 的 binding，在该 execution 所属 Session 仍有未结算的后台 Shell child_run projection 时也必须保留，覆盖顶层 Session 以及 Session、Workspace 两种隔离方式。Session-open reconciliation 将该行缺失作为未启动证明，因此须在所属 Session 的后台 Shell 记录结算前保留整个家族。Guard 在 sweep 同连接上使用有索引的存在性查询，并精确复核 tenant、Workspace、Session 和 generation。这是保守的 Session 级保护，并不逐条匹配 Shell 与 execution。
+存在 `<call>:process` execution 的 binding，在该 execution 所属 Session 仍有未结算的后台 Shell child_run projection 时也必须保留，覆盖顶层 Session 以及 Session、Workspace 两种隔离方式。Session-open reconciliation 将该行缺失作为未启动证明，因此须在所属 Session 的后台 Shell 记录结算前保留整个家族。Guard 先用 Session 原始值及其二进制身份共同去重，再在 sweep 同连接上执行有索引的存在性查询，并精确复核 tenant、Workspace、Session 和 generation。这是保守的 Session 级保护，并不逐条匹配 Shell 与 execution。
 
 ## 组件与并发
 
@@ -36,7 +36,7 @@ Managed-server 使用独立单线程 scheduler，只有 Broker 和 retention 同
 
 开启清理后，符合清理资格且无引用的历史记录在超过 max-age 后可以删除；这不保证记录在该年龄时被删除。Publication 和 CSI worker ACK 引用持续保留 execution 及其父 session 和 binding，不受年龄限制，包括 COLLECTED publication。无引用的兄弟记录可以删除。删除后沿用缺失记录行为；调用方不得复用过期 runtime-session ID 或 idempotency key。本次不增加永久 execution 墓碑。
 
-在已有 V65 stream-capture migration 后部署 V66，并保持清理关闭；验证从 V65 升级后既有终态 receipt 保留。全部实例使用新的 publication 锁协议后才开启。观察扫描、删除、跳过数、耗时和失败次数。回退到旧 writer 前先关闭清理。关闭只停止后续删除，不能恢复已删除数据。
+在已有 V65 stream-capture migration 后部署 V66，并保持清理关闭；验证从 V65 升级后既有终态 receipt 保留。除全部实例使用新的 publication 锁协议外，还须先在 [#13992](https://github.com/QwenLM/qwen-code/issues/13992) 交付并验证精确身份的 Hosted cleanup 释放证明，期间保持清理关闭。Owed cleanup descriptor 可以比 RELEASED binding 保留更久；清理该 binding 后，原释放请求会变成冲突并阻塞 Hosted Session。本 PR 不实现这项释放证明契约。观察扫描、删除、跳过数、耗时和失败次数。回退到旧 writer 前先关闭清理。关闭只停止后续删除，不能恢复已删除数据。
 
 ## 验证与验收
 
@@ -44,8 +44,8 @@ Managed-server 使用独立单线程 scheduler，只有 Broker 和 retention 同
 
 复现子会话已停止但父记录仍欠 dispatch/attach journal 修复的场景：清理须保留原 binding，使修复能够完成。验证 projection 缺失时保守保留、原始身份不匹配不能结束保护、guard 能读取 sweep 事务自己的写入，以及 canonical 终态 projection 允许清理而不回收 lineage 或 relay 分类。
 
-验证顶层 Session 的未结算后台 Shell 在两种隔离模式下均保留原 process-status 证据，而已结算 projection 允许清理；检查原始身份与 generation 不匹配，以及替代 generation 的接纳。
+验证顶层 Session 的未结算后台 Shell 在两种隔离模式下均保留原 process-status 证据，而已结算 projection 允许清理；检查原始身份与 generation 不匹配，以及替代 generation 的接纳。加入数千条已结算 Shell、其他 Session 噪声及宽松 collation 下的拥有者，验证 guard 能完成查询且实际 sweep 能推进到后续家族。
 
 集中 H2 和 MySQL 8.4.11 验证已通过，包括有界清理、回滚、精确 placement 比较、publication 行锁，以及过期 Broker 历史查询不会触发 provisioning 或 dispatch。查询计划检查确认 MySQL 可以使用候选、tenant/状态和引用索引。本地尚未验证 MariaDB；查询计划检查不代表延迟基准测试。
 
-实施产物包括 Broker sweep 和 placement guard、managed-server 引用检查器、调度与配置、增量 migration、repository 测试和 README 更新。不存在未决产品选择。
+实施产物包括 Broker sweep 和 placement guard、managed-server 引用检查器、调度与配置、增量 migration、repository 测试和 README 更新。精确 cleanup 释放证明契约由 #13992 单独交付，完成前保持清理关闭。

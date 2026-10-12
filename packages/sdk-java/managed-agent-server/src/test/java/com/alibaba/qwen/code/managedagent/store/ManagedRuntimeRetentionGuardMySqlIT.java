@@ -57,6 +57,16 @@ class ManagedRuntimeRetentionGuardMySqlIT {
         contract.backgroundSettlementIsReadOnTheSweepConnection();
     }
 
+    @Test
+    void settledBackgroundVolumeWithOtherSessionNoiseDoesNotTimeoutTheGuard() throws Exception {
+        contract.settledBackgroundVolumeWithOtherSessionNoiseDoesNotTimeoutTheGuard();
+    }
+
+    @Test
+    void backgroundOwnersRemainDistinctUnderPermissiveCollation() throws Exception {
+        contract.backgroundOwnersRemainDistinctUnderPermissiveCollation();
+    }
+
     @AfterEach
     void removeTestSchema() {
         if (admin != null && schema != null) {

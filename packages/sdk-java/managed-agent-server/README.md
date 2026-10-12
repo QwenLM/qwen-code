@@ -904,6 +904,8 @@ Session has an unsettled background Shell child_run, including top-level
 Sessions and Workspace isolation. This preserves the process-status evidence
 used by Session-open never-started reconciliation until those Shell records
 settle; the association conservatively protects the whole owning Session.
+The lookup deduplicates owning Sessions by both raw value and binary identity
+before checking their records on the sweep connection.
 Publication and CSI ACK references keep the original execution and its parents,
 including already collected publications; unreferenced siblings may be removed.
 Nonterminal children, live operation/dispatch leases and managed bindings without
@@ -918,7 +920,12 @@ bindings regardless of age, including COLLECTED publications.
 After cleanup, existing missing-record responses apply. Callers must not reuse
 expired Runtime Session IDs or idempotency keys. Deploy Flyway V66 and the code
 with cleanup disabled, upgrade every publication writer to the new locking
-protocol, then enable it. Disable retention before reverting to older writers;
+protocol, and keep retention disabled until the exact-identity Hosted cleanup
+release-proof contract in [#13992](https://github.com/QwenLM/qwen-code/issues/13992)
+is delivered and verified. An owed cleanup descriptor can outlive its RELEASED binding;
+collection then makes the original release conflict and blocks the Hosted
+Session. This PR does not implement that release-proof contract.
+Disable retention before reverting to older writers;
 disabling prevents future cleanup but cannot restore deleted records. See the
 [retention design](../../../docs/design/runtime-broker-jdbc-retention.md).
 
