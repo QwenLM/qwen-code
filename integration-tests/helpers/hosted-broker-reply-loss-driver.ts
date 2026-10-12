@@ -358,11 +358,23 @@ try {
       }
       await json(`/session/${sessionId}/detach`, {}, 204);
     }
-    assert.deepEqual(
-      exchanges.slice(traffic).map((entry) => entry.operation),
-      retryRelease ? ['release'] : [],
-      'Reload may only retry the original runtime release',
-    );
+    const cleanupRetries = exchanges.slice(traffic);
+    if (retryRelease) {
+      assert(cleanupRetries.length > 0, 'Original cleanup must be retried');
+      const original = exchanges.find((entry) => entry.operation === 'release');
+      assert(original);
+      for (const entry of cleanupRetries) {
+        assert.equal(
+          entry.operation,
+          'release',
+          'Reload may only retry the original runtime release',
+        );
+        assert.deepEqual(entry.fields, {
+          ...original.fields,
+          requestId: entry.fields['requestId'],
+        });
+      }
+    } else assert.deepEqual(cleanupRetries, []);
     assert.equal(
       modelCalls,
       callsBeforeReload,
