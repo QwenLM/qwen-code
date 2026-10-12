@@ -198,7 +198,7 @@ describe('useProgramStatus', () => {
       .find((entry) => !before.includes(entry));
     expect(listener).toBeDefined();
     write.mockClear();
-    listener!();
+    listener!('SIGCONT');
     expect(write).toHaveBeenCalledWith(report('idle'));
     unmount();
     expect(process.listeners('SIGCONT')).toEqual(before);
