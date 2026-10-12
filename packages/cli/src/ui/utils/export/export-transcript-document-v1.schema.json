@@ -67,7 +67,6 @@
           "maxLength": 128
         },
         "kind": {
-          "type": "string",
           "enum": ["root", "subagent", "teammate"],
           "description": "Which kind of agent produced the block when the identity came from the wire agent field: the session root, a delegated subagent, or an Agent Team teammate."
         }
