@@ -670,6 +670,26 @@ it('refuses args outside the canonical JSON range before any record commits', as
   }
 });
 
+it('answers a protocol-ceiling call with a per-call refusal, not a wedged Turn (D1)', async () => {
+  // Sixty-three-deep args are under the admission's own depth bound but
+  // past the protocol's MAX_JSON_DEPTH after its two wrapper levels: the
+  // encode/digest used to throw out of prepareRequests and take the whole
+  // parent Turn down (hosted_turn_failed, R2-12); now it is the call's
+  // own refusal and nothing is committed.
+  const deep = <T>(depth: number, leaf: T): unknown[] =>
+    depth <= 1 ? [leaf] : [deep(depth - 1, leaf)];
+  const responses = await executeWorkflow(
+    createTurn(),
+    call({ script: SCRIPT, args: { v: deep(63, 1) } }),
+  );
+  expect(JSON.stringify(responses)).toContain(
+    'Hosted tool input cannot commit as protocol evidence: Managed Tool JSON exceeds depth limit.',
+  );
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
 it('commits a pinned workflow launch and names it in the answer', async () => {
   const turn = createTurn();
   const responses = await executeWorkflow(

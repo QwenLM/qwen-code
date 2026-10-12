@@ -35,7 +35,7 @@ import {
   convertToFunctionErrorResponse,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { managedToolDigest , ManagedToolProtocolError } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import {
   createToolPublicationToken,
   parseToolPublicationBinding,
@@ -2430,23 +2430,35 @@ export class HostedWorkspaceToolTurn {
             }
           }
         }
+        // The inline Session Store limit keeps rejecting exactly as main
+        // does — only the canonical-digest ceiling becomes this call's own
+        // refusal, never a wedge for the whole Turn (review D1/R2-12).
         const encoded = this.encodeToolInput(
           mcpInput ?? { toolName: call.name, input },
         );
+        // H3: the publication evidence chain pins the canonical input
+        // digest for Monitor calls exactly like Shell calls.
+        let argsDigest: string | undefined;
+        let inputDigest: string | undefined;
+        try {
+          inputDigest =
+            isShell || call.name === 'monitor'
+              ? managedToolDigest(input)
+              : undefined;
+          argsDigest = `sha256:${managedToolDigest(input)}`;
+        } catch (cause) {
+          if (!(cause instanceof ManagedToolProtocolError)) throw cause;
+          validationError = `Hosted tool input cannot commit as protocol evidence: ${cause.message}`;
+        }
         return {
           call,
           validationError,
           input,
           isShell,
-          // H3: the publication evidence chain pins the canonical input
-          // digest for Monitor calls exactly like Shell calls.
-          inputDigest:
-            isShell || call.name === 'monitor'
-              ? managedToolDigest(input)
-              : undefined,
+          inputDigest,
           mcp: mcpInput !== undefined,
           ...encoded,
-          argsDigest: `sha256:${managedToolDigest(input)}`,
+          argsDigest,
           publicationId:
             (isShell || (call.name === 'monitor' && monitorAdmitted)) &&
             this.publication
@@ -2820,7 +2832,9 @@ export class HostedWorkspaceToolTurn {
         let executionCallId: string;
         try {
           prepared =
-            (request.isShell || request.monitoring) && this.publication
+            (request.isShell || request.monitoring) &&
+            this.publication &&
+            request.argsDigest !== undefined
               ? await this.broker.prepareV3(
                   request.runtimeCallId,
                   request.argsDigest,
@@ -2907,7 +2921,10 @@ export class HostedWorkspaceToolTurn {
             runtimeBindingId: prepared.runtimeBindingId,
             bindingGeneration: prepared.bindingGeneration,
             runtimeCallId: request.runtimeCallId,
-            argsDigest: request.argsDigest,
+            // Admitted-after-dropdown shells never hold a loose digest:
+            // prepareV3's own gate means a call under the protocol ceiling
+            // was refused long before this map gets another entry.
+            argsDigest: request.argsDigest as string,
             requestDigest: request.digest,
             argsRef: routeRef,
             intentSequence: intent.lastSequence,
@@ -2960,7 +2977,9 @@ export class HostedWorkspaceToolTurn {
           ),
           ordinal,
           inputDigest:
-            request.isShell && this.publication
+            request.isShell &&
+            this.publication &&
+            request.argsDigest !== undefined
               ? request.argsDigest.slice(7)
               : (request.inputDigest ?? request.digest.slice(7)),
           progressCursor: null,
@@ -2994,7 +3013,7 @@ export class HostedWorkspaceToolTurn {
                 // carries the bare input digest. Registration must name the
                 // same lane's value or the worker's prepare never matches it.
                 argsDigest: prepared
-                  ? request.argsDigest
+                  ? (request.argsDigest as string)
                   : request.inputDigest!,
               },
               capture: {
