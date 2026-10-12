@@ -11543,6 +11543,48 @@ Other open files:
         expect(client['toolExplorationBudget']['calls']).toBe(0);
       });
 
+      it('gives a goal-permitted blocking Stop hook continuation a fresh exploration phase', async () => {
+        // A goal-permitted restart takes a separate branch from the case
+        // above, and its nested turn is likewise submitted with
+        // `type: SendMessageType.Hook`, so the reset beside that branch is
+        // again the only thing that clears the phase across the restart.
+        const { permit } = installGoalRuntime();
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        const reg = registryMock();
+        reg.getAllToolNames.mockReturnValue(['read_file']);
+        reg.getTool.mockImplementation((name: string) =>
+          name === 'read_file' ? ({ kind: Kind.Read } as never) : null,
+        );
+        vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(100);
+        let turnIndex = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          const turnNo = turnIndex++;
+          return (async function* () {
+            if (turnNo === 0) {
+              for (let i = 0; i < 2; i++) {
+                yield toolCallRequest(
+                  `call-${i}`,
+                  'read_file',
+                  { path: `f${i}` },
+                  'prompt-goal-stop-hook-exploration',
+                );
+              }
+            }
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })();
+        });
+
+        await run([{ text: 'Hi' }], 'prompt-goal-stop-hook-exploration', {
+          type: SendMessageType.UserQuery,
+          goalPermit: permit,
+          goalTurnKey: 'goal-runtime:turn-1',
+        });
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(client['toolExplorationBudget']['calls']).toBe(0);
+      });
+
       it('reports stop_hook_active only when a Stop hook blocked the previous turn', async () => {
         const mockMessageBus = installMessageBus(blockStopOnce(), 'Stop');
         notDoneChat();
