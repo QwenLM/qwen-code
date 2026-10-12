@@ -289,6 +289,80 @@ broker/client documentation or a staging deployment before phase MQ2 starts):
    ordered messaging per message group) are well documented for classic
    topics, but **their carry-over to LiteTopic is UNVERIFIED**.
 
+**Resolution (verified 2026-10-12, Beijing, from public documentation and the
+5.5.0 source tag).** All five items resolve in LiteTopic's favor; the
+MQ2-start staging re-check still stands. Sources: [RIP-83
+wiki](https://github.com/apache/rocketmq/wiki/RIP%E2%80%9083-Lite-Topic:-A-New-Message-Model);
+[LiteTopic domain
+model](https://rocketmq.apache.org/docs/domainModel/03litetopic/); [5.5.0
+release
+notes](https://rocketmq.apache.org/zh/release-notes/2026/04/10/5.5.0/);
+[multi-agent best
+practice](https://rocketmq.apache.org/zh/docs/bestPractice/04multiagent/);
+[Aliyun LiteTopic
+reference](https://help.aliyun.com/zh/apsaramq-for-rocketmq/cloud-message-queue-rocketmq-5-x-series/developer-reference/litetopic)
+and [usage
+limits](https://www.alibabacloud.com/help/en/apsaramq-for-rocketmq/cloud-message-queue-rocketmq-5-x-series/product-overview/usage-limits);
+[5.5.0 LiteTopic deep
+dive](https://www.cnblogs.com/alisystemsoftware/p/20189542); 5.5.0 source tag
+[LiteEventDispatcher](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/lite/LiteEventDispatcher.java#L107-L162),
+[PopLiteMessageProcessor](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/processor/PopLiteMessageProcessor.java#L285-L328),
+[AckMessageProcessor](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/processor/AckMessageProcessor.java#L539-L558).
+
+1. **Delivery guarantee: at-least-once.** RocketMQ's core model is
+   at-least-once ("each message can be successfully delivered at least once"),
+   with policy-driven redelivery and a DLQ after the retry cap; Aliyun's
+   LiteTopic reference states client acknowledgements yield at-least-once
+   semantics; on ordered lanes, TDMQ's commercial documentation records
+   fixed-interval retry (snippet-level evidence — the open-source pages do
+   not state the interval). Broker-persisted offsets (below) resume delivery
+   from the committed watermark after a consumer restart. Consumers must be
+   idempotent — exactly the design's invariant 5.
+2. **Ordering: per-LiteTopic FIFO.** The official domain-model page: each
+   LiteTopic has one queue by default, stored and consumed in order;
+   consumption is ordered-only, one consumer thread per LiteTopic.
+3. **Consumer model, offsets, lifecycle, quotas.** Subscription registration
+   is per-client (ClientID), not group-locked: consumers in one group may
+   subscribe to different LiteTopic sets and can add/remove at runtime
+   (thousands per consumer). Dispatch, however, is **shared within a group**:
+   one dispatch attempt selects exactly one client per group — the 5.5.0
+   `LiteEventDispatcher` buckets subscribers by group and stops after the
+   first successful client, and locks, FIFO state and the offset all key on
+   `(group, LiteTopic, 0)`. On a lost ACK or client inactivity the in-doubt
+   message is re-dispatched, possibly to a different member (the 5.5.0
+   inactivity path re-dispatches while avoiding the previous client), so
+   there are no per-node copies; consumer idempotence (invariant 5) and the
+   activation fence absorb that. Cross-node wake fan-out therefore needs one
+   consumer group per node (the dispatcher iterates every group); this feeds
+   the §11 routing decision. Offsets are broker-side — memory snapshot plus incremental
+   persistence on RocksDB. LiteTopics auto-create on first send/subscribe and
+   auto-delete when their TTL lapses without writes, releasing the LiteTopic
+   count — but a subscription relation still occupies the subscription quota
+   until the consumer unsubscribes (Aliyun special rule). RIP-83 names quota
+   controls (max topics per client/total, ready-set overflow control) but
+   Apache's parameter-limits page publishes no LiteTopic numbers; Aliyun
+   publishes concrete caps: 2,000 subscriptions per consumer
+   (ticket-raisable), 200 consumption TPS per LiteTopic, and per-instance
+   creation/subscription quotas by spec — up to 23.2M LiteTopics on the
+   largest Platinum spec (`rmq.u2.1000xlarge`); 1M maps to
+   `rmq.u2.30xlarge`.
+4. **Client availability.** Official requirement: server ≥ 5.5.0, gRPC SDK
+   ≥ 5.1.0; `LitePushConsumer`/`LiteProducer` examples live in
+   apache/rocketmq-clients. `subscribeLite()` performs quota verification and
+   may fail — the adapter must treat subscription as fallible. Aliyun pricing
+   is instance-spec-based with no fixed public per-unit LiteTopic price.
+5. **Classic carry-over: does NOT hold on the consume side.** Subscription is
+   per-client rather than group-shared; consumption is ordered-only and
+   single-threaded per LiteTopic; dispatch is event-driven (Ready Set), not
+   long-polling Pop. Shared with classic: the CommitLog write path and the
+   at-least-once/retry/DLQ machinery. Broker config for the RocksDB-backed
+   path is `enableLmq=true`, `enableMultiDispatch=true`,
+   `storeType=defaultRocksDB`; note 5.5.0 also supports LMQ over
+   CombineConsumeQueueStore without the RocksDB migration (release notes,
+   PR #10174) — the store choice is MQ2-start verification scope. Known
+   operational caveat: rocketmq-dashboard issue #2777 (negative LiteTopic
+   quota counters) is dashboard-side only.
+
 For Redis Streams, standard and documented semantics apply (treated as
 verified for the purpose of this table): per-stream FIFO; consumer groups via
 `XREADGROUP` with `XACK`; re-delivery of un-ACKed entries through the pending
@@ -299,18 +373,18 @@ verified guarantees for any particular Redis deployment.
 
 ### 5.2 Capability table
 
-| Capability                                            | RocketMQ LiteTopic                                                      | Redis Streams                                                     |
-| ----------------------------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Per-Session addressing (one topic/stream per Session) | Designed for it (million-scale, per-session)                            | Possible; one stream per key, memory cost grows with live streams |
-| At-least-once delivery                                | UNVERIFIED for LiteTopic; classic RocketMQ consumption is at-least-once | Yes via consumer groups + PEL re-delivery                         |
-| Per-key ordering                                      | UNVERIFIED (not required by design; see §2)                             | Yes, per-stream FIFO                                              |
-| Re-delivery / crash recovery of consumers             | UNVERIFIED                                                              | Yes via `XAUTOCLAIM`/`XCLAIM` after a timeout                     |
-| Consumer groups (multi-node workers, wake fan-in)     | UNVERIFIED for LiteTopic                                                | First-class                                                       |
-| Suspend/Resume per Session (backpressure, quarantine) | Documented (per-topic consumer-level)                                   | Manual (stop reading the group key)                               |
-| Retention & lifecycle of millions of queues           | Documented as designed for it; API/limits UNVERIFIED                    | Operator-managed (`XTRIM`, key expiry); risk of unbounded growth  |
-| Broker as Session truth risk                          | Same architectural risk both ways; invariants 1–3 forbid it regardless  | Same                                                              |
-| Ops profile                                           | Broker cluster; Java client                                             | Single Redis / cluster; already in many deployments               |
-| Named by #12380                                       | Yes ("RocketMQ or Redis Streams")                                       | Yes                                                               |
+| Capability                                            | RocketMQ LiteTopic                                                                                                                                                                                                                                                         | Redis Streams                                                     |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Per-Session addressing (one topic/stream per Session) | Designed for it (million-scale, per-session)                                                                                                                                                                                                                               | Possible; one stream per key, memory cost grows with live streams |
+| At-least-once delivery                                | Yes — at-least-once with retry + DLQ; the fixed-interval retry on ordered lanes is commercial-doc evidence only, OSS pages silent (verified 2026-10-12, §5.1)                                                                                                              | Yes via consumer groups + PEL re-delivery                         |
+| Per-key ordering                                      | Yes — one ordered queue and one consumer thread per LiteTopic (verified 2026-10-12, §5.1); still not required by design (§2)                                                                                                                                               | Yes, per-stream FIFO                                              |
+| Re-delivery / crash recovery of consumers             | Yes — broker-persisted offsets (memory snapshot + incremental RocksDB) resume from the committed watermark (verified 2026-10-12, §5.1)                                                                                                                                     | Yes via `XAUTOCLAIM`/`XCLAIM` after a timeout                     |
+| Consumer groups (multi-node workers, wake fan-in)     | Shared within a group — one dispatch attempt goes to exactly one client per group, and a redelivery after a lost ACK or client inactivity can land on a different member (5.5.0 source-verified, §5.1); cross-node fan-out needs one consumer group per node (§11)         | First-class                                                       |
+| Suspend/Resume per Session (backpressure, quarantine) | Documented (per-topic consumer-level)                                                                                                                                                                                                                                      | Manual (stop reading the group key)                               |
+| Retention & lifecycle of millions of queues           | Auto-create on first use; TTL auto-delete releases the LiteTopic count (a subscription still counts until unsubscribe); OSS numeric caps unpublished — Aliyun publishes 2,000 subscriptions per consumer and 200 consumption TPS per LiteTopic (verified 2026-10-12, §5.1) | Operator-managed (`XTRIM`, key expiry); risk of unbounded growth  |
+| Broker as Session truth risk                          | Same architectural risk both ways; invariants 1–3 forbid it regardless                                                                                                                                                                                                     | Same                                                              |
+| Ops profile                                           | Broker cluster; Java client                                                                                                                                                                                                                                                | Single Redis / cluster; already in many deployments               |
+| Named by #12380                                       | Yes ("RocketMQ or Redis Streams")                                                                                                                                                                                                                                          | Yes                                                               |
 
 ### 5.3 Selection
 
@@ -382,7 +456,7 @@ selected broker.
 | Duplicate delivery of one envelope                | Consumer dedup `(tenantId, sessionId, stream, sequence)` against the SQL watermark; the duplicate is a no-op. Activation enqueue stays idempotent. The `stream` is the delivered lane (`public_event` from `last_sequence`, `authoritative_journal` from the journal-commit sequence). |
 | Reordered delivery within one Session             | The per-stream sequence watermark + gap detection; consumer re-reads Snapshot-plus-tail from SQL before applying anything newer. A later record never lands ahead of an unseen earlier one from MQ alone.                                                                              |
 | Broker redelivery after processed-but-ACK-lost    | Same as duplicate delivery.                                                                                                                                                                                                                                                            |
-| Consumer crash before processing                  | Broker redelivers (per selected broker's at-least-once path — must be verified in §5.1 before MQ2); the Session is woken late but from SQL truth.                                                                                                                                      |
+| Consumer crash before processing                  | Broker redelivers (per selected broker's at-least-once path — verified at doc level 2026-10-12, §5.1; re-checked against staging at MQ2-start); the Session is woken late but from SQL truth.                                                                                          |
 | Consumer crash after a local effect, before ACK   | Duplicate path on restart; every local effect is idempotent on committed identities.                                                                                                                                                                                                   |
 | Producer crash between SQL commit and publish     | Message never sent; the committed SQL delivery line is still complete. Recovery comes from SQL-side scans (overflow/re-read discipline), as today for `SessionEventHub`. MQ is not recreated as an outbox of truth.                                                                    |
 | Broker short outage                               | Producer retries with bounded buffer; local post-commit SSE unaffected; wake latency degrades only.                                                                                                                                                                                    |
@@ -398,9 +472,10 @@ selected broker.
 - **Do not let the broker become the browser cursor.** SSE replay cursors and
   the persisted replay floor stay SQL-based (V14 `managed_event_replay`
   pattern).
-- **LiteTopic semantics risk.** §5.1 lists UNVERIFIED delivery/ordering
-  items; if verification fails, MQ2 falls back to Redis Streams under the same
-  seam rather than relaxing the invariants.
+- **LiteTopic semantics risk.** §5.1's doc-level verification resolved the
+  delivery/ordering items on 2026-10-12; the residual exposure is the
+  MQ2-start staging re-check — if that fails, MQ2 falls back to Redis Streams
+  under the same seam rather than relaxing the invariants.
 - **Wake-intent carrier.** The canonical design names `WakeIntent`; the repo
   today carries the committed `wake.requested` record kind, and #12827's open
   question 3 (Session inbox vs new record) stays unsettled until #13300 lands.
@@ -430,9 +505,15 @@ This slice's validation is documentation-only:
    question 3 once #13300 lands)?
 2. Which node consumes a Session's envelopes — a consumer-group-per-Session
    routing scheme, or hash-partitioned wake workers? (Decision needed before
-   MQ2 consumer wiring.)
-3. LiteTopic §5.1 UNVERIFIED items: who runs the broker-docs/staging
-   verification, and where are the results pinned?
+   MQ2 consumer wiring.) Dispatch evidence from the 2026-10-12 verification
+   (§5.1): LiteTopic dispatch is shared within a group — one client per group
+   per LiteTopic — so fan-out to every node requires one consumer group per
+   node, while a single shared group wakes one node per dispatch (a lost ACK
+   or client inactivity can move the redelivery to another member) and leans
+   on the SQL-scan fallback otherwise.
+3. LiteTopic §5.1 items: the broker-docs verification ran 2026-10-12 and its
+   results are pinned in §5.1's resolution block; what remains is the
+   MQ2-start staging re-check against a real 5.5.0+ cluster.
 4. Envelope naming/fields: folded into the separate TypeScript contract
    slice; this document's §4 is its input, not its output.
 
