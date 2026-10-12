@@ -40,6 +40,20 @@ const rootDirectoryCheck: WarningCheck = {
   },
 };
 
+/**
+ * The startup notice shown when ripgrep cannot be used.
+ *
+ * Deliberately a single actionable line, with none of the probe's own output: a
+ * bundled binary that cannot run on the host prints its loader/allocator
+ * diagnostics (`<jemalloc>: Unsupported system page size`, `memory allocation of
+ * 160 bytes failed`, …), which in a terminal reads like Qwen Code itself ran out
+ * of memory right before the user starts debugging (#13704). The raw reason is
+ * still kept by `resolveHealthyRipgrep` in the debug log, and `qwen doctor`
+ * reports the ripgrep state with the install hint, so nothing is lost.
+ */
+const RIPGREP_UNAVAILABLE_WARNING =
+  'Ripgrep not available: falling back to built-in grep, which is slower on large codebases. Install ripgrep for faster file content search.';
+
 const ripgrepAvailabilityCheck: WarningCheck = {
   id: 'ripgrep-availability',
   check: async (options: WarningCheckOptions) => {
@@ -49,12 +63,11 @@ const ripgrepAvailabilityCheck: WarningCheck = {
 
     try {
       const isAvailable = await canUseRipgrep(options.useBuiltinRipgrep);
-      if (!isAvailable) {
-        return 'Ripgrep not available: Please install ripgrep globally to enable faster file content search. Falling back to built-in grep.';
-      }
-      return null;
-    } catch (error) {
-      return `Ripgrep not available: ${error instanceof Error ? error.message : 'Unknown error'}. Falling back to built-in grep.`;
+      return isAvailable ? null : RIPGREP_UNAVAILABLE_WARNING;
+    } catch {
+      // A probe that threw and a probe that answered "no" leave the user in the
+      // same place — built-in grep — so both get the same quiet notice.
+      return RIPGREP_UNAVAILABLE_WARNING;
     }
   },
 };

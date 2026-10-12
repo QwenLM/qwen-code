@@ -4,11 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { getUserStartupWarnings } from './userStartupWarnings.js';
+import { canUseRipgrep } from '@qwen-code/qwen-code-core/utils/ripgrepUtils.js';
 import * as os from 'node:os';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+
+vi.mock('@qwen-code/qwen-code-core/utils/ripgrepUtils.js', () => ({
+  canUseRipgrep: vi.fn(),
+}));
 
 describe('getUserStartupWarnings', () => {
   let testRootDir: string;
@@ -25,6 +30,8 @@ describe('getUserStartupWarnings', () => {
       useRipgrep: true,
       useBuiltinRipgrep: true,
     };
+    vi.mocked(canUseRipgrep).mockReset();
+    vi.mocked(canUseRipgrep).mockResolvedValue(true);
   });
 
   afterEach(async () => {
@@ -69,6 +76,56 @@ describe('getUserStartupWarnings', () => {
       const expectedWarning =
         'Could not verify the current directory due to a file system error.';
       expect(warnings).toEqual([expectedWarning]);
+    });
+  });
+
+  describe('ripgrep availability check', () => {
+    const ripgrepWarning = (warnings: string[]): string | undefined =>
+      warnings.find((warning) => warning.includes('Ripgrep not available'));
+
+    it('should stay silent when ripgrep is available', async () => {
+      vi.mocked(canUseRipgrep).mockResolvedValue(true);
+      const warnings = await getUserStartupWarnings(startupOptions);
+      expect(ripgrepWarning(warnings)).toBeUndefined();
+    });
+
+    it('should report a single actionable line when no usable ripgrep is found', async () => {
+      vi.mocked(canUseRipgrep).mockResolvedValue(false);
+      const warnings = await getUserStartupWarnings(startupOptions);
+      const warning = ripgrepWarning(warnings);
+      expect(warning).toBeDefined();
+      expect(warning).toContain('built-in grep');
+      expect(warning).toContain('Install ripgrep');
+      expect(warning!.split('\n')).toHaveLength(1);
+    });
+
+    it('should not surface the probe output when the bundled binary cannot run (#13704)', async () => {
+      vi.mocked(canUseRipgrep).mockRejectedValue(
+        new Error(
+          'Command failed: /app/vendor/ripgrep/arm64-linux/rg --version\n' +
+            '<jemalloc>: Unsupported system page size\n' +
+            '<jemalloc>: Unsupported system page size\n' +
+            'memory allocation of 160 bytes failed\n',
+        ),
+      );
+      const warnings = await getUserStartupWarnings(startupOptions);
+      const warning = ripgrepWarning(warnings);
+      expect(warning).toBeDefined();
+      // The probe's loader/allocator diagnostics read like a Qwen Code memory
+      // failure, so they must not reach the startup banner.
+      expect(warning).not.toContain('jemalloc');
+      expect(warning).not.toContain('memory allocation');
+      expect(warning).not.toContain('Command failed');
+      expect(warning!.split('\n')).toHaveLength(1);
+    });
+
+    it('should not probe ripgrep when the user turned it off', async () => {
+      const warnings = await getUserStartupWarnings({
+        ...startupOptions,
+        useRipgrep: false,
+      });
+      expect(canUseRipgrep).not.toHaveBeenCalled();
+      expect(ripgrepWarning(warnings)).toBeUndefined();
     });
   });
 });
