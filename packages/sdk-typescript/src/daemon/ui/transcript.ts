@@ -2635,18 +2635,24 @@ function appendFingerprint(
  * the estimate units the retention budget accounts, and falls back to the
  * display skeleton when it exceeds either bound, reported through the same
  * truncation channel. The skeleton is itself re-measured against both units
- * and clipped until it fits, and the whole-object bound is skipped when the
- * state's byte budget is infinite (the trim-free offline projection).
+ * and clipped until it fits. The text cut and the whole-object bound are
+ * live-retention bounds: both are skipped when the state's byte budget is
+ * infinite (the trim-free offline projection).
  */
 function boundEmbeddedResource(
   state: DaemonTranscriptState,
   block: DaemonTextTranscriptBlock,
   resource: DaemonEmbeddedResource,
 ): DaemonEmbeddedResource {
+  // Both cuts are live-retention bounds: the offline/export projection runs
+  // with an infinite byte budget on purpose (trim-free), so a payload the
+  // writer journaled intact must survive replay there. The writer admits a
+  // single block up to MAX_RECORDED_EMBEDDED_RESOURCES_BYTES (256 KiB of
+  // real JSON), above the live store's 100k-unit text cut.
+  const trimFreeByBytes = !Number.isFinite(state.maxRetainedBytes);
   const bounded =
-    resource.resource.text.length <= MAX_TEXT_BLOCK_LENGTH
-      ? resource
-      : {
+    !trimFreeByBytes && resource.resource.text.length > MAX_TEXT_BLOCK_LENGTH
+      ? {
           ...resource,
           resource: {
             ...resource.resource,
@@ -2657,12 +2663,9 @@ function boundEmbeddedResource(
               resource.resource.text,
             ),
           },
-        };
-  // The byte ceiling is a live-retention bound: the offline/export
-  // projection runs with an infinite byte budget on purpose (trim-free by
-  // bytes), so a payload the writer journaled intact must survive replay
-  // there.
-  if (!Number.isFinite(state.maxRetainedBytes)) return bounded;
+        }
+      : resource;
+  if (trimFreeByBytes) return bounded;
   if (!overEmbeddedResourceBounds(bounded)) {
     return bounded;
   }

@@ -429,6 +429,51 @@ describe('daemon embedded text resources', () => {
     expect(user).toMatchObject({ embeddedResources: [beyondCeiling] });
   });
 
+  it('keeps a writer-journaled oversized text intact in the trim-free offline projection', () => {
+    // The writer journals a single block up to
+    // MAX_RECORDED_EMBEDDED_RESOURCES_BYTES (256 KiB of real JSON) intact,
+    // so a 150k-code-unit resource text is admitted whole. The offline
+    // projection is trim-free by bytes on purpose: cutting the text arm at
+    // the live store's 100k-unit bound there drops a third of the journaled
+    // context on every replay and flips the projection's completeness
+    // verdict for a journal that is complete.
+    const text = 'x'.repeat(150_000);
+    const projection = projectChatRecordsToDaemonTranscript([
+      {
+        uuid: 'first',
+        parentUuid: null,
+        sessionId: 'session-1',
+        timestamp: '2026-09-23T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [] },
+        daemonPromptId: 'prompt-1',
+        systemPayload: {
+          displayText: '',
+          hookContext: '',
+          embeddedResources: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'context://example/large-text',
+                mimeType: 'text/plain',
+                text,
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    expect(projection.complete).toBe(true);
+    expect(projection.truncated).toBe(false);
+    const [user] = projection.blocks.filter((b) => b.kind === 'user');
+    if (!user || user.kind !== 'user') {
+      throw new Error('expected one projected user block');
+    }
+    const replayed = user.embeddedResources?.[0]?.resource.text;
+    expect(replayed).toHaveLength(150_000);
+    expect(replayed).not.toContain('[truncated]');
+  });
+
   it('does not skeletonize a writer-journaled scalar payload on replay', () => {
     // The estimator bills a flat 16 units per number/boolean regardless of
     // JSON width, so an estimate-sized ceiling skeletonizes a scalar-heavy
