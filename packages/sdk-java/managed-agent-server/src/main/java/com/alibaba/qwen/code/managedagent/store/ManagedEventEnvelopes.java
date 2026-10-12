@@ -8,6 +8,7 @@ import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 
@@ -28,7 +29,9 @@ public final class ManagedEventEnvelopes {
     // assert rejects exactly MAX_SAFE_INTEGER as "cannot advance").
     static final long MAX_SEQUENCE = 9007199254740990L;
 
-    static final Set<String> KINDS = Set.of(
+    // Ordered (the failure message joins it) — the frozen contract's 18-kind
+    // vocabulary in fixture order.
+    static final List<String> KINDS = List.of(
             "input.accepted", "wake.requested", "activation.changed",
             "model.attempt", "message.committed", "tool.intent",
             "action.changed", "tool.receipt", "checkpoint.committed",
@@ -104,6 +107,14 @@ public final class ManagedEventEnvelopes {
         if (value == null || !value.isObject()) {
             fail("envelope must be a plain JSON object.");
         }
+        // The forbidden fields are refused by name before the shape checks,
+        // exactly as the TypeScript closed() helper orders it.
+        value.fieldNames().forEachRemaining(name -> {
+            if (FORBIDDEN_FIELDS.contains(name)) {
+                fail("envelope must not carry the forbidden field \"" + name
+                        + "\".");
+            }
+        });
         if (value.size() != ENVELOPE_KEYS.size()) {
             fail("envelope must have exactly the keys "
                     + String.join(", ", ENVELOPE_KEYS) + ".");
@@ -115,18 +126,13 @@ public final class ManagedEventEnvelopes {
             }
         }
         value.fieldNames().forEachRemaining(name -> {
-            if (FORBIDDEN_FIELDS.contains(name)) {
-                fail("envelope must not carry the forbidden field \"" + name
-                        + "\".");
-            }
             if (!ENVELOPE_KEYS.contains(name)) {
                 fail("envelope must have exactly the keys "
                         + String.join(", ", ENVELOPE_KEYS) + ".");
             }
         });
         JsonNode v = value.get("v");
-        if (v == null || !v.isIntegralNumber()
-                || v.longValue() != FORMAT_VERSION) {
+        if (v == null || !v.isNumber() || v.doubleValue() != FORMAT_VERSION) {
             fail("envelope.v must be " + FORMAT_VERSION + ".");
         }
         long sequence = sequence(value.get("sequence"));
@@ -207,10 +213,53 @@ public final class ManagedEventEnvelopes {
         if (node.isIntegralNumber()) {
             return node.bigIntegerValue().toString();
         }
-        // JSON.stringify renders an integral double with no fraction; a
-        // fractional double in shortest round-trip form.
-        BigDecimal decimal = node.decimalValue().stripTrailingZeros();
-        return decimal.toPlainString();
+        return jsNumberToString(node.doubleValue());
+    }
+
+    /**
+     * ECMAScript Number::toString (radix 10) faithfully, so the digest matches
+     * the TypeScript side byte-for-byte. The thresholds are the spec's:
+     * decimal form while 1e-6 ≤ |x| < 1e21, exponential outside it.
+     */
+    static String jsNumberToString(double d) {
+        if (d == 0) {
+            return "0";
+        }
+        if (!Double.isFinite(d)) {
+            throw new IllegalArgumentException(
+                    "non-finite number in digest input");
+        }
+        String sign = d < 0 ? "-" : "";
+        // Shortest round-trip digits via Double.toString, re-read through
+        // BigDecimal so precision() and scale() give the significant digits
+        // and the decimal exponent.
+        BigDecimal bd = new BigDecimal(Double.toString(Math.abs(d)))
+                .stripTrailingZeros();
+        String digits = bd.unscaledValue().abs().toString();
+        int k = digits.length();
+        // n: the value is 0.d1…dk × 10^n (so 10^(n-1) ≤ |x| < 10^n).
+        int n = k - bd.scale();
+        StringBuilder sb = new StringBuilder(sign);
+        if (k <= n && n <= 21) {
+            // integral value in the plain range: digits then (n-k) zeros.
+            sb.append(digits);
+            sb.append("0".repeat(n - k));
+        } else if (n > 0 && n <= 21) {
+            // decimal point inside the digits.
+            sb.append(digits, 0, n).append('.').append(digits.substring(n));
+        } else if (n > -6 && n <= 0) {
+            // small decimal: 0.00…digits.
+            sb.append("0.").append("0".repeat(-n)).append(digits);
+        } else {
+            // exponential: d[.ddd]e±X where X = n - 1, with a sign like JS.
+            sb.append(digits.charAt(0));
+            if (k > 1) {
+                sb.append('.').append(digits.substring(1));
+            }
+            sb.append('e').append(n - 1 > 0 ? '+' : '-')
+                    .append(Math.abs(n - 1));
+        }
+        return sb.toString();
     }
 
     /** String escaping exactly as JSON.stringify (non-ASCII kept raw). */
@@ -243,6 +292,18 @@ public final class ManagedEventEnvelopes {
                 default:
                     if (c < 0x20) {
                         sb.append(String.format("\\u%04x", (int) c));
+                    } else if (Character.isHighSurrogate(c)
+                            && (i + 1 >= s.length()
+                                    || !Character.isLowSurrogate(
+                                            s.charAt(i + 1)))) {
+                        // JSON.stringify escapes an unpaired surrogate as a
+                        // lowercase backslash-u escape; emitting it raw would
+                        // become a replacement char in UTF-8 and change the digest.
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else if (Character.isLowSurrogate(c)
+                            && (i == 0 || !Character.isHighSurrogate(
+                                    s.charAt(i - 1)))) {
+                        sb.append(String.format("\\u%04x", (int) c));
                     } else {
                         sb.append(c);
                     }
@@ -254,13 +315,8 @@ public final class ManagedEventEnvelopes {
     private static String sha256Hex(String s) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] hash = md.digest(s.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(64);
-            for (byte b : hash) {
-                sb.append(Character.forDigit((b >> 4) & 0xf, 16));
-                sb.append(Character.forDigit(b & 0xf, 16));
-            }
-            return sb.toString();
+            return HexFormat.of().formatHex(
+                    md.digest(s.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
@@ -268,29 +324,32 @@ public final class ManagedEventEnvelopes {
 
     // --- per-field validation (mirrors the TypeScript asserts) ---
 
-    private static long sequence(JsonNode node) {
-        if (node == null || !node.isIntegralNumber()
-                || !node.canConvertToLong()) {
-            fail("envelope.sequence must be a non-negative safe integer.");
+    /**
+     * The shared safe-integer rule, on the number's VALUE, not the Jackson
+     * node category: a finite, integral-valued number within the safe-integer
+     * range. `1e0` and `42.0` are valid integers exactly as
+     * `Number.isSafeInteger` accepts them on the TypeScript side.
+     */
+    private static long finiteInteger(JsonNode node, String label) {
+        if (node == null || !node.isNumber()) {
+            fail(label + " must be a non-negative safe integer.");
         }
-        long value = node.longValue();
+        double value = node.doubleValue();
+        if (!Double.isFinite(value) || value != Math.rint(value)) {
+            fail(label + " must be a non-negative safe integer.");
+        }
         if (value < 0 || value > MAX_SEQUENCE) {
-            fail("envelope.sequence must be a non-negative safe integer.");
+            fail(label + " must be a non-negative safe integer.");
         }
-        return value;
+        return (long) value;
+    }
+
+    private static long sequence(JsonNode node) {
+        return finiteInteger(node, "envelope.sequence");
     }
 
     private static long timeMs(JsonNode node) {
-        if (node == null || !node.isIntegralNumber()
-                || !node.canConvertToLong()) {
-            fail("envelope.occurredAt must be UTC Unix milliseconds as a safe"
-                    + " integer.");
-        }
-        long value = node.longValue();
-        if (value < 0) {
-            fail("envelope.occurredAt must be UTC Unix milliseconds as a safe"
-                    + " integer.");
-        }
+        long value = finiteInteger(node, "envelope.occurredAt");
         if (value > MAX_TIME_MS) {
             fail("envelope.occurredAt exceeds the maximum UTC Unix millisecond"
                     + " value.");
