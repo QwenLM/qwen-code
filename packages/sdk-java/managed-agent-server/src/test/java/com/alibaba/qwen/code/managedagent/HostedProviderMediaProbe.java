@@ -51,7 +51,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
     private volatile EmbeddedRuntimeBroker restarted;
-    private int dropped;
+    private volatile int dropped;
 
     HostedProviderMediaProbe(JdbcTemplate jdbc, String tenant, List<Map<String, Object>> sessions,
             EmbeddedRuntimeBroker broker, HttpServer server, Supplier<EmbeddedRuntimeBroker> restart) {
@@ -179,6 +179,10 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     private Map<String, Object> check(Map<String, Object> session, String phase, JsonNode fields) throws Exception {
         String harness = session.get("sessionId").toString();
         if (phase.equals("worker-done")) return Map.of("done", finished.contains(harness));
+        if (phase.equals("dropped")) {
+            assertThat(session.get("fault")).isEqualTo("lost-execute");
+            return Map.of("done", dropped == 1);
+        }
         if (phase.equals("restart")) {
             assertThat(restarted).isNull();
             for (var value : sessions) check(value, "released", JSON.createObjectNode());
