@@ -10,6 +10,13 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
+import { record, validateResult } from './dispatch.js';
+import type {
+  ModToolCallInput,
+  ModToolNext,
+  ModToolCheckResult,
+  ModToolResult,
+} from './tool-events.js';
 import {
   MOD_END_TIMEOUT_MS,
   MOD_MAX_BYTES,
@@ -41,6 +48,21 @@ export class ModRuntime {
   private failure?: Error;
   private pending?: (reply: ModReply) => void;
   private commands: Array<ModCommand & { plugin: string }> = [];
+  private tools = false;
+  private sequence = 0;
+  private tool?: {
+    next: ModToolNext;
+    controller: AbortController;
+    operations: Map<
+      number,
+      { controller: AbortController; task: Promise<void> }
+    >;
+    checks: Map<
+      number,
+      (reply: Extract<ModReply, { type: 'check-result' }>) => void
+    >;
+    tail: Promise<void>;
+  };
   private readonly cancelled = new Int32Array(new SharedArrayBuffer(4));
 
   private constructor(
@@ -54,7 +76,13 @@ export class ModRuntime {
     this.worker.stdout.resume();
     this.worker.stderr.resume();
     this.worker.on('message', (reply: ModReply) => {
-      if (reply.type === 'log') {
+      if (reply.type === 'host-call') this.executeHost(reply);
+      else if (reply.type === 'host-cancel') {
+        for (const id of reply.ids)
+          this.tool?.operations.get(id)?.controller.abort();
+      } else if (reply.type === 'check-result')
+        this.tool?.checks.get(reply.id)?.(reply);
+      else if (reply.type === 'log') {
         if (this.failure) return;
         try {
           this.log({ text: reply.text, to: reply.to }, reply.plugin);
@@ -103,10 +131,13 @@ export class ModRuntime {
         signal,
         60_000,
       );
+      if (!record(result) || typeof result['tools'] !== 'boolean')
+        throw new Error('Invalid Mod declarations.');
+      const commands = result['commands'];
       if (
-        !Array.isArray(result) ||
-        result.length > 64 ||
-        result.some(
+        !Array.isArray(commands) ||
+        commands.length > 64 ||
+        commands.some(
           (command) =>
             !command ||
             !plugins.some((plugin) => plugin.id === command.plugin) ||
@@ -118,7 +149,8 @@ export class ModRuntime {
         )
       )
         throw new Error('Invalid Mod command declarations.');
-      runtime.commands = result as Array<ModCommand & { plugin: string }>;
+      runtime.commands = commands as Array<ModCommand & { plugin: string }>;
+      runtime.tools = result['tools'];
       return runtime;
     } catch (error) {
       await runtime.dispose();
@@ -130,6 +162,127 @@ export class ModRuntime {
     return this.commands
       .filter((command) => command.plugin === plugin)
       .map(({ plugin: _plugin, ...command }) => command);
+  }
+
+  get hasToolHooks(): boolean {
+    return this.tools;
+  }
+
+  async runTool(
+    input: ModToolCallInput,
+    next: ModToolNext,
+    signal: AbortSignal,
+  ): Promise<ModToolResult> {
+    if (this.tool || this.pending)
+      throw new Error('A Mod dispatch is already running.');
+    const owner: NonNullable<ModRuntime['tool']> = {
+      next,
+      controller: new AbortController(),
+      operations: new Map(),
+      checks: new Map(),
+      tail: Promise.resolve(),
+    };
+    this.tool = owner;
+    try {
+      const result = await this.request(
+        { type: 'tool', input },
+        AbortSignal.any([signal, owner.controller.signal]),
+      );
+      validateResult('tool.call', result);
+      return result as ModToolResult;
+    } finally {
+      owner.controller.abort();
+      await Promise.allSettled(
+        [...owner.operations.values()].map((operation) => operation.task),
+      );
+      this.tool = undefined;
+    }
+  }
+
+  private executeHost(reply: Extract<ModReply, { type: 'host-call' }>): void {
+    const owner = this.tool;
+    if (
+      !owner ||
+      owner.operations.size >= 32 ||
+      owner.operations.has(reply.id)
+    ) {
+      this.fail(new Error('Invalid Mod host operation.'));
+      return;
+    }
+    const controller = new AbortController();
+    const signal = AbortSignal.any([
+      owner.controller.signal,
+      controller.signal,
+    ]);
+    const task = owner.tail
+      .then(async () => {
+        signal.throwIfAborted();
+        const result = await owner.next(
+          reply.input,
+          signal,
+          async (input, verdict, checkSignal) => {
+            const active = AbortSignal.any([signal, checkSignal]);
+            active.throwIfAborted();
+            const id = ++this.sequence;
+            let abort: () => void = () => {};
+            try {
+              return await new Promise<ModToolCheckResult>(
+                (resolve, reject) => {
+                  abort = () =>
+                    reject(new Error('Mod permission check cancelled.'));
+                  owner.checks.set(id, (response) => {
+                    if (response.error !== undefined)
+                      reject(new Error(response.error));
+                    else {
+                      try {
+                        validateResult('tool.check', response.result);
+                        resolve({
+                          ...response.result!,
+                          ceiling: input.ceiling,
+                        });
+                      } catch (error) {
+                        reject(error);
+                      }
+                    }
+                  });
+                  active.addEventListener('abort', abort, { once: true });
+                  this.post({
+                    type: 'tool-check',
+                    id,
+                    operation: reply.id,
+                    input,
+                    verdict,
+                  });
+                },
+              );
+            } finally {
+              active.removeEventListener('abort', abort);
+              owner.checks.delete(id);
+            }
+          },
+        );
+        signal.throwIfAborted();
+        this.post({ type: 'host-result', id: reply.id, result });
+      })
+      .catch((error: unknown) => {
+        if (!this.failure)
+          this.post({
+            type: 'host-result',
+            id: reply.id,
+            error: String(error).slice(0, 4000),
+          });
+      })
+      .finally(() => {
+        owner.operations.delete(reply.id);
+      });
+    owner.operations.set(reply.id, { controller, task });
+    owner.tail = task;
+  }
+
+  private post(request: ModRequest): void {
+    if (Buffer.byteLength(JSON.stringify(request)) > MOD_MAX_BYTES + 8192)
+      throw new Error('Mod host message is too large.');
+    this.worker.postMessage(request);
   }
 
   async runCommand(
@@ -170,10 +323,16 @@ export class ModRuntime {
   async dispose(): Promise<void> {
     this.fail(new Error('Mod runtime is closed.'));
     await this.worker.terminate();
+    await Promise.allSettled(
+      [...(this.tool?.operations.values() ?? [])].map(
+        (operation) => operation.task,
+      ),
+    );
   }
 
   private fail(error: Error): void {
     this.failure ??= error;
+    this.tool?.controller.abort();
     this.pending?.({ type: 'error', message: this.failure.message });
   }
 
@@ -196,6 +355,7 @@ export class ModRuntime {
     const onAbort = () => {
       aborted = true;
       Atomics.store(this.cancelled, 0, 1);
+      this.tool?.controller.abort();
     };
     Atomics.store(this.cancelled, 0, 0);
     try {
