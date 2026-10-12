@@ -22,8 +22,13 @@ describe('main CI failure issue workflow', () => {
 
   it('opens an autofix-ready issue only for failed main CI runs', () => {
     expect(workflow).toContain('workflow_run:');
+    // 'SDK Java' joined for its post-merge push run: its path filter watches
+    // the SDK's embedding surfaces too, so it fires on roughly half of recent
+    // merges to main — and a red push run is the only signal for a merge
+    // result neither PR could fail: the duplicate-V16 Flyway collision of
+    // #12940 sat unnoticed for two hours without it.
     expect(workflow).toContain(
-      "workflows: ['E2E Tests', 'SDK Python', 'Qwen Code CI']",
+      "workflows: ['E2E Tests', 'SDK Java', 'SDK Python', 'Qwen Code CI']",
     );
     expect(workflow).toContain("types: ['completed']");
     // 'Qwen Code CI' joined the list when the macOS and Windows lanes got a
@@ -57,6 +62,17 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).not.toContain(
       "github.event.workflow_run.event == 'pull_request'",
     );
+  });
+
+  it('pins the watched name to the name key of sdk-java.yml', () => {
+    // `workflow_run.workflows` matches the watched workflow's `name:` key, not
+    // its filename — renaming sdk-java.yml's name must fail here instead of
+    // silently stopping the SDK Java failure issues.
+    const sdkJava = parse(
+      readFileSync('.github/workflows/sdk-java.yml', 'utf8'),
+    );
+    expect(sdkJava.name).toBe('SDK Java');
+    expect(yml.on.workflow_run.workflows).toContain(sdkJava.name);
   });
 
   it('creates an issue that the existing autofix worker can pick up', () => {
@@ -191,6 +207,112 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).not.toContain('body<<QWEN_MAIN_CI_FAILURE_BODY\n');
   });
 
+  describe('infrastructure-only failures', () => {
+    // 2026-10-06: both ubuntu legs of an SDK Java push run were assigned to
+    // one ECS pool whose runners lost the server before executing a single
+    // step, and the watcher minted one autofix issue per commit for it
+    // (#13510, #13511) — work no code change could resolve. The PR scan has
+    // auto-rerun this annotation class for months (qwen-autofix.md#af-076);
+    // this lane now does the same for main runs — once, because the rerun's
+    // own completion re-enters this workflow at attempt 2 and files then if
+    // the break persists.
+    const infraStep = jobs.analyze.steps.find((step) => step.id === 'infra');
+    const rerunJob = jobs.rerun_infra;
+    const infraScript = oneLine(infraStep.run);
+
+    it('publishes an infra_only verdict from a dedicated analyze step', () => {
+      expect(jobs.analyze.outputs.infra_only).toBe(
+        '${{ steps.infra.outputs.infra_only }}',
+      );
+      expect(infraStep.env.RUN_ATTEMPT).toBe(
+        '${{ github.event.workflow_run.run_attempt }}',
+      );
+      // The verdict feeds the rerun job's gate; a missing or renamed output
+      // leaves the rerun unreachable and this wiring green only by accident.
+      expect(String(rerunJob.if)).toContain(
+        "needs.analyze.outputs.infra_only == 'true'",
+      );
+    });
+
+    it('uses the same signature list as the PR-scan rerun of qwen-autofix.yml', () => {
+      // Two lanes classify the same failure class; a signature added on one
+      // side only splits the fleet's behavior. The equality pin — not a
+      // shared constant, which workflow YAML cannot express — is what keeps
+      // them in lockstep.
+      const autofix = parse(
+        readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+      );
+      expect(infraStep.env.INFRA_FAILURE_SIGNATURES).toBe(
+        autofix.env.INFRA_FAILURE_SIGNATURES,
+      );
+      expect(infraStep.env.INFRA_FAILURE_SIGNATURES).toContain(
+        'lost communication with the server',
+      );
+    });
+
+    it('classifies per failed job and only when EVERY one is infrastructure', () => {
+      // The annotation read is per check-run id taken from the jobs payload's
+      // own check_run_url, and the match is the same grep the PR scan uses.
+      expect(infraScript).toContain(
+        'jq -r \'.jobs[] | select(.conclusion == "failure") | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
+      );
+      expect(infraScript).toContain(
+        'gh api --paginate "repos/${REPO}/check-runs/${check_run_id}/annotations"',
+      );
+      expect(infraScript).toContain(
+        'grep -qiE "${INFRA_FAILURE_SIGNATURES}" <<< "${annotations}"',
+      );
+      // A mixed run — one real test failure beside one dead runner — must
+      // still file: only a unanimous vote suppresses the issue.
+      expect(infraScript).toContain(
+        '[[ "${total}" -gt 0 && "${infra}" -eq "${total}" ]]',
+      );
+    });
+
+    it('fails closed: later attempts, empty failure lists, and unreadable annotations all file', () => {
+      // The attempt guard is what stops a rerun loop: a persistent break
+      // re-fails at attempt 2 and files then. Negate it and the pin below
+      // goes red.
+      expect(infraScript).toContain('if [[ "${RUN_ATTEMPT}" == \'1\' ]]; then');
+      // Without the count guard an empty failure set is vacuously "all
+      // infrastructure" and a run whose job list could not be fetched would
+      // never be reported.
+      expect(infraScript).toContain('"${total}" -gt 0');
+      // The default is filing: the flag flips only inside the guarded block.
+      expect(infraScript).toContain('infra_only=false');
+      // An errored annotations fetch must degrade to "not infrastructure",
+      // never abort the step or fabricate a match.
+      expect(infraScript).toContain(
+        '--jq \'[.[].message] | join("\\n")\' 2>/dev/null || true',
+      );
+    });
+
+    it('reruns the failed jobs once, with actions:write and no PAT or checkout', () => {
+      expect(rerunJob.needs).toBe('analyze');
+      expect(rerunJob.permissions).toEqual({ actions: 'write' });
+      const rendered = JSON.stringify(rerunJob);
+      expect(rendered).not.toContain('CI_DEV_BOT_PAT');
+      expect(rendered).not.toContain('actions/checkout');
+      expect(oneLine(rerunJob.steps[0].run)).toContain(
+        'gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"',
+      );
+    });
+
+    it('files the issue unless the infra rerun actually ran', () => {
+      // rerun_infra is SKIPPED on the ordinary path, and a skipped need is
+      // not a success — without always() the file job would silently never
+      // run again.
+      expect(jobs.file_issue.needs).toEqual(['analyze', 'rerun_infra']);
+      const condition = String(jobs.file_issue.if);
+      expect(condition).toContain('always()');
+      expect(condition).toContain("needs.analyze.result == 'success'");
+      expect(condition).toContain("needs.analyze.outputs.infra_only != 'true'");
+      // A rerun that could not be dispatched must not swallow the report:
+      // the issue is then the only record of a red main.
+      expect(condition).toContain("needs.rerun_infra.result != 'success'");
+    });
+  });
+
   const privilegedJobs = Object.entries(jobs).filter(([, job]) =>
     JSON.stringify(job).includes('CI_DEV_BOT_PAT'),
   );
@@ -222,12 +344,15 @@ describe('main CI failure issue workflow', () => {
   it('keeps the log analysis away from the bot PAT and from write scopes', () => {
     const analyze = jobs.analyze;
     expect(JSON.stringify(analyze)).not.toContain('CI_DEV_BOT_PAT');
-    // Reading job logs needs `actions: read`; nothing here needs write.
+    // Reading job logs needs `actions: read`; the infrastructure detector
+    // reads check-run annotations, which are gated behind `checks: read`.
+    // Nothing here needs write.
     expect(analyze.permissions).toEqual({
       actions: 'read',
+      checks: 'read',
       contents: 'read',
       issues: 'read',
     });
-    expect(privilegedJobs[0][1].needs).toBe('analyze');
+    expect(privilegedJobs[0][1].needs).toEqual(['analyze', 'rerun_infra']);
   });
 });

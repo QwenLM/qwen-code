@@ -33,12 +33,12 @@ describe('Live Voice messages', () => {
     ).toBe('Global shortcut: Command+E');
     expect(
       getTranslator('en')('live.browser.sharingNamed', { target: 'Terminal' }),
-    ).toBe('Sharing Terminal. Qwen looks only when asked.');
+    ).toBe('Terminal');
     expect(
       getTranslator('zh-CN')('live.browser.sharingNamed', {
         target: 'Terminal',
       }),
-    ).toBe('正在共享Terminal，Qwen 只在需要时查看。');
+    ).toBe('Terminal');
   });
 
   it('hold only Live keys, translated one for one', () => {

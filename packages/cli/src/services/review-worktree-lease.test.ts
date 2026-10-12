@@ -18,7 +18,7 @@ import {
 } from 'node:fs';
 import type { PathOrFileDescriptor, WriteFileOptions } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cleanupReviewWorktreeLeases,
@@ -152,6 +152,12 @@ vi.mock('node:fs', async (importOriginal) => {
 
 const roots: string[] = [];
 
+beforeEach(() => {
+  const home = mkdtempSync(join(tmpdir(), 'review-lease-home-'));
+  roots.push(home);
+  vi.stubEnv('QWEN_HOME', home);
+});
+
 function createRepository(): string {
   const root = mkdtempSync(join(tmpdir(), 'review-lease-'));
   roots.push(root);
@@ -170,6 +176,7 @@ afterEach(() => {
   execStub.worktreeRemoveCalls.length = 0;
   execStub.failWorktreeVerbs = 0;
   stdioSpy.writeStderrLineSafe.mockClear();
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -226,11 +233,7 @@ describe('review worktree leases', () => {
         { encoding: 'utf8' },
       ).trim(),
     ).toBe('');
-    expect(
-      existsSync(
-        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      ),
-    ).toBe(false);
+    expect(existsSync(reviewLeasePath(root, 'pr-1'))).toBe(false);
   });
 
   it('falls back to removing an unregistered worktree directory', () => {
@@ -262,11 +265,7 @@ describe('review worktree leases', () => {
         { encoding: 'utf8' },
       ).trim(),
     ).toBe('');
-    expect(
-      existsSync(
-        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      ),
-    ).toBe(false);
+    expect(existsSync(reviewLeasePath(root, 'pr-1'))).toBe(false);
   });
 
   it('keeps the lease when fallback pruning fails', () => {
@@ -291,11 +290,7 @@ describe('review worktree leases', () => {
     });
 
     expect(existsSync(worktree)).toBe(false);
-    expect(
-      existsSync(
-        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      ),
-    ).toBe(true);
+    expect(existsSync(reviewLeasePath(root, 'pr-1'))).toBe(true);
   });
 
   it('removes only worktrees owned by the completed session', () => {
@@ -355,12 +350,9 @@ describe('review worktree leases', () => {
         { encoding: 'utf8' },
       ).trim(),
     ).toBe('');
-    expect(
-      readFileSync(
-        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-2.json'),
-        'utf8',
-      ),
-    ).toContain('session-b');
+    expect(readFileSync(reviewLeasePath(root, 'pr-2'), 'utf8')).toContain(
+      'session-b',
+    );
   });
 
   it('does not let a child prompt clean up its parent review lease', () => {
@@ -392,11 +384,7 @@ describe('review worktree leases', () => {
     });
 
     expect(existsSync(worktree)).toBe(true);
-    expect(
-      existsSync(
-        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      ),
-    ).toBe(true);
+    expect(existsSync(reviewLeasePath(root, 'pr-1'))).toBe(true);
   });
 
   it('does not remove a path outside the review temp directory', () => {
@@ -420,11 +408,7 @@ describe('review worktree leases', () => {
     });
 
     expect(readFileSync(join(outside, 'marker'), 'utf8')).toBe('keep');
-    expect(
-      existsSync(
-        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      ),
-    ).toBe(true);
+    expect(existsSync(reviewLeasePath(root, 'pr-1'))).toBe(true);
   });
 
   it('ignores a lease whose branch does not match its PR target', () => {
@@ -456,11 +440,7 @@ describe('review worktree leases', () => {
     });
 
     expect(existsSync(worktree)).toBe(true);
-    expect(
-      existsSync(
-        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      ),
-    ).toBe(true);
+    expect(existsSync(reviewLeasePath(root, 'pr-1'))).toBe(true);
   });
 
   it('does not derive lease paths from invalid targets', () => {
@@ -505,11 +485,7 @@ describe('review worktree leases', () => {
     });
 
     clearReviewWorktreeLease(root, 'pr-1');
-    expect(
-      existsSync(
-        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      ),
-    ).toBe(false);
+    expect(existsSync(reviewLeasePath(root, 'pr-1'))).toBe(false);
     cleanupReviewWorktreeLeases({
       sessionId: 'session-a',
       promptId: 'prompt-parent',
@@ -528,6 +504,42 @@ describe('review worktree leases', () => {
 });
 
 describe('the move out of the mounted directory', () => {
+  it('ignores a planted lease in the retired workspace directory', () => {
+    const root = createRepository();
+    const planted = join(
+      root,
+      '.qwen',
+      'review-leases',
+      'qwen-review-lease-pr-1.json',
+    );
+    mkdirSync(dirname(planted), { recursive: true });
+    writeFileSync(
+      planted,
+      JSON.stringify({
+        sessionId: 'foreign',
+        promptId: 'foreign',
+        target: 'pr-1',
+        repositoryRoot: root,
+        worktreePath: join(root, '.qwen', 'tmp', 'review-pr-1'),
+        branch: 'qwen-review/pr-1',
+        identity: 1,
+      }),
+    );
+
+    expect(readReviewWorktreeLease(root, 'pr-1')).toBeNull();
+    createReviewWorktreeLease({
+      sessionId: 'current',
+      promptId: 'current',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: join(root, '.qwen', 'tmp', 'review-pr-1'),
+      branch: 'qwen-review/pr-1',
+    });
+
+    expect(readReviewWorktreeLease(root, 'pr-1')?.sessionId).toBe('current');
+    expect(JSON.parse(readFileSync(planted, 'utf8')).sessionId).toBe('foreign');
+  });
+
   it('replaces the superseded legacy lease with the mirror, directory or not', () => {
     const root = createRepository();
     const legacy = (t: string) =>
@@ -559,11 +571,7 @@ describe('the move out of the mounted directory', () => {
     // Scoped: another target's legacy lease is not this call's to touch.
     expect(readFileSync(legacy('pr-2'), 'utf8')).toBe('{}');
     // ...and the new one is written where nothing mounts.
-    expect(
-      existsSync(
-        join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      ),
-    ).toBe(true);
+    expect(existsSync(reviewLeasePath(root, 'pr-1'))).toBe(true);
   });
 
   it('clears loudly, never fatally, when the legacy delete is wedged (R32-4)', () => {
@@ -1340,11 +1348,7 @@ describe('the nested review geometry (R27-6)', () => {
       branch: 'qwen-review/pr-1',
     });
 
-    expect(
-      existsSync(
-        join(outer, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-      ),
-    ).toBe(true);
+    expect(existsSync(reviewLeasePath(outer, 'pr-1'))).toBe(true);
     expect(
       existsSync(
         join(
@@ -1413,9 +1417,12 @@ describe('readReviewWorktreeLease', () => {
     expect(lease?.sessionId).toBe('session-a');
     expect(lease?.promptId).toBe('prompt-parent');
     expect(lease?.worktreePath).toBe(join(root, '.qwen', 'tmp', 'review-pr-1'));
-    expect(reviewLeasePath(root, 'pr-1')).toBe(
-      join(root, '.qwen', 'review-leases', 'qwen-review-lease-pr-1.json'),
-    );
+    expect(reviewLeasePath(root, 'pr-1').startsWith(root + sep)).toBe(false);
+    expect(
+      reviewLeasePath(root, 'pr-1').startsWith(
+        join(process.env['QWEN_HOME']!, 'review-state') + sep,
+      ),
+    ).toBe(true);
   });
 
   it('returns null for a missing lease and for non-PR targets', () => {
@@ -1560,7 +1567,11 @@ describe('lease acquisition is atomic (#9205)', () => {
       worktreePath: worktree,
       branch: 'qwen-review/pr-1',
     });
-    const trustDir = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-1');
+    const trustDir = join(
+      dirname(reviewLeasePath(root, 'pr-1')),
+      'base-tree',
+      'pr-1',
+    );
     mkdirSync(trustDir, { recursive: true });
     writeFileSync(join(trustDir, 'deadbeefdeadbeef.json'), '{"identity":1}');
 
@@ -1850,7 +1861,11 @@ describe('lease acquisition is atomic (#9205)', () => {
     // builder's lock, which lives beside the trust files.
     const root = createRepository();
     createReviewWorktreeLease(leaseParams(root));
-    const dir = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-1');
+    const dir = join(
+      dirname(reviewLeasePath(root, 'pr-1')),
+      'base-tree',
+      'pr-1',
+    );
     const lock = join(dir, 'review-pr-1-base.lock');
     mkdirSync(lock, { recursive: true });
     writeFileSync(join(lock, 'holder'), 'a-live-builder');
@@ -1875,8 +1890,16 @@ describe('lease acquisition is atomic (#9205)', () => {
     // belongs here; the per-target directory is what makes it precise.
     const root = createRepository();
     createReviewWorktreeLease(leaseParams(root));
-    const mine = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-1');
-    const other = join(root, '.qwen', 'review-leases', 'base-tree', 'pr-2');
+    const mine = join(
+      dirname(reviewLeasePath(root, 'pr-1')),
+      'base-tree',
+      'pr-1',
+    );
+    const other = join(
+      dirname(reviewLeasePath(root, 'pr-2')),
+      'base-tree',
+      'pr-2',
+    );
     for (const dir of [mine, other]) {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, 'deadbeefdeadbeef.json'), '{"identity":1}');
@@ -1933,7 +1956,7 @@ describe('lease acquisition is atomic (#9205)', () => {
     // writer rewriting it is self-heal, not clobber.
     const root = createRepository();
     mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
-    mkdirSync(join(root, '.qwen', 'review-leases'), { recursive: true });
+    mkdirSync(dirname(reviewLeasePath(root, 'pr-1')), { recursive: true });
     writeFileSync(reviewLeasePath(root, 'pr-1'), '{"truncated');
     createReviewWorktreeLease(leaseParams(root));
     expect(readReviewWorktreeLease(root, 'pr-1')?.sessionId).toBe('session-a');
@@ -2003,9 +2026,7 @@ describe('cleanupReviewWorktreeLeases scan', () => {
       'qwen-review/pr-1',
     ]);
     const stray = join(
-      root,
-      '.qwen',
-      'review-leases',
+      dirname(reviewLeasePath(root, 'pr-1')),
       'qwen-review-lease-local.json',
     );
     mkdirSync(dirname(stray), { recursive: true });

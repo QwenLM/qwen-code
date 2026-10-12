@@ -52,4 +52,40 @@ describe('POST /live/setup', () => {
       expect(update).not.toHaveBeenCalled();
     },
   );
+
+  it('forwards an endpoint to the controller', async () => {
+    const { app, update } = createApp();
+    const response = await request(app).post('/live/setup').send({
+      endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    });
+
+    expect(response.status).toBe(200);
+    expect(update).toHaveBeenCalledWith({
+      endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    });
+  });
+
+  it('forwards an empty endpoint, which restores the default', async () => {
+    const { app, update } = createApp();
+    const response = await request(app)
+      .post('/live/setup')
+      .send({ endpoint: '' });
+
+    expect(response.status).toBe(200);
+    expect(update).toHaveBeenCalledWith({ endpoint: '' });
+  });
+
+  it.each([7, null, 'x'.repeat(2049)])(
+    'rejects an invalid endpoint %j before reaching the controller',
+    async (value) => {
+      const { app, update } = createApp();
+      const response = await request(app)
+        .post('/live/setup')
+        .send({ endpoint: value });
+
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('invalid_live_endpoint');
+      expect(update).not.toHaveBeenCalled();
+    },
+  );
 });

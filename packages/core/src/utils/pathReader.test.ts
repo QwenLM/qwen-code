@@ -13,6 +13,7 @@ import { readPathFromWorkspace } from './pathReader.js';
 import type { Config } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import type { PartUnion } from '@google/genai';
 
 // --- Helper for creating a mock Config object ---
 // We use the actual implementations of WorkspaceContext and FileSystemService
@@ -47,6 +48,26 @@ const createMockConfig = (
   } as unknown as Config;
 };
 
+const passThroughFileService = () =>
+  ({
+    filterFiles: vi.fn((files) => files),
+  }) as unknown as FileDiscoveryService;
+
+const solidPng = (width: number, height: number) =>
+  sharp({ create: { width, height, channels: 3, background: '#306090' } })
+    .png()
+    .toBuffer();
+
+/** Joins string and `{ text }` parts, dropping every other part. */
+const textOf = (parts: PartUnion[]) =>
+  parts
+    .map((p) => {
+      if (typeof p === 'string') return p;
+      if (typeof p === 'object' && p && 'text' in p) return p.text;
+      return '';
+    })
+    .join('');
+
 describe('readPathFromWorkspace', () => {
   const CWD = path.resolve('/test/cwd');
   const OTHER_DIR = path.resolve('/test/other');
@@ -57,17 +78,25 @@ describe('readPathFromWorkspace', () => {
     vi.resetAllMocks();
   });
 
+  /** Reads `target` from a CWD (+ `otherDirs`) workspace. */
+  const readInWorkspace = (
+    target: string,
+    otherDirs: string[] = [],
+    fileService = passThroughFileService(),
+  ) =>
+    readPathFromWorkspace(
+      target,
+      createMockConfig(CWD, otherDirs, fileService),
+    );
+
   it('should read a text file from the CWD', async () => {
     mock({
       [CWD]: {
         'file.txt': 'hello from cwd',
       },
     });
-    const mockFileService = {
-      filterFiles: vi.fn((files) => files),
-    } as unknown as FileDiscoveryService;
-    const config = createMockConfig(CWD, [], mockFileService);
-    const result = await readPathFromWorkspace('file.txt', config);
+    const mockFileService = passThroughFileService();
+    const result = await readInWorkspace('file.txt', [], mockFileService);
     // Expect [string] for text content
     expect(result).toEqual(['hello from cwd']);
     expect(mockFileService.filterFiles).toHaveBeenCalled();
@@ -80,11 +109,7 @@ describe('readPathFromWorkspace', () => {
         'file.txt': 'hello from other dir',
       },
     });
-    const mockFileService = {
-      filterFiles: vi.fn((files) => files),
-    } as unknown as FileDiscoveryService;
-    const config = createMockConfig(CWD, [OTHER_DIR], mockFileService);
-    const result = await readPathFromWorkspace('file.txt', config);
+    const result = await readInWorkspace('file.txt', [OTHER_DIR]);
     expect(result).toEqual(['hello from other dir']);
   });
 
@@ -97,35 +122,18 @@ describe('readPathFromWorkspace', () => {
         'file.txt': 'hello from other dir',
       },
     });
-    const mockFileService = {
-      filterFiles: vi.fn((files) => files),
-    } as unknown as FileDiscoveryService;
-    const config = createMockConfig(CWD, [OTHER_DIR], mockFileService);
-    const result = await readPathFromWorkspace('file.txt', config);
+    const result = await readInWorkspace('file.txt', [OTHER_DIR]);
     expect(result).toEqual(['hello from cwd']);
   });
 
   it('should read an image file as overview text and inlineData', async () => {
-    const imageData = await sharp({
-      create: {
-        width: 20,
-        height: 10,
-        channels: 3,
-        background: '#306090',
-      },
-    })
-      .png()
-      .toBuffer();
+    const imageData = await solidPng(20, 10);
     mock({
       [CWD]: {
         'image.png': imageData,
       },
     });
-    const mockFileService = {
-      filterFiles: vi.fn((files) => files),
-    } as unknown as FileDiscoveryService;
-    const config = createMockConfig(CWD, [], mockFileService);
-    const result = await readPathFromWorkspace('image.png', config);
+    const result = await readInWorkspace('image.png');
     // Expect overview text immediately followed by the bounded image.
     expect(result).toEqual([
       {
@@ -151,11 +159,7 @@ describe('readPathFromWorkspace', () => {
         'data.bin': binaryData,
       },
     });
-    const mockFileService = {
-      filterFiles: vi.fn((files) => files),
-    } as unknown as FileDiscoveryService;
-    const config = createMockConfig(CWD, [], mockFileService);
-    const result = await readPathFromWorkspace('data.bin', config);
+    const result = await readInWorkspace('data.bin');
     // Expect [string] containing the skip message from fileUtils
     expect(result).toEqual(['Cannot display content of binary file: data.bin']);
   });
@@ -168,11 +172,7 @@ describe('readPathFromWorkspace', () => {
         'abs.txt': 'absolute content',
       },
     });
-    const mockFileService = {
-      filterFiles: vi.fn((files) => files),
-    } as unknown as FileDiscoveryService;
-    const config = createMockConfig(CWD, [OTHER_DIR], mockFileService);
-    const result = await readPathFromWorkspace(absPath, config);
+    const result = await readInWorkspace(absPath, [OTHER_DIR]);
     expect(result).toEqual(['absolute content']);
   });
 
@@ -186,22 +186,10 @@ describe('readPathFromWorkspace', () => {
           },
         },
       });
-      const mockFileService = {
-        filterFiles: vi.fn((files) => files),
-      } as unknown as FileDiscoveryService;
-      const config = createMockConfig(CWD, [], mockFileService);
-      const result = await readPathFromWorkspace('my-dir', config);
+      const result = await readInWorkspace('my-dir');
 
       // Convert to a single string for easier, order-independent checking
-      const resultText = result
-        .map((p) => {
-          if (typeof p === 'string') return p;
-          if (typeof p === 'object' && p && 'text' in p) return p.text;
-          // This part is important for handling binary/image data which isn't just text
-          if (typeof p === 'object' && p && 'inlineData' in p) return '';
-          return p;
-        })
-        .join('');
+      const resultText = textOf(result);
 
       expect(resultText).toContain(
         '--- Start of content for directory: my-dir ---',
@@ -226,19 +214,9 @@ describe('readPathFromWorkspace', () => {
           },
         },
       });
-      const mockFileService = {
-        filterFiles: vi.fn((files) => files),
-      } as unknown as FileDiscoveryService;
-      const config = createMockConfig(CWD, [], mockFileService);
-      const result = await readPathFromWorkspace('my-dir', config);
+      const result = await readInWorkspace('my-dir');
 
-      const resultText = result
-        .map((p) => {
-          if (typeof p === 'string') return p;
-          if (typeof p === 'object' && p && 'text' in p) return p.text;
-          return '';
-        })
-        .join('');
+      const resultText = textOf(result);
 
       expect(resultText).toContain('content of file 1');
       expect(resultText).toContain('nested content');
@@ -248,16 +226,7 @@ describe('readPathFromWorkspace', () => {
     });
 
     it('should handle mixed content and include files from subdirectories', async () => {
-      const imageData = await sharp({
-        create: {
-          width: 8,
-          height: 8,
-          channels: 3,
-          background: '#306090',
-        },
-      })
-        .png()
-        .toBuffer();
+      const imageData = await solidPng(8, 8);
       mock({
         [CWD]: {
           'mixed-dir': {
@@ -270,20 +239,10 @@ describe('readPathFromWorkspace', () => {
           },
         },
       });
-      const mockFileService = {
-        filterFiles: vi.fn((files) => files),
-      } as unknown as FileDiscoveryService;
-      const config = createMockConfig(CWD, [], mockFileService);
-      const result = await readPathFromWorkspace('mixed-dir', config);
+      const result = await readInWorkspace('mixed-dir');
 
-      // Check for the text part
-      const textContent = result
-        .map((p) => {
-          if (typeof p === 'string') return p;
-          if (typeof p === 'object' && p && 'text' in p) return p.text;
-          return ''; // Ignore non-text parts for this assertion
-        })
-        .join('');
+      // Check for the text part (non-text parts are ignored)
+      const textContent = textOf(result);
       expect(textContent).toContain('some text');
       expect(textContent).toContain('this should be included');
 
@@ -306,11 +265,7 @@ describe('readPathFromWorkspace', () => {
           'empty-dir': {},
         },
       });
-      const mockFileService = {
-        filterFiles: vi.fn((files) => files),
-      } as unknown as FileDiscoveryService;
-      const config = createMockConfig(CWD, [], mockFileService);
-      const result = await readPathFromWorkspace('empty-dir', config);
+      const result = await readInWorkspace('empty-dir');
       expect(result).toEqual([
         { text: '--- Start of content for directory: empty-dir ---\n' },
         { text: '--- End of content for directory: empty-dir ---' },
@@ -328,8 +283,7 @@ describe('readPathFromWorkspace', () => {
       const mockFileService = {
         filterFiles: vi.fn(() => []), // Simulate the file being filtered out
       } as unknown as FileDiscoveryService;
-      const config = createMockConfig(CWD, [], mockFileService);
-      const result = await readPathFromWorkspace('ignored.txt', config);
+      const result = await readInWorkspace('ignored.txt', [], mockFileService);
       expect(result).toEqual([]);
       expect(mockFileService.filterFiles).toHaveBeenCalledWith(
         ['ignored.txt'],
@@ -354,15 +308,8 @@ describe('readPathFromWorkspace', () => {
           files.filter((f) => !f.endsWith('ignored.log')),
         ),
       } as unknown as FileDiscoveryService;
-      const config = createMockConfig(CWD, [], mockFileService);
-      const result = await readPathFromWorkspace('my-dir', config);
-      const resultText = result
-        .map((p) => {
-          if (typeof p === 'string') return p;
-          if (typeof p === 'object' && p && 'text' in p) return p.text;
-          return '';
-        })
-        .join('');
+      const result = await readInWorkspace('my-dir', [], mockFileService);
+      const resultText = textOf(result);
 
       expect(resultText).toContain('visible');
       expect(resultText).not.toContain('invisible');
@@ -375,9 +322,7 @@ describe('readPathFromWorkspace', () => {
           'ignored.txt': 'ignored content',
         },
       });
-      const mockFileService = {
-        filterFiles: vi.fn((files) => files),
-      } as unknown as FileDiscoveryService;
+      const mockFileService = passThroughFileService();
       const config = createMockConfig(CWD, [], mockFileService, {
         respectGitIgnore: false,
         respectQwenIgnore: true,
@@ -433,12 +378,8 @@ describe('readPathFromWorkspace', () => {
           }),
         },
       });
-      const mockFileService = {
-        filterFiles: vi.fn((files) => files),
-      } as unknown as FileDiscoveryService;
-      const config = createMockConfig(CWD, [], mockFileService);
       // processSingleFileContent catches the error and returns an error string.
-      const result = await readPathFromWorkspace('unreadable.txt', config);
+      const result = await readInWorkspace('unreadable.txt');
       const textResult = result[0] as string;
 
       // processSingleFileContent formats errors using the relative path from the target dir (CWD).
@@ -454,11 +395,7 @@ describe('readPathFromWorkspace', () => {
         'large.txt': largeContent,
       },
     });
-    const mockFileService = {
-      filterFiles: vi.fn((files) => files),
-    } as unknown as FileDiscoveryService;
-    const config = createMockConfig(CWD, [], mockFileService);
-    const result = await readPathFromWorkspace('large.txt', config);
+    const result = await readInWorkspace('large.txt');
     const textResult = result[0] as string;
     expect(textResult).toContain('a'.repeat(100));
     expect(textResult).toContain('... [truncated]');

@@ -58,6 +58,15 @@ import styles from './WorkspacesOverviewPanel.module.css';
 const SESSIONS_POLL_MS = 30_000;
 const GIT_POLL_MS = 60_000;
 
+/**
+ * A trust grant is written to the daemon's trust file at once, but this table
+ * reads each workspace's runtime, which the daemon rebuilds asynchronously.
+ * Poll the capabilities payload until the rebuild shows up, bounded so a
+ * failed reconcile still returns the row to a clickable state.
+ */
+const TRUST_APPLY_POLL_MS = 1_000;
+const TRUST_APPLY_TIMEOUT_MS = 30_000;
+
 /** One page of the active default catalog, including Qwen Live tasks. */
 function useWorkspaceSessionsPage(cwd: string, enabled: boolean) {
   const workspace = useWorkspace();
@@ -292,6 +301,16 @@ export function WorkspacesOverviewPanel({
   const workspaceActions = useWorkspaceActions();
   const catalogController = useSessionCatalogController(workspace.client);
   const [creatingCwd, setCreatingCwd] = useState<string | null>(null);
+  const [trustPendingCwd, setTrustPendingCwd] = useState<string | null>(null);
+  const [trustTick, setTrustTick] = useState(0);
+  const trustDeadlineRef = useRef(0);
+  // The workspace context value is rebuilt whenever capabilities change, so a
+  // callback closing over it would rebuild the column definitions (and remount
+  // every cell) on each poll.
+  const workspaceRef = useRef(workspace);
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
 
   const workspaces = useMemo(
     () =>
@@ -302,6 +321,9 @@ export function WorkspacesOverviewPanel({
   );
   const removalEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_runtime_removal'),
+  );
+  const trustGrantEnabled = Boolean(
+    connection.capabilities?.features?.includes('workspace_trust_grant'),
   );
 
   const reportError = useCallback(
@@ -345,6 +367,45 @@ export function WorkspacesOverviewPanel({
     },
     [creatingCwd, onNewSession],
   );
+
+  const handleGrantTrust = useCallback(
+    (ws: DaemonWorkspaceCapability) => {
+      if (trustPendingCwd !== null) return;
+      trustDeadlineRef.current = Date.now() + TRUST_APPLY_TIMEOUT_MS;
+      setTrustPendingCwd(ws.cwd);
+      void (async () => {
+        try {
+          await workspaceRef.current.client
+            .workspaceByCwd(ws.cwd)
+            .grantWorkspaceTrust();
+        } catch (error) {
+          setTrustPendingCwd(null);
+          reportError(error, t('workspacesOverview.trustFailed'));
+          return;
+        }
+        void workspaceRef.current.refreshCapabilities?.().catch(() => {});
+      })();
+    },
+    [reportError, t, trustPendingCwd],
+  );
+
+  // Clears once the granted workspace reports trusted, or at the deadline.
+  // The timer re-arms itself rather than relying on the polled payload to
+  // change: a refresh that fails leaves `workspaces` untouched, and the
+  // deadline must still be reached so the row becomes clickable again.
+  useEffect(() => {
+    if (trustPendingCwd === null) return;
+    const entry = workspaces.find((ws) => ws.cwd === trustPendingCwd);
+    if (entry?.trusted || Date.now() >= trustDeadlineRef.current) {
+      setTrustPendingCwd(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void workspaceRef.current.refreshCapabilities?.().catch(() => {});
+      setTrustTick((tick) => tick + 1);
+    }, TRUST_APPLY_POLL_MS);
+    return () => clearTimeout(timer);
+  }, [trustPendingCwd, trustTick, workspaces]);
 
   const columns = useMemo<ColumnDef<DaemonWorkspaceCapability>[]>(
     () => [
@@ -411,14 +472,27 @@ export function WorkspacesOverviewPanel({
             removalEnabled && !ws.primary && ws.removable === true;
           return (
             <span className={styles.actionsCell}>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!ws.trusted || creatingCwd !== null}
-                onClick={() => handleNewSession(ws)}
-              >
-                {t('workspacesOverview.newTask')}
-              </Button>
+              {!ws.trusted && trustGrantEnabled ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={trustPendingCwd !== null}
+                  onClick={() => handleGrantTrust(ws)}
+                >
+                  {trustPendingCwd === ws.cwd
+                    ? t('workspacesOverview.trusting')
+                    : t('workspacesOverview.trust')}
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!ws.trusted || creatingCwd !== null}
+                  onClick={() => handleNewSession(ws)}
+                >
+                  {t('workspacesOverview.newTask')}
+                </Button>
+              )}
               {canRemove && (
                 <Button
                   size="icon"
@@ -440,7 +514,16 @@ export function WorkspacesOverviewPanel({
         } satisfies DataTableColumnMeta<DaemonWorkspaceCapability>,
       },
     ],
-    [creatingCwd, handleNewSession, removal, removalEnabled, t],
+    [
+      creatingCwd,
+      handleGrantTrust,
+      handleNewSession,
+      removal,
+      removalEnabled,
+      t,
+      trustGrantEnabled,
+      trustPendingCwd,
+    ],
   );
 
   const table = useReactTable({

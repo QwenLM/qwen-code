@@ -6,7 +6,7 @@ import { AuthType } from '../../contentGenerator.js';
 import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_DASHSCOPE_BASE_URL,
-  DASHSCOPE_PROXY_BASE_URL,
+  getDashscopeProxyBaseUrl,
   resolveRequestTimeout,
 } from '../constants.js';
 import type {
@@ -242,9 +242,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       hostname !== null && hostname.endsWith('.alicloudapi.com');
 
     // Check if proxy is configured and matches
-    const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
-      ? DASHSCOPE_PROXY_BASE_URL.slice(0, -1)
-      : DASHSCOPE_PROXY_BASE_URL;
+    const proxyBaseUrl = getDashscopeProxyBaseUrl();
+    const normalizedProxyUrl = proxyBaseUrl?.endsWith('/')
+      ? proxyBaseUrl.slice(0, -1)
+      : proxyBaseUrl;
 
     const isProxyMatch = Boolean(
       normalizedProxyUrl &&

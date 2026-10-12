@@ -25,9 +25,10 @@ export const ToolMode = {
 
 export type ToolMode = (typeof ToolMode)[keyof typeof ToolMode];
 
-const HIDDEN_TOOLS = new Set<string>([ToolNames.TOOL_SEARCH, 'tool_call']);
+const HIDDEN_TOOLS = new Set<string>(['tool_call']);
 
 const DIRECT_ONLY_TOOLS = new Set<string>([
+  ToolNames.TOOL_SEARCH,
   ToolNames.AGENT,
   ToolNames.ASK_USER_QUESTION,
   ToolNames.STRUCTURED_OUTPUT,
@@ -192,17 +193,19 @@ function schemaToType(schema: unknown): string {
   return 'unknown';
 }
 
-function describeBinding(binding: CodeModeToolBinding): string {
-  // A deferred tool keeps its registry semantics, but CodeModeOnly hides
-  // tool_search and never surfaces nested calls as history functionCalls, so
-  // nothing can reveal it later: this description is its only chance to carry
-  // a schema.
+export function describeCodeModeBinding(binding: CodeModeToolBinding): string {
   const params = schemaToType(binding.parametersJsonSchema);
   return `tools.${binding.jsName}(args: ${params}): Promise<CodeModeToolResult>;`;
 }
 
-export function buildExecDescription(plan: CodeModeBindingPlan): string {
-  const allTools = plan.bindings.map(
+export function buildExecDescription(
+  plan: CodeModeBindingPlan,
+  searchAvailable = false,
+): string {
+  const visibleBindings = plan.bindings.filter(
+    (binding) => !searchAvailable || !binding.deferred,
+  );
+  const allTools = visibleBindings.map(
     ({ name, jsName, description, deferred }) => ({
       name,
       jsName,
@@ -210,22 +213,23 @@ export function buildExecDescription(plan: CodeModeBindingPlan): string {
       deferred,
     }),
   );
-  const collisionText = plan.collisions
+  const collisionText = (searchAvailable ? [] : plan.collisions)
     .map(
       ({ jsName, kept, omitted }) =>
         `- ${omitted} is omitted because it collides with ${kept} as tools.${jsName}.`,
     )
     .join('\n');
-  const declarations = plan.bindings.map(describeBinding).join('\n');
+  const declarations = visibleBindings.map(describeCodeModeBinding).join('\n');
 
   return `Execute JavaScript in a fresh isolated runtime and wait for it to finish.
 
-Use async/await and call registered tools through tools.<name>(args). Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Tool calls can be composed with Promise.all. Await every tool promise; unawaited calls are cancelled when the script finishes. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
+Use async/await and call registered tools through tools.<jsName>(args), using the exact JavaScript name documented for the tool. Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Batch independent searches and reads with await Promise.allSettled([...]) and inspect every result: emit fulfilled output with text(result.value.output) and rejected reasons with text(String(result.reason)). Safe calls run concurrently within the runtime limit; a rejected promise does not discard sibling results. Keep dependent actions, mutations, and approvals sequential. User cancellation still stops unfinished calls. Await every tool promise; unawaited calls are cancelled when the script finishes. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
+${searchAvailable ? '\nDeferred tool signatures and descriptions are omitted below. Invoke tool_search as a separate top-level tool call, outside exec; it is not a JavaScript global or a tools binding. Search by keywords to obtain the registered name, full schema, and jsName. Use select:<name> only with a registered name, including the full MCP prefix. Read the result before writing a later exec call using tools.<jsName>(args). Reuse schemas already in the current context. If a schema is missing, including after context compression, search again before constructing arguments. Search results do not change this declaration.\n' : ''}
 
-Results from skill, update_goal, and capture_screen_context are automatically retained in the exec response; text() is not required to preserve their context. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls. When Omni is enabled, uploaded media and its resource metadata are also automatically retained; a result without content needs no image() call.
+Nested tool results stay in JavaScript values and are not automatically added to the exec response. Use text(value) to return text, image(value) or audio(value) to return media, and generatedImage(value) for the result of tools.image_gen(...). Only explicit helper calls are returned; bare return values and successful script completion produce no output. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls. When Omni is enabled, uploaded media and its resource metadata use the native media transport.
 
 Available globals:
-- tools: the code-mode-callable tool functions declared below.
+- tools: all registered code-mode-callable tool functions permitted in this context, including deferred tools.
 - ALL_TOOLS: frozen metadata for every function in tools.
 - text(value): append bounded text output. Non-string values are JSON-stringified when possible.
 - image(imageUrlOrItem: string | ImageContent): append an image from a base64 data URL or Qwen MCP ImageContent. To return a nested MCP image, emit available items with result.content?.forEach(image).
@@ -241,18 +245,20 @@ There is no Node.js, process, require, filesystem, network, import, console, Web
 
 type ImageContent = { type: 'image'; data: string; mimeType: string };
 type CodeModeToolResult = { callId: string; name: string; status: 'success'; output: string; content?: ImageContent[] };
-${declarations || '// No ordinary tools are available in this context.'}
+${declarations || (searchAvailable ? '// Use tool_search to discover callable tools.' : '// No ordinary tools are available in this context.')}
 
-const ALL_TOOLS = ${JSON.stringify(allTools)} as const;
+${searchAvailable ? 'Metadata for tools documented above (runtime ALL_TOOLS also includes deferred tools):' : 'ALL_TOOLS metadata:'}
+${JSON.stringify(allTools)}
 ${collisionText ? `\nName collisions:\n${collisionText}` : ''}`;
 }
 
 export function buildExecDeclaration(
   execTool: AnyDeclarativeTool,
   plan: CodeModeBindingPlan,
+  searchAvailable = false,
 ): FunctionDeclaration {
   return {
     ...execTool.schema,
-    description: buildExecDescription(plan),
+    description: buildExecDescription(plan, searchAvailable),
   };
 }

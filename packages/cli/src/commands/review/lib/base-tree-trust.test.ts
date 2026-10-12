@@ -29,7 +29,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import {
   baseTreeTrustPath,
   builtTreeRecord,
@@ -40,6 +40,7 @@ import {
 } from './base-tree-trust.js';
 import {
   createReviewWorktreeLease,
+  reviewLeasePath,
   recordReviewWorktreeLeaseMergeBase,
 } from '../../../services/review-worktree-lease.js';
 
@@ -69,12 +70,15 @@ vi.mock('node:fs', async (importOriginal) => {
 
 describe('base-tree trust store', () => {
   let repo: string;
+  let home: string;
   let worktree: string;
   let plan: string;
   const SHA_A = 'a'.repeat(40);
   const SHA_B = 'b'.repeat(40);
 
   beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+    vi.stubEnv('QWEN_HOME', home);
     repo = mkdtempSync(join(tmpdir(), 'qwen-base-tree-trust-'));
     worktree = join(repo, '.qwen', 'tmp', 'review-pr-1');
     mkdirSync(worktree, { recursive: true });
@@ -83,7 +87,11 @@ describe('base-tree trust store', () => {
     writeFileSync(plan, '{}');
   });
 
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  });
 
   /**
    * The lease fetch-pr holds for the whole review — outside the mount,
@@ -101,7 +109,7 @@ describe('base-tree trust store', () => {
     });
   };
   const leaseFileFor = (target = 'pr-1'): string =>
-    join(repo, '.qwen', 'review-leases', `qwen-review-lease-${target}.json`);
+    reviewLeasePath(repo, target);
   const leaseIdentity = (target = 'pr-1'): number =>
     JSON.parse(readFileSync(leaseFileFor(target), 'utf8')).identity as number;
 
@@ -123,7 +131,9 @@ describe('base-tree trust store', () => {
     );
     mkdirSync(innerWt, { recursive: true });
     const p = baseTreeTrustPath(innerWt, plan);
-    expect(p.startsWith(join(repo, '.qwen', 'review-leases') + sep)).toBe(true);
+    expect(p.startsWith(dirname(reviewLeasePath(repo, 'pr-1')) + sep)).toBe(
+      true,
+    );
     // Against the mounted directory itself, not a bare `tmp` segment: the
     // fixture repository is created under `tmpdir()`, which on Linux IS
     // `/tmp`, so a segment test rejects the whole fixture. The `+ sep` keeps
@@ -133,7 +143,9 @@ describe('base-tree trust store', () => {
 
   it('lives beside the leases — outside the mounted tmp dir — one file per plan', () => {
     const p = baseTreeTrustPath(worktree, plan);
-    expect(p.startsWith(join(repo, '.qwen', 'review-leases') + sep)).toBe(true);
+    expect(p.startsWith(dirname(reviewLeasePath(repo, 'pr-1')) + sep)).toBe(
+      true,
+    );
     expect(p.startsWith(join(repo, '.qwen', 'tmp') + sep)).toBe(false);
     // The name is the plan's PATH, never its stamps: a re-captured plan
     // rotates the file's CONTENT in place, so there is no earlier run's
@@ -219,12 +231,37 @@ describe('base-tree trust store', () => {
     expect(() => runIdentity(worktree)).toThrow(/does not name/);
   });
 
+  it('never reads a planted identity from the retired workspace directory', () => {
+    const retired = join(
+      repo,
+      '.qwen',
+      'review-leases',
+      'qwen-review-lease-pr-1.json',
+    );
+    mkdirSync(dirname(retired), { recursive: true });
+    writeFileSync(
+      retired,
+      JSON.stringify({
+        sessionId: 's',
+        promptId: 'p',
+        target: 'pr-1',
+        repositoryRoot: repo,
+        worktreePath: worktree,
+        branch: 'qwen-review/pr-1',
+        identity: 1,
+        mergeBaseSha: SHA_A,
+      }),
+    );
+
+    expect(() => runIdentity(worktree)).toThrow(/could not be read/);
+  });
+
   it('refuses a lease from an older build that carries no identity', () => {
     // The field is optional in the type because a lease written before it
     // existed has none. Substituting a mount-derived value there is the very
     // thing the refusal exists to prevent, so the answer is an error and the
     // next capture rewrites the lease with one.
-    mkdirSync(join(repo, '.qwen', 'review-leases'), { recursive: true });
+    mkdirSync(dirname(reviewLeasePath(repo, 'pr-1')), { recursive: true });
     writeFileSync(
       leaseFileFor(),
       JSON.stringify({

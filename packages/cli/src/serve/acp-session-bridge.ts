@@ -118,6 +118,8 @@ export {
   AcpChildCapacityExceededError,
   BranchWhilePromptActiveError,
   CdWhilePromptActiveError,
+  ManagedSessionBranchUnsupportedError,
+  RequestedSessionIdRejectedError,
   SessionNotFoundError,
   RestoreInProgressError,
   SessionArchivedError,

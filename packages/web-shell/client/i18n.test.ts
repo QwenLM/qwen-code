@@ -12,6 +12,25 @@ const FOLLOWUP_SETTING_KEYS = [
 ] as const;
 
 describe('web-shell i18n catalog', () => {
+  it('keeps filter translations available and pluralizes record counts', () => {
+    const en = getTranslator('en');
+    expect(en('trajectory.filter.search')).toBe('Search loaded records…');
+    expect(getTranslator('zh-CN')('trajectory.filter.search')).toBe(
+      '搜索已加载记录…',
+    );
+    expect(en('trajectory.filter.count', { count: 1 })).toBe(
+      '1 matching record',
+    );
+    expect(en('trajectory.filter.count', { count: 2 })).toBe(
+      '2 matching records',
+    );
+    expect(en('trajectory.filter.truncated', { count: 1 })).toContain(
+      '(1 record)',
+    );
+    expect(en('trajectory.filter.truncated', { count: 2 })).toContain(
+      '(2 records)',
+    );
+  });
   it('keeps the follow-up suggestion setting copy overridden in EN', () => {
     const t = getTranslator('en');
     for (const key of FOLLOWUP_SETTING_KEYS) {
@@ -41,14 +60,14 @@ describe('web-shell i18n catalog', () => {
     ).toContain('下一次通话');
   });
 
-  // Routes load from user scope only (a repository must not redirect
-  // microphone audio), so the hint must name user settings, in both locales.
-  it('names the user settings scope in the model hint', () => {
-    expect(getTranslator('en')('settings.liveSetup.modelHint')).toContain(
-      'user settings',
-    );
-    expect(getTranslator('zh-CN')('settings.liveSetup.modelHint')).toContain(
-      '用户设置',
-    );
+  // The model hint points at the picker's custom entry by name; keep the two
+  // strings in step in both locales.
+  it('names the custom model entry in the model hint', () => {
+    for (const language of ['en', 'zh-CN'] as const) {
+      const t = getTranslator(language);
+      expect(t('settings.liveSetup.modelHint')).toContain(
+        t('settings.liveSetup.modelCustom'),
+      );
+    }
   });
 });

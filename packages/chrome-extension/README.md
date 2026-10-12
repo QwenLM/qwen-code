@@ -20,6 +20,11 @@ It provides:
 
 ## Build
 
+To use the extension, install it from the
+[Chrome Web Store](https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph).
+The steps below build it from source, for development or where the listing is
+not available.
+
 ```bash
 npm run build        # -> dist/extension (static assets + bundled service worker)
 ```
@@ -98,7 +103,7 @@ The pinned adapter requires Node.js 22.12 or newer.
 ```bash
 npm install -g chrome-devtools-mcp@1.5.0
 QWEN_CDP_MCP_COMMAND=chrome-devtools-mcp \
-  qwen serve --allow-origin chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk
+  qwen serve --allow-origin chrome-extension://<this-extension-id>
 ```
 
 The separately installed adapter is not included in the Qwen Code npm package

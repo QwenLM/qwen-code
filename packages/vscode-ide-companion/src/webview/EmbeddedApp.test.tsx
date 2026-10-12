@@ -57,7 +57,13 @@ const sdkMocks = vi.hoisted(() => ({
       snapshots: Array<{ turnIndex: number; promptId: string }>;
     }>
   >(async () => ({ snapshots: [] })),
-  rewindSession: vi.fn(async () => ({})),
+  rewindSession: vi.fn<
+    (
+      sessionId: string,
+      promptId: string,
+      opts?: { clientId?: string; rewindFiles?: boolean },
+    ) => Promise<unknown>
+  >(async () => ({})),
 }));
 
 vi.mock('@qwen-code/sdk/daemon', () => ({
@@ -284,6 +290,41 @@ describe('EmbeddedApp host wiring', () => {
       );
     });
     expect(container.querySelector('#qwen-session-history')).toBeNull();
+  });
+
+  it('renders the Host-gate guidance for a daemonPreAuthHostGate bootstrap error', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrapError',
+            data: { reason: 'daemonPreAuthHostGate' },
+          },
+        }),
+      );
+    });
+    // Runtime came from the dataset, so the error surfaces as the over-
+    // transcript notice rather than the pre-bootstrap full-panel state.
+    const notice = document.querySelector('[role="alert"]');
+    expect(notice?.textContent).toMatch(/4170:localhost:4170/);
+    expect(notice?.textContent).toMatch(/same port number/i);
+  });
+
+  it('still renders a plain bootstrap error message', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'webShellBootstrapError',
+            data: { message: 'daemon exploded' },
+          },
+        }),
+      );
+    });
+    const notice = document.querySelector('[role="alert"]');
+    expect(notice?.textContent).toContain('daemon exploded');
   });
 
   it('attributes an internal new session to VS Code after a foreign clear', async () => {
@@ -1630,6 +1671,24 @@ describe('EmbeddedApp message edit rewind', () => {
     sdkMocks.rewindSession.mockResolvedValue({});
   });
 
+  function userBlock(id: string, text: string): Record<string, unknown> {
+    return { id, kind: 'user', text };
+  }
+
+  async function deliverTranscript(
+    props: CapturedProps,
+    blocks: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const onTranscriptChange = callback<(blocks: unknown[]) => void>(
+      props,
+      'onTranscriptChange',
+    );
+    await act(async () => {
+      onTranscriptChange(blocks);
+      await Promise.resolve();
+    });
+  }
+
   // The daemon-backed edit/rewind shipped with the cutover but nothing ever
   // exercised it: getRewindSnapshots and rewindSession appeared in this file
   // only as mock stubs (#9911).
@@ -1654,6 +1713,15 @@ describe('EmbeddedApp message edit rewind', () => {
       'session-1',
       'prompt-3',
       expect.objectContaining({ rewindFiles: false }),
+    );
+    // The rewind must be unattributed: the daemon only accepts the client id
+    // it registered for the session at create/load (`client_<uuid>`), which a
+    // raw DaemonClient never learns — the host's own `vscode-<uuid>` is not
+    // registered, and passing it makes the daemon reject the rewind with 400
+    // `invalid_client_id`, surfacing as the localized "Failed to edit the
+    // message" toast on every edit attempt.
+    expect(sdkMocks.rewindSession.mock.lastCall?.[2]).not.toHaveProperty(
+      'clientId',
     );
   });
 
@@ -1718,6 +1786,88 @@ describe('EmbeddedApp message edit rewind', () => {
       'prompt-3',
       expect.objectContaining({ rewindFiles: false }),
     );
+  });
+
+  // The daemon delivers `session.rewound` on the session stream after the
+  // rewind HTTP response resolves. Returning from prepareSubmit before the
+  // event lands lets the web shell add its optimistic user message, and the
+  // late truncation then wipes that message from the view while the turn
+  // itself proceeds correctly — the message only reappears after a reload.
+  it('holds the submit until the rewind lands in the transcript', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(3)],
+    });
+    await deliverTranscript(props, [
+      userBlock('u0', 'first'),
+      userBlock('u1', 'second'),
+      userBlock('u2', 'third'),
+      userBlock('u3', 'original text'),
+    ]);
+    const prepareSubmit = await startEditing(props, 3);
+
+    let settled = false;
+    const submission = prepareSubmit({
+      sessionId: 'session-1',
+      prompt: 'edited text',
+      inputAnnotations: [],
+    }).then(() => {
+      settled = true;
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(sdkMocks.rewindSession).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+
+    // The `session.rewound` event truncates the transcript to the target turn.
+    await act(async () => {
+      await deliverTranscript(props, [
+        userBlock('u0', 'first'),
+        userBlock('u1', 'second'),
+        userBlock('u2', 'third'),
+      ]);
+      await submission;
+    });
+    expect(settled).toBe(true);
+  });
+
+  it('aborts the submit when the rewind does not land in the transcript', async () => {
+    const props = await renderApp();
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [snapshot(3)],
+    });
+    await deliverTranscript(props, [
+      userBlock('u0', 'first'),
+      userBlock('u1', 'second'),
+      userBlock('u2', 'third'),
+      userBlock('u3', 'original text'),
+    ]);
+    const prepareSubmit = await startEditing(props, 3);
+
+    vi.useFakeTimers();
+    try {
+      let rejection: unknown;
+      const submission = prepareSubmit({
+        sessionId: 'session-1',
+        prompt: 'edited text',
+        inputAnnotations: [],
+      }).catch((error) => {
+        rejection = error;
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100);
+        await submission;
+      });
+      expect(rejection).toBeInstanceOf(Error);
+      expect((rejection as Error).message).toContain(
+        'Could not confirm the rewind.',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

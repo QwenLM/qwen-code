@@ -45,6 +45,16 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { installSseTransport, type SseTransport } from './sseTransport';
 
+/** One transcript page as the mock daemon serves it. */
+export interface MockTranscriptPage {
+  events: DaemonEvent[];
+  hasMore?: boolean;
+  nextCursor?: string;
+}
+
+/** Cursors whose one-off failure has already been served, per scenario. */
+const failedTranscriptReads = new WeakMap<object, Set<string>>();
+
 export interface DaemonRequestRecord {
   method: string;
   path: string;
@@ -102,10 +112,19 @@ export interface WebShellDaemonScenario {
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /**
-   * Page served by `GET /session/:id/transcript`. Unset answers an empty page,
-   * which is what a session with no persisted records reads as.
+   * Pages served by `GET /session/:id/transcript`. Unset answers an empty page,
+   * which is what a session with no persisted records reads as. `older` is
+   * keyed by the `cursor` the previous page handed back, so a spec can walk
+   * backwards. A `{ status }` entry answers that read with a failure instead
+   * of a page; with `then`, only the first read fails and later ones get the
+   * page, which is how a retry is exercised.
    */
-  transcriptPage?: { events: DaemonEvent[]; hasMore?: boolean };
+  transcriptPage?: MockTranscriptPage & {
+    older?: Record<
+      string,
+      MockTranscriptPage | { status: number; then?: MockTranscriptPage }
+    >;
+  };
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
   workspaceFiles: Record<string, string>;
   /**
@@ -476,6 +495,25 @@ export function createWebShellDaemonScenario(
   };
 }
 
+/**
+ * One daemon installed on a page, addressable by the proxy routes the shell
+ * uses to reach a second computer without navigating away from the first.
+ */
+interface DaemonPeer {
+  scenario: WebShellDaemonScenario;
+  requests: DaemonRequestRecord[];
+}
+
+/**
+ * Daemons installed on one page, keyed by origin. A real daemon answers
+ * `/remote-workspace-path-suggestions` and `/remote-workspaces` by fetching the
+ * target daemon server-side; the mock has no server side, so the route handler
+ * for the page origin dispatches to the mock installed for the target origin
+ * and records the forwarded request there, exactly as the upstream daemon would
+ * see it. Keyed by page so scenarios never leak between tests.
+ */
+const installedDaemons = new WeakMap<Page, Map<string, DaemonPeer>>();
+
 export async function installMockDaemon(
   page: Page,
   scenario: WebShellDaemonScenario,
@@ -484,6 +522,11 @@ export async function installMockDaemon(
   const baseURL = options.baseURL ?? getPlaywrightBaseURL();
   const baseOrigin = new URL(baseURL).origin;
   const requests: DaemonRequestRecord[] = [];
+  const peers = installedDaemons.get(page) ?? new Map<string, DaemonPeer>();
+  installedDaemons.set(page, peers);
+  peers.set(baseOrigin, { scenario, requests });
+  const resolvePeer = (origin: string): DaemonPeer | undefined =>
+    origin ? peers.get(origin) : undefined;
   const sse = await installSseTransport<DaemonEvent>(page, { baseURL });
 
   await page.route(`${baseOrigin}/**`, async (route) => {
@@ -522,6 +565,7 @@ export async function installMockDaemon(
       scenario,
       body,
       url.searchParams,
+      resolvePeer,
     );
   });
 
@@ -792,6 +836,8 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
     path === '/workspace-path-suggestions' ||
+    path === '/remote-workspace-path-suggestions' ||
+    path === '/remote-workspaces' ||
     path === '/workspaces' ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
@@ -854,7 +900,11 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && path === '/workspace-path-suggestions') return true;
+  if (method === 'GET' && path === '/remote-workspace-path-suggestions') {
+    return true;
+  }
   if (method === 'POST' && path === '/workspaces') return true;
+  if (method === 'POST' && path === '/remote-workspaces') return true;
   if (
     (method === 'GET' || method === 'POST') &&
     path === '/workspace/settings'
@@ -1116,6 +1166,74 @@ function plainRemote(name: string, url: string): DaemonGitRemoteInfo {
   };
 }
 
+/** Directory listing the daemon answers with, for a requested prefix. */
+function pathSuggestionsPayload(
+  scenario: WebShellDaemonScenario,
+  prefix: string,
+): Record<string, unknown> {
+  const listed =
+    scenario.pathSuggestions?.[prefix] ??
+    scenario.pathSuggestions?.[prefix.replace(/\/+$/, '')] ??
+    [];
+  const base = !prefix || prefix.endsWith('/') ? prefix : `${prefix}/`;
+  return {
+    kind: 'workspace-path-suggestions',
+    dir: prefix,
+    sep: '/',
+    suggestions: listed.map((name) => ({ name, path: `${base}${name}` })),
+    truncated: false,
+  };
+}
+
+/**
+ * Registers a workspace and reports it, the way `POST /workspaces` does. Also
+ * used by the proxy route, which registers on the target daemon's behalf.
+ */
+function registerWorkspacePayload(
+  scenario: WebShellDaemonScenario,
+  body: unknown,
+): Record<string, unknown> {
+  const record = isRecord(body) ? body : {};
+  const cwd = typeof record['cwd'] === 'string' ? record['cwd'] : '';
+  const displayName =
+    typeof record['displayName'] === 'string'
+      ? record['displayName']
+      : undefined;
+  const workspace = {
+    id: `e2e-${cwd.replace(/[^a-zA-Z0-9]+/g, '-')}`,
+    cwd,
+    ...(displayName ? { displayName } : {}),
+    primary: false,
+    trusted: true,
+  };
+  // Mutate the capability snapshot so the refresh the app performs right
+  // after registering reports the new workspace, as the real daemon does.
+  scenario.capabilities = {
+    ...scenario.capabilities,
+    workspaces: [...(scenario.capabilities.workspaces ?? []), workspace],
+  };
+  return { ...workspace, persisted: record['persist'] === true };
+}
+
+/** The proxy routes only forward to a plain HTTP(S) origin. */
+function daemonOriginParam(raw: string | null): string {
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    return parsed.origin;
+  } catch {
+    return '';
+  }
+}
+
+function remoteUnreachable(): Record<string, unknown> {
+  return {
+    error: 'Failed to reach remote daemon',
+    code: 'remote_unreachable',
+  };
+}
+
 async function handleDaemonRoute(
   route: Route,
   method: string,
@@ -1123,6 +1241,7 @@ async function handleDaemonRoute(
   scenario: WebShellDaemonScenario,
   body: unknown,
   searchParams: URLSearchParams = new URLSearchParams(),
+  resolvePeer?: (origin: string) => DaemonPeer | undefined,
 ): Promise<void> {
   if (method === 'GET' && path === '/health') {
     await json(route, { ok: true, healthy: true });
@@ -1140,42 +1259,62 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && path === '/workspace-path-suggestions') {
-    const prefix = searchParams.get('prefix') ?? '';
-    const listed =
-      scenario.pathSuggestions?.[prefix] ??
-      scenario.pathSuggestions?.[prefix.replace(/\/+$/, '')] ??
-      [];
-    const base = !prefix || prefix.endsWith('/') ? prefix : `${prefix}/`;
-    await json(route, {
-      kind: 'workspace-path-suggestions',
-      dir: prefix,
-      sep: '/',
-      suggestions: listed.map((name) => ({ name, path: `${base}${name}` })),
-      truncated: false,
+    await json(
+      route,
+      pathSuggestionsPayload(scenario, searchParams.get('prefix') ?? ''),
+    );
+    return;
+  }
+  // The shell browses another computer through this daemon's proxy route, so
+  // the forwarded request is served by — and recorded against — the mock
+  // installed for the target origin.
+  if (method === 'GET' && path === '/remote-workspace-path-suggestions') {
+    const peer = resolvePeer?.(daemonOriginParam(searchParams.get('daemon')));
+    if (!peer) {
+      await json(route, remoteUnreachable(), 502);
+      return;
+    }
+    peer.requests.push({
+      method: 'GET',
+      path: '/workspace-path-suggestions',
+      body: null,
+      headers: {},
     });
+    await json(
+      route,
+      pathSuggestionsPayload(peer.scenario, searchParams.get('prefix') ?? ''),
+    );
     return;
   }
   if (method === 'POST' && path === '/workspaces') {
+    await json(route, registerWorkspacePayload(scenario, body));
+    return;
+  }
+  if (method === 'POST' && path === '/remote-workspaces') {
     const record = isRecord(body) ? body : {};
-    const cwd = typeof record['cwd'] === 'string' ? record['cwd'] : '';
-    const displayName =
-      typeof record['displayName'] === 'string'
-        ? record['displayName']
-        : undefined;
-    const workspace = {
-      id: `e2e-${cwd.replace(/[^a-zA-Z0-9]+/g, '-')}`,
-      cwd,
-      ...(displayName ? { displayName } : {}),
-      primary: false,
-      trusted: true,
+    const peer = resolvePeer?.(
+      daemonOriginParam(
+        typeof record['daemon'] === 'string' ? record['daemon'] : '',
+      ),
+    );
+    if (!peer || typeof record['cwd'] !== 'string' || !record['cwd']) {
+      await json(route, remoteUnreachable(), 502);
+      return;
+    }
+    const upstreamBody = {
+      cwd: record['cwd'],
+      ...(record['persist'] === true ? { persist: true } : {}),
+      ...(typeof record['displayName'] === 'string'
+        ? { displayName: record['displayName'] }
+        : {}),
     };
-    // Mutate the capability snapshot so the refresh the app performs right
-    // after registering reports the new workspace, as the real daemon does.
-    scenario.capabilities = {
-      ...scenario.capabilities,
-      workspaces: [...(scenario.capabilities.workspaces ?? []), workspace],
-    };
-    await json(route, { ...workspace, persisted: record['persist'] === true });
+    peer.requests.push({
+      method: 'POST',
+      path: '/workspaces',
+      body: upstreamBody,
+      headers: { 'content-type': 'application/json' },
+    });
+    await json(route, registerWorkspacePayload(peer.scenario, upstreamBody));
     return;
   }
   if (method === 'GET' && path === '/workspace/providers') {
@@ -2120,12 +2259,58 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'transcript') {
-      const page = scenario.transcriptPage;
+      const cursor = searchParams.get('cursor');
+      // The daemon refuses a cursor sent with a direction or an anchor: the
+      // cursor already carries both. Answer the same way, so a client that
+      // sends the pair fails here rather than only against a real daemon.
+      if (
+        cursor &&
+        (searchParams.has('direction') ||
+          searchParams.has('beforeRecordId') ||
+          searchParams.has('atRecordId'))
+      ) {
+        await json(
+          route,
+          {
+            error: 'Invalid transcript cursor and anchor combination',
+            code: 'invalid_transcript_cursor',
+          },
+          400,
+        );
+        return;
+      }
+      const configured = scenario.transcriptPage;
+      let page: MockTranscriptPage | undefined = configured;
+      if (cursor) {
+        const entry = configured?.older?.[cursor];
+        if (entry && 'status' in entry) {
+          let failed = failedTranscriptReads.get(scenario);
+          if (!failed) {
+            failed = new Set();
+            failedTranscriptReads.set(scenario, failed);
+          }
+          if (!entry.then || !failed.has(cursor)) {
+            failed.add(cursor);
+            await json(
+              route,
+              { error: 'Transcript page is unavailable' },
+              entry.status,
+            );
+            return;
+          }
+          page = entry.then;
+        } else {
+          page = entry;
+        }
+      }
       await json(route, {
         v: 1,
         sessionId,
         events: page?.events ?? [],
         hasMore: page?.hasMore ?? false,
+        ...(page?.nextCursor !== undefined
+          ? { nextCursor: page.nextCursor }
+          : {}),
       });
       return;
     }

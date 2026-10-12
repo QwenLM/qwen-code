@@ -40,9 +40,10 @@ describe('bundled browser-use skill', () => {
       `@qwen-code/node-repl-mcp@${nodeReplPackage.version}`,
     );
     expect(skill).not.toContain('@qwen-code/node-repl-mcp@latest');
-    expect(skill).toContain('node_repl_add_node_module_dir');
-    expect(skill).toContain('<skill-base>/runtime/node_modules');
-    expect(skill).toContain('node_modules/playwright-core/package.json');
+    // The SDK loads its own bundled dependencies, so setup must not send the
+    // model through a module-directory registration first.
+    expect(skill).not.toContain('node_repl_add_node_module_dir');
+    expect(skill).not.toContain('node_modules');
     expect(skill).toContain("import('/absolute/skill/base/runtime/index.js')");
     expect(skill).not.toContain('<extension-root>');
     expect(skill).not.toContain('qwen extensions install');
@@ -60,10 +61,31 @@ describe('bundled browser-use skill', () => {
   });
 
   it('names where the Qwen Chrome extension comes from', () => {
-    expect(skill).toContain('no store listing yet');
+    expect(skill).toContain(
+      'https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph',
+    );
     expect(skill).toContain('`packages/chrome-extension`');
     expect(skill).toContain('`dist/extension`');
     expect(skill).toContain('Load unpacked');
+  });
+
+  it('tells the agent that Windows is unsupported', () => {
+    const prose = skill.replace(/\s+/g, ' ');
+    expect(prose).toContain(
+      'Windows is not supported: no Native Messaging host is ever registered there',
+    );
+    expect(prose).toContain(
+      'Calls that start a browser session fail with `BROWSER_DISCONNECTED`, and `browsers.list()` waits out the connect budget and returns an empty list',
+    );
+    expect(prose).toContain(
+      'tell them Browser Use needs macOS or Linux and stop',
+    );
+    expect(prose).toContain(
+      'Do not retry, and do not send them to the Chrome Web Store',
+    );
+    expect(prose).toContain(
+      'If the extension does not connect on macOS or Linux',
+    );
   });
 
   it('uses the current Browser SDK contract', () => {

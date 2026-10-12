@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ConfigContext } from '../contexts/ConfigContext.js';
 import path from 'node:path';
 import React from 'react';
 import { Box, Text, useIsScreenReaderEnabled } from 'ink';
@@ -183,9 +184,19 @@ const InlineTerminalImage: React.FC<InlineTerminalImageProps> = ({
   );
 };
 
-export const TerminalImage: React.FC<TerminalImageProps> = (props) =>
-  'image' in props ? (
+export const TerminalImage: React.FC<TerminalImageProps> = (props) => {
+  const contextConfig = React.useContext(ConfigContext);
+  const config = 'config' in props ? props.config : contextConfig;
+  if (config?.getShellExecutionSandbox?.()) {
+    return (
+      <Text color={theme.text.secondary}>
+        Image preview unavailable in tool sandbox.
+      </Text>
+    );
+  }
+  return 'image' in props ? (
     <InlineTerminalImage {...props} />
   ) : (
     <FileTerminalImage {...props} />
   );
+};

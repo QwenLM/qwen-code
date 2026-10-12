@@ -191,6 +191,13 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionLiveConversation: 'qwen/control/session/live-conversation',
   sessionLiveTranscript: 'qwen/control/session/live-transcript',
   sessionBackgroundNotification: 'qwen/control/session/background_notification',
+  /**
+   * Session multi-agent: write an `agent_mention` / `agent_message` record
+   * into the chat session (durable record + main-model history, no turn).
+   * Params/result: `SessionExternalRecordRequest` / `SessionExternalRecordResponse`
+   * (core `agents/session-agents/contract.ts`).
+   */
+  sessionExternalRecord: 'qwen/control/session/external_record',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
@@ -243,6 +250,17 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceReload: 'qwen/control/workspace/reload',
   workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
+  /**
+   * A paired Bridge sends a session-affecting workspace change, already
+   * persisted by the workspace-control engine or the daemon, to every other
+   * live engine. Params: `{ v: 1, revision, kind, tightening, cwd }` plus
+   * `enabled` for `sessionWorkflow` and `reason` for `skills`. The engine
+   * re-reads that setting, applies it to every live session before the
+   * session's next prompt, model request or tool dispatch, cancels a turn it
+   * cannot revalidate, and only then answers `{ v: 1, revision,
+   * acknowledged: true }`. Any other answer is not an acknowledgement.
+   */
+  workspaceChange: 'qwen/control/workspace/change',
   /**
    * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
    * here — which the PARENT serve process calls DOWN into the `qwen --acp`
@@ -653,6 +671,12 @@ export interface ServeContextCategoryBreakdown {
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older servers. */
   startupContext?: number;
+  /**
+   * Conversation tokens after the startup prelude. When `totalTokens` is 0
+   * (no provider count yet: after a model switch, `/restore` or a resume) this
+   * is a local estimate of the history rather than 0, so the rows include the
+   * conversation. Older servers report 0 there.
+   */
   messages: number;
   /** Provider total not accounted for by any category. Absent from older servers. */
   unattributed?: number;
@@ -1246,6 +1270,22 @@ export interface ServeWorkspaceMemoryFile {
   scope: ServeContextFileScope;
   /** Size in bytes of the file's serialized contents on disk. */
   bytes: number;
+  /**
+   * File text, present only when the caller asked for content
+   * (`GET /workspace/memory?content=true`), the read succeeded, and the
+   * on-disk bytes are valid BOM-free UTF-8. A `mode:'replace'` client may
+   * treat it as the file's full text. Absent for non-UTF-8 or BOM'd
+   * files (a lossy decode is never served as replaceable text) and for
+   * reads that raced a concurrent write.
+   */
+  content?: string;
+  /**
+   * True when the served text is not the file's full content: either
+   * `content` stops at the daemon's read cap, or the read raced a
+   * concurrent write (byte count differed from `bytes`, in which case
+   * `content` is omitted entirely).
+   */
+  truncated?: boolean;
 }
 
 export interface ServeWorkspaceMemoryStatus {
@@ -1585,6 +1625,16 @@ export interface ServeWorkspaceExtensionsStatus {
   extensions: ServeExtensionEntry[];
   errors?: ServeStatusCell[];
 }
+
+export type ServeExtensionSummary = Omit<
+  ServeExtensionEntry,
+  'capabilities' | 'details'
+>;
+
+export type ServeWorkspaceExtensionSummaries = Omit<
+  ServeWorkspaceExtensionsStatus,
+  'extensions'
+> & { extensions: ServeExtensionSummary[] };
 
 export function createIdleWorkspaceExtensionsStatus(
   workspaceCwd: string,

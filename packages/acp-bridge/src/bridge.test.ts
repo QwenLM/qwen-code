@@ -28,6 +28,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   BranchWhilePromptActiveError,
+  CdWhilePromptActiveError,
   InvalidClientIdError,
   BridgeChannelQuarantinedError,
   InvalidPermissionOptionError,
@@ -144,6 +145,7 @@ import { MultiClientPermissionMediator } from './permissionMediator.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
+  MID_TURN_SEND_NOW_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
@@ -473,6 +475,233 @@ describe('createAcpSessionBridge', () => {
         { sessionId: session.sessionId, holds: [] },
       ]);
       expect(summary().hasRunningBackgroundTasks).toBeUndefined();
+      await bridge.shutdown();
+    });
+
+    // R1-17 (#11768): the backgroundTurn disjuncts in branch/fork/rewind
+    // admission and queue callbacks had no test — the existing busy-guard
+    // table only ever produced the busy state with an in-flight prompt. An
+    // admitted background notification turn is a different way to reach the
+    // same guard. The queued-cd table below pins branch, fork and rewind
+    // admission individually, including rejection before entering the queue.
+    // The branchSession and launchSessionForkAgent queue-callback disjuncts
+    // remain masked by their own admission checks and are the
+    // residual R1-17 gap. The side-task term (`concurrentSideTask` in
+    // `session-control-plane.ts`) is a concurrent-release decision and is not
+    // pinned here.
+    const admittedBackgroundTurn = {
+      turnId: 'notification-1',
+      taskId: 'Explore-1',
+      kind: 'agent',
+      sourceTurnId: 'user-1',
+      toolUseId: 'call-1',
+      label: 'Explore',
+      startedAt: 1000,
+    } as const;
+
+    it.each([
+      {
+        operation: 'branch',
+        method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.branchSession(sessionId, {}),
+        errorType: BranchWhilePromptActiveError,
+      },
+      {
+        operation: 'rewind',
+        method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.rewindSession(sessionId, { promptId: 'prompt-1' }),
+        errorType: SessionBusyError,
+      },
+      {
+        operation: 'fork',
+        method: SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.launchSessionForkAgent(sessionId, 'review this'),
+        errorType: SessionBusyError,
+      },
+      {
+        operation: 'cd',
+        method: SERVE_CONTROL_EXT_METHODS.sessionCd,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.changeSessionCwd(sessionId, { path: WS_B }),
+        errorType: CdWhilePromptActiveError,
+      },
+    ])(
+      'rejects $operation while an admitted background turn is running',
+      async ({ invoke, errorType, method }) => {
+        // R1-3: the error class alone cannot distinguish a synchronous
+        // admission rejection from a post-dispatch refusal — a child-side
+        // busy answer is mapped into SessionBusyError too. Each arm wires an
+        // ext-method impl that throws for the operation's own method, so a
+        // change that moves the busy check after the child dispatch fails
+        // twice over: the call is recorded on the fake agent and the
+        // operation rejects with the impl's error instead of the guard's.
+        const handle = makeChannel({
+          extMethodImpl: (calledMethod) => {
+            if (calledMethod === method) {
+              throw new Error('mutation must not reach a busy session');
+            }
+            return {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await expect(
+          handle.agentConnection.extMethod('_qwencode/start_turn', {
+            sessionId: session.sessionId,
+            source: 'background_notification',
+            ...admittedBackgroundTurn,
+          }),
+        ).resolves.toEqual({ accepted: true });
+        expect(
+          bridge.getSessionSummary(session.sessionId).backgroundTurn,
+        ).toMatchObject({ turnId: admittedBackgroundTurn.turnId });
+
+        await expect(invoke(bridge, session.sessionId)).rejects.toBeInstanceOf(
+          errorType,
+        );
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({ method }),
+        );
+        await bridge.shutdown();
+      },
+    );
+
+    it.each([
+      {
+        operation: 'branch',
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.branchSession(sessionId, {}),
+        errorType: BranchWhilePromptActiveError,
+      },
+      {
+        operation: 'fork',
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.launchSessionForkAgent(sessionId, 'review this'),
+        errorType: SessionBusyError,
+      },
+      {
+        operation: 'rewind',
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.rewindSession(sessionId, { promptId: 'prompt-1' }),
+        errorType: SessionBusyError,
+      },
+    ])(
+      'rejects $operation synchronously while an in-flight cd holds the queue during a background turn',
+      async ({ invoke, errorType }) => {
+        const hangingCd = deferred<Record<string, unknown>>();
+        const handle = makeChannel({
+          extMethodImpl: (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionCd
+              ? hangingCd.promise
+              : {},
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const cd = bridge.changeSessionCwd(session.sessionId, { path: WS_B });
+        void cd.catch(() => undefined);
+        await vi.waitFor(() =>
+          expect(handle.agent.extMethodCalls).toContainEqual(
+            expect.objectContaining({
+              method: SERVE_CONTROL_EXT_METHODS.sessionCd,
+            }),
+          ),
+        );
+
+        await expect(
+          handle.agentConnection.extMethod('_qwencode/start_turn', {
+            sessionId: session.sessionId,
+            source: 'background_notification',
+            ...admittedBackgroundTurn,
+          }),
+        ).resolves.toEqual({ accepted: true });
+
+        const outcome = await Promise.race([
+          invoke(bridge, session.sessionId).then(
+            () => 'queued-success',
+            (error) => error,
+          ),
+          new Promise<'queued-timeout'>((resolve) =>
+            setTimeout(() => resolve('queued-timeout'), 100),
+          ),
+        ]);
+        expect(outcome).toBeInstanceOf(errorType);
+
+        hangingCd.resolve({
+          previousCwd: WS_A,
+          newCwd: WS_B,
+          warnings: [],
+        });
+        await cd;
+        await bridge.shutdown();
+      },
+    );
+
+    // R1-1: the cd guard (pinned by the `cd` row above) and the
+    // `entryHasLocalWork` term are the two deferred sites the branch/fork/rewind
+    // rows cannot reach. Retention is decided on the detach path —
+    // `maybeCloseIdleSession('last_client_detached')` evaluates
+    // `entryIsAutoCloseCandidate` inside the awaited `detachClient` — and is
+    // only observable with no event subscriber attached: the candidate check
+    // returns early on `subscriberCount > 0`, one line before `entryHasLocalWork`
+    // runs, so a subscribed session would pass for the wrong reason and stay
+    // green under the mutation. The release half below is the reaper's idle
+    // TTL, which is what proves the turn was the only thing holding it.
+    it('retains a detached session whose only work is an admitted background turn', async () => {
+      let conditionalCloseCalls = 0;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            conditionalCloseCalls++;
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 10,
+        sessionIdleTimeoutMs: 10,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        handle.agentConnection.extMethod('_qwencode/start_turn', {
+          sessionId: session.sessionId,
+          source: 'background_notification',
+          ...admittedBackgroundTurn,
+        }),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        bridge.getSessionSummary(session.sessionId).backgroundTurn,
+      ).toMatchObject({ turnId: admittedBackgroundTurn.turnId });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(conditionalCloseCalls).toBe(0);
+      expect(bridge.sessionCount).toBe(1);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'active',
+      );
+
+      await handle.agentConnection.extNotification('_qwencode/end_turn', {
+        sessionId: session.sessionId,
+        source: 'background_notification',
+        reason: 'end_turn',
+        turnId: admittedBackgroundTurn.turnId,
+      });
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+      expect(conditionalCloseCalls).toBe(1);
+
       await bridge.shutdown();
     });
 
@@ -3175,6 +3404,39 @@ describe('createAcpSessionBridge', () => {
       workspaceCwd: WS_A,
       currentCwd: target,
       attached: true,
+    });
+    await bridge.shutdown();
+  });
+
+  it('reports the live execution cwd and worktree ownership snapshot', async () => {
+    const target = path.join(WS_A, '.qwen', 'worktrees', 'branch-test');
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionCd
+          ? { previousCwd: WS_A, newCwd: target, warnings: [] }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.changeSessionCwd(session.sessionId, {
+      path: target,
+      allowedRoots: [path.join(WS_A, '.qwen', 'worktrees')],
+    });
+    bridge.setSessionWorktree(session.sessionId, {
+      slug: 'branch-test',
+      path: target,
+      branch: 'worktree-branch-test',
+    });
+
+    expect(bridge.getSessionExecutionSnapshot(session.sessionId)).toEqual({
+      workspaceCwd: WS_A,
+      effectiveCwd: target,
+      worktree: {
+        slug: 'branch-test',
+        path: target,
+        branch: 'worktree-branch-test',
+      },
     });
     await bridge.shutdown();
   });
@@ -5993,6 +6255,64 @@ describe('createAcpSessionBridge', () => {
       }),
     ).resolves.toEqual({ stopReason: 'end_turn' });
     expect(handles[0]?.agent.promptCalls[0]?.sessionId).toBe('persisted-1');
+
+    await bridge.shutdown();
+  });
+
+  it('returns the explicit load approval override in restored state', async () => {
+    let approvalMode = ApprovalMode.PLAN;
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              modes: {
+                currentModeId: ApprovalMode.PLAN,
+                _meta: { planExecutionMode: ApprovalMode.YOLO },
+                availableModes: [],
+              },
+              configOptions: [
+                {
+                  id: 'mode',
+                  name: 'Approval mode',
+                  type: 'select',
+                  currentValue: ApprovalMode.PLAN,
+                  options: [],
+                },
+              ],
+            }) as unknown as LoadSessionResponse,
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              const previous = approvalMode;
+              approvalMode = params['mode'] as ApprovalMode;
+              return { previous, current: approvalMode };
+            }
+            return {};
+          },
+        }).channel,
+    });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-approval',
+      workspaceCwd: WS_A,
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    expect(loaded.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+    expect(loaded.state.modes?._meta?.['planExecutionMode']).toBeUndefined();
+    expect(
+      loaded.state.configOptions?.find((option) => option.id === 'mode'),
+    ).toMatchObject({ currentValue: ApprovalMode.DEFAULT });
+
+    const attached = await bridge.loadSession({
+      sessionId: 'persisted-approval',
+      workspaceCwd: WS_A,
+    });
+    expect(attached.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+    expect(attached.state.modes?._meta?.['planExecutionMode']).toBeUndefined();
+    expect(
+      attached.state.configOptions?.find((option) => option.id === 'mode'),
+    ).toMatchObject({ currentValue: ApprovalMode.DEFAULT });
 
     await bridge.shutdown();
   });
@@ -17099,6 +17419,120 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('binds chunk uploads to registered clients and revokes them on detach', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const { uploadId } = bridge.createSessionAttachmentUpload(
+          session.sessionId,
+          { name: 'test.txt', mimeType: 'text/plain', size: 3 },
+          { clientId: session.clientId },
+        );
+        expect(() =>
+          bridge.appendSessionAttachmentUpload(
+            session.sessionId,
+            uploadId,
+            0,
+            Buffer.from('abc'),
+          ),
+        ).toThrow(expect.objectContaining({ status: 404 }));
+        bridge.appendSessionAttachmentUpload(
+          session.sessionId,
+          uploadId,
+          0,
+          Buffer.from('abc'),
+          { clientId: session.clientId },
+        );
+        const reference = await bridge.completeSessionAttachmentUpload(
+          session.sessionId,
+          uploadId,
+          { clientId: session.clientId },
+        );
+        expect(
+          (
+            await bridge.readSessionAttachment(
+              session.sessionId,
+              reference.attachmentId,
+            )
+          )?.data.toString(),
+        ).toBe('abc');
+        const pending = bridge.createSessionAttachmentUpload(
+          session.sessionId,
+          { name: 'pending.txt', mimeType: 'text/plain', size: 3 },
+          { clientId: session.clientId },
+        );
+        await bridge.detachClient(session.sessionId, session.clientId);
+        expect(() =>
+          bridge.appendSessionAttachmentUpload(
+            session.sessionId,
+            pending.uploadId,
+            0,
+            Buffer.from('abc'),
+            { clientId: session.clientId },
+          ),
+        ).toThrow();
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it("frees a detached client's staged uploads while another client keeps the session open", async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(second.sessionId).toBe(first.sessionId);
+        expect(first.clientId).toBeTruthy();
+        expect(second.clientId).toBeTruthy();
+        expect(second.clientId).not.toBe(first.clientId);
+        const create = (clientId: string | undefined) =>
+          bridge.createSessionAttachmentUpload(
+            first.sessionId,
+            {
+              name: 'staged.bin',
+              mimeType: 'application/octet-stream',
+              size: 1,
+            },
+            { clientId },
+          );
+        for (let i = 0; i < 8; i++) create(first.clientId);
+        expect(() => create(second.clientId)).toThrow(
+          expect.objectContaining({ status: 429 }),
+        );
+        await bridge.detachClient(first.sessionId, first.clientId);
+        for (let i = 0; i < 8; i++) {
+          expect(() => create(second.clientId)).not.toThrow();
+        }
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('closes captured attachment stores during bridge shutdown', async () => {
+      const close = vi.spyOn(SessionAttachmentStore.prototype, 'close');
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        bridge.createSessionAttachmentUpload(session.sessionId, {
+          name: 'test.txt',
+          mimeType: 'text/plain',
+          size: 3,
+        });
+        close.mockClear();
+        await bridge.shutdown();
+        expect(close).toHaveBeenCalled();
+      } finally {
+        close.mockRestore();
+        await bridge.shutdown();
+      }
+    });
+
     it('keeps attachment references on the event bus and resolves bytes for ACP', async () => {
       const prompts: PromptRequest[] = [];
       const factory: ChannelFactory = async () =>
@@ -17140,7 +17574,15 @@ describe('createAcpSessionBridge', () => {
       );
 
       expect(prompts[0]?.prompt).toEqual([
-        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
+        },
       ]);
       expect(prompts[0]?._meta?.['qwen.daemon.attachmentReferences']).toEqual([
         reference,
@@ -17270,6 +17712,10 @@ describe('createAcpSessionBridge', () => {
       expect(prompts[0]?.prompt).toEqual([
         {
           type: 'resource',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
           resource: {
             uri: 'attachment:///notes.txt',
             mimeType: 'text/plain',
@@ -17278,6 +17724,10 @@ describe('createAcpSessionBridge', () => {
         },
         {
           type: 'resource',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
           resource: {
             uri: 'attachment:///report.pdf',
             mimeType: 'application/pdf',
@@ -18298,6 +18748,102 @@ describe('createAcpSessionBridge', () => {
       },
     );
 
+    it('answers the snapshot listing only after a rewind queued behind a branch has run', async () => {
+      const tracked = new Set<string>([
+        SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      ]);
+      const calls: string[] = [];
+      const branchGate = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (tracked.has(method)) calls.push(method);
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            await branchGate.promise;
+            return { newSessionId: 'branch-session', title: 'Branch' };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            return { targetTurnIndex: 1, filesChanged: [], filesFailed: [] };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            // What the agent lists once the rewind has truncated.
+            return {
+              snapshots: [{ promptId: 'session########0', turnIndex: 0 }],
+            };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const branch = bridge.branchSession(session.sessionId, {});
+      const rewind = bridge.rewindSession(session.sessionId, {
+        promptId: 'session########1',
+      });
+      await vi.waitFor(() =>
+        expect(calls).toEqual([SERVE_CONTROL_EXT_METHODS.sessionBranch]),
+      );
+
+      // Asked while the rewind is still waiting its turn: no answer yet.
+      let listed: { snapshots: unknown[] } | undefined;
+      const listing = bridge
+        .getRewindSnapshots(session.sessionId)
+        .then((result) => {
+          listed = result;
+          return result;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(listed).toBeUndefined();
+      expect(calls).toEqual([SERVE_CONTROL_EXT_METHODS.sessionBranch]);
+
+      branchGate.resolve();
+      await branch;
+      await rewind;
+      await expect(listing).resolves.toEqual({
+        snapshots: [{ promptId: 'session########0', turnIndex: 0 }],
+      });
+      expect(calls).toEqual([
+        SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      ]);
+      await bridge.shutdown();
+    });
+
+    it('still answers the snapshot listing after an admitted rewind failed', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            throw new Error('rewind blew up');
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            return { snapshots: [] };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.rewindSession(session.sessionId, {
+          promptId: 'session########1',
+        }),
+      ).rejects.toThrow();
+      await expect(
+        bridge.getRewindSnapshots(session.sessionId),
+      ).resolves.toEqual({ snapshots: [] });
+      await bridge.shutdown();
+    });
+
     it.each([
       {
         operation: 'branch',
@@ -18801,6 +19347,91 @@ describe('createAcpSessionBridge', () => {
           { clientId: branch.clientId },
         ),
       ).resolves.toEqual({ stopReason: 'end_turn' });
+      await bridge.shutdown();
+    });
+
+    it('keeps a latest-state worktree branch persisted and forwards its target id', async () => {
+      const targetSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
+          return { newSessionId: targetSessionId, title: 'Worktree branch' };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const branch = await bridge.branchSession(source.sessionId, {
+        name: 'Worktree branch',
+        targetSessionId,
+        persistOnly: true,
+      });
+
+      expect(branch).toMatchObject({
+        sessionId: targetSessionId,
+        displayName: 'Worktree branch',
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+          params: expect.objectContaining({ targetSessionId }),
+        }),
+      );
+      expect(handle.agent.loadSessionCalls).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('rejects a persisted worktree branch before dispatch at the session cap', async () => {
+      const targetSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxSessions: 1,
+      });
+      const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.branchSession(source.sessionId, {
+          targetSessionId,
+          persistOnly: true,
+        }),
+      ).rejects.toMatchObject({
+        name: 'SessionLimitExceededError',
+        limit: 1,
+      });
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        }),
+      );
+      await bridge.shutdown();
+    });
+
+    it('rejects a persisted branch whose returned target id changed', async () => {
+      const targetSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
+          return {
+            newSessionId: '22222222-2222-4222-8222-222222222222',
+            title: 'Wrong target',
+          };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.branchSession(source.sessionId, {
+          targetSessionId,
+          persistOnly: true,
+        }),
+      ).rejects.toThrow('different target session id');
+      expect(handle.agent.loadSessionCalls).toEqual([]);
       await bridge.shutdown();
     });
 
@@ -25607,6 +26238,177 @@ describe('createAcpSessionBridge', () => {
       );
 
       await bridge.shutdown();
+    });
+
+    it.each([
+      [{ persisted: false }, 'negative_ack'],
+      [
+        { persisted: false, reason: 'recording_unavailable' },
+        'recording_unavailable',
+      ],
+      [
+        { persisted: false, reason: 'write_not_confirmed' },
+        'write_not_confirmed',
+      ],
+      [{ persisted: false, reason: 'SECRET_REASON' }, 'unknown'],
+      [{ persisted: 'SECRET_ACK' }, 'invalid_ack'],
+      [null, 'invalid_ack'],
+      [
+        new Error('SECRET_RPC', { cause: { token: 'SECRET_TOKEN' } }),
+        'rpc_rejected',
+      ],
+    ])(
+      'safely classifies source persistence response %j as %s',
+      async (result, reason) => {
+        const onDiagnosticLine = vi.fn();
+        const handle = makeChannel({
+          extMethodImpl: async (method) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionSource) return {};
+            if (result instanceof Error) throw result;
+            return result as Record<string, unknown>;
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          onDiagnosticLine,
+        });
+        try {
+          const session = await bridge.spawnOrAttach({
+            workspaceCwd: WS_A,
+            sessionScope: 'thread',
+            sourceType: 'scheduled_task',
+            sourceId: 'SECRET_SOURCE',
+          });
+          expect(session.sourcePersisted).toBe(false);
+          const failures = onDiagnosticLine.mock.calls.filter(([line]) =>
+            line.includes('source_persistence_failed'),
+          );
+          expect(failures).toEqual([
+            [
+              `qwen serve: source_persistence_failed sessionId=${session.sessionId} reason=${reason} sourcePersisted=false`,
+              'warn',
+            ],
+          ]);
+          expect(JSON.stringify(failures)).not.toContain('SECRET_');
+        } finally {
+          await bridge.shutdown();
+        }
+      },
+    );
+
+    it.each(['rpc_timeout', 'transport_closed'] as const)(
+      'classifies actual source transport failure %s',
+      async (reason) => {
+        const sourceStarted = deferred<void>();
+        const sourceReply = deferred<Record<string, unknown>>();
+        const handle = makeChannel({
+          extMethodImpl: async (method) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionSource) return {};
+            sourceStarted.resolve();
+            return sourceReply.promise;
+          },
+        });
+        const onDiagnosticLine = vi.fn();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          initializeTimeoutMs: 500,
+          onDiagnosticLine,
+        });
+        try {
+          const pending = bridge.spawnOrAttach({
+            workspaceCwd: WS_A,
+            sourceType: 'scheduled_task',
+          });
+          const result = pending.catch((error: unknown) => error);
+          await sourceStarted.promise;
+          if (reason === 'transport_closed')
+            handle.crash({ exitCode: 1, signalCode: null });
+          await result;
+          expect(
+            onDiagnosticLine.mock.calls.filter(([line]) =>
+              line.includes('source_persistence_failed'),
+            ),
+          ).toEqual([
+            [
+              expect.stringContaining(`reason=${reason} sourcePersisted=false`),
+              'warn',
+            ],
+          ]);
+        } finally {
+          sourceReply.resolve({ persisted: false });
+          await bridge.shutdown();
+        }
+      },
+    );
+
+    it.each(['load', 'resume', 'live-backfill'] as const)(
+      'correlates source failures on %s without logging source payloads',
+      async (mode) => {
+        const onDiagnosticLine = vi.fn();
+        const handle = makeChannel({
+          extMethodImpl: async (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionSource
+              ? { persisted: false, reason: 'write_not_confirmed' }
+              : {},
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          onDiagnosticLine,
+        });
+        try {
+          const sessionId =
+            mode === 'live-backfill'
+              ? (await bridge.spawnOrAttach({ workspaceCwd: WS_A })).sessionId
+              : `source-${mode}`;
+          const request = {
+            sessionId,
+            workspaceCwd: WS_A,
+            sourceType: 'channel',
+            sourceId: 'SECRET_SOURCE',
+          };
+          const restored = await (mode === 'load'
+            ? bridge.loadSession(request)
+            : bridge.resumeSession(request));
+          expect(restored.sourcePersisted).toBe(false);
+          const failures = onDiagnosticLine.mock.calls.filter(([line]) =>
+            line.includes('source_persistence_failed'),
+          );
+          expect(failures).toEqual([
+            [
+              `qwen serve: source_persistence_failed sessionId=${sessionId} reason=write_not_confirmed sourcePersisted=false`,
+              'warn',
+            ],
+          ]);
+          expect(JSON.stringify(failures)).not.toContain('SECRET_SOURCE');
+        } finally {
+          await bridge.shutdown();
+        }
+      },
+    );
+
+    it('keeps source persistence booleans when the diagnostic callback throws', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: false }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        onDiagnosticLine: () => {
+          throw new Error('sink failed');
+        },
+      });
+      try {
+        await expect(
+          bridge.spawnOrAttach({
+            workspaceCwd: WS_A,
+            sourceType: 'scheduled_task',
+          }),
+        ).resolves.toMatchObject({ sourcePersisted: false });
+      } finally {
+        await bridge.shutdown();
+      }
     });
 
     it('persists and returns source metadata in status and list summaries', async () => {
@@ -37112,6 +37914,54 @@ describe('createAcpSessionBridge — background notifications', () => {
   });
 });
 
+describe('createAcpSessionBridge — session agent records', () => {
+  const request = {
+    kind: 'agent_message' as const,
+    recordKey: 'run-1:result',
+    modelText: '<agent_message from="claude-B">done</agent_message>',
+    payload: {
+      displayText: 'done',
+      author: { agentId: 'agent-1', name: 'claude-B' },
+      runId: 'run-1',
+      status: 'completed' as const,
+    },
+  };
+
+  it('forwards the record to the live session and returns its id', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionExternalRecord
+          ? { sessionId: params['sessionId'], recordId: 'rec-1', created: true }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.appendExternalRecord(session.sessionId, request),
+    ).resolves.toEqual({
+      sessionId: session.sessionId,
+      recordId: 'rec-1',
+      created: true,
+    });
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+      params: { sessionId: session.sessionId, ...request },
+    });
+    await bridge.shutdown();
+  });
+
+  it('rejects a record for an unknown session', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    await expect(
+      bridge.appendExternalRecord('missing', request),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await bridge.shutdown();
+  });
+});
+
 /**
  * `enqueueMidTurnMessage` backs the web-shell mid-turn drain: the browser
  * pushes a message typed during a turn, the ACP child drains it via
@@ -37154,6 +38004,152 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await vi.waitFor(() =>
       expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
     );
+    await bridge.shutdown();
+  });
+
+  it('asks the agent to deliver queued input only on send-now', async () => {
+    const firstTurn = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req: PromptRequest) => {
+        if ((req.prompt[0] as { text?: string }).text === 'work') {
+          await firstTurn.promise;
+        }
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'work' }],
+    });
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    const requests = () =>
+      handle.agent.extMethodCalls.filter(
+        (call) => call.method === MID_TURN_SEND_NOW_METHOD,
+      );
+    const client = { clientId: session.clientId };
+
+    // Nothing waits yet, and queue-only steering is not the user's to send.
+    expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+      requested: false,
+    });
+    bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'delegated',
+      undefined,
+      undefined,
+      { queueOnly: true },
+    );
+    expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+      requested: false,
+    });
+    expect(() =>
+      bridge.sendMidTurnMessagesNow(session.sessionId, {
+        clientId: 'not-bound',
+      }),
+    ).toThrow(InvalidClientIdError);
+
+    // Typing alone keeps tool-boundary delivery.
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'steer',
+        client,
+        'typed-1',
+      ),
+    ).toEqual({ accepted: true, messageId: 'typed-1' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(requests()).toEqual([]);
+
+    expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+      requested: true,
+    });
+    await vi.waitFor(() =>
+      expect(requests()).toEqual([
+        {
+          method: MID_TURN_SEND_NOW_METHOD,
+          params: { sessionId: session.sessionId },
+        },
+      ]),
+    );
+
+    // The agent's send-now drain takes the user's message and leaves the
+    // queue-only steering for the tool boundary.
+    await expect(
+      handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+        sessionId: session.sessionId,
+        userInputOnly: true,
+      }),
+    ).resolves.toMatchObject({ messages: ['steer'] });
+    await expect(
+      handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+        sessionId: session.sessionId,
+      }),
+    ).resolves.toMatchObject({ messages: ['delegated'] });
+
+    firstTurn.resolve();
+    await turn;
+    await bridge.shutdown();
+  });
+
+  it('logs a send-now request an older agent rejects and keeps the queue', async () => {
+    const firstTurn = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req: PromptRequest) => {
+        if ((req.prompt[0] as { text?: string }).text === 'work') {
+          await firstTurn.promise;
+        }
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: (method) => {
+        if (method === MID_TURN_SEND_NOW_METHOD) {
+          throw RequestError.methodNotFound(method);
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'work' }],
+    });
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    const client = { clientId: session.clientId };
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'steer',
+        client,
+        'typed-1',
+      );
+      // Advisory: the answer does not wait for the agent.
+      expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+        requested: true,
+      });
+      await vi.waitFor(() =>
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `[mid-turn] session=${JSON.stringify(session.sessionId)} send-now request failed`,
+          ),
+        ),
+      );
+      // The message still waits for the tool boundary.
+      await expect(
+        handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+          sessionId: session.sessionId,
+        }),
+      ).resolves.toMatchObject({ messages: ['steer'] });
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    firstTurn.resolve();
+    await turn;
     await bridge.shutdown();
   });
 
@@ -37510,6 +38506,84 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
 
     release();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('still delivers a message whose deletion missed while a failing drain held it', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const context = { clientId: session.clientId };
+    const prompt = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        context,
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+    const reference = await bridge.storeSessionAttachment(
+      session.sessionId,
+      Uint8Array.of(1, 2, 3),
+      'image/png',
+      context,
+    );
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, 'first', context, 'u1', {
+        content: [reference],
+      }),
+    ).toEqual({ accepted: true, messageId: 'u1' });
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, 'second', context, 'u2'),
+    ).toEqual({ accepted: true, messageId: 'u2' });
+    let deleteAnswer: unknown;
+    const readFile = vi
+      .spyOn(fsp, 'readFile')
+      .mockImplementationOnce(async () => {
+        // A delete or an edit lands while the drain reads an attachment, and
+        // that read then fails.
+        deleteAnswer = bridge.removeMidTurnMessage(
+          session.sessionId,
+          'u2',
+          context,
+        );
+        throw Object.assign(new Error('too many open files'), {
+          code: 'EMFILE',
+        });
+      });
+    try {
+      await expect(
+        handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+          sessionId: session.sessionId,
+          userInputOnly: true,
+        }),
+      ).rejects.toBeDefined();
+    } finally {
+      readFile.mockRestore();
+    }
+    // The client was told the message is no longer its to change, so it is
+    // delivered as that answer says rather than dropped.
+    expect(deleteAnswer).toEqual({ removed: false });
+    const next = await handle.agentConnection.extMethod(
+      'craft/drainMidTurnQueue',
+      { sessionId: session.sessionId },
+    );
+    expect(next['messages']).toEqual(['first', 'second']);
+
+    release?.();
     await prompt;
     await bridge.shutdown();
   });
@@ -38192,7 +39266,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         type: 'text',
         text: 'two images\n[Attachment is no longer available]',
       },
-      { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+      {
+        type: 'image',
+        data: 'AQI=',
+        mimeType: 'image/png',
+        _meta: {
+          'qwen.daemon.attachmentContext':
+            expect.stringContaining('"absolutePath":'),
+        },
+      },
     ]);
     releases[1]!();
     await vi.waitFor(() =>
@@ -38272,7 +39354,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         type: 'text',
         text: 'm2\n[Attachment is no longer available]',
       },
-      { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+      {
+        type: 'image',
+        data: 'AQI=',
+        mimeType: 'image/png',
+        _meta: {
+          'qwen.daemon.attachmentContext':
+            expect.stringContaining('"absolutePath":'),
+        },
+      },
     ]);
     releases[2]!();
     await vi.waitFor(() =>

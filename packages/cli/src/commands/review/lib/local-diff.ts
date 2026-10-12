@@ -28,7 +28,7 @@ import { lstatSync, statSync, type Stats } from 'node:fs';
 import { join, sep } from 'node:path';
 import {
   REVIEW_CACHE_DIR,
-  REVIEW_LEASE_DIR,
+  RETIRED_REVIEW_LEASE_DIR,
   REVIEW_TMP_DIR,
   REVIEWS_DIR,
   repoRelativeOf,
@@ -327,7 +327,12 @@ function diffUntracked(repoRoot: string, path: string): Buffer {
  * slashes on every platform, which is the spelling `repoRelPath` arrives in.
  */
 const REVIEW_PLUMBING = new RegExp(
-  `(?:^|/)(?:${[REVIEW_TMP_DIR, REVIEW_CACHE_DIR, REVIEWS_DIR, REVIEW_LEASE_DIR]
+  `(?:^|/)(?:${[
+    REVIEW_TMP_DIR,
+    REVIEW_CACHE_DIR,
+    REVIEWS_DIR,
+    RETIRED_REVIEW_LEASE_DIR,
+  ]
     .map((dir) =>
       dir
         .split(sep)

@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { formatExecutionSandbox } from './utils/execution-sandbox-display.js';
 import process from 'node:process';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import type { CommandContext } from './commands/types.js';
 import { getCliVersion } from '../utils/version.js';
+import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 import {
   IdeClient,
   AuthType,
@@ -171,8 +173,11 @@ export async function getSystemInfo(
   const osArch = process.arch;
   const osRelease = os.release();
   const nodeVersion = process.version;
-  const npmVersion = await getNpmVersion();
-  const sandboxEnv = getSandboxEnv();
+  const executionSandbox = formatExecutionSandbox(context.services.config);
+  const npmVersion = executionSandbox
+    ? 'not probed (tool execution sandbox active)'
+    : await getNpmVersion();
+  const sandboxEnv = executionSandbox ?? getSandboxEnv();
   const modelVersion = context.services.config?.getModel() || 'Unknown';
   const cliVersion = await getCliVersion();
   const selectedAuthType = context.services.config?.getAuthType() || '';
@@ -210,7 +215,8 @@ export async function getExtendedSystemInfo(
   const memoryUsage = formatMemoryUsage(process.memoryUsage().rss);
 
   // For bug reports, use sandbox name without prefix
-  const sandboxEnv = getSandboxEnv(true);
+  const sandboxEnv =
+    formatExecutionSandbox(context.services.config) ?? getSandboxEnv(true);
 
   // Get base URL and apiKeyEnvKey if using OpenAI or Anthropic auth
   const contentGeneratorConfig =
@@ -228,8 +234,13 @@ export async function getExtendedSystemInfo(
       ? GIT_COMMIT_INFO
       : undefined;
 
-  // Get fast model from settings
-  const fastModel = context.services.settings?.merged?.fastModel || undefined;
+  // Get fast model from settings. The persisted selector can carry a
+  // userinfo-bearing baseUrl suffix — bug reports must not embed it.
+  const fastModelSetting =
+    context.services.settings?.merged?.fastModel || undefined;
+  const fastModel = fastModelSetting
+    ? formatAuxModelSelectorForDisplay(fastModelSetting)
+    : undefined;
   const lspStatus = getLspStatus(context);
 
   return {

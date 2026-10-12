@@ -118,7 +118,9 @@ describe('AddWorkspaceDialog', () => {
     submit();
 
     const err = alert();
-    expect(err?.textContent).toBe('Path must be absolute');
+    expect(err?.textContent).toBe(
+      'Enter an absolute path or an SSH workspace URL.',
+    );
     expect(input().getAttribute('aria-invalid')).toBe('true');
     expect(input().getAttribute('aria-describedby')).toBe(
       'add-workspace-error add-workspace-hint',
@@ -300,6 +302,48 @@ describe('AddWorkspaceDialog', () => {
     });
     afterEach(() => {
       vi.useRealTimers();
+    });
+
+    it('submits an SSH URL with Enter without browsing the local filesystem', async () => {
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onSuggest={onSuggest}
+          browseDirectories
+          initialPath="/local/"
+        />,
+      );
+      await settle();
+      expect(onSuggest).toHaveBeenCalledWith('/local/');
+      expect(
+        document.querySelector('button[aria-label="Parent folder"]'),
+      ).not.toBeNull();
+      expect(document.body.textContent).toContain('ssh://');
+      onSuggest.mockClear();
+      const url = 'ssh://alice@build-box:2222/srv/project';
+      type(`  ${url}  `);
+      await settle();
+      expect(onSuggest).not.toHaveBeenCalled();
+      expect(
+        document.querySelector('button[aria-label="Parent folder"]'),
+      ).toBeNull();
+      const enter = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        input().dispatchEvent(enter);
+      });
+      expect(enter.defaultPrevented).toBe(false);
+      expect(input().value.trim()).toBe(url);
+      await act(async () => {
+        input().form!.requestSubmit();
+      });
+      expect(onAdd).toHaveBeenCalledWith(url, true);
     });
 
     it('renders a persistent remote directory browser', async () => {

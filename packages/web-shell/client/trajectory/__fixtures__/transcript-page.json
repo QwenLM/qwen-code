@@ -188,7 +188,6 @@
           "timing": {
             "kind": "tool",
             "durationMs": 35,
-            "startedAt": 1789877518944,
             "promptId": "c0b0ee3f-22a9-4927-bc7a-c5c247fa5b83########1",
             "callId": "call_90d339aa79e549408e92a551",
             "toolName": "read_file",
@@ -216,7 +215,6 @@
           "timing": {
             "kind": "tool",
             "durationMs": 20,
-            "startedAt": 1789877518982,
             "promptId": "c0b0ee3f-22a9-4927-bc7a-c5c247fa5b83########1",
             "callId": "call_7a36569ea40d481191602e78",
             "toolName": "glob",

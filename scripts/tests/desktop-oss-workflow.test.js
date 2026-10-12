@@ -29,7 +29,7 @@ const syncWorkflow = readFileSync(
   'utf8',
 );
 const tauriConfig = JSON.parse(
-  readFileSync('packages/desktop-shell/src-tauri/tauri.conf.json', 'utf8'),
+  readFileSync('packages/desktop/src-tauri/tauri.conf.json', 'utf8'),
 );
 const hasJq = (() => {
   try {
@@ -336,6 +336,32 @@ describe('Desktop OSS mirror workflow', () => {
     expect(prepare).toContain(
       '--base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/desktop/v${VERSION}"',
     );
+    // Only the re-mirror path may treat a platform as optional; the artifact
+    // path is a fresh build and must fail if a leg did not upload (#12806).
+    expect(prepare).toContain("SOURCE: '${{ steps.release.outputs.source }}'");
+    expect(prepare).toContain(`if [ "$SOURCE" = 'release' ]; then`);
+    expect(prepare).toContain(
+      'manifest_args=(--allow-missing-platform linux-aarch64)',
+    );
+    // Pin the containment, not only the pieces: hoisting the tolerant
+    // assignment into the unconditional declaration above the guard leaves
+    // every string above present and the `if` block merely redundant, yet a
+    // SOURCE=artifact fresh build whose arm64 leg failed to upload then
+    // publishes the mirror feed without linux-aarch64 and exits 0 — #12806
+    // again, with this test green.
+    expect(prepare).toContain(
+      'manifest_args=()\n' +
+        `          if [ "$SOURCE" = 'release' ]; then\n` +
+        '            manifest_args=(--allow-missing-platform linux-aarch64)\n' +
+        '          fi',
+    );
+    // Pin the effect, not only the pieces: the declaration and the `if` guard
+    // both survive a refactor that drops the expansion, and an unexpanded array
+    // is not an error under `set -u` — the mirror would then die with
+    // `found 0` on exactly the path this flag exists for.
+    expect(prepare).toMatch(
+      /create-desktop-update-manifest\.mjs[\s\S]*?"\$\{manifest_args\[@\]}"/,
+    );
     expect(prepare).toContain('sha256sum -- * > SHA256SUMS.txt');
 
     const upload = getWorkflowStep(
@@ -369,6 +395,16 @@ describe('Desktop OSS mirror workflow', () => {
 
   it('advances the OSS feed only for the current GitHub stable version', () => {
     const publish = getWorkflowJob(releaseWorkflow, 'publish');
+    // The other side of the strictness split. A fresh build must never be able
+    // to tolerate a missing leg: an operator unblocking a release by adding the
+    // flag here would drop the key from the primary feed while the arm64 asset
+    // still ships — #12806 again, with every test green and no step failing.
+    const generateManifest = getWorkflowStep(
+      publish,
+      'Generate checksums and updater manifest',
+    );
+    expect(generateManifest).toContain('create-desktop-update-manifest.mjs');
+    expect(generateManifest).not.toContain('--allow-missing-platform');
     const updateFeed = getWorkflowStep(publish, 'Update stable updater feed');
     expect(updateFeed).toContain('sort -V');
     expect(updateFeed).toContain(

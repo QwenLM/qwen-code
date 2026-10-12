@@ -5,8 +5,8 @@
  */
 
 // The base-tree reuse fence's trust state, persisted OUTSIDE the sandbox's
-// read-write mount — beside the worktree leases, the existing "nothing mounts
-// it" precedent (`REVIEW_LEASE_DIR` in lib/paths.ts).
+// read-write mount — beside the worktree leases in the global trusted review
+// state root.
 //
 // Every fence decision comes from this file ALONE. The markers inside the
 // base tree (`.qwen-review-base-ok`, `.qwen-review-base-failed`) are notes for
@@ -44,8 +44,12 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
-import { LEASE_PREFIX, REVIEW_LEASE_DIR, REVIEW_TMP_DIR } from './paths.js';
+import { basename, dirname, join, resolve } from 'node:path';
+import {
+  LEASE_PREFIX,
+  reviewRepositoryRootForWorktree,
+  reviewTrustStateDir,
+} from './paths.js';
 
 /** What one legitimately-left entry looked like at record time. */
 export interface BuiltTreeStat {
@@ -151,51 +155,6 @@ function sameIdentity(a: number, b: number): boolean {
 }
 
 /**
- * The host-side directory the trust file keys under, derived LEXICALLY from
- * the worktree — never through git, because the worktree's own pointer lives
- * inside the mount and asking git for the root would let a planted pointer
- * choose where the run's state is written. Validated, not just derived: the
- * walk assumes the pipeline's `<root>/.qwen/tmp/<name>` geometry, and a
- * worktree outside that shape (a hand-passed `--worktree /tmp/wt`) must be
- * refused here, before anything creates directories two levels up from it.
- */
-function trustRootFor(worktree: string): string {
-  // Nested geometry (a review launched from inside another review's
-  // worktree): the inner review's own `.qwen` sits inside the OUTER
-  // review's read-write mount, and a trust file written there is readable
-  // AND writable by the outer reviewed code — the record the fence reads
-  // must sit outside every layer, beside the outermost enclosing
-  // repository's lease directory, exactly where `leaseDirectory` puts it.
-  // Lexical, never through git, and never resolved through the filesystem:
-  // a planted pointer or link would choose where the run's state is
-  // written.
-  const resolved = resolve(worktree);
-  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
-  const at = resolved.indexOf(marker);
-  if (at >= 0) {
-    // The FIRST occurrence is the outermost layer; two levels up from it is
-    // the outermost repository root, and its `.qwen` is the answer — the
-    // same path `leaseDirectory` computes for this geometry.
-    const outermostTmp = resolved.slice(0, at + marker.length - 1);
-    return resolve(outermostTmp, '..', '..', '.qwen');
-  }
-  const tmpDir = dirname(resolved);
-  const qwenDir = dirname(tmpDir);
-  if (
-    basename(tmpDir) !== 'tmp' ||
-    basename(qwenDir) !== '.qwen' ||
-    dirname(qwenDir) === qwenDir
-  ) {
-    throw new Error(
-      `cannot place the base-tree trust artifact for ${worktree}: the ` +
-        'worktree is not shaped like <root>/.qwen/tmp/<name>, so there is ' +
-        'no host-side review directory to key it under',
-    );
-  }
-  return qwenDir;
-}
-
-/**
  * The one file holding a run's base-tree trust state, named by a digest of
  * the plan's path alone — the run identity is INSIDE the file (see the
  * module doc), so a re-captured plan rotates the content, not the name, and
@@ -239,8 +198,7 @@ export function releaseBaseTreeLock(worktree: string): void {
 /** The host-side directory holding one review target's base-tree state. */
 function baseTreeStateDir(worktree: string): string {
   return join(
-    trustRootFor(worktree),
-    basename(REVIEW_LEASE_DIR),
+    reviewTrustStateDir(reviewRepositoryRootForWorktree(worktree)),
     'base-tree',
     // Under the TARGET, so `clearReviewWorktreeLease` can reclaim it: the
     // file is keyed by the plan's path, which nothing outside this module
@@ -309,8 +267,7 @@ export function runIdentity(worktree: string): {
   const resolved = resolve(worktree);
   const target = reviewTargetOf(worktree);
   const leaseFile = join(
-    trustRootFor(worktree),
-    basename(REVIEW_LEASE_DIR),
+    reviewTrustStateDir(reviewRepositoryRootForWorktree(worktree)),
     `${LEASE_PREFIX}${target}.json`,
   );
   let lease: {
@@ -523,7 +480,7 @@ export function establishTrust(
   identityMs: number,
   baseSha: string,
 ): TrustState {
-  mkdirSync(dirname(trustPath), { recursive: true });
+  mkdirSync(dirname(trustPath), { recursive: true, mode: 0o700 });
   const mint = (): TrustFile => ({
     identity: identityMs,
     baseSha,

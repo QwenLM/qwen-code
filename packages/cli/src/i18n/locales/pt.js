@@ -186,6 +186,8 @@ export default {
     'O retrocesso não afeta arquivos editados manualmente ou por meio de comandos shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Não é possível retroceder para um turno que foi compactado. Tente um turno mais recente.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Não é possível retroceder a conversa para este turno: ele não corresponde mais ao histórico do modelo (por exemplo, após uma nova tentativa). Tente um turno mais recente.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'A restauração de arquivos não está disponível para este turno (sem alterações capturadas, ou o turno é anterior à sessão atual).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -1851,12 +1853,16 @@ export default {
     'Contexto excede o limite! Use /compress ou /clear para reduzir.',
   'No API response yet. Send a message to see actual usage.':
     'Ainda não há resposta da API. Envie uma mensagem para ver o uso real.',
+  'Estimated usage, including the conversation':
+    'Uso estimado, incluindo a conversa',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Ainda não há uso do provedor. Estas são estimativas locais, incluindo a conversa.',
   'Estimated pre-conversation overhead': 'Sobrecarga estimada pré-conversa',
   'Context window': 'Janela de Contexto',
   tokens: 'tokens',
   Used: 'Usado',
   Free: 'Livre',
-  'Autocompact buffer': 'Buffer de autocompactação',
+  'Autocompact buffer': 'Buffer de compactação',
   'Usage by category': 'Uso por categoria',
   'System prompt': 'Prompt do sistema',
   'Built-in tools': 'Ferramentas integradas',

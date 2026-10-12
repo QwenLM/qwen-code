@@ -536,6 +536,13 @@ class AcpSubagentExecutor implements SubagentExecutor {
           this.params.runtimeContext,
         );
     const task = String(context.get('task_prompt') ?? 'Get Started!');
+    // The rendered memory policy promises the legacy catalog at the request
+    // tail, which only LlmChat appends. A peer never goes through LlmChat, so
+    // the first turn carries it after the task; continuations keep the
+    // turn-1 copy, as the bundle itself does.
+    const catalog = system
+      ? this.params.runtimeContext.getAutoMemoryContext()
+      : '';
     // The first turn's task is seeded into the transcript as the initial user
     // prompt by the dispatcher; a continuation turn (a resident external agent
     // re-invoked per incoming user message) has no such seed, so emit the task
@@ -546,6 +553,7 @@ class AcpSubagentExecutor implements SubagentExecutor {
       [
         ...(system ? [{ type: 'text' as const, text: system }] : []),
         { type: 'text', text: task },
+        ...(catalog ? [{ type: 'text' as const, text: catalog }] : []),
       ],
       signal,
       options,
@@ -932,6 +940,12 @@ class AcpSubagentExecutor implements SubagentExecutor {
   }
 
   private updateTool(update: ToolCall | ToolCallUpdate): void {
+    if (
+      update._meta?.['toolLifecycle'] !== undefined &&
+      update.status === undefined &&
+      update.content === undefined
+    )
+      return;
     const callId = update.toolCallId;
     if (this.finishedTools.has(callId)) return;
     const previous = this.tools.get(callId);

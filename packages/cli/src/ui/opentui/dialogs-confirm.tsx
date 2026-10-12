@@ -544,7 +544,9 @@ function OutcomeSelect(props: {
       onHover={select.highlightIndex}
       onWheel={(direction) =>
         select.setActiveIndex(
-          direction === 'up' ? select.activeIndex - 1 : select.activeIndex + 1,
+          direction === 'up'
+            ? select.activeIndexRef.current - 1
+            : select.activeIndexRef.current + 1,
         )
       }
       onSelectIndex={select.selectIndex}

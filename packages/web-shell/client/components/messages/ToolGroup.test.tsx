@@ -12,7 +12,10 @@ import {
 } from '../../adapters/toolClassification';
 import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import { getTranslator, I18nProvider } from '../../i18n';
-import { WebShellCustomizationProvider } from '../../customization';
+import {
+  WebShellCustomizationProvider,
+  type MarkdownRenderContext,
+} from '../../customization';
 import {
   TranscriptDocumentExpandedProvider,
   TranscriptRenderModeProvider,
@@ -21,6 +24,13 @@ import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
+import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import {
+  result as managedResult,
+  notStartedResult,
+  blockedResult,
+  previewOnlyResult,
+} from '../managed/managed-tool-result.test-fixtures';
 
 vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -31,7 +41,6 @@ vi.mock('../../WebShellContexts', async () => {
 });
 
 const {
-  buildUnifiedDiff,
   extractDiff,
   fencedCodeBlock,
   formatSingleToolSummary,
@@ -207,6 +216,63 @@ const zhT = (key: string, values?: Record<string, string | number>): string => {
 };
 
 describe('tool group summary logic', () => {
+  it.each([
+    [notStartedResult, 'Command not executed'],
+    [blockedResult, 'Output delivery blocked'],
+    [previewOnlyResult, 'Command succeeded'],
+  ])(
+    'renders the shared result facts in tool summaries: %s',
+    (result, expected) => {
+      const container = renderToolLine(
+        makeTool({ toolResult: result }),
+        { onToolResultOpen: vi.fn() },
+        {},
+      );
+      expect(container.textContent).toContain(expected);
+    },
+  );
+  it('rerenders a result-only revision change and opens its canonical Item', () => {
+    const onOpen = vi.fn();
+    const customization = {};
+    const tool = makeTool({
+      rawOutput: 'unchanged preview',
+      toolResult: managedResult,
+    });
+    const container = renderToolLine(
+      tool,
+      { onToolResultOpen: onOpen },
+      customization,
+    );
+    expect(container.textContent).toContain('Capture complete');
+    const { root } = mounted.at(-1)!;
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <WebShellCustomizationProvider value={customization}>
+            <ToolLine
+              tool={{
+                ...tool,
+                toolResult: {
+                  ...managedResult,
+                  projection_revision: 2,
+                  capture_status: 'partial',
+                  delivery_status: 'blocked',
+                },
+              }}
+              onToolResultOpen={onOpen}
+            />
+          </WebShellCustomizationProvider>
+        </I18nProvider>,
+      ),
+    );
+    expect(container.textContent).toContain('Capture incomplete');
+    expect(container.textContent).toContain('Output delivery blocked');
+    const button = [...container.querySelectorAll('button')].find(
+      (node) => node.textContent === 'View output',
+    );
+    act(() => button!.click());
+    expect(onOpen).toHaveBeenCalledWith('item-1');
+  });
   it('counts agents separately only for compact summaries', () => {
     const tools = [
       makeTool({ callId: 'agent-1', toolName: 'Agent' }),
@@ -769,6 +835,30 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it('shows the Advisor verdict and expands the full review', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'advisor',
+        status: 'completed',
+        rawOutput: {
+          type: 'advisor_review',
+          verdict: 'Sound approach.',
+          risks: 'Retry handling is unclear.',
+          missingEvidence: 'No integration result.',
+          recommendation: 'Run the integration test.',
+        },
+      }),
+    ]);
+
+    act(() => {
+      (container.querySelector('button') as HTMLElement).click();
+    });
+
+    expect(container.textContent).toContain('Sound approach.');
+    expect(container.textContent).toContain('Retry handling is unclear.');
+    expect(container.textContent).toContain('Run the integration test.');
+  });
+
   it('expands a workflow tool into its live execution graph', () => {
     const tool = makeTool({
       toolName: 'workflow',
@@ -2223,6 +2313,53 @@ describe('tool row rendering', () => {
 });
 
 describe('thinking rows in the compact summary', () => {
+  it('passes each expanded thought streaming state to the Markdown customization', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const transformMarkdown = vi.fn(
+      (content: string, context: MarkdownRenderContext) =>
+        `${content} ${context.isStreaming ? 'pending' : 'settled'}`,
+    );
+    const customization = { markdown: { transformMarkdown } };
+    const tools = [makeTool({ toolName: 'ReadFile' })];
+    const render = (isStreaming: boolean) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={customization}>
+              <ToolGroup
+                tools={tools}
+                thoughts={[{ content: 'thought citation', isStreaming }]}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        );
+      });
+    };
+
+    render(true);
+    act(() => container.querySelector('button')?.click());
+    const thoughtHeader = container.querySelector<HTMLElement>(
+      '[data-testid="compact-thinking-summary"]',
+    );
+    expect(thoughtHeader).not.toBeNull();
+    act(() => thoughtHeader?.click());
+    expect(container.textContent).toContain('thought citation pending');
+    expect(transformMarkdown).toHaveBeenLastCalledWith('thought citation', {
+      source: 'thinking',
+      isStreaming: true,
+    });
+
+    render(false);
+    expect(container.textContent).toContain('thought citation settled');
+    expect(transformMarkdown).toHaveBeenLastCalledWith('thought citation', {
+      source: 'thinking',
+      isStreaming: false,
+    });
+  });
+
   it('expands a single-agent compact summary before opening agent details', () => {
     const onOpenSubagent = vi.fn();
     const container = renderToolGroup(
@@ -2701,6 +2838,38 @@ describe('tool output logic', () => {
         }),
       ),
     ).toContain('-deleted content');
+  });
+
+  it('builds a diff from the edit tool’s real parameter names on the full projection', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            file_path: 'document.ts',
+            old_string: 'old content',
+            new_string: 'REAL_PARAMETER_DIFF',
+          },
+        }),
+      ),
+    ).toContain('REAL_PARAMETER_DIFF');
+  });
+
+  it('does not render an attempted real-parameter diff for a failed edit', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'failed',
+          args: {
+            file_path: 'document.ts',
+            old_string: 'old content',
+            new_string: 'ATTEMPTED NEW CONTENT',
+          },
+          rawOutput: 'Error: old_string not found',
+        }),
+      ),
+    ).toBe('');
   });
 
   it('does not render an attempted typed diff for a failed edit', () => {

@@ -108,9 +108,9 @@ hygiene findings.
   - Correct: multi-SDK behavior is consistent, protocol fields match the
     TS SDK, bridge error mapping preserves the original error class.
 
-- **ui-apps** — the two UI apps (`packages/desktop-shell/` and
+- **ui-apps** — the two UI apps (`packages/desktop/` and
   `packages/web-shell/`).
-  - `desktop-shell`: a thin Tauri shell around Web Shell (window
+  - `desktop`: a thin Tauri shell around Web Shell (window
     management, process lifecycle, signing, updates).
   - `web-shell`: a client React app (`client/`), a Vite build, and a
     daemon proxy; ships as an embeddable component.

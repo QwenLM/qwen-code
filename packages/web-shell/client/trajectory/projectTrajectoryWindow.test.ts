@@ -113,19 +113,33 @@ describe('projectTrajectoryWindow', () => {
     ]);
   });
 
-  it('drops the start time a tool frame may carry', () => {
-    // The merged producer omits it, because tool calls are logged in one loop
-    // after their batch settles and the timestamp is the batch's end for all of
-    // them. This page was captured from a build that still sent it.
+  it('gives tools no start time on a page recorded before starts were', () => {
+    // A tool frame carries a start only when the session recorded one, and
+    // this session predates that. Nothing downstream may invent one.
     const toolFrames = timings(projectTrajectoryWindow(REAL_PAGE)).filter(
       (entry) => entry.timing.kind === 'tool',
     );
 
-    expect(toolFrames).not.toHaveLength(0);
+    expect(toolFrames.map((frame) => frame.timing.startedAt)).toEqual([
+      undefined,
+      undefined,
+    ]);
     for (const frame of toolFrames) {
-      expect(frame.timing.startedAt).toBeUndefined();
       expect(frame.timing.durationMs).toBeGreaterThan(0);
     }
+  });
+
+  it('preserves a recorded start and measured zero duration through projection', () => {
+    const timing = {
+      kind: 'tool',
+      callId: 'measured-call',
+      startedAt: 1_760_000_000_000,
+      durationMs: 0,
+      toolStatus: 'cancelled',
+    };
+    expect(timings(projectTrajectoryWindow([timingFrame(timing)]))).toEqual([
+      expect.objectContaining({ timing }),
+    ]);
   });
 
   it('carries the record id a frame was stamped with', () => {
@@ -353,13 +367,10 @@ describe('projectTrajectoryWindow', () => {
         'read_file',
         'glob',
       ]);
-      expect(
-        tools.every(
-          (row) =>
-            (row.timing?.durationMs ?? 0) > 0 &&
-            row.timing?.startedAt === undefined,
-        ),
-      ).toBe(true);
+      expect(tools.map((row) => row.timing)).toEqual([
+        { durationMs: 35 },
+        { durationMs: 20 },
+      ]);
       expect(tools.map((row) => row.toolStatus)).toEqual([
         'success',
         'success',

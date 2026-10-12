@@ -358,6 +358,13 @@ pub fn trusted_window_ids_for_pid(pid: u32) -> Option<Vec<u64>> {
     )
 }
 
+pub(crate) fn trusted_focused_window_for_pid(pid: u32) -> Option<u64> {
+    trusted_shell_windows(Some(pid))?
+        .into_iter()
+        .find(|window| window.focused)
+        .map(|window| window.info.xid)
+}
+
 /// Briefly activate an exact compositor-owned window, execute one bounded
 /// focus-sensitive operation, and restore the prior exact Shell focus.
 pub fn with_focused_window<T>(

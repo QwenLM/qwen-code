@@ -1,4 +1,10 @@
-import { expect, test, type Page, type TestInfo } from '@playwright/test';
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type TestInfo,
+} from '@playwright/test';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
@@ -21,6 +27,14 @@ const LOCAL_CWD = '/srv/local-project';
 const REMOTE_FOLDER = 'shared-checkout';
 const LOCAL_FOLDER = 'local-checkout';
 
+/**
+ * The one directory both hosts list at their filesystem root; each host's
+ * fixture below declares what lives inside it. `withAncestorDirectories`
+ * derives this root listing from that key, so a browse starting at `/` can
+ * descend to the folder instead of meeting a filesystem with no ancestors.
+ */
+const ROOT_FOLDER = 'srv';
+
 const workspaceFeatures = [
   'session_events',
   'permission_vote',
@@ -32,6 +46,41 @@ const workspaceFeatures = [
   'workspace_display_name',
 ];
 
+/**
+ * Adds the ancestor directories of every listed prefix, so a fixture declaring
+ * `/srv` also lists `srv` at `/`. A real filesystem is connected: a browse that
+ * starts at the root can descend to any directory on it. Without the ancestors
+ * the mocked filesystem is a single directory floating in space, and the only
+ * browse that could ever find anything is one seeded from a path inside it —
+ * which is how a cwd belonging to a *different* machine came to look like a
+ * working seed for this one.
+ */
+function withAncestorDirectories(
+  pathSuggestions: Record<string, string[]>,
+): Record<string, string[]> {
+  const ancestors = new Map<string, Set<string>>();
+  for (const prefix of Object.keys(pathSuggestions)) {
+    const segments = prefix.split('/').filter(Boolean);
+    segments.forEach((segment, depth) => {
+      const parent =
+        depth === 0 ? '/' : `/${segments.slice(0, depth).join('/')}/`;
+      const names = ancestors.get(parent);
+      if (names) {
+        names.add(segment);
+      } else {
+        ancestors.set(parent, new Set([segment]));
+      }
+    });
+  }
+  const merged: Record<string, string[]> = {};
+  for (const [parent, names] of ancestors) {
+    merged[parent] = [...names].sort();
+  }
+  // The fixture's own entries win, so a deliberately declared listing is never
+  // replaced by a synthesized one.
+  return { ...merged, ...pathSuggestions };
+}
+
 function hostScenario(
   cwd: string,
   pathSuggestions: Record<string, string[]>,
@@ -42,7 +91,7 @@ function hostScenario(
       features: workspaceFeatures,
       workspaces: [{ id: 'primary', cwd, primary: true, trusted: true }],
     },
-    pathSuggestions,
+    pathSuggestions: withAncestorDirectories(pathSuggestions),
   });
 }
 
@@ -86,6 +135,10 @@ function addWorkspaceDialog(page: Page) {
 async function openFolderBrowser(page: Page): Promise<void> {
   await page
     .getByRole('button', { name: 'Add workspace', exact: true })
+    .locator('../..')
+    .hover();
+  await page
+    .getByRole('button', { name: 'Add workspace', exact: true })
     .click();
   await expect(addWorkspaceDialog(page)).toBeVisible();
 }
@@ -94,6 +147,26 @@ async function selectFolderSource(page: Page, source: string): Promise<void> {
   const dialog = addWorkspaceDialog(page);
   await dialog.getByRole('combobox', { name: 'Folder source' }).click();
   await page.getByRole('option', { name: source, exact: true }).click();
+}
+
+/**
+ * In browse mode a click descends one directory, so reaching a folder below the
+ * filesystem root takes one click per level. Asserts the seed on the way, since
+ * "starts at the browsed machine's root" is the behaviour under test: the
+ * connected daemon's cwd is a path on a different machine.
+ */
+async function browseFromRootInto(
+  dialog: Locator,
+  name: string,
+): Promise<void> {
+  await expect(
+    dialog.getByRole('combobox', { name: 'Directory path' }),
+  ).toHaveValue('/');
+  await dialog.getByRole('option', { name: ROOT_FOLDER }).click();
+  await expect(
+    dialog.getByRole('combobox', { name: 'Directory path' }),
+  ).toHaveValue(`/${ROOT_FOLDER}/`);
+  await expect(dialog.getByRole('option', { name })).toBeVisible();
 }
 
 async function waitForRequest(
@@ -132,6 +205,7 @@ test('Settings adds a verified computer and returns to Connections @smoke', asyn
   );
 
   const sourceUrl = await gotoSourceShell(page);
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await page
     .getByRole('button', { name: 'Settings', exact: true })
     .first()
@@ -143,13 +217,23 @@ test('Settings adds a verified computer and returns to Connections @smoke', asyn
   await page.getByLabel('Daemon address').fill(REMOTE_ORIGIN);
   await page.getByRole('button', { name: 'Add connection' }).click();
 
-  await expect(page).toHaveURL(sourceUrl);
+  // `?fanout=` names the hosts this document may reach; the shell keeps it in
+  // the URL so the next load's CSP still covers them, so compare without it.
+  await expect
+    .poll(() => {
+      const landed = new URL(page.url());
+      landed.searchParams.delete('fanout');
+      return landed.href;
+    })
+    .toBe(new URL('/settings', sourceUrl).href);
   await expect(
     page
       .getByRole('navigation', { name: 'Settings' })
       .getByRole('button', { name: /^Connections/ }),
   ).toHaveAttribute('aria-current', 'page');
-  await expect(page.getByText('127.0.0.1:5199', { exact: true })).toBeVisible();
+  // The host group label now renders this host too, so scope to the saved
+  // connection chip that adding the computer created.
+  await expect(page.locator(`button[title="${REMOTE_ORIGIN}"]`)).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(() =>
@@ -186,7 +270,7 @@ test('the resumed browser lists the chosen computer directories @smoke', async (
   );
   await seedConnectedComputer(page);
 
-  await gotoSourceShell(page);
+  const sourceUrl = await gotoSourceShell(page);
   await openFolderBrowser(page);
   const sourceSelector = addWorkspaceDialog(page).getByRole('combobox', {
     name: 'Folder source',
@@ -198,16 +282,16 @@ test('the resumed browser lists the chosen computer directories @smoke', async (
   ).toBeVisible();
   await selectFolderSource(page, '127.0.0.1:5199');
 
-  // The tab really navigates to the chosen computer, marker and all.
-  await expect
-    .poll(() => new URL(page.url()).searchParams.get('daemon'))
-    .toBe(REMOTE_ORIGIN);
+  // Browsing the chosen computer no longer navigates the tab: the folder list
+  // is fetched through the source daemon's proxy route and shown in place.
+  await expect(page).toHaveURL(sourceUrl);
+  expect(new URL(page.url()).searchParams.has('daemon')).toBe(false);
 
   const dialog = addWorkspaceDialog(page);
   await expect(dialog).toBeVisible();
-  await expect(
-    dialog.getByRole('option', { name: REMOTE_FOLDER }),
-  ).toBeVisible();
+  // The chosen computer is browsed from its own filesystem root, not from a cwd
+  // belonging to this one, so walking down to its folder is part of the flow.
+  await browseFromRootInto(dialog, REMOTE_FOLDER);
   // The same browser now shows only the chosen computer's folders.
   await expect(dialog.getByRole('option', { name: LOCAL_FOLDER })).toHaveCount(
     0,
@@ -238,6 +322,11 @@ test('the resumed browser lists the chosen computer directories @smoke', async (
       (request) => request.method === 'POST' && request.path === '/workspaces',
     ),
   ).toEqual([]);
+
+  // Confirming the add is what hands the tab over to the chosen computer.
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get('daemon'))
+    .toBe(REMOTE_ORIGIN);
 });
 
 test('cancelling returns to the exact source tab @smoke', async ({
@@ -260,9 +349,7 @@ test('cancelling returns to the exact source tab @smoke', async ({
   const sourceUrl = page.url();
   await openFolderBrowser(page);
   await selectFolderSource(page, '127.0.0.1:5199');
-  await expect(
-    addWorkspaceDialog(page).getByRole('option', { name: REMOTE_FOLDER }),
-  ).toBeVisible();
+  await browseFromRootInto(addWorkspaceDialog(page), REMOTE_FOLDER);
 
   await addWorkspaceDialog(page)
     .getByRole('button', { name: 'Cancel', exact: true })
@@ -274,7 +361,11 @@ test('cancelling returns to the exact source tab @smoke', async ({
   await expect(
     page.getByRole('button', { name: 'Add workspace', exact: true }),
   ).toBeVisible();
-  expect(new URL(page.url()).search).toBe('');
+  // `?fanout=` outlives the flow by design (it keeps the next load's CSP
+  // covering the saved hosts), so only the resume marker must be gone.
+  const residualParams = new URL(page.url()).searchParams;
+  residualParams.delete('fanout');
+  expect(residualParams.toString()).toBe('');
   expect(
     remote.requests.filter(
       (request) => request.method === 'POST' && request.path === '/workspaces',
@@ -302,9 +393,7 @@ test('the folder source selector can return to this computer @smoke', async ({
   const sourceOrigin = new URL(sourceUrl).origin;
   await openFolderBrowser(page);
   await selectFolderSource(page, '127.0.0.1:5199');
-  await expect(
-    addWorkspaceDialog(page).getByRole('option', { name: REMOTE_FOLDER }),
-  ).toBeVisible();
+  await browseFromRootInto(addWorkspaceDialog(page), REMOTE_FOLDER);
 
   await selectFolderSource(page, 'This computer');
 
@@ -382,6 +471,10 @@ test('with no connected computer the folder browser opens directly @smoke', asyn
   page.on('load', () => loads.push(page.url()));
 
   await gotoSourceShell(page);
+  await page
+    .getByRole('button', { name: 'Add workspace', exact: true })
+    .locator('../..')
+    .hover();
   await page
     .getByRole('button', { name: 'Add workspace', exact: true })
     .click();

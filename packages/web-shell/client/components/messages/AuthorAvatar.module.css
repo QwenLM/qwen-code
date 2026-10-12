@@ -1,0 +1,63 @@
+.avatar {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  /* Relative to whatever it sits on, so it still shows on a secondary card. */
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+  color: var(--foreground);
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
+}
+
+.avatar[data-tinted='true'] {
+  background: color-mix(in srgb, var(--author-color) 22%, transparent);
+  color: color-mix(in srgb, var(--author-color) 75%, var(--foreground));
+}
+
+.sm {
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
+}
+
+.md {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+/* SquadTag: the squad's mark, a small muted pill beside the agents' ones. */
+.squadTag {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  /* Relative to what it sits on, like the avatar: dark --muted equals --card. */
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+  /* --muted-foreground on the tint falls below readable contrast in light. */
+  color: color-mix(in srgb, var(--foreground) 72%, transparent);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.squadTagIcon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.squadTagName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
