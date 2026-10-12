@@ -2003,6 +2003,282 @@ describe('subagent.ts', () => {
         mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
         await expectExecuteError(await createAgent(config), 'API Failure');
       });
+
+      it('retains the failure message across the rethrow so the caller can report it (#13597)', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
+        const scope = await createAgent(config);
+        expect(scope.getLastError()).toBeUndefined();
+        await expectExecuteError(scope, 'API Failure');
+        expect(scope.getLastError()).toBe('API Failure');
+      });
+
+      it('does not carry a stale failure cause into a re-executed run (#13597)', async () => {
+        const { config } = await createMockConfig();
+        // Run 1 rejects, so the instance retains a cause.
+        mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'API Failure');
+        expect(scope.getLastError()).toBe('API Failure');
+
+        // Run 2 on the same instance (stop-hook continuation, resident turns)
+        // ends in ERROR by *returning* rather than throwing: the loop result
+        // carries the mode and executeTurn copies it without writing a message
+        // (agent-core.ts ends a run this way on the empty-tool-response-parts
+        // arm). Run 2 must not report run 1's cause — otherwise the parent
+        // reads '(terminate mode: ERROR). API Failure' for a failure that had a
+        // different one and debugs the wrong thing. This is the mirror of the
+        // stale loopType attribution #9450 fixed for the field reset below it.
+        vi.spyOn(scope.getCore(), 'runReasoningLoop').mockResolvedValue({
+          text: '',
+          terminateMode: AgentTerminateMode.ERROR,
+          turnsUsed: 1,
+          loopType: null,
+        });
+        await scope.execute(new ContextState());
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+        expect(scope.getLastError()).toBeUndefined();
+      });
+
+      it('retains the chat-creation failure message on the non-throwing ERROR path (#13597)', async () => {
+        const { config } = await createMockConfig();
+        const scope = await createAgent(config);
+        // A provider/auth initialization failure that makes `createChat`
+        // return undefined is the rare early return (workflow-orchestrator
+        // calls it "the rare `createChat` early return"). It sets ERROR by
+        // returning, so nothing rethrows and this assignment is the only thing
+        // that can tell the parent why the run stopped — without it the reason
+        // line regresses to the bare '(terminate mode: ERROR).' that #13597 set
+        // out to remove.
+        vi.spyOn(scope.getCore(), 'createChat').mockResolvedValue(
+          undefined as unknown as LlmChat,
+        );
+        await scope.execute(new ContextState());
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+        expect(scope.getLastError()).toBe(
+          'Failed to create the agent chat session.',
+        );
+      });
+
+      it('bounds and sanitizes the retained message before the model reads it (#13597)', async () => {
+        // The reason line is spliced into the parent's tool result, persisted
+        // into chat history and re-sent on every later turn, so a provider SDK
+        // that packs a whole response body into `message` must not be able to
+        // grow the parent's context without limit.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error(`\u001b[31m${'x'.repeat(5000)}`),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'x'.repeat(50));
+        const retained = scope.getLastError()!;
+        // Bounded, and still carrying real message text rather than only an
+        // ellipsis. The exact 500-char outer bound is pinned by the long-cause
+        // case below — that is the shape which actually reaches it now that the
+        // message is bounded short of the total to leave the cause room.
+        expect(retained.length).toBeLessThanOrEqual(500);
+        expect(retained).toContain('x'.repeat(50));
+        expect(retained.endsWith('…')).toBe(true);
+        expect(retained).not.toContain('\u001b[31m');
+      });
+
+      it('spends the message budget on real text, not escape bytes (#13597)', async () => {
+        // Bounding the raw message charged the budget to escape sequences that
+        // `stripAnsiAndControl` then deleted: a 2 000-char colourised failure
+        // reached the parent as a 40-char stub, which is the unactionable-reason
+        // shape #13597 is about.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('\u001b[31mx\u001b[0m'.repeat(200)),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'x');
+        expect(scope.getLastError()).toContain('x'.repeat(200));
+      });
+
+      it('spends the budget on real text when the stripped message is short (#13597)', async () => {
+        // Routing only a long cleaned message through the bound left the raw
+        // error for everything shorter, and `getErrorMessage` head-caps the
+        // composed `<message> (cause: …)` at 1 000 RAW characters before the
+        // collapse: escape bytes then evicted the folded cause from a message
+        // well inside the outer 500-char bound, leaving most of it unused.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('\u001b[31mx\u001b[0m'.repeat(200)), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'x');
+        expect(scope.getLastError()).toContain('x'.repeat(200));
+        expect(scope.getLastError()).toContain('ECONNRESET');
+        expect(scope.getLastError()).toContain('socket hang up');
+      });
+
+      it('keeps the folded cause when the message cleans to nothing (#13597)', async () => {
+        // A message made only of control characters cleans to '', and falling
+        // back to the raw Error there handed `getErrorMessage` a 2 000-character
+        // message for its 1 000-RAW-character head cap to spend on the escape
+        // bytes the cleaning removes — evicting the cause and leaving the parent
+        // the truthy stub '...', the unactionable-reason shape #13597 is about.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('\u0007'.repeat(2000)), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expect(scope.execute(new ContextState())).rejects.toBeDefined();
+        expect(scope.getLastError()).toContain('ECONNRESET');
+      });
+
+      it('does not split a surrogate pair when bounding the message (#13597)', async () => {
+        // The bound is a length, so an astral character can straddle it. This
+        // text is persisted into chat history and the JSONL transcript, where
+        // an unpaired surrogate serializes as a lone `\udXXX` and renders as
+        // U+FFFD — mojibake in the field #13597 added to make failures
+        // readable.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('a'.repeat(399) + '\u{1f600}' + 'b'.repeat(200)),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'a'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toBe(retained.replace(/\p{Surrogate}/gu, ''));
+      });
+
+      it('does not split a surrogate pair at the outer bound either (#13597)', async () => {
+        // Same invariant at the second cut, reached when a long cause pushes
+        // the composed string past MAX_MODEL_VISIBLE_ERROR_LENGTH.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('a'.repeat(399)), {
+            cause: new Error('c'.repeat(91) + '\u{1f600}' + 'd'.repeat(100)),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'a'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toBe(retained.replace(/\p{Surrogate}/gu, ''));
+      });
+
+      it('drops format characters that reorder or hide the retained message (#13597)', async () => {
+        // Escape/control stripping leaves the Unicode format class intact: a
+        // bidi override reorders the reason wherever it is rendered (a human
+        // auditing the transcript reads different text than is stored) and a
+        // zero-width insertion makes the stored phrase unmatchable for any
+        // consumer that greps it. The text is replayed on every later turn.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('quota exceeded \u202etni \u200bfor API key'),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'quota exceeded');
+        expect(scope.getLastError()).not.toMatch(/\p{Cf}/u);
+      });
+
+      it('folds `cause` into the retained message (#13597)', async () => {
+        // Raw `error.message` drops it, and the cause is the half that tells the
+        // parent what to change — without it the reason line names only the
+        // mode, which is what #13597 set out to fix.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('upstream request failed'), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'upstream request failed');
+        expect(scope.getLastError()).toContain('socket hang up');
+        expect(scope.getLastError()).toContain('ECONNRESET');
+      });
+
+      it('keeps the folded cause when the message alone exceeds the bound (#13597)', async () => {
+        // The bound used to be applied to `getErrorMessage`'s composed
+        // `<message> (cause: <detail>)` string head-first, so a provider body
+        // long enough to trip it deleted precisely the cause the fold adds: the
+        // parent read 500 chars of opaque body and never learned it was an
+        // ECONNRESET. Reserving headroom for the cause is what keeps the two
+        // halves of the same fix from working against each other.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('M'.repeat(600)), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'M'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toContain('ECONNRESET');
+        expect(retained).toContain('socket hang up');
+        expect(retained.length).toBeLessThanOrEqual(501);
+      });
+
+      it('still bounds the retained message when a long cause pushes it over (#13597)', async () => {
+        // Headroom for the cause must not become an unbounded total: a cause
+        // long enough to exceed the budget still lands on the outer 500-char
+        // bound, which is the guarantee the model-visible copy exists to give.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('M'.repeat(600)), {
+            cause: new Error('C'.repeat(400)),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'M'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toHaveLength(501); // the 500-char bound plus the '…'
+        expect(retained.endsWith('…')).toBe(true);
+      });
+
+      it('keeps token boundaries in a multi-line failure message (#13597)', async () => {
+        // `stripAnsiAndControl` deletes `\n`/`\r`/`\t` outright, which would weld
+        // 'quota exceeded' onto '{"code":429}' and hand the parent a token that
+        // never existed — in the one field #13597 added to make the failure
+        // actionable. Collapsing whitespace to a single space keeps the result
+        // single-line without merging tokens (same shape as `sanitizeForStderr`
+        // in packages/cli/src/utils/errors.ts).
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('quota exceeded\n{"code":429}'),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'quota exceeded');
+        expect(scope.getLastError()).toBe('quota exceeded {"code":429}');
+        expect(scope.getLastError()).not.toContain('\n');
+      });
+
+      it.each([
+        [
+          'a plain object with a message',
+          { message: 'rate limited', code: 429 },
+          'rate limited',
+        ],
+        ['a bare string', 'socket closed', 'socket closed'],
+      ])(
+        'retains the message of a non-Error rejection: %s (#13597)',
+        async (_label, rejection, expected) => {
+          // Provider SDKs do not always reject with an Error. Narrowing the
+          // getErrorMessage call to Error instances would leave every Error-only
+          // case above green while these collapse to an empty cause, and the
+          // parent would again read the bare '(terminate mode: ERROR).'.
+          const { config } = await createMockConfig();
+          mockSendMessageStream.mockRejectedValue(rejection);
+          const scope = await createAgent(config);
+          await expect(scope.execute(new ContextState())).rejects.toBeDefined();
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+          expect(scope.getLastError()).toContain(expected);
+        },
+      );
     });
 
     describe('execute - retry waits', () => {

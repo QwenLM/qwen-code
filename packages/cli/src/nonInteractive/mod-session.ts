@@ -6,7 +6,15 @@
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
-import { loadModSource } from '@qwen-code/qwen-code-core/mods/discovery.js';
+import {
+  loadModSource,
+  loadModDependencies,
+} from '@qwen-code/qwen-code-core/mods/discovery.js';
+import {
+  orderModPlugins,
+  resolveModDependency,
+} from '@qwen-code/qwen-code-core/mods/dependencies.js';
+import { resolveModOptions } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
 import { MOD_END_TIMEOUT_MS } from '@qwen-code/qwen-code-core/mods/types.js';
 import type { ModLog } from '@qwen-code/qwen-code-core/mods/types.js';
@@ -39,6 +47,7 @@ export class ModSession implements ICommandLoader {
   constructor(
     private readonly config: Config,
     private readonly adapter: JsonOutputAdapterInterface,
+    private readonly optionScopes: readonly unknown[] = [],
   ) {
     this.sessionId = config.getSessionId();
     this.unregisterCleanup = registerCleanup(() => {
@@ -54,7 +63,11 @@ export class ModSession implements ICommandLoader {
     adapter: JsonOutputAdapterInterface,
   ): ModSession | undefined {
     return settings.merged.experimental?.mods
-      ? new ModSession(config, adapter)
+      ? new ModSession(config, adapter, [
+          settings.systemDefaults.settings.pluginConfigs,
+          settings.user.settings.pluginConfigs,
+          settings.system.settings.pluginConfigs,
+        ])
       : undefined;
   }
 
@@ -91,6 +104,7 @@ export class ModSession implements ICommandLoader {
 
   private async load(signal: AbortSignal): Promise<void> {
     try {
+      const candidates = [];
       for (const extension of this.config
         .getExtensions()
         .filter(
@@ -99,15 +113,77 @@ export class ModSession implements ICommandLoader {
         signal.throwIfAborted();
         try {
           const source = await loadModSource(extension.path);
-          if (source === undefined) continue;
-          const runtime = await ModRuntime.create(
+          const marketplace =
+            extension.installMetadata?.marketplaceConfig?.name;
+          candidates.push({
+            extension,
+            name: extension.name,
+            version: extension.version,
+            marketplace,
             source,
+            dependencies: source?.dependencies ?? [],
+            options: source
+              ? resolveModOptions(
+                  source.userConfig,
+                  this.optionScopes,
+                  extension.name,
+                  marketplace,
+                )
+              : {},
+          });
+        } catch (error) {
+          throw new Error(
+            `Mod ${extension.name}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      const pending = candidates.filter((item) => item.source);
+      const reachable = new Set<(typeof candidates)[number]>();
+      while (pending.length) {
+        signal.throwIfAborted();
+        const plugin = pending.shift()!;
+        if (reachable.has(plugin)) continue;
+        reachable.add(plugin);
+        if (!plugin.source) {
+          try {
+            plugin.dependencies = await loadModDependencies(
+              plugin.extension.path,
+            );
+          } catch (error) {
+            throw new Error(
+              `Mod dependency ${plugin.name}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        for (const dependency of plugin.dependencies) {
+          pending.push(resolveModDependency(candidates, plugin, dependency));
+        }
+      }
+      const selected = candidates.filter((item) => reachable.has(item));
+      orderModPlugins(selected);
+      // Ordinary providers participate in preflight, not Mod registration order.
+      const mods = selected
+        .filter((item) => item.source)
+        .map((plugin) => ({
+          ...plugin,
+          dependencies: plugin.dependencies.filter(
+            (dependency) =>
+              resolveModDependency(selected, plugin, dependency).source,
+          ),
+        }));
+      for (const { extension, source, options } of orderModPlugins(mods)) {
+        if (!source) continue;
+        signal.throwIfAborted();
+        try {
+          const runtime = await ModRuntime.create(
+            { root: source.root, entry: source.entry, source: source.source },
             this.config.getTargetDir(),
             (entry) => {
               this.pendingLogs.push({ ...entry, plugin: extension.name });
               if (this.logsReady) this.flushLogs();
             },
             signal,
+            options,
           );
           this.mods.push({ id: extension.id, name: extension.name, runtime });
         } catch (error) {

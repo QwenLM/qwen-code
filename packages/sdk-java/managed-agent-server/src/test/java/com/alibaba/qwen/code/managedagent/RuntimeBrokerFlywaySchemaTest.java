@@ -44,7 +44,7 @@ class RuntimeBrokerFlywaySchemaTest {
 
         assertThat(expected).containsKeys("qwen_runtime_binding_slot",
                 "qwen_runtime_binding", "qwen_runtime_session",
-                "qwen_tool_execution");
+                "qwen_tool_execution", "managed_workspace_execution_lease");
         assertThat(actual).containsKeys(
                 expected.keySet().toArray(String[]::new));
         SoftAssertions.assertSoftly(softly -> expected.forEach(

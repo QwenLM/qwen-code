@@ -46,6 +46,12 @@ public class ChildWorkspaceStore {
     public static final String BLOCKED = "blocked";
     public static final String MERGE = "merge";
     public static final String DISCARD = "discard";
+    /**
+     * A discard that replaced a merge before the child's result was pinned:
+     * the discard pins it first. Recorded by {@link #requestFinish}, never
+     * asked for.
+     */
+    public static final String DISCARD_PINNED = "discard_pinned";
 
     private static final Set<String> SETTLED_SESSION_STATES = Set.of("CLOSED", "ARCHIVED", "DELETED");
     /** The columns a transition may set besides the state; anything else is refused. */
@@ -129,12 +135,12 @@ public class ChildWorkspaceStore {
     public List<Row> findDue(long now, int limit) {
         return jdbc.query(SELECT + " WHERE (state IN (?, ?, ?, ?, ?)"
                         + " OR (state = ? AND finish_request IS NOT NULL)"
-                        + " OR (state IN (?, ?, ?) AND finish_request = ?))"
+                        + " OR (state IN (?, ?, ?) AND finish_request IN (?, ?)))"
                         + " AND next_retry_at <= ?"
                         + " AND (claimed_until IS NULL OR claimed_until <= ?)"
                         + " ORDER BY next_retry_at, created_at, parent_session_id, child_run_id LIMIT ?",
                 this::row, PREPARING, MERGING, APPLYING, APPLIED, DISCARDING, READY, CONFLICTED, BLOCKED,
-                FAILED, DISCARD, now, now, limit);
+                FAILED, DISCARD, DISCARD_PINNED, now, now, limit);
     }
 
     /**
@@ -244,7 +250,11 @@ public class ChildWorkspaceStore {
      * recorded while a child Session bound to this run is open: the row
      * runs it only once every such Session is closed (#13753 I2), and the
      * row lock it takes is the one a creation takes, so a creation never
-     * binds to a row whose finish was requested.
+     * binds to a row whose finish was requested. A discard that replaces a
+     * merge whose result is not pinned yet (one not started, or one that
+     * ended blocked before its pin) is recorded as {@link #DISCARD_PINNED}:
+     * the merge was asked because the child completed, so its work stays
+     * at the result ref although it does not land.
      */
     public Row requestFinish(String tenantId, String parentSessionId, String childRunId,
             String finish, long now) {
@@ -259,9 +269,11 @@ public class ChildWorkspaceStore {
                         "The child run has no child Workspace.");
             }
             Row row = rows.getFirst();
-            if (finish.equals(row.finishRequest())) {
+            if (finish.equals(row.finishRequest())
+                    || DISCARD.equals(finish) && DISCARD_PINNED.equals(row.finishRequest())) {
                 return row;
             }
+            String recorded = finish;
             if (MERGE.equals(finish)) {
                 if (row.finishRequest() != null) {
                     throw new ApiException(HttpStatus.CONFLICT, "child_workspace_conflict",
@@ -285,10 +297,13 @@ public class ChildWorkspaceStore {
                     throw new ApiException(HttpStatus.CONFLICT, "child_workspace_finishing",
                             "The child Workspace is being merged.");
                 }
+                if (MERGE.equals(row.finishRequest()) && row.resultCommit() == null) {
+                    recorded = DISCARD_PINNED;
+                }
             }
             jdbc.update("UPDATE qwen_managed_child_workspace SET finish_request = ?, next_retry_at = 0,"
                             + " updated_at = ? WHERE parent_session_id = ? AND child_run_id = ? AND tenant_id = ?",
-                    finish, now, parentSessionId, childRunId, tenantId);
+                    recorded, now, parentSessionId, childRunId, tenantId);
             return find(tenantId, parentSessionId, childRunId);
         });
     }

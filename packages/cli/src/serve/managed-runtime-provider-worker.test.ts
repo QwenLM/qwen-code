@@ -1610,7 +1610,7 @@ const timer = setInterval(() => {
       state: 'prepared',
     });
     expect(await refused.json()).toEqual({
-      code: 'managed_runtime_provider_operation_failed',
+      code: 'managed_runtime_owner_hold_pending',
       error: 'Managed Runtime Session still owns unfinished work.',
     });
     drain.release();
@@ -1638,7 +1638,7 @@ const timer = setInterval(() => {
     const refused = await releasing;
     expect(refused.status).toBe(409);
     expect(await refused.json()).toEqual({
-      code: 'managed_runtime_identity_conflict',
+      code: 'managed_runtime_owner_hold_pending',
       error: 'Managed Runtime Session still owns unfinished work.',
     });
     // Preparation already cancelled pending work before this late refusal.
