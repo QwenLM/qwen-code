@@ -31,7 +31,7 @@ public final class ManagedEventEnvelopes {
     // assert rejects exactly MAX_SAFE_INTEGER as "cannot advance").
     static final long MAX_SEQUENCE = 9007199254740990L;
 
-    // Ordered (the failure message joins it) — the frozen contract's 18-kind
+    // Ordered (the failure message joins it) — the frozen contract's 20-kind
     // vocabulary in fixture order.
     static final List<String> KINDS = List.of(
             "input.accepted", "wake.requested", "activation.changed",
@@ -39,7 +39,8 @@ public final class ManagedEventEnvelopes {
             "action.changed", "tool.receipt", "checkpoint.committed",
             "context.compacted", "cancel.requested", "turn.settled",
             "config.bound", "lifecycle.changed", "domain.committed",
-            "message.delta", "message.retracted", "operation.replayed");
+            "message.delta", "message.retracted", "operation.replayed",
+            "hosted.batch.planned", "hosted.cleanup");
 
     static final Set<String> FORBIDDEN_FIELDS = Set.of(
             "absolutePath", "localPath", "pid", "pod", "runtimeBindingId",
