@@ -610,10 +610,13 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async release(): Promise<void> {
+  async release(options?: { readonly drain?: boolean }): Promise<void> {
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release`,
-      {},
+      // #13856: the drain arm stops the Session's live background holds
+      // before releasing; a routine release is refused
+      // `runtime_session_held` while a run is provably live.
+      options?.drain === true ? { drain: true } : {},
     );
     if (response['released'] !== true)
       throw new Error('Runtime Session release is unconfirmed.');
