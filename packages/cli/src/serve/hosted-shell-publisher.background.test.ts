@@ -1583,6 +1583,61 @@ it('settles an unproven monitor end as watch_failed, never as a clean exit', asy
   });
 });
 
+it('settles a parked monitor from its real exit evidence, not the tail (#13856 R1-55)', async () => {
+  const r = await rig();
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId: 'monitor-parked',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'monitor-parked',
+    args: { command: 'du -sh .', description: 'du watch' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted('monitor-parked', BINDING);
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] =
+    'monitor-parked';
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  await r.monitors.attach('monitor-parked', BINDING, { pid: 9 });
+  prepared.sink.setStarted(9);
+  await prepared.sink.write('stdout', Buffer.from('still watching\n'));
+  // The quota/idle park passed its stop unproven: the record sits blocked.
+  await r.monitors.blockedRuntimeLost('monitor-parked');
+  // A real exit arrives carrying a tail line: the parked record must settle
+  // from the exit evidence, not by re-committing the tail as an observation.
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  const envelope = await prepared.sink.finalize('success', []);
+  await r.registry.accept(prepared.identity, envelope);
+  const record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', 'monitor-parked')!.record,
+  );
+  expect(record).toMatchObject({
+    stopReason: 'exited',
+    // The tail was not re-committed as an observation of the ended period.
+    observationSequence: 0,
+    run: { state: 'settled', execution: 'settled' },
+  });
+});
+
 it('replays the lines a monitor wrote before its observer registered', async () => {
   const r = await rig();
   const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
