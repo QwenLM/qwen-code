@@ -40,7 +40,8 @@ button.
 
 - `client/voice/voice-error.ts` maps the existing transport vocabulary; its
   collocated tests cover all explicit errors, dynamic templates and unknowns.
-- `client/i18n.tsx` supplies paired English/Chinese messages.
+- `client/voice/messages.ts` supplies paired English/Chinese messages, merged
+  into the shared translator by `client/i18n.tsx`.
 - `client/voice/VoiceButton.tsx` renders translations and handles dismissal;
   `VoiceButton.module.css` retains the existing scoped styling and adds only
   feedback layout and close-button styling.
@@ -51,6 +52,12 @@ Presentation mapping keeps older daemons compatible and avoids a cross-package
 protocol change for a UI improvement. New daemon wording will use the generic
 localized fallback until explicitly mapped. Dismissal does not resolve the
 underlying configuration or permission problem; another attempt may fail again.
+
+Dictation is an interactive composer surface. Its dictionary follows the existing
+transcript-only empty-stub mechanism so exported read-only transcripts do not
+carry unused dictation strings. Artifact tests guard both their absence from the
+transcript entry and their presence in the interactive entry, while preserving
+the existing transcript size budget.
 
 ## Validation and acceptance
 
@@ -66,6 +73,8 @@ underlying configuration or permission problem; another attempt may fail again.
 5. Focused tests, build, typecheck and browser E2E pass. Automated browser tests
    simulate microphone/daemon responses; supplemental no-model verification may
    use a real local daemon. Neither proves real ASR operation.
+6. The transcript build excludes dictation translation keys and stays within
+   its existing size budget; the interactive build retains both languages.
 
 ## Open questions
 
