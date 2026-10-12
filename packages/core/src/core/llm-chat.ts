@@ -685,6 +685,11 @@ export interface LlmPreparedRequest {
   providerPin: string;
   promptTokensForClamp: number;
   allowPersistentRetry?: boolean;
+  /**
+   * The caller set `maxOutputTokens` itself. Otherwise the saved value is the
+   * automatic window clamp, and a replay must still allow MAX_TOKENS recovery.
+   */
+  userMaxOutputTokens?: boolean;
 }
 export type LlmPreparedRequestCallback = ((
   prepared: LlmPreparedRequest,
@@ -3669,6 +3674,29 @@ export class LlmChat {
       parsedEnvMaxTokensForClamp;
     const outputCeiling: number =
       explicitOutputCeiling ?? defaultOutputCeiling(model);
+    // A replayed request carries the first send's automatic clamp in
+    // params.config.maxOutputTokens; only a caller-set value is a user cap.
+    const savedRequest = options?.preparedRequest;
+    const userMaxOutputTokens =
+      !options?.maxOutputTokensFromRecovery &&
+      (savedRequest
+        ? savedRequest.userMaxOutputTokens === true
+        : params.config?.maxOutputTokens !== undefined);
+    const userOutputCeiling: number | undefined =
+      (userMaxOutputTokens ? params.config?.maxOutputTokens : undefined) ??
+      cgConfigForThresholds?.samplingParams?.max_tokens ??
+      parsedEnvMaxTokensForClamp;
+    const onPreparedRequest =
+      userMaxOutputTokens && options?.onPreparedRequest
+        ? Object.assign(
+            (prepared: LlmPreparedRequest, captureUnsupported?: boolean) =>
+              options.onPreparedRequest!(
+                { ...prepared, userMaxOutputTokens: true },
+                captureUnsupported,
+              ),
+            { maxSnapshotBytes: options.onPreparedRequest.maxSnapshotBytes },
+          )
+        : options?.onPreparedRequest;
     // Declared at function level so the MAX_TOKENS escalation path inside
     // the generator closure can re-clamp against the same window and prompt
     // estimate.
@@ -4217,7 +4245,7 @@ export class LlmChat {
         // the model hits MAX_TOKENS, retry once with the escalated limit.
         let maxTokensEscalated = false;
         const hasUserMaxTokensOverride =
-          explicitOutputCeiling !== undefined &&
+          userOutputCeiling !== undefined &&
           !options?.maxOutputTokensFromRecovery;
         // params.config.maxOutputTokens is set by the first-send clamp; the
         // outputCeiling fallback is defensive and should not fire in practice.
@@ -4362,7 +4390,7 @@ export class LlmChat {
               () => {
                 terminalMutationAborted = true;
               },
-              options?.onPreparedRequest,
+              onPreparedRequest,
               promptTokensForClamp,
             );
             streamEstablished = true;
@@ -5491,7 +5519,7 @@ export class LlmChat {
                 attemptState.onModelTurnCommitted,
                 false,
                 undefined,
-                options?.onPreparedRequest,
+                onPreparedRequest,
                 promptTokensForClamp,
                 retryEvent.isContinuation === true,
               );
@@ -6475,7 +6503,7 @@ export class LlmChat {
                     fallbackRetryErrorCodes,
                     requestRouteKey,
                     turnGoalContext,
-                    options?.onPreparedRequest,
+                    onPreparedRequest,
                     promptTokensForClamp,
                     fallbackConfig,
                   )) {

@@ -11582,6 +11582,93 @@ describe('LlmChat', async () => {
       expect(chat.getLastModelMessageText()).toBe('first second');
     });
 
+    describe('prepared request replay', () => {
+      function routeReplayToTestModel() {
+        const routeConfig = {
+          model: 'test-model',
+          authType: AuthType.USE_GEMINI,
+        };
+        mockGeneratorConfig();
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          resolveForModel: vi.fn().mockResolvedValue({
+            model: 'test-model',
+            contentGenerator: mockContentGenerator,
+            contentGeneratorConfig: routeConfig,
+          }),
+        } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      }
+
+      async function captureAndReplay(config?: GenerateContentConfig) {
+        routeReplayToTestModel();
+        let saved: LlmPreparedRequest | undefined;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(
+          makeStream([makeChunk([{ text: 'captured' }], 'STOP')]),
+        );
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'essay', ...(config ? { config } : {}) },
+            'replay-capture',
+            undefined,
+            {
+              onPreparedRequest: async (prepared) => {
+                saved = prepared;
+              },
+            },
+          ),
+        );
+        const streams = [
+          makeStream([makeChunk([{ text: 'first' }], 'MAX_TOKENS')]),
+          makeStream([makeChunk([{ text: ' second' }], 'STOP')]),
+        ];
+        let callIndex = 0;
+        vi.mocked(mockContentGenerator.generateContentStream).mockReset();
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams[callIndex++]!);
+        const replayChat = newChat();
+        const events: StreamEvent[] = [];
+        for await (const event of await replayChat.sendPreparedMessageStream(
+          saved!,
+          'replay-capture',
+          new AbortController().signal,
+        ))
+          events.push(event);
+        return { saved: saved!, events, replayChat };
+      }
+
+      it('recovers from MAX_TOKENS when the saved cap is the automatic clamp', async () => {
+        const { saved, events, replayChat } = await captureAndReplay();
+
+        expect(saved.request.config.maxOutputTokens).toBeGreaterThan(0);
+        expect(saved.userMaxOutputTokens).toBeUndefined();
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        expect(replayChat.getLastModelMessageText()).toContain('second');
+      });
+
+      it('keeps a caller-set maxOutputTokens as a user cap on replay', async () => {
+        const { saved, events, replayChat } = await captureAndReplay({
+          maxOutputTokens: 1024,
+        });
+
+        expect(saved.userMaxOutputTokens).toBe(true);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledOnce();
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(false);
+        expect(replayChat.getLastModelMessageText()).toBe('first');
+      });
+    });
+
     it('commits an ordinary STOP when returned before provider EOF', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
