@@ -72,6 +72,89 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
+    public RuntimeSessionRecord completeStoppedSessionRelease(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected, RuntimeBindingRecord claim) {
+        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
+                || !jdbcSessions.usesDataSource(dataSource)
+                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
+                || !jdbcExecutions.usesDataSource(dataSource)) {
+            throw new IllegalArgumentException("Release requires the same DataSource");
+        }
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            lockPlacementDomain(connection, claim.getRequest().getScope().getTenantId());
+            RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true);
+            RuntimeAdmission.requireStoppedRelease(binding, claim, expected, JdbcRepositorySupport.databaseNowPrecise(connection));
+            if (JdbcToolExecutionRepository.hasActiveByBinding(connection, binding.getBindingId(), binding.getGeneration())) {
+                throw new RuntimeBrokerException(409, "workspace_close_execution_unsettled",
+                        "Original resources remain active", false);
+            }
+            RuntimeSessionRecord updated = JdbcRuntimeSessionRepository.compareAndSet(connection, expected,
+                    expected.withState(RuntimeSessionRecord.State.RELEASED, JdbcRepositorySupport.databaseNow(connection)));
+            if (updated != null) {
+                clearStoppedHolder(connection, binding, expected);
+                RuntimeAdmission.requireStoppedRelease(binding, claim, expected, JdbcRepositorySupport.databaseNowPrecise(connection));
+            }
+            return updated;
+        });
+    }
+
+    private static void clearStoppedHolder(Connection connection, RuntimeBindingRecord binding,
+            RuntimeSessionRecord session) throws SQLException {
+        String key = workspaceHolderKey(binding.getRequest().getScope().getTenantId()
+                + "\u0000" + binding.getRequest().getStorageId());
+        try (PreparedStatement statement = connection.prepareStatement("SELECT holder_key, binding_id,"
+                + " runtime_generation, runtime_session_id FROM managed_workspace_execution_lease"
+                + " WHERE storage_key = ? AND storage_kind = 'LOCAL' FOR UPDATE")) {
+            statement.setString(1, key);
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next()) {
+                    return;
+                }
+                String holder = row.getString("holder_key");
+                String holderBinding = row.getString("binding_id");
+                String holderSession = row.getString("runtime_session_id");
+                long generation = row.getLong("runtime_generation");
+                if (holder == null && holderBinding == null && holderSession == null
+                        && row.getObject("runtime_generation") == null) {
+                    return;
+                }
+                if (holder == null || !binding.getBindingId().equals(holderBinding)
+                        || binding.getGeneration() != generation || holderSession == null
+                        || !holder.equals(workspaceHolderKey(holderBinding + "\u0000"
+                                + generation + "\u0000" + holderSession))) {
+                    throw new RuntimeBrokerException(409, "workspace_close_identity_unverified",
+                            "Original Workspace holder differs", false);
+                }
+                if (!session.getRuntimeSessionId().equals(holderSession)) {
+                    return;
+                }
+                try (PreparedStatement clear = connection.prepareStatement("UPDATE managed_workspace_execution_lease"
+                        + " SET holder_key = NULL, binding_id = NULL, runtime_generation = NULL, runtime_session_id = NULL"
+                        + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND holder_key = ? AND binding_id = ?"
+                        + " AND runtime_generation = ? AND runtime_session_id = ?")) {
+                    clear.setString(1, key);
+                    clear.setString(2, holder);
+                    clear.setString(3, holderBinding);
+                    clear.setLong(4, generation);
+                    clear.setString(5, holderSession);
+                    if (clear.executeUpdate() != 1) {
+                        throw new SQLException("Original Workspace holder changed");
+                    }
+                }
+            }
+        }
+    }
+
+    private static String workspaceHolderKey(String identity) {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(identity.getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 is unavailable", error);
+        }
+    }
+
+    @Override
     public RuntimeSessionRecord beginSessionRelease(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeSessionRecord expected) {
         if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
