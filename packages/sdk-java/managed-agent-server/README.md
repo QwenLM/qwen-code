@@ -17,7 +17,7 @@ authentication and writer credentials" below.
 ## Integration status
 
 The Hosted path supports durable no-tool Sessions and private Workspace tool
-profiles. G0 adds opt-in public creation with an initial file-tool Turn through
+profiles. G0 adds opt-in public creation with an initial Workspace Turn (file tools, or mandatory-approval foreground Shell under the Shell opt-in) through
 the production Broker. This is not complete Workspace lifecycle, in-flight
 recovery or distributed provisioning support. See the G0 section below for its
 exact deployment and admission boundary, and the historical
@@ -37,10 +37,13 @@ The test-tree `SurfaceRegistry` names every mounted route, internal ones
 included, with its admission rule class; `SurfaceRegistryGateTest` fails any
 mounted route the registry lacks, so a new public or WebShell route needs both
 a spec operation and a registry entry ([actor-roles design](../../../docs/design/2026-10-07-managed-agent-actor-roles.md), D5).
-Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
-`1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
+Sessions created for the built-in `qwen-code` agent record the agent revision
+from `QWEN_MANAGED_AGENT_REVISION` (default `1`); a Session pinned to a stored
+definition records the revision it resolved at admission. `POST /v1/agents`,
+`GET /v1/agents/{id}` and
 `POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
-revisions; Sessions do not use them yet. Every response carries `X-Request-Id`, which error
+revisions; a Session pinned to one executes that stored revision (see "Stored
+agent execution" below). Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
 projection versions they were accepted with. They keep their Item and Part
 identity too, except after Harness recovery retracts output: the retracted
@@ -215,8 +218,11 @@ curl -sS -X DELETE \
 Close and delete reject an active Turn and seal input as soon as they are
 admitted. A background worker then closes the Hosted Harness Session, waits
 until no Harness holds its journal writer under an unexpired lease (the
-holding Harness seals it when closing), drains the Runtime binding (currently
-only an in-process retirement flag) and completes the operation; a failed
+holding Harness seals it when closing), drains the Runtime binding (fenced by
+the persisted Session status the Broker checks on the warm admission resolve
+for an unbound Session, so the fence survives restarts; an in-process flag is
+kept only for a Session row that has vanished) and completes the operation; a
+failed
 attempt is retried with the dispatch backoff until it succeeds, so a `202`
 never means that tools stopped (a Harness whose capability digest no longer
 matches retries the same way, logged with the permanent reason — nothing
@@ -243,13 +249,7 @@ different Session conflicts. A successful concurrent request can still complete
 the receipt, and a failing sibling cannot overwrite that completed outcome. It
 cannot complete a retired receipt once a later rename has completed either: that
 sibling answers `409 session_mutation_superseded` and the newer public SQL title stays.
-The Harness title was already written before this check; ordering overlapping
-Harness writes remains a follow-up tracked in #13269. A
-same-key request sent after the later rename is the newest request and still
-applies, including when a concurrent sibling retires its receipt again. Each
-new attempt records the Session's current journal sequence on its command row;
-existing receipts use their original requested event until they are retried.
-Retries do not re-append the original `requested` event. If the command store
+The latest title attempt is now a durable delivery with a monotonically increasing per-Session revision. The Harness checks this revision inside its journal commit and uses a stable command identity per attempt, so a late older versioned write cannot undo a newer versioned title and a lost reply can be replayed without another write. A failed same-key request retried after a later rename receives a new revision and can still win. Pending same-key retries keep their original revision. A recovery worker redelivers the latest unfinished title and completes its public receipt; older completion attempts cannot affect the newer delivery. Both inline requests and recovery workers claim before sending; failure cleanup requires the current unexpired owner. Fresh disabled or unsupported Harness requests are refused before admission. Workspace migration also refuses unfinished title delivery even when the public command is FAILED. Close, archive, delete and cwd changes wait for this delivery to settle, including when its public command is FAILED, so sealing cannot strand a title already accepted by the Harness. The Harness must advertise title protocol version 1 before the SDK sends a versioned title. Plain private SDK title writes remain supported and preserve the watermark. See [the concurrency design](../../../docs/design/2026-10-08-managed-session-rename-delivery.md). If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight
 lifecycle change blocks another one. A retry with the same key from the same
@@ -276,7 +276,19 @@ while its operations stay readable. Completed deletion permanently marks an exis
 private journal `DELETED`, clears its writer and recovery references, and fences
 new writes and recovery. Close and archive keep output pinned. Deletion does
 not physically erase the journal, events or resources; output collection stays
-disabled by default and requires the retention deployment gates.
+disabled by default and requires the retention deployment gates. With both
+`qwen.managed-agent.tool-publication.enabled` and
+`qwen.managed-agent.tool-publication.gc-enabled` true, collection also frees
+stream-capture bytes (background Shell and foreground leftovers): eligible
+`PUBLISHED` `MYSQL_INLINE` rows of the `managed-tool-result-{content,page,manifest}`
+kinds with no journal reference on a permanently retired Session are
+byte-dropped after the same deletion grace under a per-Session claim ledger
+(`qwen_managed_session_resource_collection`), keeping their identities with
+state `COLLECTED`. Reads of the retired Session stay fenced with
+`tool_output_session_retired` exactly as before; a workspace-recovery read
+that physically reaches a collected byte copy fails the named check
+`resource_collected` instead of the generic `resource_layout_unsupported` or
+`resource_corrupt` verdict a pre-V65 broker produces.
 
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this
@@ -404,8 +416,10 @@ npm run dev:managed-agent
 # Once per clone, and re-run after pulling changes to qwencode/runtime-broker (~12 s):
 mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
-# One-time, on a fresh MySQL 8 (creates the database and user the URL names):
-mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1';"
+# One-time, on a fresh MySQL 8 (creates the database and user the URL names;
+# the performance_schema SELECT covers Flyway's boot probe — without it the
+# probe is denied (ERROR 1142) and startup stops at 'foreign_key_checks'):
+mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1'; GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'localhost'; GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'127.0.0.1';"
 # (official MySQL images enable skip-name-resolve, so 'qwen'@'localhost' alone never
 #  matches TCP clients; a containerized MySQL sees the gateway address — grant at
 #  'qwen'@'%' or the container-visible host instead)
@@ -494,12 +508,50 @@ Harness or Runtime Broker credentials.
 
 ## Embedded Runtime Broker
 
-### Initial Workspace file Turn (G0)
+### Public foreground Shell admission
+
+Stored AgentDefinition Sessions keep their compiled profile and approval mode;
+the Shell switch changes only the built-in agent's default profile selection.
+Every Shell Session still requires the switch and valid asking approval for
+fresh execution. Harness load copies retain the definition identity alongside
+`suppressChildAgents`.
+
+`QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED=true` selects the server-owned
+`hosted-workspace-shell/1` profile for newly created built-in `qwen-code` Workspace Sessions on both
+public REST and WebShell, including empty creation. It defaults to false and
+requires Workspace files plus its deployment prerequisites. Set
+`QWEN_MANAGED_AGENT_APPROVAL_MODE` to `default` or `auto-edit`; Shell opt-in with
+`yolo`, an empty or unknown mode fails startup. Shell always asks permission.
+Existing Sessions keep their stored profile and approval mode.
+
+Disabling only the Shell flag refuses fresh Turns on existing Shell Sessions
+with `409 workspace_unavailable`; original idempotency keys, accepted approval
+responses, cancellation and settlement remain supported while Workspace files
+remain enabled and persisted approval remains `default` or `auto-edit`. Files-off
+or invalid approval can refuse attachment; neither case is bypassed by a
+capability. Files Sessions retain their existing behavior. Shell Session responses
+add `foreground_shell` (public) or `foregroundShell` (WebShell); false disables
+fresh sending. Files and unbound Sessions omit the field, with no schema default.
+`workspaceTurns` expresses creator/grant permission, not sufficient Shell Turn
+admission: fresh sending also requires `foregroundShell=true`. Controlled W2 cwd
+changes do not execute Shell and retain their own files, actor, path and
+context-revision admission; the Shell flag is not a general Session freeze.
+
+Shell close/archive/unarchive/delete remain unavailable, and are refused before
+creating a lifecycle operation. Existing G3 recovery refusals remain in force;
+no dispatched Shell is automatically replayed. Keep the opt-in off until the
+deployment passes #12904, #13010 and public FG6f physical failure gates. See
+[the complete design](../../../docs/design/public-hosted-shell-admission.md).
+
+### Initial Workspace Turn (G0)
 
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
-Read/Write/Edit Turn supplied with public Session creation. The WebShell creation
-adapter uses the same admission. This requires the Hosted Harness and HTTP
-Session Store, a `yolo`, `default` or `auto-edit` approval mode, and a `local-process`, `session`-isolated
+Workspace Turn supplied with public Session creation: Read/Write/Edit under
+`hosted-workspace-files/1`, or file tools plus mandatory-approval foreground Shell
+under `hosted-workspace-shell/1` when the Shell opt-in above is enabled. The
+WebShell creation adapter uses the same admission. This requires the Hosted
+Harness and HTTP Session Store, `default` or `auto-edit` approval for Shell
+(`yolo` is also valid for files), and a `local-process`, `session`-isolated
 Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
 tenant/storage identity must have a deployment mount. The trusted ingress must
@@ -514,21 +566,29 @@ never enable it where untrusted clients can reach the server.
 `auto-edit`, any caller with a read grant on the bound Workspace can list and
 inspect pending permission Actions through the public API or WebShell;
 answering one needs the Session's recorded owner or a caller holding OPERATOR
-or above, and that read grant as well. Responses are durable, idempotent
+or above, and that read grant as well. A Shell Session is the exception:
+only its recorded owner may answer, because that answer runs a command. Responses are durable, idempotent
 operations; their final result follows the committed Harness decision.
 `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
 The approval mode is pinned at Session creation and must be confirmed by the
 Harness on creation and load.
 
 Submit `agent_id: "qwen-code"`, the existing `workspace` selection and `input`
-through `POST /v1/agents/sessions`. The server chooses the fixed
-`hosted-workspace-files/1` private profile and uses the persisted Workspace ID
-for the Session Store. Public callers cannot choose the profile. Configure the
+through `POST /v1/agents/sessions`. The server persists
+`hosted-workspace-shell/1` with mandatory `default`/`auto-edit` approval when the
+Shell deployment opt-in is enabled, otherwise `hosted-workspace-files/1` with the
+configured file approval mode. This also applies to empty bound creation. The
+Session Store uses the persisted Workspace ID; public callers cannot choose the
+profile. W1c offline migration remains files/1-only and refuses persisted Shell
+definitions with `migration_profile_unsupported`. Configure the
 Harness's deployment-owned `--managed-runtime-broker-url` and
 `--managed-runtime-broker-token` options to reach this Broker. A repeated creation key returns
-the original Session/Turn; changed input conflicts. Disabling the opt-in refuses
-creation with input, including replays, while empty bound creation remains
-available. The directory mounted for a Workspace is trusted deployment data,
+the original Session/Turn; changed input conflicts. Disabling the Workspace files
+opt-in refuses creation with input, including replays, while empty bound creation
+remains available. The Shell opt-in selects the persisted profile; it does not
+independently admit creation input. Upgrade the Harness before enabling the
+Shell flag: an older Harness ignores `suppressChildAgents` and would advertise
+the child agent tool. The directory mounted for a Workspace is trusted deployment data,
 not a filesystem sandbox.
 
 Later Turns may be submitted by any caller holding OPERATOR on the bound
@@ -537,14 +597,21 @@ facts hold (the Workspace registry still backs the binding and stays `ACTIVE`,
 and the actor recorded by the Workspace create command keeps OPERATOR or
 above; the WebShell adapter's per-caller `workspaceTurns` capability flag
 mirrors exactly that rule, though the public surface publishes no such
-flag), and such a caller may cancel the Session's running Turns and rename
-the Session — a readable actor below OPERATOR gets `403
-session_operation_forbidden`, and an admitted OPERATOR blocked by the shape
-or fact gates gets `409 workspace_unavailable`. Workspace close follows its
-separate close capability and lifecycle admission. Archive, delete and
-unarchive follow their separate retention capabilities after reliable
-Workspace close. Controlled cwd changes ship below (W2); broad Workspace capability
-advertisement remains gated. Shell and in-flight recovery are separate slices.
+flag). Shell Sessions also require the Shell opt-in and valid persisted
+approval for fresh sending. `workspaceTurns` does not certify Shell admission;
+Shell clients also require `foregroundShell=true`. Such a caller may cancel
+the Session's running Turns and rename the Session — a readable actor below
+OPERATOR gets `403 session_operation_forbidden`, and an admitted OPERATOR
+blocked by the shape or fact gates gets `409 workspace_unavailable`.
+Workspace close follows its separate close capability and lifecycle admission.
+Public Shell close, archive, unarchive and delete stay unavailable, including
+protocol-0. Archive, delete and unarchive of non-Shell Sessions follow their
+separate retention capabilities after reliable Workspace close. Controlled cwd
+changes ship below (W2); broad Workspace capability advertisement remains
+gated. Public foreground Shell does not publish the child agent tool, and it
+has no Session message funnel because that funnel shares the child
+orchestrator's write chain.
+Background Shell, Monitor and complete in-flight recovery remain separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
 
@@ -794,21 +861,26 @@ and Shell can reach other paths allowed by the worker's host permissions.
 Foreground Shell may create detached descendants. Use this only with trusted
 local workloads. The W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
-Public bound Turn admission is limited to the opt-in initial file Turn described
-in G0 above and to later Turns submitted by any caller holding OPERATOR on the
-Workspace under the same opt-in while the Session's creator-keyed execution
-facts hold (the WebShell adapter's per-caller `workspaceTurns` capability
-flag mirrors that same rule; the public surface publishes no such flag);
-such a caller may also cancel the Session's running Turns and rename the
-Session. Later Turns run
-under the creator's Workspace grants, so an actor without a read grant keeps the
-existing `session_not_found` invisibility, a readable actor below OPERATOR is
-refused `session_operation_forbidden`, and an admitted OPERATOR whose Session
-lost the creator-keyed facts meets the family's domain `workspace_unavailable`.
-Public close follows its separate close
+Public bound Turn admission is limited to the initial Workspace Turn described
+in G0 above (file tools, or mandatory-approval foreground Shell under the Shell
+opt-in; the public Shell tool list does not include the child agent tool) and
+later Turns submitted by any caller holding OPERATOR on the Workspace under the
+same opt-in while the Session's creator-keyed execution facts hold (the WebShell
+adapter's per-caller `workspaceTurns` capability flag mirrors that same rule;
+the public surface publishes no such flag). Shell Sessions additionally require
+the Shell opt-in and valid persisted approval for fresh sending; `workspaceTurns`
+does not by itself admit a Shell Turn, which also requires `foregroundShell=true`.
+Such a caller may also cancel the Session's running Turns and rename the Session.
+Later Turns run under the creator's Workspace grants, so an actor without a read
+grant keeps the existing `session_not_found` invisibility, a readable actor below
+OPERATOR is refused `session_operation_forbidden`, and an admitted OPERATOR whose
+Session lost the creator-keyed facts meets the family's domain
+`workspace_unavailable`. Public Shell close, archive, unarchive and delete stay
+unavailable, including protocol-0. Public close follows its separate close
 capability and lifecycle admission. Archive, delete and unarchive follow their
 separate retention capabilities after reliable Workspace close;
-the private Shell profile is not enabled through public creation.
+the Shell profile reaches public creation only through the deployment Shell
+opt-in described above; callers cannot select it.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 
@@ -904,6 +976,61 @@ docker build -f packages/sdk-java/managed-agent-server/Dockerfile .
 The stock image contains the Java control plane only. Use the static Runtime
 provisioner, or provide a derived image/mount with Node.js and the Qwen worker
 artifacts, before enabling the local-process provisioner in a container.
+
+The image keeps the application's `127.0.0.1` defaults, so a plain
+`docker run -p 8080:8080` publishes nothing: `-p` DNATs to the container's
+bridge IP, and a loopback listener is unreachable through it. Publishing is
+an explicit opt-in, and the server refuses a non-loopback bind under the
+shipped `auto` auth mode, so the command must name an authentication
+posture — signed mode, as the introduction recommends (see "Broker
+authentication and writer credentials" above). The signing key and the
+datasource password are passed valueless so Docker forwards them from the
+shell environment — the `=` spelling would leave either secret in the
+command's argv for the container's whole lifetime. A valueless `-e`
+forwards the variable of the same name, so export
+`QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY` and `SPRING_DATASOURCE_PASSWORD` before
+the run. The datasource must also be
+named: the Prerequisites' `127.0.0.1` default is the container itself from
+inside, so the image cannot boot against it:
+
+```bash
+docker run -p 8080:8080 \
+  -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
+  -e QWEN_MANAGED_AGENT_AUTH_MODE=signed \
+  -e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY \
+  -e SPRING_DATASOURCE_URL='jdbc:mysql://<db-host>:3306/qwen_managed_agent' \
+  -e SPRING_DATASOURCE_USERNAME='qwen' \
+  -e SPRING_DATASOURCE_PASSWORD \
+  <image>
+```
+
+or the deliberately unauthenticated
+`-e QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true` override.
+
+The `qwen` user the recipe names needs the grants from the Full WebShell
+entry's MySQL one-liner — including `SELECT` on
+`performance_schema.user_variables_by_thread`, granted at the
+container-visible host — or Flyway's boot probe is denied (`ERROR 1142`)
+and startup stops.
+
+Publishing the API needs no Runtime Broker face: the broker ships disabled
+by default, and a non-loopback broker bind is a separate opt-in — the broker
+refuses one unless `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true`
+is also set (see Broker deployment above).
+
+The opt-in makes the authentication consequence load-bearing. Under the
+shipped default — `auto` resolving to `open` — there is no HTTP
+authentication: tenancy is whatever `X-Qwen-Tenant-Id` says. Signed mode
+HMAC-authenticates every request's tenant and actor headers; the
+insecure-bind override publishes with request authentication off. Either way the tenant-scoped API is
+exposed to anything that can route to the listener. That exposure does
+not depend on publishing a port: on the default bridge network the API
+also answers on the container's own bridge address, so every process on
+the Docker host and every peer container on that bridge can reach it
+with no `-p` at all. Run a published deployment behind an ingress that
+authenticates the tenant before setting `X-Qwen-Tenant-Id`, map ports
+only inside your own network policy, and attach the container only to
+networks whose peers you trust.
 
 ## Managed Session Store verification
 
@@ -1061,3 +1188,11 @@ Do not recreate or move the directory, change `QWEN_HOME`, or modify retained ba
 Promotion increments mount revision once. Successful `prepare` and `promote` commits clear the migration's previous error code. Update the deployment's Workspace root and restart Broker/Harness with the original QWEN_HOME before opening admission. An old deployment mapping fails closed. New file Turns and undo use fresh Runtime identities. Source rows, messages, journal, keys and backup names remain unchanged. Failure preserves the fence; missing stop proof, unsupported profiles or drift require diagnosis. Reverse migration is a new verified operation at a higher revision.
 
 The target marker is the sole manifest exception and must match the copied source marker or the exact operation-pinned target marker. Do not hand-edit it. No online drain, directory copying, public migration route, Shell/MCP/Hook migration or source-lost recovery is provided. Uninitialized retained members without a verifiable frozen private definition are refused. Production Linux/MySQL acceptance evidence must be recorded separately from injected-identity tests.
+
+### Stored agent execution
+
+Sessions pin a stored AgentDefinition revision and digest at admission. `permission_policy` and `tools` select the Session's immutable approval mode and hosted tool profile. `model` accepts `{}` or `{ "id": "configured-model" }`; `instructions` accepts UTF-8 text up to 64 KiB. Skills, MCP servers, environment templates and per-definition approval timeouts remain unsupported and are refused explicitly.
+
+Set `QWEN_MANAGED_AGENT_DEFINITION_MODELS` to comma-separated IDs configured in the Harness's deployment `modelProviders`; it defaults to empty. Each ID must resolve to one configured provider route with deployment credentials. An absent or ambiguous route or unresolved credentials fails the Turn with `model_unavailable` before inference. Credentials never belong in definitions. Enable and configure the Managed Session Store for stored-definition execution; instructions are delivered as digest-addressed resource references and verified on load.
+
+`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` defaults to `hosted-workspace-files/1`. Before opting into `hosted-workspace-files/2`, drain old workers and upgrade every provisioner according to #13166. Empty permission policies inherit the deployment approval mode (default `yolo`); use `default` for deployments that require approval.

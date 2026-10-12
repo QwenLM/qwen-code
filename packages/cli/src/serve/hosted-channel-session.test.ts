@@ -121,6 +121,7 @@ async function withSession<T>(
               | undefined;
             if (payload?.promptId && typeof payload.state === 'string') {
               await settleInJournal(
+                harness,
                 authority,
                 payload.promptId,
                 payload.state as 'completed' | 'error' | 'cancelled',
@@ -244,12 +245,37 @@ function settleTurn(
 }
 
 async function settleInJournal(
+  harness: Harness,
   authority: LocalManagedSessionAuthority,
   turnId: string,
   outcome: 'completed' | 'error' | 'cancelled' = 'completed',
 ): Promise<void> {
   // The wake turn's journal settle, as `commitTurnComplete` records it:
-  // the only thing that consumes a pending input.
+  // the only thing that consumes a pending input. The commit-time fence
+  // refuses a turn.settled whose result is not a published reader-facing
+  // record, so the settle publishes one first.
+  const resultRef = await harness.store.publish(
+    'managed-turn-result',
+    Buffer.from(
+      JSON.stringify({
+        uuid: `${turnId}:result`,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'turn_result',
+        cwd: '/workspace',
+        version: 'hosted-harness/1',
+        systemPayload: {
+          promptId: turnId,
+          state: outcome,
+          stopReason: outcome === 'completed' ? 'end_turn' : outcome,
+          endedAt: Date.now(),
+        },
+      }),
+      'utf8',
+    ),
+  );
   await authority.appendExecution(
     {
       operation: 'settleTurn',
@@ -270,7 +296,7 @@ async function settleInJournal(
           turnId,
           outcome,
           stopReason: outcome === 'completed' ? 'end_turn' : outcome,
-          resultRef: null,
+          resultRef,
           usageRef: null,
           pendingOwnersRef: null,
         },
@@ -469,7 +495,7 @@ describe('HostedChannelSession outbound', () => {
         // Nothing settled yet: nothing to plan.
         expect(await channels.planReply(inputId)).toBeUndefined();
         settleTurn(harness, inputId, 'The build is green.');
-        await settleInJournal(authority, inputId);
+        await settleInJournal(harness, authority, inputId);
         const planned = await channels.planReply(inputId);
         expect(planned).toMatchObject({
           deliveryId: `${inputId}:reply`,
@@ -500,13 +526,13 @@ describe('HostedChannelSession outbound', () => {
     await withSession(harness, async (channels, authority) => {
       const errored = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, errored, 'partial', 'error');
-      await settleInJournal(authority, errored, 'error');
+      await settleInJournal(harness, authority, errored, 'error');
       expect(await channels.planReply(errored)).toBeUndefined();
       const empty = (
         await channels.submitInput(inbound({ platformEventId: '1700:50' }))
       ).inputId;
       settleTurn(harness, empty, '   ');
-      await settleInJournal(authority, empty);
+      await settleInJournal(harness, authority, empty);
       expect(await channels.planReply(empty)).toBeUndefined();
       expect(await channels.reconcileReplies()).toEqual([]);
     });
@@ -519,14 +545,14 @@ describe('HostedChannelSession outbound', () => {
       // plan (the pin refuses), but every turn behind it must still get one.
       const stuck = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, stuck, 'Late answer.');
-      await settleInJournal(authority, stuck);
+      await settleInJournal(harness, authority, stuck);
       const rolled = (
         await channels.submitInput(
           inbound({ accountGeneration: 2, platformEventId: '1800:1' }),
         )
       ).inputId;
       settleTurn(harness, rolled, 'Fresh answer.');
-      await settleInJournal(authority, rolled);
+      await settleInJournal(harness, authority, rolled);
       // No turn_result record exists in the projection — none arrives
       // through the production sink — so this settle gate is journal-only.
       // A re-keyed pin no longer publishes behind its own refuse: the plan
@@ -550,7 +576,7 @@ describe('HostedChannelSession outbound', () => {
         { text: 'private reasoning marker', thought: true },
         { text: 'Public answer.' },
       ]);
-      await settleInJournal(authority, inputId);
+      await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       const claimed = await channels.claim(planned.deliveryId);
       // Reasoning the model marked as thinking never becomes mail text.
@@ -570,7 +596,7 @@ describe('HostedChannelSession outbound', () => {
     await withSession(harness, async (channels, authority) => {
       const inputId = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, inputId, 'x'.repeat(100_000));
-      await settleInJournal(authority, inputId);
+      await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       const claimed = await channels.claim(planned.deliveryId);
       // The reply resource carries the planned segment, not the raw 100 KB
@@ -589,7 +615,7 @@ describe('HostedChannelSession outbound', () => {
       // Newlines and quotes double in the reply's JSON: a 48 KiB raw plan
       // serializes to about 96 KiB — past the inline envelope bound.
       settleTurn(harness, inputId, '\n"'.repeat(50_000) + '🙂'.repeat(40_000));
-      await settleInJournal(authority, inputId);
+      await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       const claimed = await channels.claim(planned.deliveryId);
       expect(encodeChannelReply(claimed.reply).byteLength).toBeLessThanOrEqual(
@@ -615,7 +641,7 @@ describe('HostedChannelSession outbound', () => {
     await withSession(harness, async (channels, authority) => {
       const inputId = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, inputId, 'Done.');
-      await settleInJournal(authority, inputId);
+      await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       const claimed = await channels.claim(planned.deliveryId);
       expect(claimed.segments).toHaveLength(1);
@@ -643,7 +669,7 @@ describe('HostedChannelSession outbound', () => {
     await withSession(harness, async (channels, authority) => {
       const inputId = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, inputId, 'Done.');
-      await settleInJournal(authority, inputId);
+      await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       await channels.claim(planned.deliveryId);
       await channels.settle(planned.deliveryId, 'rejected');
@@ -671,7 +697,7 @@ describe('HostedChannelSession outbound', () => {
     await withSession(harness, async (channels, authority) => {
       const first = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, first, 'Late answer.');
-      await settleInJournal(authority, first);
+      await settleInJournal(harness, authority, first);
       // The account re-key rolls the route forward: the settled turn's
       // reply may not plan, or every retry orphans a fresh resource pair.
       await channels.submitInput(
@@ -730,7 +756,7 @@ describe('HostedChannelSession outbound', () => {
         await channels.submitInput(inbound({ platformEventId: '1700:50' }))
       ).inputId;
       settleTurn(harness, second, 'Recovered.');
-      await settleInJournal(authority, second);
+      await settleInJournal(harness, authority, second);
       const planned = await channels.planReply(second);
       expect(planned).toMatchObject({ deliveryId: `${second}:reply` });
       expect(await channels.reconcileReplies()).toEqual([]);
@@ -742,7 +768,7 @@ describe('HostedChannelSession outbound', () => {
     const inputId = (await withSession(harness, async (channels, authority) => {
       const id = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, id, 'Answer.');
-      await settleInJournal(authority, id);
+      await settleInJournal(harness, authority, id);
       // The process died before planReply ran.
       return id;
     }))!;
@@ -764,7 +790,7 @@ describe('HostedChannelSession outbound', () => {
     await withSession(harness, async (channels, authority) => {
       const inputId = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, inputId, 'Done.');
-      await settleInJournal(authority, inputId);
+      await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       const claimed = await channels.claim(planned.deliveryId);
       expect(claimed.delivery.run).toMatchObject({
@@ -820,7 +846,7 @@ describe('HostedChannelSession outbound', () => {
     await withSession(harness, async (channels, authority) => {
       const inputId = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, inputId, 'Done.');
-      await settleInJournal(authority, inputId);
+      await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       await channels.claim(planned.deliveryId);
       const unknown = await channels.settle(planned.deliveryId, 'unknown');
@@ -889,7 +915,7 @@ describe('HostedChannelSession outbound', () => {
     await withSession(harness, async (channels, authority) => {
       const first = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, first, 'One.');
-      await settleInJournal(authority, first);
+      await settleInJournal(harness, authority, first);
       const planned = (await channels.planReply(first))!;
       const cancelled = await channels.cancel(planned.deliveryId);
       expect(cancelled.run).toMatchObject({
@@ -903,7 +929,7 @@ describe('HostedChannelSession outbound', () => {
         await channels.submitInput(inbound({ platformEventId: '1700:60' }))
       ).inputId;
       settleTurn(harness, second, 'Two.');
-      await settleInJournal(authority, second);
+      await settleInJournal(harness, authority, second);
       const other = (await channels.planReply(second))!;
       await channels.claim(other.deliveryId);
       const requested = await channels.cancel(other.deliveryId);
@@ -929,7 +955,7 @@ describe('HostedChannelSession outbound', () => {
         inbound({ accountGeneration: 2, platformEventId: '1800:1' }),
       );
       settleTurn(harness, inputId, 'Late answer.');
-      await settleInJournal(authority, inputId);
+      await settleInJournal(harness, authority, inputId);
       // The plan pins the input's revision; the binding has moved on, so
       // the old generation creates no new effect AND no orphan byte pair
       // (R10 P2: the pin is checked before anything is published).

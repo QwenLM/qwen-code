@@ -30,7 +30,9 @@ public class ChildLifecycleAdmissions {
 
     /** Whether this host can close a Workspace Session at all. Without it
      * no close is ever admitted, so a caller must not hold anything else
-     * (a parent's settlement) hostage to one. */
+     * (a parent's settlement) hostage to one. The one exception is a
+     * worktree run's merge (#13753 I2), which runs only once its child is
+     * closed: that run waits for a host that can close it. */
     public boolean closeSupported() {
         return runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose();
     }

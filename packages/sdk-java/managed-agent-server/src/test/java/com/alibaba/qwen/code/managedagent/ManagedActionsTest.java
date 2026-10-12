@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.RETURNS_DEFAULTS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doReturn;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -17,9 +18,15 @@ import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ManagedActionService;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
@@ -42,6 +49,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.convention.TestBean;
@@ -49,12 +60,16 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.time.Duration;
+import java.time.Clock;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @SpringBootTest(
@@ -68,6 +83,7 @@ import java.util.concurrent.atomic.AtomicInteger;
             "qwen.managed-agent.dispatch.scan-delay=50ms"
         })
 @AutoConfigureMockMvc
+@Import(ManagedActionsTest.Configuration.class)
 class ManagedActionsTest {
     @Autowired private MockMvc mvc;
     @Autowired private ObjectMapper json;
@@ -75,6 +91,7 @@ class ManagedActionsTest {
     @Autowired private ManagedSessionStore journals;
     @Autowired private ManagedActionStore actions;
     @Autowired private AgentStateStore sessions;
+    @Autowired private ManagedAgentStore store;
 
     @TestBean(methodName = "createHarness")
     private HarnessConnector harness;
@@ -96,12 +113,26 @@ class ManagedActionsTest {
         logged.stop();
     }
 
+    @TestConfiguration
+    static class Configuration {
+        @Bean @Primary
+        ManagedAgentStore actionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry,
+                Clock clock, com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher publisher) {
+            var properties = new ManagedAgentProperties();
+            properties.getHarness().setWorkspaceFilesEnabled(true);
+            return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry, properties);
+        }
+    }
+
     private static final Map<String, Answer<Void>> responses = new ConcurrentHashMap<>();
 
     static HarnessConnector createHarness() {
         return mock(
                 HarnessConnector.class,
                 call -> {
+                    if ("isAvailable".equals(call.getMethod().getName())) {
+                        return true;
+                    }
                     if ("resolveAction".equals(call.getMethod().getName())) {
                         Answer<Void> answer = responses.get(call.getArgument(2));
                         return answer == null ? null : answer.answer(call);
@@ -560,11 +591,30 @@ class ManagedActionsTest {
                 .andExpect(status().isBadRequest());
     }
 
-    @Test
-    void ownerResponseReplaysAcrossSurfacesAndUsesCommittedDecisionAfterLostAnswer()
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void ownerResponseReplaysAcrossSurfacesAndUsesCommittedDecisionAfterLostAnswer(boolean shell)
             throws Exception {
         String tenant = tenant();
         String session = session(tenant);
+        if (shell) {
+            assertThat(store.workspaceFilesEnabled()).isTrue();
+            assertThat(store.workspaceShellEnabled()).isFalse();
+            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+                    + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-actions', 1, 'storage', 'workspace', ?, ?, 'ACTIVE')",
+                    tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+            for (String actor : List.of("owner", "other")) {
+                jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, 'workspace-actions', ?, 'OPERATOR')", tenant, actor.getBytes(StandardCharsets.UTF_8));
+            }
+            jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = 'storage', workspace_id = 'workspace-actions',"
+                    + " workspace_generation = 1, cwd_relative = '.', context_config_ref = ?, context_revision = 1,"
+                    + " workspace_config_ref = ?, workspace_policy_ref = ?, tool_profile = 'hosted-workspace-shell/1', approval_mode = 'default'"
+                    + " WHERE tenant_id = ? AND session_id = ?", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                    WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF, tenant, session);
+            assertThat(store.requireSession(tenant, session).toolProfile()).isEqualTo("hosted-workspace-shell/1");
+            assertThat(store.requireSession(tenant, session).approvalMode()).isEqualTo("default");
+        }
         ActionJournal journal =
                 action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
         AtomicInteger delivered = new AtomicInteger();
@@ -612,6 +662,9 @@ class ManagedActionsTest {
                                 .validate("/components/schemas/PublicCommandOperation", result))
                 .isEmpty();
         assertThat(result.at("/action_resolution/outcome").asText()).isEqualTo("decided");
+        var decision = actions.find(tenant, session, journal.id).orElseThrow();
+        assertThat(decision.state()).isEqualTo("decided");
+        assertThat(decision.decisionReceiptId()).isEqualTo(result.at("/action_resolution/decision_receipt_id").asText());
         assertThat(result.at("/action_resolution/decision_receipt_id").asText())
                 .startsWith("decision_");
         JsonNode replay =
@@ -814,6 +867,114 @@ class ManagedActionsTest {
                         OpenApiContract.load()
                                 .validate("/components/schemas/PublicCommandOperation", result))
                 .isEmpty();
+    }
+
+    @Test
+    void disabledReplicaSettlesOnlyJournalProvenEndedResponses() throws Exception {
+        doReturn(false).when(harness).isAvailable();
+        try {
+            String tenant = tenant();
+            String session = session(tenant);
+            ActionJournal pending = action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
+            ActionJournal ended = new ActionJournal(pending, System.currentTimeMillis(), 9007199254740991L);
+            ended.change("requested", null);
+            String pendingOp = readAccepted(
+                    auth(post(path(session, pending.id) + "/responses"), tenant, "owner")
+                            .header("Idempotency-Key", "disabled-pending")
+                            .contentType(MediaType.APPLICATION_JSON).content(response("allow")))
+                    .path("id").asText();
+            String endedOp = readAccepted(
+                    auth(post(path(session, ended.id) + "/responses"), tenant, "owner")
+                            .header("Idempotency-Key", "disabled-ended")
+                            .contentType(MediaType.APPLICATION_JSON).content(response("allow")))
+                    .path("id").asText();
+            var before = jdbc.queryForMap("SELECT * FROM managed_agent_operation WHERE operation_id = ?", pendingOp);
+            var claim = sessions.claimOperation(tenant, session, endedOp, "stopped-worker", Duration.ofMinutes(10))
+                    .orElseThrow();
+            ended.change("expired", null);
+            var coordinator = new ActionResponseCoordinator(sessions, actions,
+                    new UnavailableHarnessConnector(), mock(java.util.concurrent.ExecutorService.class),
+                    Clock.systemUTC(), new ManagedAgentProperties());
+            coordinator.recover();
+            var result = sessions.findOperation(tenant, session, endedOp).orElseThrow();
+            assertThat(result.state()).isEqualTo("FAILED");
+            assertThat(result.claimGeneration()).isEqualTo(claim.claimGeneration());
+            assertThat(actions.response(tenant, session, endedOp).errorCode()).isEqualTo("action_expired");
+            assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_operation WHERE operation_id = ?", pendingOp))
+                    .isEqualTo(before);
+        } finally {
+            doReturn(true).when(harness).isAvailable();
+        }
+    }
+
+    @Test
+    void approvalLeaseRenewsWhileDeliveryIsHeldPastItsInitialDeadline() throws Exception {
+        doReturn(false).when(harness).isAvailable();
+        var executor = Executors.newSingleThreadExecutor();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setLeaseDuration(Duration.ofMillis(300));
+        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(50));
+        AtomicInteger calls = new AtomicInteger();
+        ActionResponseCoordinator first = null;
+        ActionResponseCoordinator sibling = null;
+        try {
+            String tenant = tenant();
+            String session = session(tenant);
+            ActionJournal journal = action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
+            String operation = readAccepted(
+                    auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                            .header("Idempotency-Key", "held-delivery")
+                            .contentType(MediaType.APPLICATION_JSON).content(response("allow")))
+                    .path("id").asText();
+            HarnessConnector available = mock(HarnessConnector.class, call -> {
+                if ("isAvailable".equals(call.getMethod().getName())) {
+                    return true;
+                }
+                if ("resolveAction".equals(call.getMethod().getName())) {
+                    // recover() scans every deliverable operation, so responses
+                    // left behind by sibling tests reach this mock as well.
+                    if (!journal.id.equals(call.getArgument(2))) {
+                        return null;
+                    }
+                    calls.incrementAndGet();
+                    entered.countDown();
+                    if (!release.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("held approval was not released");
+                    }
+                    journal.change("decided", call.getArgument(3));
+                    return null;
+                }
+                return RETURNS_DEFAULTS.answer(call);
+            });
+            first = new ActionResponseCoordinator(sessions, actions, available, executor, Clock.systemUTC(), properties);
+            sibling = new ActionResponseCoordinator(sessions, actions, available, executor, Clock.systemUTC(), properties);
+            long started = System.currentTimeMillis();
+            first.dispatch(tenant, session, operation);
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+            await().atMost(Duration.ofSeconds(5)).until(() -> System.currentTimeMillis() - started >= 1000);
+            var claimed = sessions.findOperation(tenant, session, operation).orElseThrow();
+            assertThat(claimed.claimGeneration()).isEqualTo(1);
+            assertThat(sessions.claimOperation(tenant, session, operation, "competing-replica", Duration.ofSeconds(1)))
+                    .isEmpty();
+            sibling.recover();
+            release.countDown();
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(sessions.findOperation(tenant, session, operation).orElseThrow().state())
+                            .isEqualTo("COMPLETED"));
+            assertThat(calls.get()).isEqualTo(1);
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+            if (first != null) {
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(first, "stopRenewals");
+            }
+            if (sibling != null) {
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(sibling, "stopRenewals");
+            }
+            doReturn(true).when(harness).isAvailable();
+        }
     }
 
     @Test
