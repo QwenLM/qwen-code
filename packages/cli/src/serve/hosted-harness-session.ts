@@ -7087,6 +7087,19 @@ export function registerHostedHarnessSessionRoutes(
             ).release({ drain: true });
             session.heldRuntimeTurns.delete(heldTurn);
           } catch (cause) {
+            // A "not found" answer means nothing remains to stop: the Runtime
+            // is already gone, so the turn owes nothing and the close may
+            // proceed — the same tolerance the sibling owner-release carries
+            // (#13856 R1-1). Every other refusal is unproven and parks
+            // honestly below.
+            if (
+              cause instanceof HostedWorkspaceBrokerRejection &&
+              cause.status === 404 &&
+              cause.code === 'runtime_session_not_found'
+            ) {
+              session.heldRuntimeTurns.delete(heldTurn);
+              continue;
+            }
             heldDrainFailed ??= cause;
             writeStderrLineSafe(
               `qwen serve: Hosted Harness drain of held Runtime ${heldTurn} failed: ${String(cause)}`,

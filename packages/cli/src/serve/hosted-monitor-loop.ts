@@ -234,7 +234,10 @@ export class HostedMonitorLoop {
         return;
       }
       if (this.settled) return;
-      await this.flush();
+      // The watch's physical end supersedes its quota: this final window
+      // commits, but the quota must not park the record ahead of the exit's
+      // own settle (#13856 R1-30).
+      await this.flush(false);
       if (this.settled) return;
       if (stopRequested) {
         this.ended = true;
@@ -278,20 +281,24 @@ export class HostedMonitorLoop {
    * it accurately blocked instead of reporting a stopped task that never
    * stopped. A loop that parked on an unproven auto-stop is still stoppable
    * here, so the close's proven drain upgrades that parked record to the
-   * requested stop instead of leaving it blocked forever (#13856).
+   * requested stop instead of leaving it blocked forever. The runtime_lost
+   * arm parks the same open way: the failed close that asks for it keeps the
+   * Session and its publisher alive for a retry, and that retry's proven
+   * drain — or the watch's own end — still owes the record its settlement
+   * (#13856).
    */
   async stop(
     settle: 'stop_requested' | 'runtime_lost' = 'stop_requested',
   ): Promise<void> {
     if (this.settled) return;
     this.ended = true;
-    this.settled = true;
     this.disarm();
     await this.handle?.terminate();
     if (settle === 'runtime_lost') {
       await this.monitors.blockedRuntimeLost(this.monitorId);
       return;
     }
+    this.settled = true;
     await this.monitors.settleStopRequested(this.monitorId);
   }
 
@@ -321,7 +328,7 @@ export class HostedMonitorLoop {
   }
 
   /** Commits whatever the window buffered as one observation revision. */
-  private async flush(): Promise<void> {
+  private async flush(settleQuota: boolean = true): Promise<void> {
     if (this.ended || this.buffered.length === 0) return;
     const lines = this.buffered;
     this.buffered = [];
@@ -334,6 +341,7 @@ export class HostedMonitorLoop {
     this.armIdle();
     const sequence = this.monitors.record(this.monitorId)?.observationSequence;
     if (
+      settleQuota &&
       this.params !== undefined &&
       sequence !== undefined &&
       sequence >= this.params.maxEvents
