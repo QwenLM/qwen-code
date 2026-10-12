@@ -1114,6 +1114,41 @@ async function startDeferredDaemon(
   return { handle, createBridge };
 }
 
+/**
+ * Raw upgrade probe (no `ws` client): resolves with the wire status the
+ * daemon answered the /acp upgrade with — 101 when the socket was upgraded,
+ * an HTTP error status when it was answered as a plain request.
+ */
+function probeAcpUpgradeWireStatus(
+  handle: RunHandle,
+): Promise<number | undefined> {
+  const url = new URL(handle.url);
+  return new Promise<number | undefined>((resolve, reject) => {
+    const req = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: '/acp',
+      headers: {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Key': Buffer.from('0123456789abcdef').toString('base64'),
+        'Sec-WebSocket-Version': '13',
+        Authorization: 'Bearer secret-token',
+      },
+    });
+    req.once('upgrade', (res, socket) => {
+      socket.destroy();
+      resolve(res.statusCode);
+    });
+    req.once('response', (res) => {
+      res.resume();
+      resolve(res.statusCode);
+    });
+    req.once('error', reject);
+    req.end();
+  });
+}
+
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
   () => [] as Array<Record<string, unknown>>,
 );
@@ -11022,6 +11057,47 @@ describe('runQwenServe runtime startup failures', () => {
       expect(await rootRes.text()).toContain('<div id="root">');
       expect(createBridge).toHaveBeenCalledTimes(1);
       await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('holds an /acp WebSocket upgrade arriving in the deferred runtime window instead of 406ing it', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-upgrade-')),
+    );
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+    try {
+      // 101 once the held upgrade is replayed onto the attached transport;
+      // 406 when it falls through to the SSE GET /acp handler instead (the
+      // bug this pins against, issue #13995).
+      expect(await probeAcpUpgradeWireStatus(handle)).toBe(101);
+      // The held upgrade must itself force the deferred runtime up — a client
+      // that only opens a socket never touches a REST route.
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('answers a retryable 503 to an /acp WebSocket upgrade when the deferred runtime fails to start', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-503-')),
+    );
+    const { handle } = await startDeferredDaemon(tmpDir, {
+      createBridge: () => {
+        throw new Error('runtime boom');
+      },
+    });
+    try {
+      // The probe is held in the pre-transport window and flushed with a 503
+      // once the runtime startup failure rejects runtimeReady.
+      expect(await probeAcpUpgradeWireStatus(handle)).toBe(503);
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      // The gate stays closed: a later upgrade gets the same 503 immediately
+      // instead of queueing behind a flush that already ran.
+      expect(await probeAcpUpgradeWireStatus(handle)).toBe(503);
     } finally {
       await handle.close();
     }

@@ -13,12 +13,13 @@ import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
 import * as fs from 'node:fs';
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
 import * as https from 'node:https';
 import { isIP } from 'node:net';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
+import type { Duplex } from 'node:stream';
 import express, {
   type Application,
   type NextFunction,
@@ -9823,7 +9824,7 @@ async function runQwenServeImpl(
         const acpHandle = candidateApp.locals?.['acpHandle'] as
           | AcpHttpHandle
           | undefined;
-        acpHandle?.attachServer?.(server);
+        attachAcpWsTransport(acpHandle);
         if (opts.channelSelection) {
           closeServerAfterChannelWorkerStartupFailure = true;
           let manager: ChannelWorkerManager | undefined;
@@ -10678,7 +10679,7 @@ async function runQwenServeImpl(
           const acpHandle = preparedRuntimeApp.locals?.['acpHandle'] as
             | AcpHttpHandle
             | undefined;
-          acpHandle?.attachServer?.(server);
+          attachAcpWsTransport(acpHandle);
           markServeAppStartupReady();
           void publishLiveDiscovery(preparedRuntimeApp);
           if (!runtimeStartupSettled) {
@@ -10767,6 +10768,84 @@ async function runQwenServeImpl(
           });
         });
       },
+    });
+
+    // A deferred boot (deferRuntimeUntilFirstHealth) listens before the
+    // runtime app — and its ACP WebSocket transport — exists. With no
+    // 'upgrade' listener registered yet, Node routes an upgrade request to
+    // Express as a plain GET, which the delegating app holds until the
+    // runtime is ready and then forwards to the SSE GET handler: the client
+    // sees a misleading 406 instead of a socket. Hold early upgrades here
+    // and replay them once the transport attaches (the same hold the
+    // delegating app gives REST requests), or answer a retryable 503 once
+    // no transport can still arrive (runtime settled without one, startup
+    // failed, or the daemon is shutting down).
+    const preTransportUpgrades: Array<{
+      req: IncomingMessage;
+      socket: Duplex;
+      head: Buffer;
+    }> = [];
+    let acpWsTransportAttached = false;
+    let preTransportUpgradeGateClosed = false;
+    const releasePreTransportUpgrades = (): void => {
+      const queued = preTransportUpgrades.splice(0);
+      for (const { req, socket, head } of queued) {
+        if (socket.destroyed) continue;
+        if (acpWsTransportAttached) {
+          // 'upgrade' listeners run in registration order: this guard is
+          // first and returns immediately once the transport is attached,
+          // so the acp-http listener performs the real upgrade (auth, path
+          // routing, handshake) exactly as for a direct arrival.
+          server.emit('upgrade', req, socket, head);
+        } else {
+          socket.write(
+            'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n',
+          );
+          socket.destroy();
+        }
+      }
+    };
+    const attachAcpWsTransport = (
+      acpHandle: AcpHttpHandle | undefined,
+    ): void => {
+      if (!acpHandle || acpWsTransportAttached) return;
+      acpHandle.attachServer(server);
+      acpWsTransportAttached = true;
+      releasePreTransportUpgrades();
+    };
+    if (runtimeStartupSettled) {
+      // Prebuilt runtime: the transport attaches synchronously from
+      // onListening. Only a handle-less app (QWEN_SERVE_ACP_HTTP=0) never
+      // attaches — close the gate so late upgrades get the 503 immediately.
+      const acpHandle = (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+        'acpHandle'
+      ] as AcpHttpHandle | undefined;
+      if (!acpHandle) preTransportUpgradeGateClosed = true;
+    } else {
+      void runtimeReady.then(
+        () => {
+          if (!acpWsTransportAttached) preTransportUpgradeGateClosed = true;
+          releasePreTransportUpgrades();
+        },
+        () => {
+          preTransportUpgradeGateClosed = true;
+          releasePreTransportUpgrades();
+        },
+      );
+    }
+    server.on('upgrade', (req, socket, head) => {
+      if (acpWsTransportAttached) return;
+      if (preTransportUpgradeGateClosed) {
+        socket.write(
+          'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n',
+        );
+        socket.destroy();
+        return;
+      }
+      preTransportUpgrades.push({ req, socket, head });
+      // A socket opened before any REST request must still force the
+      // deferred runtime up, same as the delegating app's start-on-request.
+      if (!runtimeStartupSettled) startRuntimeForRequest?.();
     });
 
     const tryListen = (attemptPort: number, attempt: number): void => {
