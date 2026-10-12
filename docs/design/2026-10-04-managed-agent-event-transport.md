@@ -476,10 +476,10 @@ selected broker.
   delivery/ordering items on 2026-10-12; the residual exposure is the
   MQ2-start staging re-check — if that fails, MQ2 falls back to Redis Streams
   under the same seam rather than relaxing the invariants.
-- **Wake-intent carrier.** The canonical design names `WakeIntent`; the repo
-  today carries the committed `wake.requested` record kind, and #12827's open
-  question 3 (Session inbox vs new record) stays unsettled until #13300 lands.
-  This design intentionally does not pick the carrier.
+- **Wake-intent carrier.** Resolved 2026-10-12 (§11): the carrier is the
+  committed `wake.requested` record, which #13300 landed; a distinct
+  WakeIntent record would store the same fact twice, so this supersedes
+  #12827 question 3.
 - **Scope hygiene.** Each phase records its slice and exclusions on the
   tracker, per #12380's claiming rule.
 
@@ -521,7 +521,12 @@ This slice's validation is documentation-only:
    backstop), and a node that wins activation subscribes to that Session's
    LiteTopic (per-client, dynamic) and unsubscribes on release — the
    Session's owner is then the sole subscriber and dispatch lands exactly on
-   it.
+   it. That sole-subscriber property is the steady state, not the handoff:
+   when a lease expires without a clean unsubscribe, a stale subscription can
+   coexist briefly, the dispatcher may select it, and its fenced no-op ACK
+   still advances the group offset, so the new owner can miss that
+   notification — SQL reconciliation (the backstop above) covers the miss,
+   and the handoff case is on MQ2's verification list.
 3. LiteTopic §5.1 items: the broker-docs verification ran 2026-10-12 and its
    results are pinned in §5.1's resolution block; what remains is the
    MQ2-start staging re-check against a real 5.5.0+ cluster.
