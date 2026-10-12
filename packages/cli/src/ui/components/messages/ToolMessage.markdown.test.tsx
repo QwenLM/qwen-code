@@ -14,7 +14,9 @@ import {
   OverflowProvider,
   useOverflowState,
 } from '../../contexts/OverflowContext.js';
-import { ToolCallStatus } from '../../types.js';
+import { ToolCallStatus, StreamingState } from '../../types.js';
+import { StreamingContext } from '../../contexts/StreamingContext.js';
+import { RenderModeProvider } from '../../contexts/RenderModeContext.js';
 import { ToolMessage, type ToolMessageProps } from './ToolMessage.js';
 
 const baseProps: ToolMessageProps = {
@@ -36,14 +38,16 @@ function OverflowProbe() {
 
 function resultWithOverflow(props: ToolMessageProps, visible = true) {
   return (
-    <OverflowProvider>
-      {visible && (
-        <Box width={props.contentWidth} flexDirection="column">
-          <ToolMessage {...props} />
-        </Box>
-      )}
-      <OverflowProbe />
-    </OverflowProvider>
+    <StreamingContext.Provider value={StreamingState.Idle}>
+      <OverflowProvider>
+        {visible && (
+          <Box width={props.contentWidth} flexDirection="column">
+            <ToolMessage {...props} />
+          </Box>
+        )}
+        <OverflowProbe />
+      </OverflowProvider>
+    </StreamingContext.Provider>
   );
 }
 
@@ -54,6 +58,206 @@ describe('tool result Markdown with a real renderer', () => {
     expect(lastFrame()).not.toContain('**');
   });
 
+  it('keeps the tail of an overflowing completed Markdown result', () => {
+    const { lastFrame } = renderWithProviders(
+      resultWithOverflow({
+        ...baseProps,
+        renderOutputAsMarkdown: undefined,
+        resultDisplay: Array.from(
+          { length: 60 },
+          (_, i) => `**row ${i}**`,
+        ).join('\n'),
+      }),
+    );
+    expect(lastFrame()).toContain('row 59');
+    expect(lastFrame()).not.toContain('row 0');
+    expect(lastFrame()).toContain('lines hidden');
+  });
+
+  it.each([
+    ['wide line', 'x'.repeat(3000), 'xxxx'],
+    ['JSON', JSON.stringify({ value: 'x'.repeat(3000) }), 'xxxx'],
+    ['Chinese', '中文'.repeat(1500), '中文'],
+  ])(
+    'keeps content visible for an oversized first %s',
+    (_name, resultDisplay, visibleText) => {
+      const { lastFrame } = renderWithProviders(
+        resultWithOverflow({
+          ...baseProps,
+          renderOutputAsMarkdown: undefined,
+          resultDisplay,
+          availableTerminalHeight: 9,
+        }),
+      );
+      expect(lastFrame()).toContain(visibleText);
+      expect((lastFrame() ?? '').split('\n')).toHaveLength(5);
+    },
+  );
+
+  it('renders an exactly fitting Markdown result in full', () => {
+    const { lastFrame } = renderWithProviders(
+      resultWithOverflow({
+        ...baseProps,
+        availableTerminalHeight: 12,
+        resultDisplay: Array.from({ length: 6 }, (_, i) => `**row ${i}**`).join(
+          '\n',
+        ),
+      }),
+    );
+    expect(lastFrame()).toContain('row 0');
+    expect(lastFrame()).toContain('row 5');
+    expect(lastFrame()).not.toContain('**');
+    expect(lastFrame()).not.toContain('hidden');
+    expect(lastFrame()).not.toContain('more lines');
+  });
+
+  it('keeps raw table source and following text when they fit', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderModeProvider value={{ renderMode: 'raw', setRenderMode: vi.fn() }}>
+        {resultWithOverflow({
+          ...baseProps,
+          availableTerminalHeight: 12,
+          resultDisplay: '| A | B |\n| --- | --- |\n| x | y |\none\ntwo\nthree',
+        })}
+      </RenderModeProvider>,
+    );
+    expect(lastFrame()).toContain('three');
+    expect(lastFrame()).not.toContain('hidden');
+    expect(lastFrame()).not.toContain('┌');
+  });
+
+  it('counts code gutters in raw mode before choosing full Markdown', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderModeProvider value={{ renderMode: 'raw', setRenderMode: vi.fn() }}>
+        {resultWithOverflow({
+          ...baseProps,
+          contentWidth: 26,
+          availableTerminalHeight: 12,
+          resultDisplay:
+            '```text\n' +
+            Array.from({ length: 4 }, () => 'x'.repeat(23)).join('\n') +
+            '\n```',
+        })}
+      </RenderModeProvider>,
+    );
+    expect(lastFrame()).toContain('```text');
+    expect(lastFrame()).not.toContain('hidden');
+    expect((lastFrame() ?? '').split('\n')).toHaveLength(8);
+  });
+
+  it('keeps a completed Mermaid source bounded rather than estimating its diagram from source lines', () => {
+    const { lastFrame } = renderWithProviders(
+      resultWithOverflow({
+        ...baseProps,
+        availableTerminalHeight: 9,
+        resultDisplay: '```mermaid\ngraph TD; A-->B; B-->C; C-->D\n```',
+      }),
+    );
+    expect(lastFrame()).toContain('graph TD; A-->B; B-->C; C-->D');
+    expect((lastFrame() ?? '').split('\n')).toHaveLength(5);
+  });
+
+  it('keeps a narrow completed math block bounded without guessing its header height', () => {
+    const { lastFrame } = renderWithProviders(
+      resultWithOverflow({
+        ...baseProps,
+        contentWidth: 14,
+        availableTerminalHeight: 9,
+        resultDisplay: '$$\nx\n$$',
+      }),
+    );
+    expect(lastFrame()).toContain('$$');
+    expect(lastFrame()).not.toContain('LaTeX');
+    expect((lastFrame() ?? '').split('\n')).toHaveLength(6);
+  });
+
+  it('counts raw blockquote indentation before choosing full Markdown', async () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderModeProvider value={{ renderMode: 'raw', setRenderMode: vi.fn() }}>
+        {resultWithOverflow({
+          ...baseProps,
+          contentWidth: 26,
+          availableTerminalHeight: 12,
+          resultDisplay: Array.from(
+            { length: 6 },
+            () => ' '.repeat(28) + '> x',
+          ).join('\n'),
+        })}
+      </RenderModeProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(8);
+    expect(lastFrame()).toContain('> x');
+  });
+
+  it('keeps the completed-result tail even when its group is still pending', () => {
+    const { lastFrame } = renderWithProviders(
+      resultWithOverflow({
+        ...baseProps,
+        isPending: true,
+        resultDisplay: Array.from(
+          { length: 60 },
+          (_, i) => `**row ${i}**`,
+        ).join('\n'),
+      }),
+    );
+    expect(lastFrame()).toContain('row 59');
+    expect(lastFrame()).not.toContain('row 0');
+  });
+
+  it('keeps executing Markdown results pending', () => {
+    const { lastFrame } = renderWithProviders(
+      resultWithOverflow({
+        ...baseProps,
+        isPending: true,
+        status: ToolCallStatus.Executing,
+        resultDisplay: Array.from(
+          { length: 60 },
+          (_, i) => `**row ${i}**`,
+        ).join('\n'),
+      }),
+    );
+    expect(lastFrame()).toContain('row 0');
+    expect(lastFrame()).not.toContain('viewport too small');
+    expect(lastFrame()).not.toContain('**');
+  });
+
+  it('uses a streaming cue for a pending table', () => {
+    const { lastFrame } = renderWithProviders(
+      resultWithOverflow({
+        ...baseProps,
+        isPending: true,
+        status: ToolCallStatus.Executing,
+        resultDisplay:
+          '| A | B |\n| --- | --- |\n' +
+          Array.from(
+            { length: 40 },
+            (_, i) => `| value${i} | result${i} |`,
+          ).join('\n'),
+      }),
+    );
+    expect(lastFrame()).toContain('more rows streaming');
+    expect(lastFrame()).not.toContain('viewport too small');
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(16);
+  });
+
+  it('keeps a force-shown resumed shell result literal and tail-preserving', () => {
+    const { lastFrame } = renderWithProviders(
+      resultWithOverflow({
+        ...baseProps,
+        name: 'Shell',
+        renderOutputAsMarkdown: undefined,
+        forceShowResult: true,
+        resultDisplay: Array.from(
+          { length: 60 },
+          (_, i) => `**row ${i}**`,
+        ).join('\n'),
+      }),
+    );
+    expect(lastFrame()).toContain('**row 59**');
+    expect(lastFrame()).not.toContain('**row 0**');
+  });
+
   it.each([
     [
       'paragraphs',
@@ -62,14 +266,14 @@ describe('tool result Markdown with a real renderer', () => {
     ],
     [
       'list marker wrapping',
-      Array.from({ length: 12 }, () => '- ' + 'a'.repeat(20)).join('\n'),
+      Array.from({ length: 20 }, () => '- ' + 'a'.repeat(20)).join('\n'),
       24,
     ],
     [
       'asymmetric table after prose',
       'One\nTwo\nThree\nFour\n| A | B |\n| --- | --- |\n' +
         `| ${'x'.repeat(100)} | ${'a '.repeat(20).trim()} |\n` +
-        Array.from({ length: 9 }, () => '| a | b |').join('\n'),
+        Array.from({ length: 50 }, () => '| a | b |').join('\n'),
       80,
       40,
     ],
@@ -165,7 +369,10 @@ describe('tool result Markdown with a real renderer', () => {
       expect(frame.split('\n').length).toBeLessThanOrEqual(
         availableTerminalHeight - 4,
       );
-      expect(frame).toMatch(/more (?:lines?|rows)/);
+      expect(frame.split('\n').length).toBeGreaterThanOrEqual(
+        availableTerminalHeight - 6,
+      );
+      expect(frame).toMatch(/\.\.\. first \d+/);
       expect(frame).not.toContain('streaming');
     },
   );
@@ -189,6 +396,10 @@ describe('tool result Markdown with a real renderer', () => {
       await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
       expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(
         availableTerminalHeight - 4,
+      );
+      expect(lastFrame()).toContain('value39');
+      expect((lastFrame() ?? '').split('\n').length).toBeGreaterThanOrEqual(
+        availableTerminalHeight - 6,
       );
       rerender(
         withProviders(
@@ -225,7 +436,7 @@ describe('tool result Markdown with a real renderer', () => {
     expect(lastFrame()).not.toContain('**');
   });
 
-  it('clears overflow when content becomes short, empty, or is unmounted', async () => {
+  it('clears overflow when content becomes short or the result subtree is unmounted', async () => {
     const props = { ...baseProps, resultDisplay: '**long line**\n'.repeat(60) };
     const { lastFrame, rerender } = renderWithProviders(
       resultWithOverflow(props),

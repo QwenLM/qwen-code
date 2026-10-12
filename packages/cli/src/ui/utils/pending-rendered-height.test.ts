@@ -55,6 +55,10 @@ describe('estimateWrappedRows', () => {
     expect(estimateWrappedRows('hello', 80)).toBe(1);
   });
 
+  it('counts newlines even when their combined width fits', () => {
+    expect(estimateWrappedRows('aaa\nbbbb\ncc', 80)).toBe(3);
+  });
+
   it('returns 1 for an empty line', () => {
     expect(estimateWrappedRows('', 80)).toBe(1);
   });
@@ -381,6 +385,155 @@ describe('fitPendingSlice', () => {
     expect(clipped).toBe(true);
     expect(keptLines).toBe(1);
     expect(fitPendingSlice(lines, 80, 14, CLAMP, false).clipped).toBe(false);
+  });
+
+  it('bounds a table that becomes the frontier after slicing following text', () => {
+    const lines = [
+      'intro',
+      '| A | B |',
+      '| --- | --- |',
+      '| x | y |',
+      `| ${'z'.repeat(500)} | y |`,
+      'after',
+    ];
+    expect(fitPendingSlice(lines, 80, 14, CLAMP).keptLines).toBe(1);
+  });
+
+  it('rejects an oversized first table when checking a completed result', () => {
+    const lines = ['| A | B |', '| --- | --- |', '| x | y |'];
+    expect(fitPendingSlice(lines, 80, 1, CLAMP, false)).toEqual({
+      keptLines: 0,
+      clipped: true,
+    });
+  });
+
+  it('does not price raw pipe rows as a visual table', () => {
+    const lines = [
+      '| A | B |',
+      '| --- | --- |',
+      '| x | y |',
+      'one',
+      'two',
+      'three',
+    ];
+    expect(
+      fitPendingSlice(lines, 80, 6, CLAMP, false, { renderVisualBlocks: false })
+        .clipped,
+    ).toBe(false);
+  });
+
+  it('does not keep a pending table when even its margins cannot fit', () => {
+    expect(
+      fitPendingSlice(['| A | B |', '| --- | --- |', '| x | y |'], 80, 1, 1)
+        .keptLines,
+    ).toBe(0);
+  });
+
+  it('charges expanded tabs in code blocks', () => {
+    expect(
+      fitPendingSlice(['```', '\t'.repeat(6) + 'x', '```'], 24, 3, CLAMP)
+        .keptLines,
+    ).toBe(2);
+  });
+
+  it('charges the code gutter and padding', () => {
+    expect(
+      fitPendingSlice(['```', 'x'.repeat(78), '```'], 80, 3, CLAMP).keptLines,
+    ).toBe(2);
+  });
+
+  it('charges the list marker and indentation', () => {
+    expect(
+      fitPendingSlice(['- ' + 'x'.repeat(22)], 24, 1, CLAMP).keptLines,
+    ).toBe(0);
+  });
+
+  it('counts code gutters in raw mode too', () => {
+    const lines = [
+      '```text',
+      ...Array.from({ length: 4 }, () => 'x'.repeat(23)),
+      '```',
+    ];
+    expect(
+      fitPendingSlice(lines, 24, 6, CLAMP, false, { renderVisualBlocks: false })
+        .clipped,
+    ).toBe(true);
+  });
+
+  it('does not claim a completed diagram fits from its source height', () => {
+    const lines = ['```mermaid', 'graph TD; A-->B', '```'];
+    expect(fitPendingSlice(lines, 80, 3, CLAMP, false).clipped).toBe(true);
+    expect(
+      fitPendingSlice(lines, 80, 3, CLAMP, false, { renderVisualBlocks: false })
+        .clipped,
+    ).toBe(false);
+  });
+
+  it('does not subtract a disabled code gutter', () => {
+    const lines = [
+      '```',
+      ...Array.from({ length: 9 }, () => 'x'.repeat(79)),
+      '```',
+    ];
+    expect(
+      fitPendingSlice(lines, 80, 11, CLAMP, true, { showLineNumbers: false })
+        .clipped,
+    ).toBe(false);
+  });
+
+  it('keeps code height stable when unrelated lines are appended', () => {
+    const lines = [
+      '```',
+      ...Array.from({ length: 9 }, () => 'x'.repeat(76)),
+      '```',
+    ];
+    expect(fitPendingSlice(lines, 80, 11, CLAMP).keptLines).toBe(11);
+    expect(
+      fitPendingSlice(
+        [...lines, ...Array.from({ length: 1000 }, () => 'after')],
+        80,
+        11,
+        CLAMP,
+      ).keptLines,
+    ).toBe(11);
+  });
+
+  it('includes a continued code block start line in gutter width', () => {
+    const body = Array.from({ length: 9 }, () => 'x'.repeat(75));
+    expect(
+      fitPendingSlice(
+        ['``` qwen-code:start-line=999', ...body, '```'],
+        80,
+        11,
+        CLAMP,
+      ).clipped,
+    ).toBe(true);
+    expect(
+      fitPendingSlice(['```', ...body, '```'], 80, 11, CLAMP).clipped,
+    ).toBe(false);
+  });
+
+  it('does not claim a completed math block fits from its source height', () => {
+    const lines = ['$$', 'x', '$$'];
+    expect(fitPendingSlice(lines, 12, 3, CLAMP, false).clipped).toBe(true);
+    expect(
+      fitPendingSlice(lines, 12, 3, CLAMP, false, { renderVisualBlocks: false })
+        .clipped,
+    ).toBe(false);
+  });
+
+  it('counts the raw blockquote indentation and prefix as ordinary text', () => {
+    const lines = Array.from({ length: 6 }, () => ' '.repeat(28) + '> x');
+    expect(
+      fitPendingSlice(lines, 24, 6, CLAMP, false, { renderVisualBlocks: false })
+        .keptLines,
+    ).toBe(3);
+  });
+
+  it('charges blockquote padding and marker width', () => {
+    expect(
+      fitPendingSlice(['> ' + 'x'.repeat(22)], 24, 1, CLAMP).keptLines,
+    ).toBe(0);
   });
 
   it('accounts for wrapping of non-table lines', () => {

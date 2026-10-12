@@ -883,6 +883,19 @@ describe('<TableRenderer />', () => {
       expect(stripAnsi(output)).toContain('more rows streaming');
     });
 
+    it('does not leave a bare border when a completed table has only two rows', () => {
+      const { lastFrame } = renderWithProviders(
+        <TableRenderer
+          headers={['A', 'B']}
+          rows={manyRows}
+          contentWidth={80}
+          maxHeight={2}
+        />,
+      );
+      expect(lastFrame()).toContain('more rows not shown');
+      expect(lastFrame()).not.toContain('┌');
+    });
+
     it('is a passthrough when maxHeight is undefined (full table)', () => {
       const output = renderWithMaxHeight(['A', 'B'], manyRows, undefined);
       expect(stripAnsi(output)).not.toContain('more rows streaming');

@@ -112,6 +112,7 @@ import {
   getEnclosingFenceInfo,
 } from '../utils/markdownUtilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
+import type { RenderMode } from '../contexts/RenderModeContext.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
@@ -598,8 +599,12 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  renderMode: RenderMode = settings.merged.ui?.renderMode ?? 'render',
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
+  // An active stream retains its starting callbacks across render-mode toggles.
+  const renderModeRef = useRef(renderMode);
+  renderModeRef.current = renderMode;
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeInteractionPromptIdRef = useRef<string | undefined>(undefined);
   const activeInteractionOwnerRef = useRef<
@@ -1983,6 +1988,11 @@ export const useLlmStream = (
           commitWidth,
           commitRowBudget,
           tableClampRows,
+          true,
+          {
+            renderVisualBlocks: renderModeRef.current === 'render',
+            showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
+          },
         );
         if (!clipped) break;
         // Back up to the last blank line at or before the kept prefix — the only
@@ -2075,6 +2085,7 @@ export const useLlmStream = (
       terminalHeight,
       availableTerminalHeightRef,
       terminalWidthRef,
+      settings,
     ],
   );
 

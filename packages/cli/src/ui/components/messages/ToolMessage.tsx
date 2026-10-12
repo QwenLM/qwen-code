@@ -47,6 +47,8 @@ import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
+import { useRenderMode } from '../../contexts/RenderModeContext.js';
+import { fitPendingSlice } from '../../utils/pending-rendered-height.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 
 import {
@@ -623,13 +625,17 @@ const StringResultRenderer: React.FC<{
   availableHeight?: number;
   childWidth: number;
   registerOverflow?: boolean;
+  isPending?: boolean;
 }> = ({
   data,
   renderAsMarkdown,
   availableHeight,
   childWidth,
   registerOverflow,
+  isPending = false,
 }) => {
+  const { renderMode } = useRenderMode();
+  const settings = useSettings();
   let displayData = data;
 
   // Truncate if too long
@@ -637,15 +643,30 @@ const StringResultRenderer: React.FC<{
     displayData = '...' + displayData.slice(-MAXIMUM_RESULT_DISPLAY_CHARACTERS);
   }
 
-  if (renderAsMarkdown) {
+  // Completed overflow keeps the existing plain-text tail, including diagnostics.
+  const useMarkdown =
+    renderAsMarkdown &&
+    (isPending ||
+      availableHeight === undefined ||
+      !fitPendingSlice(
+        displayData.split(/\r?\n/),
+        childWidth,
+        availableHeight,
+        Number.MAX_SAFE_INTEGER,
+        false,
+        {
+          renderVisualBlocks: renderMode === 'render',
+          showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
+        },
+      ).clipped);
+  if (useMarkdown) {
     return (
       <Box flexDirection="column">
         <MarkdownDisplay
           text={displayData}
-          isPending={false}
+          isPending={isPending}
           availableTerminalHeight={availableHeight}
           contentWidth={childWidth}
-          enforceHeightBudget
           registerOverflow={registerOverflow ?? true}
         />
       </Box>
@@ -748,9 +769,8 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   /**
    * True while the tool message is rendered inside `pendingHistoryItems`
    * (live area), false (or omitted — undefined is treated as false)
-   * once committed to `<Static>`. Forwarded for parity with sibling
-   * renderers and possible future gating; currently inert inside this
-   * component. The live-phase filter for panel-owned subagent entries
+   * once committed to `<Static>`. Forwarded to Markdown and sibling renderers.
+   * The live-phase filter for panel-owned subagent entries
    * lives in `ToolGroupMessage` (the only call site), and the terminal
    * `SubagentScrollbackSummary` fires regardless of `isPending` so the
    * inline path can bridge the gap between `unregisterForeground`'s
@@ -772,7 +792,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   emphasis = 'medium',
-  renderOutputAsMarkdown = true,
+  renderOutputAsMarkdown,
   activeShellPtyId,
   embeddedShellFocused,
   ptyId,
@@ -888,8 +908,8 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCappingShell && shellCapHeight === shellOutputMaxLines;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
-  // Keep capped shell output on MaxSizedBox's tail-preserving plain-text path,
-  // including resumed results whose Markdown flag defaults to true (#10640).
+  // Resumed shell output has no Markdown flag; stdout is still plain text.
+  renderOutputAsMarkdown ??= !isShellTool;
   if (isCappingShell) {
     renderOutputAsMarkdown = false;
   }
@@ -1096,6 +1116,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 availableHeight={shellStringCapHeight}
                 childWidth={innerWidth}
                 registerOverflow={!shellCapIgnoresShowMore}
+                isPending={isPending && status === ToolCallStatus.Executing}
               />
             )}
           </Box>

@@ -1846,6 +1846,7 @@ describe('<ToolMessage />', () => {
         {...baseProps}
         name="some-other-tool"
         resultDisplay={exactFitString}
+        renderOutputAsMarkdown={false}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
         forceShowResult

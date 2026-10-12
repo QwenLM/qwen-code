@@ -2459,6 +2459,10 @@ export const AppContainer = (props: AppContainerProps) => {
     [],
   );
 
+  const configuredRenderMode = settings.merged.ui?.renderMode;
+  const [renderMode, setRenderMode] = useState<RenderMode>(
+    configuredRenderMode === 'raw' ? 'raw' : 'render',
+  );
   const {
     streamingState,
     submitQuery,
@@ -2501,6 +2505,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    renderMode,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -3942,10 +3947,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
-  const configuredRenderMode = settings.merged.ui?.renderMode;
-  const [renderMode, setRenderMode] = useState<RenderMode>(
-    configuredRenderMode === 'raw' ? 'raw' : 'render',
-  );
   const renderModeConfigMountedRef = useRef(false);
   useEffect(() => {
     if (!renderModeConfigMountedRef.current) {

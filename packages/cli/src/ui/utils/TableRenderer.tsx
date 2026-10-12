@@ -72,8 +72,8 @@ interface TableRendererProps {
    */
   isStreaming?: boolean;
   /**
-   * Maximum rendered text lines the table may occupy. When set (streaming
-   * preview) and the fully rendered table exceeds it, output is clipped to
+   * Maximum rendered text lines the table may occupy. When set and the fully
+   * rendered table exceeds it, output is clipped to
    * `maxHeight - 1` lines plus a cue. Backstop against a wrapped-cell table
    * overflowing the viewport and triggering the scroll-to-top lock.
    */
@@ -448,8 +448,13 @@ const TableText: React.FC<{
 }> = ({ text, contentWidth, maxHeight, isStreaming, registerOverflow }) => {
   const id = React.useId();
   const { addOverflowingId, removeOverflowingId } = useOverflowActions() ?? {};
-  const lines =
-    maxHeight === undefined ? [] : wrapText(text, contentWidth, { hard: true });
+  const lines: string[] = [];
+  if (maxHeight !== undefined) {
+    for (const line of text.split('\n')) {
+      lines.push(...wrapText(line, contentWidth, { hard: true }));
+      if (lines.length > maxHeight) break;
+    }
+  }
   const isClipped = maxHeight !== undefined && lines.length > maxHeight;
   React.useEffect(() => {
     if (registerOverflow && isClipped) {
@@ -460,7 +465,7 @@ const TableText: React.FC<{
     return () => removeOverflowingId?.(id);
   }, [registerOverflow, isClipped, id, addOverflowingId, removeOverflowingId]);
   if (isClipped) {
-    const kept = lines.slice(0, Math.max(0, maxHeight - 1));
+    const kept = lines.slice(0, maxHeight <= 2 ? 0 : maxHeight - 1);
     kept.push(
       applyColor(
         truncateToWidth(

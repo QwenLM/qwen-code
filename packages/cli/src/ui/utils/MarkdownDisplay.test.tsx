@@ -6,13 +6,23 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import stripAnsi from 'strip-ansi';
+import { Box, Text } from 'ink';
 import { MarkdownDisplay } from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
-import { renderWithProviders } from '../../test-utils/render.js';
+import { renderWithProviders, withProviders } from '../../test-utils/render.js';
+import {
+  OverflowProvider,
+  useOverflowState,
+} from '../contexts/OverflowContext.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
 import { RenderModeProvider } from '../contexts/RenderModeContext.js';
 import { getScreenBuffer } from '../selection/screen-buffer.js';
 import { getSelectedText } from '../selection/selection-text.js';
+
+function OverflowProbe() {
+  const state = useOverflowState();
+  return <Text>overflow:{state?.overflowingIds.size ?? 0}</Text>;
+}
 
 function copiedFrame(stdout: NodeJS.WriteStream): string {
   const frame = getScreenBuffer(stdout)!.frame!;
@@ -40,6 +50,33 @@ describe('<MarkdownDisplay />', () => {
       <MarkdownDisplay {...baseProps} text="" />,
     );
     expect(lastFrame()).toMatchSnapshot();
+  });
+
+  it('clears overflow when the same mounted Markdown instance becomes empty and unmounts', async () => {
+    const longText = '**line**\n'.repeat(60);
+    const tree = (text: string, visible = true) => (
+      <OverflowProvider>
+        <Box width={80} flexDirection="column">
+          {visible && (
+            <MarkdownDisplay
+              {...baseProps}
+              text={text}
+              enforceHeightBudget
+              registerOverflow
+            />
+          )}
+        </Box>
+        <OverflowProbe />
+      </OverflowProvider>
+    );
+    const { lastFrame, rerender } = renderWithProviders(tree(longText));
+    await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
+    rerender(withProviders(tree('')));
+    await vi.waitFor(() => expect(lastFrame()).toBe('overflow:0'));
+    rerender(withProviders(tree(longText)));
+    await vi.waitFor(() => expect(lastFrame()).toContain('overflow:1'));
+    rerender(withProviders(tree(longText, false)));
+    await vi.waitFor(() => expect(lastFrame()).toBe('overflow:0'));
   });
 
   it('renders a simple paragraph', () => {

@@ -143,6 +143,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   registerOverflow = false,
 }) => {
   const { renderMode } = useRenderMode();
+  const settings = useSettings();
   const overflowId = React.useId();
   const { addOverflowingId, removeOverflowingId } = useOverflowActions() ?? {};
 
@@ -213,10 +214,13 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const tableMaxHeight =
     pendingRenderedBudget !== undefined && availableTerminalHeight !== undefined
       ? Math.max(
-          isPending ? 2 : 1,
-          availableTerminalHeight -
-            TABLE_PENDING_RESERVED_ROWS -
-            (enforceHeightBudget && !isPending ? 1 : 0),
+          1,
+          Math.min(
+            pendingRenderedBudget - 2,
+            availableTerminalHeight -
+              TABLE_PENDING_RESERVED_ROWS -
+              (enforceHeightBudget && !isPending ? 1 : 0),
+          ),
         )
       : undefined;
   if (pendingRenderedBudget !== undefined) {
@@ -227,6 +231,10 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       pendingRenderedBudget,
       tableClampRows,
       isPending,
+      {
+        renderVisualBlocks,
+        showLineNumbers: settings.merged.ui?.showLineNumbers ?? true,
+      },
     );
     if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);
@@ -586,10 +594,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       }
       tableRows.push(cells);
     } else if (inTable && !tableRowMatch) {
-      // End of table — a following line closes it, so this table is COMPLETE
-      // and renders in full (the rendered-aware slice guarantees a completed
-      // table that would overflow was cut before it; `maxHeight` clamps the
-      // residual wrapped-cell case).
+      // A following line closes the table. Its layout uses all rows, but a
+      // pending or enforceHeightBudget caller can still clamp its height.
       if (tableHeaders.length > 0 && tableRows.length > 0) {
         addContentBlock(
           <RenderTable
@@ -789,11 +795,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     );
   }
 
-  // Handle table at end of content — the table still being written. Draw it live
-  // (growing each tick); the `maxHeight` clamp caps it at the viewport and the
-  // slice above keeps preceding content within budget, so it can never overflow
-  // and lock the terminal. Renders in full once the message commits to <Static>
-  // (isPending=false → no clamp).
+  // A frontier table grows while pending. The clamp also applies to completed
+  // content that opts into enforceHeightBudget; other completed tables render
+  // in full.
   //
   // While PENDING, defer a table that has no COMPLETE data row yet. A zero-row
   // table can only render horizontally (the vertical fallback needs rows to lay
