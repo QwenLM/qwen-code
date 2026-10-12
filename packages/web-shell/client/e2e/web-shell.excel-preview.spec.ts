@@ -42,6 +42,12 @@ async function workbookBytes(): Promise<Buffer> {
   sheet.getCell('A10').value = 'Merged report note';
   sheet.getCell('A1').font = { bold: true, color: { argb: 'FFFFFFFF' } };
   sheet.getCell('B1').font = { color: { argb: 'FF000000' } };
+  sheet.getCell('C1').font = { bold: true };
+  sheet.getCell('C1').fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF000000' },
+  };
   sheet.getCell('A1').fill = {
     type: 'pattern',
     pattern: 'solid',
@@ -269,6 +275,16 @@ test('previews artifact and @file with lazy Excel loading, formats and virtual s
   });
   await expect(explicitBlackCell).toHaveCSS('color', 'rgb(0, 0, 0)');
   await expect(explicitBlackCell).toHaveCSS(
+    'background-color',
+    'rgb(255, 255, 255)',
+  );
+  const missingForegroundCell = table.getByRole('cell', {
+    name: 'Notes',
+    exact: true,
+  });
+  await expect(missingForegroundCell).toHaveCSS('font-weight', '700');
+  await expect(missingForegroundCell).toHaveCSS('color', 'rgb(0, 0, 0)');
+  await expect(missingForegroundCell).toHaveCSS(
     'background-color',
     'rgb(255, 255, 255)',
   );

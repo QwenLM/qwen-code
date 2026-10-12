@@ -96,6 +96,17 @@ async function getDependencyLicense(depName, depVersion, packageDir) {
     // and an Apache-style NOTICE file (required by Apache-2.0 §4(d)).
     // Append both so the notices they accompany are actually shipped.
     const extraSections = [];
+    // pako 1.0.11's top-level LICENSE omits its lib/zlib/inflate.js header.
+    // Original: https://registry.npmjs.org/pako/-/pako-1.0.11.tgz
+    if (depName === 'pako' && depVersion === '1.0.11') {
+      const zlibLicense = await fs.readFile(
+        new URL('./licenses/pako-1.0.11-zlib.txt', import.meta.url),
+        'utf-8',
+      );
+      extraSections.push(
+        `--- lib/zlib/inflate.js (Zlib) ---\n\n${zlibLicense.trim()}`,
+      );
+    }
     for (const supplementaryFile of await findSupplementaryLicenseFiles(
       packageDir,
     )) {

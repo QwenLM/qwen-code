@@ -60,9 +60,9 @@ function previewCell(cell: Cell, date1904: boolean): ExcelPreviewCell {
     fill?.type === 'pattern' && fill.pattern === 'solid'
       ? rgb(fill.fgColor?.argb)
       : undefined;
-  // Fall back together when an explicit color is unsupported, keeping text readable.
+  // A retained fill needs an explicit foreground; fall back together otherwise.
   const unsupportedColors =
-    (cell.font?.color && !color) ||
+    (!color && !!backgroundColor) ||
     (fill &&
       !(fill.type === 'pattern' && fill.pattern === 'none') &&
       !backgroundColor);

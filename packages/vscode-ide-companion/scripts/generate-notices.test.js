@@ -84,6 +84,27 @@ describe('ExcelJS browser bundle notices', () => {
         expect(dep.license).toMatch(/Copyright|copyright/);
         expect(dep.license).not.toContain('License text not found.');
       }
+      const pakoNotice = notices
+        .split('\npako@1.0.11\n')[1]
+        .split(
+          '============================================================\n',
+        )[0];
+      expect(pakoNotice).toContain(
+        (
+          await fs.readFile(
+            new URL('./licenses/pako-1.0.11-zlib.txt', import.meta.url),
+            'utf-8',
+          )
+        ).trim(),
+      );
+      expect(pakoNotice).toContain("This software is provided 'as-is'");
+      expect(pakoNotice).toContain('1995-2013 Jean-loup Gailly and Mark Adler');
+      expect(pakoNotice).toContain(
+        '2014-2017 Vitaly Puzrin and Andrey Tupitsin',
+      );
+      expect(pakoNotice).toContain(
+        '3. This notice may not be removed or altered from any source distribution.',
+      );
       expect(notices).not.toContain('License text not found.');
       const noticeCount = [
         ...notices.matchAll(/^={60}\n(?=[^\n]+@[^\n]+\n\()/gm),

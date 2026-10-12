@@ -317,6 +317,25 @@ describe('Excel preview projection', () => {
     }
   });
 
+  it.each(['FF000000', 'FF000080'])(
+    'falls back an absent font color with solid fill %s',
+    async (argb) => {
+      const book = new ExcelJS.Workbook();
+      const sheet = book.addWorksheet('Missing foreground');
+      const cell = sheet.getCell('A1');
+      cell.value = 'Readable header';
+      cell.font = { bold: true };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb } };
+      const loaded = await preview(book);
+      expect(loaded.worksheets[0]!.getCell('A1').font).toEqual({ bold: true });
+      const projected = projectExcelSheet(loaded, 0).rows[0]![0]!;
+      expect(projected.text).toBe('Readable header');
+      expect(projected.style.fontWeight).toBe('bold');
+      expect(projected.style.color).toBeUndefined();
+      expect(projected.style.backgroundColor).toBeUndefined();
+    },
+  );
+
   it('keeps merged masters and basic styles without duplicating their values', async () => {
     const book = new ExcelJS.Workbook();
     const sheet = book.addWorksheet('Merged');

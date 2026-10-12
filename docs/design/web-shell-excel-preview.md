@@ -54,8 +54,8 @@ the same value formatter and display them only as plain text. Do not execute for
 Use a white cell canvas so document colors remain readable in dark mode.
 Show basic explicit RGB colors, bold/italic text, alignment, and merges; complex
 styles/themes and embedded objects are outside this preview's fidelity guarantee.
-If an explicit foreground or fill cannot be represented, fall back both colors
-to black on white together. Uncalculated annotations inherit the cell text color.
+If an explicit fill lacks a representable foreground, or the fill cannot be
+represented, fall back both colors to black on white together. Uncalculated annotations inherit the cell text color.
 
 Limit preview input to 10 MiB and each selected sheet to 100,000 grid cells,
 including empty positions inside the content/merge extent. Ignore peripheral
@@ -91,7 +91,7 @@ revalidate this hook on upgrades. Invalid merge addresses fail closed. Rejection
 keeps the original downloadable. These guards do not bound general ZIP expansion
 or general workbook memory. Download retains the existing separate file-size policy.
 
-ExcelJS's prebuilt browser bundle includes packages outside its runtime dependency graph. Record original license texts for all 72 embedded dependency paths (68 package names), with source fingerprints and matching published versions, including nested copies and the original upstream saxes license omitted from its tarball. Source-identical releases cannot be distinguished from the bundle alone. Keep the ordinary dependency walk for nested distributions such as JSZip, but omit ExcelJS's Node-only archiver, unzipper, and tmp branches because the only production importer uses its browser entry. Other consumers of those packages remain included. Notice generation checks the browser entry, bundle hash and version so an upgrade requires reviewing this inventory; tests verify each source path and complete license body.
+ExcelJS's prebuilt browser bundle includes packages outside its runtime dependency graph. Record original license texts for all 72 embedded dependency paths (68 package names), with source fingerprints and matching published versions, including nested copies and the original upstream saxes license omitted from its tarball. Source-identical releases cannot be distinguished from the bundle alone. Keep the ordinary dependency walk for nested distributions such as JSZip, but omit ExcelJS's Node-only archiver, unzipper, and tmp branches because the only production importer uses its browser entry. Other consumers of those packages remain included. For pako 1.0.11, supplement its top-level MIT license with the original Zlib copyright and terms from its lib/zlib/inflate.js source header. Notice generation checks the browser entry, bundle hash and version so an upgrade requires reviewing this inventory; tests verify each source path and complete license body.
 
 ## Affected areas
 

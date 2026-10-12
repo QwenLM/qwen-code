@@ -467,7 +467,9 @@ describe('build artifact — transcript entry (#11031)', () => {
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_323_000);
+    // Trial merge with main at 4cd30565 measures 1,325,565, including the
+    // shared Excel preview translations; the parser remains lazily loaded.
+    expect(js.length).toBeLessThan(1_327_000);
   });
 
   it('carries no Live Voice strings and looks none up', () => {
