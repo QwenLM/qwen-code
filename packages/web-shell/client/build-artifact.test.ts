@@ -410,14 +410,19 @@ describe('build artifact — transcript entry (#11031)', () => {
     // c34b8423, main measures 1,321,586 and this branch 1,324,022; substituting
     // main's i18n table yields an identical JS remainder. The selection-copy
     // menu strings (#13833) land in that same shared table — the menu itself
-    // stays stubbed out of this entry — and measure 1,325,251. The ceiling
-    // leaves a small margin around that intentional UI; re-measure and lower
-    // it if the entry gets leaner.
+    // stays stubbed out of this entry — and measure 1,325,251. The
+    // action-reminder help copy (#13832) entered that same table only after
+    // the 1,325,251 measurement was taken, so the entry was already past the
+    // 1,326,500 ceiling at that re-measure's own merge commit (#13964); the
+    // Managed task panel's copy (#13936) stays stubbed out of this entry.
+    // At 008c0de7 the remainder measures 1,327,531. The ceiling leaves a
+    // small margin around that intentional UI; re-measure and lower it if
+    // the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_326_500);
+    expect(js.length).toBeLessThan(1_329_500);
   });
 
   it('keeps selection copying and its converter out of the transcript entry', () => {
