@@ -16,6 +16,9 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -111,10 +114,34 @@ class ManagedAgentServiceWorkflowChildTest {
         verify(store).replayChildSessionCommand(eq(TENANT), eq(PARENT),
                 replayedKey.capture(), replayed.capture());
         // The replay must answer by the derivation a lost reply actually
-        // carries — not merely repeat whatever digest the insert attempted.
+        // carries — not merely repeat whatever digest the insert attempted:
+        // both name the canonical (sorted-key) request the creation is,
+        // hashed here independently of RequestDigests.
         assertThat(replayedKey.getValue()).isEqualTo(attemptedKey.getValue())
                 .isEqualTo(ManagedAgentService.childCreationKey(PARENT, RUN));
-        assertThat(replayed.getValue()).isEqualTo(attempted.getValue());
+        String expected = sha256("{\"child\":\"" + RUN + "\",\"input\":[{"
+                + "\"definition\":{\"definitionDigest\":\"" + DIGEST + "\","
+                + "\"definitionId\":\"workflow/audit\","
+                + "\"definitionRevision\":1},"
+                + "\"script\":\"" + SCRIPT + "\","
+                + "\"type\":\"workflow_launch\"}],"
+                + "\"title\":\"workflow/audit\"}");
+        assertThat(attempted.getValue()).isEqualTo(expected);
+        assertThat(replayed.getValue()).isEqualTo(expected);
+    }
+
+    private static String sha256(String canonical) {
+        try {
+            byte[] hashed = MessageDigest.getInstance("SHA-256")
+                    .digest(canonical.getBytes(StandardCharsets.UTF_8));
+            StringBuilder result = new StringBuilder("sha256:");
+            for (byte item : hashed) {
+                result.append(String.format("%02x", item & 0xff));
+            }
+            return result.toString();
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     @Test

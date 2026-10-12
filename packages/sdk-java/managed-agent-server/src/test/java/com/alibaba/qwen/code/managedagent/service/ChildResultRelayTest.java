@@ -364,7 +364,7 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("binding");
         assertThat(row.get().childSessionId()).isEqualTo(CHILD);
         verify(sessions, never()).createChildSession(anyString(), anyString(),
-                anyString(), anyString(), anyString());
+                anyString(), anyString(), anyString(), Mockito.anyBoolean());
 
         relay.scan();
         assertThat(row.get().state()).isEqualTo("watching");
@@ -397,11 +397,15 @@ class ChildResultRelayTest {
                         + "\"completion\":\"sent\"}");
         relay.scan();
         // The bounded defer is the answer for a kind the relay cannot
-        // build — never a prompt-shaped guess from another envelope.
+        // build — never a prompt-shaped guess from another envelope. The
+        // reason pins the deliberate refusal: a guess that called the
+        // (unstubbed) prompt arm would also defer, but on its own failure.
         assertThat(row.get().state()).isEqualTo("creating");
         assertThat(row.get().attempts()).isEqualTo(1);
+        assertThat(row.get().lastError())
+                .contains("cannot create kind shell");
         verify(sessions, never()).createChildSession(anyString(), anyString(),
-                anyString(), anyString(), anyString());
+                anyString(), anyString(), anyString(), Mockito.anyBoolean());
         verify(sessions, never()).createWorkflowChildSession(anyString(),
                 anyString(), anyString(), anyString(), anyLong(), anyString(),
                 anyString(), any());
