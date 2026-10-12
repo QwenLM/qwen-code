@@ -743,7 +743,22 @@ jobs:
           RELEASE_CLOBBER: '${{ inputs.clobber }}'
         run: |
           set -euo pipefail
+          # `gh release create --generate-notes` lets the Release Notes API pick
+          # its own start tag. This repo carries several tag families (v*,
+          # desktop-v*, sdk-typescript-v*, cua-driver-rs-v*), so the API anchors
+          # on an unrelated release (observed: cua-driver-rs-v*) and every
+          # Desktop release re-lists the PRs since then. Anchor the notes at the
+          # previous stable Desktop release instead. The API needs an existing
+          # release tag, so resolve it from the release list, not `git tag`.
+          previous_tag="$(
+            gh release list --limit 100 --exclude-drafts --json tagName,isPrerelease \
+              --jq '.[] | select(.isPrerelease | not) | .tagName' \
+              | grep -x 'desktop-v[0-9].*' \
+              | grep -vF -x "$RELEASE_TAG" \
+              | head -n1 || true
+          )"
           args=("$RELEASE_TAG" release-assets/* --target "$GITHUB_SHA" --title "Qwen Code Desktop v$RELEASE_VERSION" --generate-notes --latest=false)
+          if [ -n "$previous_tag" ]; then args+=(--notes-start-tag "$previous_tag"); fi
           if [ "$RELEASE_DRAFT" = 'true' ]; then args+=(--draft); fi
           if [ "$RELEASE_PRERELEASE" = 'true' ]; then args+=(--prerelease); fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
