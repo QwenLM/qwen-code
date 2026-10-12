@@ -1221,9 +1221,16 @@ export async function runNonInteractive(
           repairs: recoveryPlan.repairs,
           hasContinuation: recoveryPlan.continuation !== undefined,
         });
+        // Only a plan that carries a continuation has a confirmation to
+        // check: `clean` and `degraded_history` spread no
+        // `cancellationConfirmationId`, so a caller that passed the
+        // confirmation it read for a turn that has since settled compared two
+        // unrelated things and got a mismatch error where the no-op below is
+        // the answer.
         if (
+          recoveryPlan.continuation &&
           options.confirmCancellation !==
-          recoveryPlan.cancellationConfirmationId
+            recoveryPlan.cancellationConfirmationId
         ) {
           await emitNonInteractiveFinalMessage({
             message:

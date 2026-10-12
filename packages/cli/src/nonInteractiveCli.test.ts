@@ -3036,6 +3036,64 @@ describe('runNonInteractive', () => {
 
       expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
+
+    // A `clean` and a `degraded_history` plan spread no
+    // `cancellationConfirmationId`, so a caller that passes the confirmation
+    // it read for a turn that has since settled must still get the no-op
+    // above, not a mismatch error.
+    it('is still a no-op when a confirmation is supplied for a settled turn', async () => {
+      setupMetricsMock();
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi
+          .fn()
+          .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
+      }));
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-c4',
+        {
+          continueInterrupted: true,
+          confirmCancellation: 'turn-9',
+        },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('rejects a confirmation that does not match the interrupted turn', async () => {
+      setupMetricsMock();
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+        isLastTurnCancelled: vi.fn().mockReturnValue(false),
+        getLastTurnCancellationConfirmationId: vi
+          .fn()
+          .mockReturnValue('turn-9'),
+      }));
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-c5',
+        {
+          continueInterrupted: true,
+          confirmCancellation: 'turn-8',
+        },
+      );
+
+      expect(exitCode).toBe(1);
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+    });
   });
 
   it('on EPIPE, destroys stdout and returns normally instead of process.exit', async () => {
