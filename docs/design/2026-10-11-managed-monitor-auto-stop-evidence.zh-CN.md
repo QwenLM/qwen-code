@@ -111,7 +111,8 @@ Broker 拒绝、丢失的 Runtime Session 或传输失败都应答 `false`。
 - 只有仍在观测的 loop 才发起自动停止。另一个停止进行中时触发的窗口或
   空闲计时器什么也不停。
 - Session close 的 `loop.stop()` 先等待仍在途的自动停止。已证明的自动
-  停止结算记录；只有它的 park 才把记录留给 close 自己的停止。
+  停止结算记录；其最终输出始终未落地时，close 以停止的原因结算记录，且不
+  发出第二次停止（D5）。只有它的 park 才把记录留给 close 自己的停止。
 - 一个停止的退出在该停止自己的应答返回之前已结算了记录时，保留该结算
   （D5）。
 
@@ -127,6 +128,16 @@ manifest 推进到其封口修订，再在自动停止仍在等待时把退出�
 finalize 的 `stopRequested` 标记不会覆盖它。随后到达的 worker 应答发现
 记录已结算；应答丢失也不改变什么，因为退出已经证明了结束。结算之后，记录
 契约只允许 `notifiedThrough` 变化。
+
+已证明的停止仍可能先于其退出到达。publisher 拒绝该 finalize 时（例如
+最终输出推进遇到短暂的存储故障），worker 的 completion 记录投递失败但
+保留证据，因此 `monitor-stop` 仍应答 `exited`。此时没有任何退出到达
+loop，记录的输出也尚未封口。loop 于是让记录保持打开，并保留停止的原因，
+既不 park 也不做终态结算：终态记录会拒绝 publisher 对同一 finalize 的有界
+重驱仍需写入的输出修订。重驱送达退出后，记录以停止的原因结算，并带着封口
+的 manifest。若重驱始终未能落地，Session close 以该原因结算记录，且不发出
+第二次停止，因为停止已获证明。在此之前，watch 已经结束、其持有行也已结算，
+记录却仍显示 `running`。
 
 退出链本身从不发出停止。当 watch 自行结束（或经 drain 结束），而其
 finalize 冲刷的最后一个窗口达到配额时，该窗口照常提交，但不触发配额：
@@ -163,9 +174,10 @@ finalize 冲刷的最后一个窗口达到配额时，该窗口照常提交，�
   `runtime_session_not_found`；停止未获证明，记录 park。Harness 不会为了
   停止而重新获取 Runtime Session。
 - **publisher 在停止时拒绝的 finalize** 仍会得到 `exited`（worker 的
-  completion 记录投递失败但保留证据）。loop 结算，之后对该 finalize 的
-  重驱无法再推进已结算记录的输出。这与任何在 finalize 链之外运行的结算
-  有相同的暴露面。
+  completion 记录投递失败但保留证据）。记录以停止的原因保持打开，直到该
+  finalize 的重驱落地（D5）。有界重驱耗尽时，或 Session close 在待触发的
+  重驱之前结算记录时，记录结算后输出 manifest 仍为 pending。任何先于被拒
+  finalize 运行的终态结算都有相同的暴露面。
 - **未证明的自动停止可能以 `stop_requested` 结束。** worker 在尝试 kill
   之前就把停止标记为已请求。该停止未获证明而 watch 稍后结束时，其
   finalize 带着这个标记，打开的 park 按 #13889 对 park 之后的停止的规则
@@ -181,7 +193,8 @@ finalize 冲刷的最后一个窗口达到配额时，该窗口照常提交，�
 - Broker（`RuntimeBrokerServiceTest`）：接纳 `monitor-status` 与
   `monitor-stop`，在 `unknown` 时保留、在 `exited` 时结算持有行，以及之后不再发出任何维护调用
   的 routine release；停止仍在途时 routine release 应答 held 而不是 busy；
-  Harness drain 期间的停止；拒绝别的 Session 的 key、恰在一个归属字段
+  完成的 Monitor control 不结束任何 control 栅栏，因此仍在途的计入栅栏的
+  control 让 release 保持 busy；Harness drain 期间的停止；拒绝别的 Session 的 key、恰在一个归属字段
   （Harness Session、Runtime Session、binding、generation）上与本 Session
   的 watch 不同的 watch、Shell 行、不配对的组合、不存在的行与任何持有行都
   不可能带有的 id，且都不转发。
@@ -190,18 +203,25 @@ finalize 冲刷的最后一个窗口达到配额时，该窗口照常提交，�
   （`hosted-workspace-broker.test.ts`）；句柄的证明映射
   （`hosted-monitor-remote-executor.test.ts`）；turn 对 Runtime call 的
   接线（`hosted-workspace-tool-turn.test.ts`）；`max_events` 与
-  `idle_timeout` 只在最终输出落地之后经真实 publisher 结算，以及越过配额的
+  `idle_timeout` 只在最终输出落地之后经真实 publisher 结算（包括存储两次
+  拒绝最终推进、由重驱在记录结算之前落地封口输出的情形），以及越过配额的
   自然退出不经停止即结算（`hosted-shell-publisher.background.test.ts`、
   `hosted-monitor-loop.test.ts`）。loop 还钉住在途的停止
   （`hosted-monitor-loop.test.ts`）：先于 worker 应答落地的退出以停止的
   原因结算，无论该应答被证明还是丢失；不带证据的结束结算为
   `watch_failed`；close 的停止等待自动停止，只在其
   park 时才行动；close 的停止保留其退出造成的结算；在配额 flush 之内触发
-  的空闲计时器不发出第二次停止。
+  的空闲计时器不发出第二次停止；没有退出的已证明停止让记录保持打开、不
+  park，直到退出到达，或在 close 时以其原因结算。
 - 变异轮（在与 main 合并后的代码上运行）：覆盖 Broker 门禁、行结算、逐一
   的各项归属校验、id 筛查、`unknown` 保留、control 栅栏、包装的校验与接纳
   状态、证明映射、退出链、turn 接线与在途停止的每条规则的 27 个变异体，
-  全部被杀死。
+  全部被杀死。第二轮评审又增加 5 个：completion 的栅栏结束，以及针对被拒
+  finalize 保持打开的 4 个（凭证明结算、凭证明 park、丢弃保留的原因、close
+  以该原因结算），全部被杀死。拒绝路径上的栅栏结束没有可观测的变异体：它
+  唯一的抛出来源是 Runtime 进程已死，而这会先让 binding 丢失；丢失的
+  binding 永不重新激活，死进程不会重新可用，release 对栅栏的两处检查都只在
+  lease 证明可用之后才运行。
 - `npm run build && npm run typecheck`、被触及的 CLI 套件，以及
   `runtime-broker` 的 `mvn test` / `checkstyle:check`。
 - 物理：本改动未运行。H3 rig 的 Monitor 臂是加入自动停止走查的位置

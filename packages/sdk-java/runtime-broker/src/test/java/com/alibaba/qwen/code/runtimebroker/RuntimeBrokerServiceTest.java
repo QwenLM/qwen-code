@@ -1885,6 +1885,32 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void harnessMonitorControlEndsNoControlFenceItNeverBegan() throws Exception {
+        // A Monitor control runs unfenced, so its completion ends no fence
+        // either: a stray end would hide the next fenced control from the
+        // release's busy check and release the Session under it (#13896).
+        try (Fixture fixture = monitorFixture()) {
+            ToolExecutionRecord invocation = startMonitorWatch(fixture);
+            Map<String, Object> exited = Map.of("operationId", "call", "state", "exited",
+                    "unitName", "qwen-mon-call", "evidence", Map.of("exitSignal", "SIGTERM"));
+            fixture.transport.controlResult = CompletableFuture.completedFuture(exited);
+            assertEquals(exited, join(fixture.service.control("harness", "runtime",
+                    Map.of("kind", "monitor-stop", "sessionKey", Map.of("tenantId", "tenant",
+                            "workspaceId", "workspace", "sessionId", "harness"),
+                            "operationId", invocation.getExecutionCallId(), "targetOperationId", "call"))));
+            CompletableFuture<Object> control = new CompletableFuture<>();
+            fixture.transport.controlResult = control;
+            CompletionStage<Object> manifest = fixture.service.control("harness", "runtime",
+                    Map.of("kind", "manifest"));
+            assertEquals("runtime_session_busy",
+                    failure(fixture.service.release("harness", "runtime")).getCode());
+            control.complete("ready");
+            assertEquals("ready", join(manifest));
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+        }
+    }
+
+    @Test
     void harnessMonitorStopStillReachesItsWatchAfterNewAdmissionCloses() throws Exception {
         // Both Monitor kinds are recovery kinds: a stop the quota owes must
         // reach the watch even once the Harness is draining, where ordinary

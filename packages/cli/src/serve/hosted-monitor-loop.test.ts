@@ -111,13 +111,16 @@ class FakeExecutor {
     this.onExit = onExit;
     return Promise.resolve({
       receipt: { watch: 'started' },
-      terminate: () => {
+      terminate: async () => {
         this.terminateCalls += 1;
         if (this.holdStop)
           return new Promise<boolean>((resolve) =>
             this.heldStops.push(resolve),
           );
-        return Promise.resolve(this.provesStop);
+        // The worker answers a proven stop only after the finalize that
+        // carries the stopped watch's exit returned (#13896).
+        if (this.provesStop) await this.exitStopped();
+        return this.provesStop;
       },
     });
   }
@@ -473,6 +476,7 @@ describe('HostedMonitorLoop', () => {
     await rig.clock.advance(1_000);
     // The held-Runtime drain could not prove its stop, so the close parks
     // this loop and fails: the Session and its publisher stay alive.
+    rig.executor.provesStop = false;
     await rig.loop.stop('runtime_lost');
     expect(committed(rig.authority).run).toMatchObject({
       state: 'recovery_blocked',
@@ -497,11 +501,13 @@ describe('HostedMonitorLoop', () => {
 
     rig.executor.onLine?.('one');
     await rig.clock.advance(1_000);
+    rig.executor.provesStop = false;
     await rig.loop.stop('runtime_lost');
     expect(committed(rig.authority).run.state).toBe('recovery_blocked');
 
     // The retried close drained, so its stop call is proven and must not be
     // skipped over the earlier park.
+    rig.executor.provesStop = true;
     await rig.loop.stop('stop_requested');
     expect(committed(rig.authority)).toMatchObject({
       stopReason: 'stop_requested',
@@ -585,6 +591,8 @@ describe('HostedMonitorLoop', () => {
       // The close's stop issues nothing while the auto-stop still waits.
       expect(rig.executor.terminateCalls).toBe(1);
 
+      // A proven answer with no exit before it: the final output never
+      // landed, so the close settles at the auto-stop's reason itself.
       rig.executor.answerStop(proven);
       await fired;
       if (!proven) {
@@ -599,6 +607,45 @@ describe('HostedMonitorLoop', () => {
         run: { state: proven ? 'settled' : 'cancelled', execution: 'settled' },
       });
       expect(rig.executor.terminateCalls).toBe(calls);
+      await closeLoop(rig);
+    },
+  );
+
+  it.each([
+    ['max_events', { maxEvents: 1 }, 1_000],
+    ['idle_timeout', { idleTimeoutMs: 60_000 }, 60_000],
+  ] as const)(
+    'keeps a proven %s stop open until its refused finalize lands (#13896)',
+    async (reason, bounds, firing) => {
+      const harness = await createHarness();
+      const rig = await openLoop(harness);
+      rig.executor.holdStop = true;
+      const parked = vi.spyOn(rig.session, 'blockedRuntimeLost');
+      await rig.loop.start(params(bounds));
+
+      if (reason === 'max_events') rig.executor.onLine?.('one');
+      const fired = rig.clock.advance(firing);
+      await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+      // The worker proved the end, but the publisher refused the finalize
+      // that carries it: the sealed output has not reached the record, and
+      // a terminal record would refuse it.
+      rig.executor.answerStop(true);
+      await fired;
+      await rig.loop.done;
+      expect(committed(rig.authority)).toMatchObject({
+        stopReason: null,
+        run: { state: 'running' },
+      });
+      expect(parked).not.toHaveBeenCalled();
+
+      // The finalize's redrive delivers the exit, which settles at the
+      // stop's reason, not at its stop marker.
+      await rig.executor.exitStopped();
+      expect(committed(rig.authority)).toMatchObject({
+        stopReason: reason,
+        run: { state: 'settled', execution: 'settled' },
+      });
+      expect(rig.executor.terminateCalls).toBe(1);
       await closeLoop(rig);
     },
   );
@@ -677,6 +724,7 @@ describe('HostedMonitorLoop', () => {
     );
     expect(rig.executor.terminateCalls).toBe(1);
 
+    await rig.executor.exitStopped();
     rig.executor.answerStop(true);
     await fired;
     await rig.loop.done;

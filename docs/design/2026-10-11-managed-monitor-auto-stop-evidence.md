@@ -126,8 +126,9 @@ worker. While it waits, the loop keeps three rules:
 - Only a loop that still observes starts an auto-stop. A window or idle
   timer that fires while another stop is under way stops nothing.
 - The Session close's `loop.stop()` first waits for an auto-stop still in
-  flight. A proven auto-stop settles the record; only its park leaves the
-  record to the close's own stop.
+  flight. A proven auto-stop settles the record, or, when its final output
+  never landed, the close settles it at the stop's reason with no second
+  stop (D5). Only its park leaves the record to the close's own stop.
 - A stop whose exit settled the record before the stop's own answer
   returned keeps that settlement (D5).
 
@@ -146,6 +147,20 @@ does not override it. The worker's answer that follows finds the record
 settled, and a lost answer changes nothing, because the exit already
 proved the end. After the settle the record contract allows only
 `notifiedThrough` to change.
+
+A proven stop can still arrive before its exit. When the publisher refuses
+that finalize (for example, a transient store failure on the final output
+forward), the worker's completion records the delivery failure and keeps
+the evidence, so `monitor-stop` still answers `exited`. No exit has reached
+the loop, and the record's output is not sealed yet. The loop then keeps
+the record open at the stop's reason, with no park and no terminal settle:
+a terminal record would refuse the output revision that the publisher's
+bounded redrive of the same finalize still has to write. The redrive
+delivers the exit, and the record settles at the stop's reason with its
+sealed manifest. If the redrive never lands, the Session close settles the
+record at that reason with no second stop, since the stop is already
+proven. Until then the record reads `running` for a watch that has ended,
+while its hold row is already settled.
 
 The exit chain itself never issues a stop. When a watch ends on its own (or
 through a drain) and the final window its finalize flushes reaches the
@@ -191,9 +206,11 @@ answers a stop only after the same finalize returns.
   The Harness does not re-acquire the Runtime Session for a stop.
 - **A finalize the publisher refuses at the stop** still yields `exited`
   (the worker's completion records the delivery failure but keeps the
-  evidence). The loop settles, and a later redrive of that finalize cannot
-  advance the output of a settled record. This is the same exposure as any
-  settle that runs outside the finalize chain.
+  evidence). The record stays open at the stop's reason until the
+  finalize's redrive lands (D5). When the bounded redrive runs out, or the
+  Session close settles the record before a pending redrive fires, the
+  record settles with its output manifest still pending. Any terminal
+  settle that runs ahead of a refused finalize has the same exposure.
 - **An unproven auto-stop can end as `stop_requested`.** The worker marks
   the stop requested before it tries the kill. When that stop stays
   unproven and the watch ends later, its finalize carries the marker, and
@@ -213,8 +230,9 @@ answers a stop only after the same finalize returns.
 - Broker (`RuntimeBrokerServiceTest`): admission of `monitor-status` and
   `monitor-stop`, the hold row kept on `unknown` and settled on `exited`, and a routine
   release with no further maintenance call; a routine release that answers
-  held, not busy, while a stop is still in flight; a stop during a Harness
-  drain; refusal of another Session's key, of a watch that differs from the
+  held, not busy, while a stop is still in flight; a completed Monitor
+  control that ends no control fence, so a fenced control still in flight
+  keeps the release busy; a stop during a Harness drain; refusal of another Session's key, of a watch that differs from the
   Session's in exactly one ownership field (Harness Session, Runtime
   Session, binding, generation), of a Shell row, a mismatched pair, a
   missing row and an id no hold row can carry, none of them forwarded.
@@ -224,19 +242,30 @@ answers a stop only after the same finalize returns.
   the handle's proof mapping (`hosted-monitor-remote-executor.test.ts`);
   the turn's wiring of the Runtime call (`hosted-workspace-tool-turn.test.ts`);
   `max_events` and `idle_timeout` settling through the real publisher only
-  after the final output landed, and a natural exit that crosses the quota
-  settling with no stop (`hosted-shell-publisher.background.test.ts`,
+  after the final output landed, including a final forward the store
+  refuses twice whose redrive lands the sealed output before the record
+  settles, and a natural exit that crosses the quota settling with no stop
+  (`hosted-shell-publisher.background.test.ts`,
   `hosted-monitor-loop.test.ts`). The loop also pins the stop in flight
   (`hosted-monitor-loop.test.ts`): an exit that lands before the worker's
   answer settles at the stop's reason whether that answer is proven or
   lost; an end without evidence settles `watch_failed`; a close stop waits out the auto-stop and acts only on its park; a
-  close stop keeps the settlement its exit made; and an idle timer that
-  fires inside the quota flush issues no second stop.
+  close stop keeps the settlement its exit made; an idle timer that
+  fires inside the quota flush issues no second stop; and a proven stop
+  with no exit keeps the record open and unparked until the exit arrives,
+  or settles at its reason on the close.
 - Mutation pass, run on the code merged with main: 27 mutants over the
   Broker gate, the row settle, each ownership check on its own, the id
   screen, the `unknown` keep, the control fence, the wrapper's validation
   and accepted states, the proof mapping, the exit chain, the turn wiring
-  and each stop-in-flight rule, all killed.
+  and each stop-in-flight rule, all killed. The second review round added
+  five more: the completion's fence end, and four over the refused-finalize
+  hold (settling on the proof, parking on it, dropping the kept reason, and
+  the close's settle at that reason), all killed. The refusal path's fence
+  end has no observable mutant. Its only throw is a dead Runtime process,
+  which loses the binding first. A lost binding is never reactivated, a
+  dead process does not become usable again, and both release checks of the
+  fence run only after the lease proves usable.
 - `npm run build && npm run typecheck`, the touched CLI suites, and
   `mvn test` / `checkstyle:check` for `runtime-broker`.
 - Physical: not run in this change. The H3 rig's Monitor arm is where an

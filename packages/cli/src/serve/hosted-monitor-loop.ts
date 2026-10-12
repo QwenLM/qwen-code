@@ -117,7 +117,9 @@ export class HostedMonitorLoop {
    * worker answers a stop only after the finalize that carries the watch's
    * exit returns, so an exit that arrives meanwhile is that stop's own
    * evidence: it settles the record at this reason from inside its chain,
-   * and the answer that follows finds the record settled (#13896).
+   * and the answer that follows finds the record settled. A proven stop
+   * whose finalize the publisher refused keeps the reason for that
+   * finalize's redrive (#13896).
    */
   private stopping: 'exited' | 'max_events' | 'idle_timeout' | undefined;
   /** The auto-stop's whole arm, which a stop call waits out first. */
@@ -228,8 +230,9 @@ export class HostedMonitorLoop {
    * stop, never as a bare exit (#13856 A8). A loop that parked on an
    * unproven auto-stop is still open here: the watch kept running, so its
    * physical end is the evidence that finally settles the record. An exit
-   * that arrives while an auto-stop waits on the worker settles at that
-   * stop's reason instead of its own stop marker (#13896).
+   * that arrives while an auto-stop waits on the worker, or that a refused
+   * finalize's redrive delivers after the stop proved the end, settles at
+   * that stop's reason instead of its own stop marker (#13896).
    */
   private onExit(failed: boolean, stopRequested = false): Promise<void> {
     if (this.settled && !failed) return Promise.resolve();
@@ -304,14 +307,23 @@ export class HostedMonitorLoop {
    * drain — or the watch's own end — still owes the record its settlement
    * (#13856). An auto-stop already waiting on the worker goes first: its
    * proof settles the record, and only its park leaves the record to this
-   * call. The exit a stop causes may settle the record before the stop's
-   * own answer returns, and that settlement stands (#13896).
+   * call. A proven auto-stop whose final output never landed settles here
+   * at its own reason, with no second stop. The exit a stop causes may
+   * settle the record before the stop's own answer returns, and that
+   * settlement stands (#13896).
    */
   async stop(
     settle: 'stop_requested' | 'runtime_lost' = 'stop_requested',
   ): Promise<void> {
     await this.autoStop?.catch(() => undefined);
     if (this.settled) return;
+    if (this.stopping !== undefined) {
+      const stopReason = this.stopping;
+      this.stopping = undefined;
+      this.settled = true;
+      await this.monitors.settleQuiet(this.monitorId, stopReason);
+      return;
+    }
     this.ended = true;
     this.disarm();
     await this.handle?.terminate();
@@ -416,26 +428,27 @@ export class HostedMonitorLoop {
    * proven stop may settle the record at that reason. An unproven one parks
    * on the same honest line `stop()` uses, so a watch that still runs never
    * reports as a task that ended — and the park leaves the record open,
-   * because that watch's own end is still to come (#13856).
+   * because that watch's own end is still to come (#13856). A proven stop
+   * normally finds the record already settled by its exit (D5). One that
+   * does not means the publisher refused the finalize carrying that exit,
+   * and its redrive must still advance the record's output to the sealed
+   * manifest, which a terminal record refuses: the record stays open at
+   * this reason until that exit lands, or the Session close settles it
+   * (#13896).
    */
   private async autoStopWatch(
     handle: MonitorWatchHandle,
     stopReason: 'exited' | 'max_events' | 'idle_timeout',
   ): Promise<void> {
     this.stopping = stopReason;
-    let proven: boolean;
+    let proven = false;
     try {
       proven = await handle.terminate();
     } finally {
-      this.stopping = undefined;
+      if (!proven || this.settled) this.stopping = undefined;
     }
-    if (this.settled) return;
-    if (!proven) {
-      await this.monitors.blockedRuntimeLost(this.monitorId);
-      return;
-    }
-    this.settled = true;
-    await this.monitors.settleQuiet(this.monitorId, stopReason);
+    if (this.settled || proven) return;
+    await this.monitors.blockedRuntimeLost(this.monitorId);
   }
 
   private disarm(): void {

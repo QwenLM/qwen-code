@@ -565,12 +565,15 @@ it('melds a monitor watch through one terminal step only after its start receipt
 
 it.each([
   // The quota fires from the debounce window that commits its last
-  // observation; the idle window fires with nothing observed.
-  ['max_events', 1_000, 1],
-  ['idle_timeout', 60_000, 0],
+  // observation; the idle window fires with nothing observed. A refused
+  // finalize still proves the stop, and its redrive lands the output.
+  ['max_events', false, 1_000, 1],
+  ['idle_timeout', false, 60_000, 0],
+  ['max_events', true, 1_000, 1],
+  ['idle_timeout', true, 60_000, 0],
 ] as const)(
-  'settles the %s auto-stop only on the worker stop evidence, after its final output (#13896)',
-  async (reason, firing, observed) => {
+  'settles the %s auto-stop only on the worker stop evidence, after its final output (refused finalize: %s) (#13896)',
+  async (reason, refused, firing, observed) => {
     const r = await rig();
     const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
     await r.monitors.admit({
@@ -599,6 +602,7 @@ it.each([
     // finalizes through the publisher first, and only that completion's
     // exit evidence comes back as `exited`.
     const stops: unknown[] = [];
+    let advance: { mock: { calls: unknown[] } } | undefined;
     const broker = {
       async monitorControl(operation: unknown) {
         stops.push(operation);
@@ -615,12 +619,25 @@ it.each([
         prepared.sink.setStopRequested();
         await prepared.sink.finish('stdout', true);
         await prepared.sink.finish('stderr', true);
-        await r.registry.accept(
-          prepared.identity,
-          await prepared.sink.finalize('error', [], {
-            message: 'Background Shell terminated with SIGTERM.',
-          }),
-        );
+        // A store that fails the final forward and its first redrive, then
+        // heals: only the bounded redrive can land the sealed output.
+        if (refused)
+          advance = vi
+            .spyOn(r.monitors, 'advanceOutput')
+            .mockRejectedValueOnce(new Error('transient store 5xx #1'))
+            .mockRejectedValueOnce(new Error('transient store 5xx #2'));
+        try {
+          await r.registry.accept(
+            prepared.identity,
+            await prepared.sink.finalize('error', [], {
+              message: 'Background Shell terminated with SIGTERM.',
+            }),
+          );
+        } catch (cause) {
+          // The worker's completion records the delivery failure and keeps
+          // the exit evidence it answers with.
+          if (!refused) throw cause;
+        }
         return {
           operationId: 'worker-call-a',
           state: 'exited' as const,
@@ -664,6 +681,30 @@ it.each([
       await prepared.sink.write('stdout', Buffer.from('built\n'));
     timers.get(firing)!.shift()!();
     await loop.done;
+    if (refused) {
+      // The record settles only once the redrive landed the sealed output.
+      await vi.waitFor(
+        async () => {
+          const settled = parseMonitorRun(
+            session!.authority.extensionRecord(
+              'monitor_run',
+              'monitor-execution',
+            )!.record,
+          );
+          expect(settled.stopReason).not.toBeNull();
+          const manifest = parseToolResultManifestBytes(
+            await (
+              session!.resources as {
+                read: (ref: ManagedSessionDurableRef) => Promise<Buffer>;
+              }
+            ).read(settled.outputRef!),
+          );
+          expect(manifest.captureStatus).toBe('complete');
+        },
+        { timeout: 5_000, interval: 50 },
+      );
+      expect(advance!.mock.calls.length).toBeGreaterThanOrEqual(3);
+    }
 
     expect(stops).toEqual([
       {
