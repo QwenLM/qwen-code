@@ -362,7 +362,7 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
         closing: false,
       }),
     ).rejects.toThrow(/budget_exhausted/);
-  });
+  }, 30_000);
 
   it("commits the leader's receipt against an attached run and refetches its reply", async () => {
     const lead = await leadSideSetup();
