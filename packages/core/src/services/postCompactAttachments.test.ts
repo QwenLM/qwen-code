@@ -1953,4 +1953,21 @@ describe('stripAnalysisBlock', () => {
       'Docs mention <analysis> here.\n\nREAL SUMMARY about </thinking> handling';
     expect(stripAnalysisBlock(docs)).toBe(docs);
   });
+
+  it('keeps the same prose when it trails a real envelope', () => {
+    // The suffix chain judges the note exactly like the generic pass does;
+    // an envelope in front must not change what prose survives.
+    const input =
+      '<state_snapshot>real</state_snapshot>\n' +
+      'Note: <analysis> pairs with </think> in the wild.';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
+
+  it('keeps gap prose naming the instructed tag on the rebind path', () => {
+    const input =
+      '<state_snapshot>a</state_snapshot>\n' +
+      'Note: <analysis> pairs with </think> here\n' +
+      '<state_snapshot>b</state_snapshot>';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
 });

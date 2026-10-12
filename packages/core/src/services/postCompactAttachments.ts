@@ -576,9 +576,10 @@ const CLOSED_ANALYSIS_BLOCK_ANYWHERE = new RegExp(
   `<analysis>[\\s\\S]*?<\\/analysis>\\s*`,
   'gi',
 );
-const UNCLOSED_ANALYSIS_BLOCK = /<analysis>[\s\S]*$/i;
-// Generic-pass variant: when a reasoning closer is mentioned after the
-// opener, the opener is prose discussing the tags, not a truncated block.
+// When a reasoning closer is mentioned after the opener, the opener is
+// prose discussing the tags, not a truncated block. Every unclosed
+// instructed-tag pass uses this variant, so a note naming the tags is kept
+// the same way with or without an envelope in front of it.
 const UNCLOSED_ANALYSIS_BLOCK_PROSE =
   /<analysis>(?![\s\S]*<\/(?:analysis|think|thinking|reasoning)>)[\s\S]*$/i;
 const UNCLOSED_REASONING_BLOCK = new RegExp(
@@ -653,7 +654,7 @@ export function stripAnalysisBlock(rawSummary: string): string {
       .slice(end)
       .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
       .replace(CLOSED_REASONING_BLOCK, '')
-      .replace(UNCLOSED_ANALYSIS_BLOCK, '')
+      .replace(UNCLOSED_ANALYSIS_BLOCK_PROSE, '')
       .replace(UNCLOSED_REASONING_BLOCK, '');
     const firstCloseAt = rawSummary.indexOf(
       ENVELOPE_CLOSE,
@@ -681,7 +682,7 @@ export function stripAnalysisBlock(rawSummary: string): string {
           .slice(0, secondOpen)
           .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
           .replace(CLOSED_REASONING_BLOCK, '')
-          .replace(UNCLOSED_ANALYSIS_BLOCK, '')
+          .replace(UNCLOSED_ANALYSIS_BLOCK_PROSE, '')
           .replace(UNCLOSED_REASONING_BLOCK, '') +
         gapRaw
           .slice(secondOpen)
