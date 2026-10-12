@@ -125,8 +125,8 @@ const wakeDeps = vi.hoisted(() => ({
 }));
 
 const domainEnablement = vi.hoisted(() => ({
-  childRun: false,
-  monitorRun: false,
+  childRun: true,
+  monitorRun: true,
 }));
 
 vi.mock(
@@ -138,18 +138,37 @@ vi.mock(
       >();
     return {
       ...actual,
+      // #13856: monitor_run is enabled in production, so the real gate
+      // decides it; the hook stays for a case that needs it shut.
       assertManagedSessionDomainEnabled: (
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
-        if (domain === 'child_run' && domainEnablement.childRun) return;
-        if (domain === 'monitor_run' && domainEnablement.monitorRun) return;
+        if (domain === 'monitor_run' && !domainEnablement.monitorRun) {
+          throw new actual.ManagedSessionRecordError(
+            'domain monitor_run is registered but not enabled for submission.',
+          );
+        }
         actual.assertManagedSessionDomainEnabled(domain);
       },
-      // H4b: record commits gate per kind, beside the admission mock.
+      // H4b: record commits gate per kind, beside the admission mock. The
+      // shell kind is enabled in production (#13856), so every kind the
+      // production list carries goes through the real gate; a case that
+      // needs the shell kind shut closes it per test. A kind production
+      // has not enabled (a workflow planting) stays a fixture, admitted so
+      // the case runs what it is about rather than the kind gate.
       assertManagedSessionChildRunKindEnabled: (kind: string) => {
-        if (!domainEnablement.childRun) {
-          actual.assertManagedSessionChildRunKindEnabled(kind);
+        if (kind === 'shell' && !domainEnablement.childRun) {
+          throw new actual.ManagedSessionRecordError(
+            'domain child_run kind shell is registered but not enabled for submission.',
+          );
         }
+        if (
+          !(
+            actual.MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]
+          ).includes(kind)
+        )
+          return;
+        actual.assertManagedSessionChildRunKindEnabled(kind);
       },
     };
   },
@@ -163,6 +182,29 @@ vi.mock('./hosted-monitor-wake-turn.js', async (importOriginal) => {
     createMonitorWakeRunTurn: (params: never) => {
       wakeDeps.last = params;
       return actual.createMonitorWakeRunTurn(params as never);
+    },
+  };
+});
+
+const neverStartedReconcile = vi.hoisted(() => ({
+  fn: vi.fn((input: unknown) => input),
+  gate: undefined as Promise<void> | undefined,
+}));
+vi.mock('./hosted-never-started-reconcile.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./hosted-never-started-reconcile.js')
+    >();
+  return {
+    ...actual,
+    reconcileNeverStartedChildRuns: async (
+      input: Parameters<typeof actual.reconcileNeverStartedChildRuns>[0],
+    ) => {
+      neverStartedReconcile.fn(input);
+      const gate = neverStartedReconcile.gate;
+      neverStartedReconcile.gate = undefined;
+      if (gate !== undefined) await gate;
+      return actual.reconcileNeverStartedChildRuns(input);
     },
   };
 });
@@ -1365,6 +1407,43 @@ describe('Hosted Harness no-tool session', () => {
       expect(state.model).not.toHaveBeenCalled();
     },
   );
+
+  it('runs the never-started reconcile for a fresh Session open', async () => {
+    neverStartedReconcile.fn.mockClear();
+    await hookApp();
+    expect(neverStartedReconcile.fn).toHaveBeenCalledTimes(1);
+    expect(neverStartedReconcile.fn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authority: expect.anything(),
+        resources: expect.anything(),
+        childRuns: expect.any(HostedChildRunSession),
+        brokerOptions: expect.anything(),
+      }),
+    );
+  });
+
+  it('holds the fresh Session open until the never-started reconcile completes', async () => {
+    neverStartedReconcile.fn.mockClear();
+    let release!: () => void;
+    neverStartedReconcile.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let opened = false;
+    const pending = hookApp().then((app) => {
+      opened = true;
+      return app;
+    });
+    try {
+      await vi.waitFor(() =>
+        expect(neverStartedReconcile.fn).toHaveBeenCalledTimes(1),
+      );
+      expect(opened).toBe(false);
+    } finally {
+      release();
+    }
+    await pending;
+    expect(opened).toBe(true);
+  });
 
   it.each([
     { tenantId: 'foreign' },
@@ -2856,6 +2935,73 @@ describe('Hosted Harness no-tool session', () => {
             event.payload['turnId'] === inputId,
         ),
       ).toBe(true);
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  });
+
+  it('registers a wake Runtime a background run still holds, for the close drain (#13856 R1-28)', async () => {
+    const inputId = await prewriteAutomationParkedWakeSession();
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      }),
+    });
+    try {
+      // The wake turn started a background Shell that still holds its Runtime,
+      // so the routine release refuses `runtime_session_held`. The aftermath
+      // must read that as the designed hold — register it for the close's
+      // drain and keep settling — never drain (that would stop a run the user
+      // meant to keep), and never wedge the Session on the refusal.
+      const repair = mockRepairBroker();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+        () =>
+          Promise.reject(
+            new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+          ),
+      );
+      repair.unlatch();
+      const heldRuntimeTurns = new Set<string>();
+      const session = {
+        managed,
+        automations: new HostedAutomationSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          key,
+        ),
+        heldRuntimeTurns,
+      } as never;
+      const aftermath = await settleCrashedWakeTurnAftermath({
+        session,
+        sessionId: SESSION_ID,
+        cwd: state.root,
+        brokerOptions: { token: '', baseUrl: 'http://127.0.0.1:8080' } as never,
+        turnId: inputId,
+      });
+      expect(aftermath).toBe('settled');
+      expect(heldRuntimeTurns.has(inputId)).toBe(true);
     } finally {
       await managed.close().catch(() => undefined);
     }
@@ -6401,7 +6547,7 @@ describe('Hosted Harness no-tool session', () => {
           .status,
       ).toBe(204);
     } finally {
-      domainEnablement.childRun = false;
+      domainEnablement.childRun = true;
     }
   });
 
@@ -7359,6 +7505,192 @@ describe('Hosted Harness no-tool session', () => {
     expect(parked.run.state).toBe('recovery_blocked');
     expect(parked.run.reason).toBe('runtime_lost');
     expect(parked.run.execution).toBe('outcome_unknown');
+  });
+
+  it('drains a turn-held Runtime at close through the drain arm (#13856)', async () => {
+    // The designed hold: the turn's routine release is refused
+    // `runtime_session_held`, the turn settles clean (no recovery park),
+    // and the Session's close owes the Runtime's drain release.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+      randomUUID(),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+      error: { message: 'not run' },
+    });
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+    );
+    release.mockResolvedValue();
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'registerPublisher',
+    ).mockResolvedValue('1');
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'run_shell_command',
+        callId: 'shell',
+        args: { command: 'printf hello' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: {
+              id: call.callId,
+              name: call.name,
+              args: call.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      await toolTurn!.consumeResults();
+      return { text: 'done', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'run command' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        // The designed hold is not a wedge: the Session stays healthy.
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release.mock.calls[0]).toEqual([]);
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        )
+      ).status,
+    ).toBe(204);
+    // The close handed the held Runtime back through the drain arm.
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(release.mock.calls[1]).toEqual([{ drain: true }]);
+  });
+
+  it('closes a Session whose held Runtime is already gone (#13856 R1-1)', async () => {
+    // The held turn's Runtime is already gone by the close: the drain's 404
+    // names nothing left to stop, so the close tolerates it and answers 204
+    // rather than wedging on a 503 over a Session that can never close.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+      randomUUID(),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+      error: { message: 'not run' },
+    });
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+    );
+    release.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(404, 'runtime_session_not_found'),
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'registerPublisher',
+    ).mockResolvedValue('1');
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'run_shell_command',
+        callId: 'shell',
+        args: { command: 'printf hello' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: {
+              id: call.callId,
+              name: call.name,
+              args: call.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      await toolTurn!.consumeResults();
+      return { text: 'done', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'run command' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        )
+      ).status,
+    ).toBe(204);
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(release.mock.calls[1]).toEqual([{ drain: true }]);
   });
 
   type DetachedFamily = 'child_run' | 'monitor_run';
@@ -21830,7 +22162,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         supertest(replacement).delete(`/session/${SESSION_ID}`),
       );
     } finally {
-      domainEnablement.childRun = false;
+      domainEnablement.childRun = true;
     }
   }, 30_000);
 
@@ -22077,7 +22409,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
           supertest(replacement).delete(`/session/${SESSION_ID}`),
         );
       } finally {
-        domainEnablement.childRun = false;
+        domainEnablement.childRun = true;
       }
     },
     30_000,
@@ -22387,7 +22719,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         );
         await headers(supertest(second).delete(`/session/${SESSION_ID}`));
       } finally {
-        domainEnablement.childRun = false;
+        domainEnablement.childRun = true;
       }
     },
     30_000,
@@ -22618,7 +22950,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect(retried).toBe(0);
         expect(domainCommits('team_task')).toBe(1);
       } finally {
-        domainEnablement.childRun = false;
+        domainEnablement.childRun = true;
       }
     },
     30_000,

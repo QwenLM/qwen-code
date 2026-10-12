@@ -283,15 +283,33 @@ importers:
 
   integrations/test-failure-explorer:
     devDependencies:
+      '@modelcontextprotocol/ext-apps':
+        specifier: ^1.7.5
+        version: 1.7.5(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@3.25.76))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(zod@3.25.76)
       '@modelcontextprotocol/sdk':
         specifier: ^1.30.0
         version: 1.30.0(supports-color@7.2.0)(zod@3.25.76)
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
+      '@types/react':
+        specifier: ^19.2.0
+        version: 19.2.10
+      '@types/react-dom':
+        specifier: ^19.2.0
+        version: 19.2.3(@types/react@19.2.10)
       esbuild:
         specifier: ^0.25.0
         version: 0.25.12
+      jsdom:
+        specifier: ^26.1.0
+        version: 26.1.0(supports-color@7.2.0)
+      react:
+        specifier: ^19.2.4
+        version: 19.2.4
+      react-dom:
+        specifier: ^19.2.4
+        version: 19.2.4(react@19.2.4)
       typescript:
         specifier: 5.8.3
         version: 5.8.3
