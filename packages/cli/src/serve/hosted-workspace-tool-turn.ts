@@ -4589,7 +4589,12 @@ export class HostedWorkspaceToolTurn {
       // byte_limit and budget_exhausted are the funnel's member-facing
       // refusals; a store fault is recovery's, never the call's answer.
       if (cause instanceof ManagedSessionRecordError) {
-        return answer(cause.message, true);
+        const parts = await answer(cause.message, true);
+        // A normal local refusal still owes the parked wait its fold —
+        // a durable wait it leaves behind turns the Turn's next call
+        // into a recovery fault.
+        await this.harness.resolveAwaitCommand(commandId);
+        return parts;
       }
       throw cause;
     }
