@@ -17,6 +17,7 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { parseChildShellRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import * as stdio from '../utils/stdioHelpers.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { reconcileNeverStartedChildRuns } from './hosted-never-started-reconcile.js';
@@ -412,6 +413,66 @@ describe('reconcileNeverStartedChildRuns', () => {
     expect(result.settled).toEqual([]);
     expect(result.skipped).toEqual(['shell-1']);
     expect(committed('shell-1').run.execution).toBe('dispatch_started');
+  });
+
+  it('attributes each skip cause with the session id and never logs the rejection message', async () => {
+    await open();
+    await createManagedHarnessHandle(session!).ensureRunnable();
+    await strand('shell-ambiguous');
+    await strand('shell-rejected');
+    await strand('shell-no-identity');
+    await strand('shell-foreign');
+    await appendIntent('shell-ambiguous', 'runtime-a');
+    await appendIntent('shell-rejected', 'runtime-a');
+    await appendIntent('shell-foreign', 'runtime-a', 'another-session');
+    // shell-no-identity intentionally has no tool.intent at all.
+    const rejection = Object.assign(
+      new Error(
+        'fetch failed: GET https://broker.test/internal/runtime-broker/v1/executions/shell-rejected:process?runtimeSessionId=runtime-a',
+      ),
+      { status: 401, code: 'runtime_broker_auth_rejected' },
+    );
+    broker.backgroundProcessStatus.mockImplementation(async (id) => {
+      if (id === 'shell-rejected') throw rejection;
+      if (id === 'shell-ambiguous') return { state: 'executing' as const };
+      return undefined;
+    });
+    await reopen();
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    try {
+      const result = await reconcileNeverStartedChildRuns({
+        authority: session!.authority,
+        resources: session!.resources,
+        childRuns: orchestratorOf(session!),
+        brokerOptions: BROKER_OPTIONS,
+      });
+
+      expect(result.settled).toEqual([]);
+      expect(result.skipped.toSorted()).toEqual([
+        'shell-ambiguous',
+        'shell-foreign',
+        'shell-no-identity',
+        'shell-rejected',
+      ]);
+      // One diagnostic line attributes every skip to its own cause; a bare
+      // `skipped.join(', ')` here goes red.
+      expect(stderr).toHaveBeenCalledTimes(1);
+      const line = stderr.mock.calls.at(0)?.[0] as string;
+      expect(line).toContain(`session ${key.sessionId}`);
+      expect(line).toContain('shell-ambiguous (ambiguous_state (executing))');
+      expect(line).toContain(
+        'shell-rejected (probe_rejected (status 401, code runtime_broker_auth_rejected))',
+      );
+      expect(line).toContain('shell-no-identity (no_identity)');
+      expect(line).toContain('shell-foreign (route_foreign)');
+      expect(line).not.toContain('https://');
+      expect(line).not.toContain('fetch failed');
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(committed('shell-ambiguous').run.execution).toBe('dispatch_started');
   });
 
   it.each([

@@ -125,6 +125,11 @@ started: false })` → 经 `commitExtensionRecord` 提交
 5. 结算**提交**错误向上传播（会话自身写平面失败必须响亮可重试）；
    一切**取证**错误（路由读取、status）记入 `skipped`，绝不阻塞
    open —— Broker 暂不可达只是「未证明」，恰是 R3 安全的回答。
+   搁死记录的诊断行带会话 id，并把每条跳过归因到独立原因 ——
+   `no_identity`、`route_foreign`、`probe_rejected`（只带拒绝的
+   HTTP status/code 字段，绝不带嵌有请求 URL 的错误消息文本）、
+   `ambiguous_state` —— 永久性空洞（凭据错误）不再与瞬时不可达
+   输出逐字节相同的行。
 
 ### 挂点：hosted 会话 open
 
@@ -166,7 +171,8 @@ if (session.childRuns && brokerOptions)
   失），回合内的 `close_not_started` arm 无法证明「从未启动」，这样
   的记录只能搁浅到某次重开运行本 arm —— 而常驻 Session 可能永远不会
   重开。补上另一半位于 `hosted-workspace-tool-turn.ts` 的派发路径，
-  是它自己的后续工作，且落地时必须保持「仅行缺失」（R3）。
+  是它自己的后续工作（跟踪为 #13937），且落地时必须保持
+  「仅行缺失」（R3）。
 - 不做周期扫描器：按 R1 只做 reload。open 时 Broker 不可达留下的洞，
   留到下一次 reload 自愈；严格好于今天（永远没有）。
 - 探测后不 `release()`：release 会持久 `RELEASED` 并楔死该 runtime
@@ -191,6 +197,11 @@ stub 的 `HostedWorkspaceBroker` 模块）：
   记录不动（仍 `dispatch_started`，无 settle 提交）。
 - **R3 无身份**：无 `tool.intent` 路由 / 会话不匹配 ⇒ 跳过。
 - **R3 非搁死**：`running_attached` 记录连候选都不是。
+
+- **跳过原因归因**：搁死记录的诊断行带会话 id 与每条记录的独立原因
+  （`no_identity` / `route_foreign` / `probe_rejected` 只带拒绝的
+  HTTP status/code 字段、绝不带其消息文本 / `ambiguous_state`）；
+  见证 spy 住 stderr 写入器，原因退回裸 id 或拒绝文本泄漏入行即红。
 
 契约层（`contracts/managed-child-run-record-v1.fixtures.json`）：
 

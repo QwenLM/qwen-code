@@ -137,7 +137,12 @@ started: false })` → commits `state: failed`,
    failing is loudly retryable); every _proof-reading_ error (route read,
    status) is reported in `skipped` and never blocks the open —
    a Broker that is not reachable yet simply means "not proven", which is
-   the R3-safe answer.
+   the R3-safe answer. The stranded-record diagnostic names the session
+   and attributes each skip to its own cause — `no_identity`,
+   `route_foreign`, `probe_rejected` (with the rejection's HTTP
+   status/code fields only, never its message text, which embeds the
+   request URL), or `ambiguous_state` — so a permanent hole (a bad
+   token) can no longer read byte-identically to a transient outage.
 
 ### Hook point: hosted session open
 
@@ -183,7 +188,8 @@ if (session.childRuns && brokerOptions)
   arm cannot prove never-started, and such a record strands until a
   reopen runs this arm — which a resident Session may never see. Closing
   that half lives in `hosted-workspace-tool-turn.ts`'s dispatch path, is
-  its own follow-up, and must stay row-absence-only when it lands (R3).
+  its own follow-up (tracked as #13937), and must stay row-absence-only
+  when it lands (R3).
 - No periodic scanner: reload-only per R1. A broker-outage-at-open hole
   stays stranded until a later reload; strictly better than today (never).
 - No `release()` after probing: releasing persists `RELEASED` and wedges
@@ -210,6 +216,13 @@ stubbed `HostedWorkspaceBroker` module):
   ⇒ record untouched (still `dispatch_started`, no settle commit).
 - **R3 no-identity**: no `tool.intent` route / mismatched session ⇒ skip.
 - **R3 not-stranded**: `running_attached` records are never even candidates.
+
+- **Skip-cause attribution**: the stranded-record diagnostic carries the
+  session id and a per-record cause (`no_identity` / `route_foreign` /
+  `probe_rejected` with the rejection's HTTP status/code fields only,
+  never its message text / `ambiguous_state`); the witness spies the
+  stderr writer, so collapsing the cause back to a bare id or leaking
+  rejection text into the line goes red.
 
 Contract level (`contracts/managed-child-run-record-v1.fixtures.json`):
 

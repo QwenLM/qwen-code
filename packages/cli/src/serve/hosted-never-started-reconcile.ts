@@ -38,6 +38,25 @@ export interface NeverStartedReconcileResult {
   readonly skipped: readonly string[];
 }
 
+type RouteResolution =
+  | { readonly runtimeSessionId: string }
+  | { readonly failure: 'no_identity' | 'route_foreign' };
+
+// The stderr diagnostic carries these fields and nothing more: the
+// rejection's message embeds the request URL with its session ids (and a
+// mis-typed logger could leak the bearer token), so only the status/code
+// pair is ever interpolated.
+function rejectionDetail(cause: unknown): string {
+  const bag =
+    cause !== null && typeof cause === 'object'
+      ? (cause as Record<string, unknown>)
+      : {};
+  const parts: string[] = [];
+  if (typeof bag['status'] === 'number') parts.push(`status ${bag['status']}`);
+  if (typeof bag['code'] === 'string') parts.push(`code ${bag['code']}`);
+  return parts.length > 0 ? parts.join(', ') : 'no status';
+}
+
 function asDurableRef(value: unknown): ManagedSessionDurableRef | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
     return undefined;
@@ -55,20 +74,24 @@ async function runtimeSessionIdOfRoute(
   resources: { read(ref: ManagedSessionDurableRef): Promise<Buffer> },
   routeRef: ManagedSessionDurableRef,
   harnessSessionId: string,
-): Promise<string | undefined> {
-  if (routeRef.kind !== 'managed-tool-input') return undefined;
+): Promise<RouteResolution> {
+  if (routeRef.kind !== 'managed-tool-input') return { failure: 'no_identity' };
   const route = JSON.parse(
     (await resources.read(routeRef)).toString('utf8'),
   ) as { harnessSessionId?: unknown; runtimeSessionId?: unknown };
-  if (
-    route.harnessSessionId !== harnessSessionId ||
-    typeof route.runtimeSessionId !== 'string'
-  )
-    return undefined;
-  return assertManagedSessionStableId(
-    route.runtimeSessionId,
-    'recovered Runtime owner',
-  );
+  if (route.harnessSessionId !== harnessSessionId)
+    return {
+      failure:
+        route.harnessSessionId === undefined ? 'no_identity' : 'route_foreign',
+    };
+  if (typeof route.runtimeSessionId !== 'string')
+    return { failure: 'no_identity' };
+  return {
+    runtimeSessionId: assertManagedSessionStableId(
+      route.runtimeSessionId,
+      'recovered Runtime owner',
+    ),
+  };
 }
 
 export async function reconcileNeverStartedChildRuns(input: {
@@ -116,30 +139,35 @@ export async function reconcileNeverStartedChildRuns(input: {
   }
   const settled: string[] = [];
   const skipped: string[] = [];
+  const skipCauses = new Map<string, string>();
+  const skip = (record: ChildRun, cause: string): void => {
+    skipped.push(record.shellId);
+    skipCauses.set(record.shellId, cause);
+  };
   const groups = new Map<string, ChildRun[]>();
   for (const record of candidates) {
     const executionCallId = record.run.executionCallId ?? record.shellId;
-    let runtimeSessionId: string | undefined;
+    let resolution: RouteResolution;
     try {
       const routeRef = intents.get(executionCallId);
-      runtimeSessionId =
+      resolution =
         routeRef === undefined
-          ? undefined
+          ? { failure: 'no_identity' }
           : await runtimeSessionIdOfRoute(
               input.resources,
               routeRef,
               sessionKey.sessionId,
             );
     } catch {
-      runtimeSessionId = undefined;
+      resolution = { failure: 'no_identity' };
     }
-    if (runtimeSessionId === undefined) {
-      skipped.push(record.shellId);
+    if ('failure' in resolution) {
+      skip(record, resolution.failure);
       continue;
     }
-    const group = groups.get(runtimeSessionId);
+    const group = groups.get(resolution.runtimeSessionId);
     if (group === undefined) {
-      groups.set(runtimeSessionId, [record]);
+      groups.set(resolution.runtimeSessionId, [record]);
     } else {
       group.push(record);
     }
@@ -163,12 +191,12 @@ export async function reconcileNeverStartedChildRuns(input: {
       let answer: { state: string } | undefined;
       try {
         answer = await broker.backgroundProcessStatus(executionCallId);
-      } catch {
-        skipped.push(record.shellId);
+      } catch (cause) {
+        skip(record, `probe_rejected (${rejectionDetail(cause)})`);
         continue;
       }
       if (answer !== undefined) {
-        skipped.push(record.shellId);
+        skip(record, `ambiguous_state (${answer.state})`);
         continue;
       }
       await input.childRuns.settleFailed(record.shellId, {
@@ -180,8 +208,11 @@ export async function reconcileNeverStartedChildRuns(input: {
   }
   if (skipped.length > 0) {
     writeStderrLineSafe(
-      `qwen serve: ${skipped.length} stranded child run(s) stayed ` +
-        `unsettled on reload (not proven never-started): ${skipped.join(', ')}.`,
+      `qwen serve: session ${sessionKey.sessionId}: ${skipped.length} ` +
+        `stranded child run(s) stayed unsettled on reload (not proven ` +
+        `never-started): ${skipped
+          .map((shellId) => `${shellId} (${skipCauses.get(shellId)})`)
+          .join(', ')}.`,
     );
   }
   if (settled.length > 0) {
