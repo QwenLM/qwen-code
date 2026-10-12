@@ -33,11 +33,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "code",
-          "severity",
-          "count"
-        ],
+        "required": ["code", "severity", "count"],
         "properties": {
           "code": {
             "type": "string",
@@ -45,11 +41,7 @@
             "maxLength": 128
           },
           "severity": {
-            "enum": [
-              "info",
-              "warning",
-              "error"
-            ]
+            "enum": ["info", "warning", "error"]
           },
           "count": {
             "type": "integer",
@@ -67,9 +59,7 @@
     "author": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "name"
-      ],
+      "required": ["name"],
       "properties": {
         "name": {
           "type": "string",
@@ -78,11 +68,7 @@
         },
         "kind": {
           "type": "string",
-          "enum": [
-            "root",
-            "subagent",
-            "teammate"
-          ],
+          "enum": ["root", "subagent", "teammate"],
           "description": "Which kind of agent produced the block when the identity came from the wire agent field: the session root, a delegated subagent, or an Agent Team teammate."
         }
       }
@@ -297,20 +283,13 @@
           "if": {
             "properties": {
               "status": {
-                "enum": [
-                  "completed",
-                  "failed"
-                ]
+                "enum": ["completed", "failed"]
               }
             },
-            "required": [
-              "status"
-            ]
+            "required": ["status"]
           },
           "then": {
-            "required": [
-              "resultPreview"
-            ]
+            "required": ["resultPreview"]
           }
         }
       ],
@@ -353,12 +332,7 @@
           "maxLength": 409600
         },
         "status": {
-          "enum": [
-            "completed",
-            "failed",
-            "cancelled",
-            "canceled"
-          ]
+          "enum": ["completed", "failed", "cancelled", "canceled"]
         },
         "background": {
           "type": "boolean"
@@ -430,10 +404,7 @@
           "maxLength": 409600
         },
         "stream": {
-          "enum": [
-            "stdout",
-            "stderr"
-          ]
+          "enum": ["stdout", "stderr"]
         }
       }
     },
@@ -480,10 +451,7 @@
           "maxLength": 400
         },
         "stream": {
-          "enum": [
-            "stdout",
-            "stderr"
-          ]
+          "enum": ["stdout", "stderr"]
         }
       }
     },
@@ -554,13 +522,7 @@
           "maxLength": 200
         },
         "resolved": {
-          "enum": [
-            "approved",
-            "rejected",
-            "cancelled",
-            "expired",
-            "resolved"
-          ]
+          "enum": ["approved", "rejected", "cancelled", "expired", "resolved"]
         }
       }
     },
@@ -697,13 +659,7 @@
     "promptCancelledBlock": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "kind",
-        "clientReceivedAt",
-        "createdAt",
-        "updatedAt"
-      ],
+      "required": ["id", "kind", "clientReceivedAt", "createdAt", "updatedAt"],
       "properties": {
         "id": {
           "type": "string",
@@ -731,10 +687,7 @@
     "rasterImage": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "data",
-        "mimeType"
-      ],
+      "required": ["data", "mimeType"],
       "properties": {
         "data": {
           "type": "string",
@@ -742,22 +695,14 @@
           "pattern": "^[A-Za-z0-9+/]*={0,2}$"
         },
         "mimeType": {
-          "enum": [
-            "image/png",
-            "image/jpeg",
-            "image/gif",
-            "image/webp"
-          ]
+          "enum": ["image/png", "image/jpeg", "image/gif", "image/webp"]
         }
       }
     },
     "usage": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "inputTokens",
-        "outputTokens"
-      ],
+      "required": ["inputTokens", "outputTokens"],
       "properties": {
         "inputTokens": {
           "type": "integer",
@@ -779,11 +724,7 @@
     "permissionOption": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "optionId",
-        "label",
-        "raw"
-      ],
+      "required": ["optionId", "label", "raw"],
       "properties": {
         "optionId": {
           "type": "string",
@@ -806,10 +747,7 @@
     "questionOption": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "label",
-        "raw"
-      ],
+      "required": ["label", "raw"],
       "properties": {
         "label": {
           "type": "string",
@@ -827,11 +765,7 @@
     "question": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "question",
-        "options",
-        "raw"
-      ],
+      "required": ["question", "options", "raw"],
       "properties": {
         "header": {
           "type": "string",
@@ -857,11 +791,7 @@
     "todoEntry": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "content",
-        "status"
-      ],
+      "required": ["id", "content", "status"],
       "properties": {
         "id": {
           "type": "string",
@@ -873,18 +803,10 @@
           "maxLength": 409600
         },
         "status": {
-          "enum": [
-            "pending",
-            "in_progress",
-            "completed"
-          ]
+          "enum": ["pending", "in_progress", "completed"]
         },
         "priority": {
-          "enum": [
-            "high",
-            "medium",
-            "low"
-          ]
+          "enum": ["high", "medium", "low"]
         },
         "blockedBy": {
           "type": "array",
@@ -900,10 +822,7 @@
     "todoPreview": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "kind",
-        "entries"
-      ],
+      "required": ["kind", "entries"],
       "properties": {
         "kind": {
           "const": "todo_list"
@@ -935,10 +854,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "questions"
-          ],
+          "required": ["kind", "questions"],
           "properties": {
             "kind": {
               "const": "ask_user_question"
@@ -955,10 +871,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "command"
-          ],
+          "required": ["kind", "command"],
           "properties": {
             "kind": {
               "const": "command"
@@ -976,10 +889,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "path"
-          ],
+          "required": ["kind", "path"],
           "properties": {
             "kind": {
               "const": "file_diff"
@@ -1005,10 +915,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "path"
-          ],
+          "required": ["kind", "path"],
           "properties": {
             "kind": {
               "const": "file_read"
@@ -1032,10 +939,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "url"
-          ],
+          "required": ["kind", "url"],
           "properties": {
             "kind": {
               "const": "web_fetch"
@@ -1054,11 +958,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "serverId",
-            "toolName"
-          ],
+          "required": ["kind", "serverId", "toolName"],
           "properties": {
             "kind": {
               "const": "mcp_invocation"
@@ -1080,10 +980,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "code"
-          ],
+          "required": ["kind", "code"],
           "properties": {
             "kind": {
               "const": "code_block"
@@ -1107,10 +1004,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "query"
-          ],
+          "required": ["kind", "query"],
           "properties": {
             "kind": {
               "const": "search"
@@ -1137,11 +1031,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "columns",
-            "rows"
-          ],
+          "required": ["kind", "columns", "rows"],
           "properties": {
             "kind": {
               "const": "tabular"
@@ -1176,10 +1066,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "prompt"
-          ],
+          "required": ["kind", "prompt"],
           "properties": {
             "kind": {
               "const": "image_generation"
@@ -1203,11 +1090,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "agentName",
-            "task"
-          ],
+          "required": ["kind", "agentName", "task"],
           "properties": {
             "kind": {
               "const": "subagent_delegation"
@@ -1230,10 +1113,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "rows"
-          ],
+          "required": ["kind", "rows"],
           "properties": {
             "kind": {
               "const": "key_value"
@@ -1244,10 +1124,7 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": [
-                  "label",
-                  "value"
-                ],
+                "required": ["label", "value"],
                 "properties": {
                   "label": {
                     "type": "string",
@@ -1268,9 +1145,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind"
-          ],
+          "required": ["kind"],
           "properties": {
             "kind": {
               "const": "generic"
@@ -1291,11 +1166,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "text",
-            "answers"
-          ],
+          "required": ["kind", "text", "answers"],
           "properties": {
             "kind": {
               "const": "question_answers"
@@ -1310,10 +1181,7 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": [
-                  "question",
-                  "answer"
-                ],
+                "required": ["question", "answer"],
                 "properties": {
                   "question": {
                     "type": "string",
@@ -1331,10 +1199,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "text"
-          ],
+          "required": ["kind", "text"],
           "properties": {
             "kind": {
               "const": "text"
@@ -1348,10 +1213,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "summary"
-          ],
+          "required": ["kind", "summary"],
           "properties": {
             "kind": {
               "const": "generic"
@@ -1377,9 +1239,7 @@
                 "const": true
               }
             },
-            "required": [
-              "complete"
-            ]
+            "required": ["complete"]
           },
           "then": {
             "properties": {
@@ -1390,11 +1250,7 @@
           }
         }
       ],
-      "required": [
-        "exportedAt",
-        "complete",
-        "truncated"
-      ],
+      "required": ["exportedAt", "complete", "truncated"],
       "properties": {
         "title": {
           "type": "string",
