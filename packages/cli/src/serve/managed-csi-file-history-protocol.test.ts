@@ -121,7 +121,7 @@ describe('preparation paths from original resource bytes', () => {
     expect(sample.preparation.paths).not.toContain('read-only.txt');
   });
 
-  it.each(['paths', 'membership', 'owner', 'wrapper'])(
+  it.each(['paths', 'membership', 'owner', 'read-only-path'])(
     'refuses coherent resource hashes with changed %s',
     (fault) => {
       const sample = csiHistoryPreparationFixture();
@@ -138,7 +138,8 @@ describe('preparation paths from original resource bytes', () => {
       if (fault === 'paths') body.preparation.paths = ['caller.txt'];
       if (fault === 'membership') body.preparation.invocations.shift();
       if (fault === 'owner') body.runtimeSessionId = 'foreign';
-      if (fault === 'wrapper') body.preparation.paths.push('read-only.txt');
+      if (fault === 'read-only-path')
+        body.preparation.paths.push('read-only.txt');
       const bytes = Buffer.from(JSON.stringify(body));
       item.bytesBase64 = bytes.toString('base64');
       item.reference['byteLength'] = bytes.length;

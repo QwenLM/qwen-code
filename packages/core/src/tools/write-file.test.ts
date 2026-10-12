@@ -243,6 +243,30 @@ describe('WriteFileTool', () => {
     expect(fs.readFileSync(parent, 'utf8')).toBe('original bytes');
   });
 
+  it('reports a scoped directory confirmation as a structured target error', async () => {
+    const io: TextFileIo = {
+      inspect: vi
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('Directory target'), { code: 'EISDIR' }),
+        ),
+      withMutation: vi.fn(),
+    };
+    const config = {
+      ...mockConfigInternal,
+      getFileSystemService: () =>
+        Object.assign(new StandardFileSystemService(), { textFileIo: io }),
+    } as unknown as Config;
+    await expect(
+      new WriteFileTool(config)
+        .build({ file_path: p('directory'), content: 'new' })
+        .getConfirmationDetails(abortSignal),
+    ).rejects.toMatchObject({
+      name: 'StructuredToolError',
+      errorType: ToolErrorType.TARGET_IS_DIRECTORY,
+    });
+  });
+
   /** Builds, approves the confirmation when it offers one, then executes. */
   async function confirmAndRun(filePath: string, content: string) {
     const invocation = build(filePath, content);

@@ -73,10 +73,42 @@ directory to match history; execution repeats that same fence before effects.
 Changing cwd therefore requires installation for a new Session instead of reusing
 history from another directory.
 
+Boot 5 validates the native installation contract before recording it: the
+operation id is derived from the original Session and context revision is 1.
+Noncanonical reinstall keys and unsupported first revisions refuse without
+replacing the installed record. Exact canonical replays preserve the binding.
+Authority failures before composition or preimage preparation can retry. A failed
+preparation can also retry when history and retained storage are proven unchanged;
+changed or unverifiable effects seal execution and report
+`managed_csi_history_retirement_required`, including already queued snapshots.
+Its retained pins are preserved and its preparation is never silently recopied.
+
+History preparation projects the largest possible next snapshot, file records
+and retained pins before copying, with 1 KiB reserved for the authority envelope.
+It enforces 100 snapshots and the 64 KiB history response budget. Conservative
+capacity refusal reports `managed_csi_history_capacity_exceeded` and leaves the
+prior snapshot and Session usable. It may refuse earlier than an exact
+reuse-aware budget. Settled execution responses allow the executor's existing
+1 MiB result budget plus the bounded 16 KiB request envelope, so UTF-8 Read
+results are not rejected merely because their byte count exceeds 64 KiB.
+
 Write and Edit rethrow errors caught by their outer mutation wrapper when the
 signal is aborted, preserving cancellation propagation at the Core tool API.
 Non-aborted wrapper failures remain typed tool errors. This does not change the
 scheduler's existing cancellation classification or the tools' inner catches.
+
+The scoped writer retains exact pre-write bytes and restores them on a refused
+partial write while preserving the original inode and mode. A failed new-file
+write removes its own leaf. Rollback verifies original descriptor/named-entry
+identity and backup alias fences, and completes without the cancelled signal.
+Only the exact cancellation reason is recoverable after successful rollback;
+storage failures and failed rollback close the backend. Missing files and initial
+non-file path shapes refuse one request; mount, inode, device, backup pin and
+inventory changes remain fatal. This is recovery from observed write errors,
+not qualification of crash atomicity or persistent device failure recovery.
+Retained readiness deduplicates working paths across snapshots, but still checks
+each failed backup and authenticates current storage. Full inventory checking
+remains in place; this change does not claim linear total cost with growing pins.
 
 The Java request retains canonical Session UUID isolation, Workspace generation
 and storage identity, root-relative working directory and a canonical absolute
@@ -152,6 +184,13 @@ worker, composer, executor, Core tools and retained storage. Observe a complete
 bind/prepare/Read/Write/Edit/history-snapshot sequence, original preimages and
 result bytes. Tampered identities/grants/resources, wrong ownership, unavailable
 authority and sealed admission must cause no new file effects.
+
+Also verify illegal context installations do not replace the accepted identity,
+pre-effect authority failures can retry, post-effect preparation failure refuses
+queued snapshots with the retirement code, and capacity refusal precedes copies.
+After cancellation or partial write failure, compare complete original bytes,
+inode and mode; genuine integrity failure must still close admission. Exercise a
+Chinese Read result above 64 KiB and an exact retry through the real HTTP worker.
 
 Keep fixture transport evidence distinct from real SQL issuer evidence. On a
 non-Linux host, any Linux mount/descriptor mapping must be explicitly labelled;

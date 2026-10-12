@@ -37,11 +37,13 @@ const native = JSON.parse(
 );
 
 // Structural readback fixture only; no native SQL admission or CSI preimage I/O.
-export function csiHistoryPreparationFixture() {
+export function csiHistoryPreparationFixture(
+  initial?: CsiFileHistoryObservation,
+) {
   const owner = native.boot.identity.sessionId;
   const promptId = randomUUID();
   const batchId = randomUUID();
-  const observation: CsiFileHistoryObservation = {
+  const observation: CsiFileHistoryObservation = initial ?? {
     state: { ownerSessionId: owner, snapshots: [], files: {} },
     backupDirectory: {
       volumeDevice: '1',
@@ -111,7 +113,7 @@ export function csiHistoryPreparationFixture() {
   };
   const body = {
     operationId: `csi-file-history:intent:${batchId}`,
-    revision: 2,
+    revision: 1,
     previousRecordRef: null,
     schemaVersion: 2,
     profile: 'csi-files-retirement/1',

@@ -515,6 +515,10 @@ export class ManagedToolExecutor {
         );
       const existingHistory = this.fileHistories.get(sessionId);
       let history = tools.fileHistory ?? existingHistory;
+      if (tools.retainedFileHistory && !tools.fileHistory)
+        throw new ManagedToolConflictError(
+          'Retained file history requires its original composition.',
+        );
       if (
         tools.fileHistory &&
         (tools.fileHistory.ownerSessionId !== ownerSessionId ||
@@ -528,7 +532,6 @@ export class ManagedToolExecutor {
             ownerSessionId,
             tools.directory,
             operation.state,
-            tools.retainedFileHistory,
           );
           await history.ready();
           if (!this.isAdmissionOpen)

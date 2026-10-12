@@ -1156,6 +1156,33 @@ describe('Managed Tool worker admission seal', () => {
     }
   });
 
+  it('refuses retained history binding without the original composed history', async () => {
+    const createBackup = vi.fn();
+    const executor = new ManagedToolExecutor(async () => ({
+      sessionId: reference.sessionId,
+      directory: '/unadmitted-retained-workspace',
+      admitsDirectory: () => true,
+      tools: new Map(),
+      retainedFileHistory: {
+        withWorkingFile: vi.fn(),
+        withBackupFile: vi.fn(),
+        createBackup,
+      },
+    }));
+    try {
+      await expect(
+        executor.controlFileHistory(reference.sessionId, reference.sessionId, {
+          kind: 'raw-file-history',
+          action: 'bind',
+          state: null,
+        }),
+      ).rejects.toBeInstanceOf(ManagedToolConflictError);
+      expect(createBackup).not.toHaveBeenCalled();
+    } finally {
+      await executor.close();
+    }
+  });
+
   it('refuses a queued original file invocation at its actual start boundary', async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), 'qwen-worker-queued-seal-'),

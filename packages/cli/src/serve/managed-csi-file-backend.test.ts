@@ -16,6 +16,7 @@ import { composeManagedCsiFiles } from './managed-csi-file-composer.js';
 import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
 import type { ManagedCsiMount } from './managed-csi-mount.js';
 import type { ManagedCsiMountReceipt } from './managed-csi-envelope.js';
+import { readCsiFileHistoryObservation } from './managed-csi-file-history-protocol.js';
 import { isModifiableDeclarativeTool } from '@qwen-code/qwen-code-core/tools/modifiable-tool.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 
@@ -24,6 +25,7 @@ const native = {
   mkdir: fs.mkdir,
   lstat: fs.lstat,
   readdir: fs.readdir,
+  unlink: fs.unlink,
 };
 const signal = new AbortController().signal;
 
@@ -51,7 +53,9 @@ async function fixture(mapped: boolean) {
     rootInode: rootStats.ino.toString(),
   } as ManagedCsiMountReceipt;
   const owner = randomUUID();
-  const addresses = new Map<number, string>([[root.fd, directory]]);
+  const addresses = new Map<number, { handle: FileHandle; address: string }>([
+    [root.fd, { handle: root, address: directory }],
+  ]);
   const opened: Array<{
     handle: FileHandle;
     address: string;
@@ -75,17 +79,22 @@ async function fixture(mapped: boolean) {
     if (!match) return input;
     const parent = addresses.get(Number(match[1]));
     if (!parent) throw new Error('Fixture received an unknown fd.');
-    return match[2] ? path.join(parent, match[2]) : parent;
+    return match[2] ? path.join(parent.address, match[2]) : parent.address;
   };
   vi.spyOn(fs, 'open').mockImplementation(async (file, flags, mode) => {
     const resolved = address(file);
     const handle = await native.open(resolved, flags, mode);
-    addresses.set(handle.fd, String(resolved));
+    const fd = handle.fd;
+    addresses.set(fd, { handle, address: String(resolved) });
+    const actualClose = handle.close.bind(handle);
     opened.push({
       handle,
       address: String(resolved),
       rawAddress: String(file),
-      close: vi.spyOn(handle, 'close'),
+      close: vi.spyOn(handle, 'close').mockImplementation(async () => {
+        await actualClose();
+        if (addresses.get(fd)?.handle === handle) addresses.delete(fd);
+      }),
     });
     onOpened?.(handle, String(file));
     return handle;
@@ -97,6 +106,9 @@ async function fixture(mapped: boolean) {
       native.mkdir(address(file), options)) as typeof fs.mkdir);
     vi.spyOn(fs, 'readdir').mockImplementation(((file) =>
       native.readdir(address(file))) as typeof fs.readdir);
+    vi.spyOn(fs, 'unlink').mockImplementation((file) =>
+      native.unlink(address(file)),
+    );
   }
   let rootClosed = false;
   let closing: Promise<void> | undefined;
@@ -219,6 +231,7 @@ function cases(mapped: boolean) {
     const file = owned.file('raw');
     const bytes = Buffer.from([0xff, 0xfe, 0x61, 0x00, 0x0d, 0x00, 0x0a, 0x00]);
     await fs.writeFile(file, bytes, { mode: 0o640 });
+    await fs.chmod(file, 0o640);
     const composed = await owned.compose();
     expect([...composed.tools.tools.keys()].sort()).toEqual([
       'edit',
@@ -418,9 +431,136 @@ function cases(mapped: boolean) {
       if (kind === 'directory') await fs.mkdir(file);
       await expect(async () =>
         backend.textFileIo.inspect(file),
+      ).rejects.toThrow(kind === 'reserved' ? 'reserved' : 'ordinary file');
+      expect(backend.getDrainInspection().blocked).toBe(false);
+      await fs.writeFile(owned.file('healthy'), 'still usable');
+      expect(
+        await backend.readTextFile({ path: owned.file('healthy') }),
+      ).toMatchObject({ content: 'still usable' });
+    },
+  );
+
+  it('keeps ordinary missing-file and non-directory-parent errors local to the request', async () => {
+    const owned = await fixture(mapped);
+    const backend = await owned.open();
+    await fs.writeFile(owned.file('healthy'), 'still usable');
+    await expect(
+      backend.withReadFile(
+        { path: owned.file('missing'), mediaDelivery: 'inline' },
+        async () => {},
+      ),
+    ).rejects.toMatchObject({ name: 'FileReadOpenError' });
+    await expect(
+      backend.textFileIo.inspect(owned.file('healthy/child')),
+    ).rejects.toMatchObject({ code: 'ENOTDIR' });
+    expect(
+      await backend.readTextFile({ path: owned.file('healthy') }),
+    ).toMatchObject({ content: 'still usable' });
+    expect(backend.getDrainInspection()).toMatchObject({
+      blocked: false,
+      closed: false,
+    });
+  });
+
+  it('closes admission after a genuine read I/O failure', async () => {
+    const owned = await fixture(mapped);
+    const backend = await owned.open();
+    const file = owned.file('unavailable');
+    await fs.writeFile(file, 'original bytes');
+    owned.onOpened((handle, address) => {
+      if (address.endsWith('/unavailable'))
+        vi.spyOn(handle, 'read').mockRejectedValueOnce(
+          Object.assign(new Error('Device I/O failure'), { code: 'EIO' }),
+        );
+    });
+    await expect(backend.readTextFile({ path: file })).rejects.toMatchObject({
+      code: 'EIO',
+    });
+    expect(backend.getDrainInspection().blocked).toBe(true);
+    await expect(backend.close()).rejects.toThrow();
+  });
+
+  it('validates a repeated working path once across retained snapshots', async () => {
+    const owned = await fixture(mapped);
+    await fs.writeFile(owned.file('a'), 'unchanged');
+    const composed = await owned.compose();
+    for (const prompt of ['first', 'second', 'third'])
+      await composed.history.prepare(prompt, ['a', 'new']);
+    const calls = vi.spyOn(
+      composed.tools.retainedFileHistory!,
+      'withWorkingFile',
+    );
+    await composed.history.ready();
+    expect(calls).toHaveBeenCalledTimes(2);
+    expect(composed.history.state().snapshots).toHaveLength(3);
+    const observed = await composed.observe();
+    const parsed = readCsiFileHistoryObservation(
+      { state: observed.history, ...observed.storage },
+      owned.owner,
+    );
+    expect(parsed.state.files['new']).toBeNull();
+    expect(
+      parsed.state.snapshots[0].trackedFileBackups['new'].backupFileName,
+    ).toBeNull();
+  });
+
+  it.each(['abort', 'enospc', 'enospc-with-abort'])(
+    'restores exact original bytes and inode after a partial %s write',
+    async (failure) => {
+      const owned = await fixture(mapped);
+      const file = owned.file('original');
+      const original = Buffer.from([0xff, 0x00, 0x41, 0x41, 0x41, 0x41]);
+      await fs.writeFile(file, original);
+      await fs.chmod(file, 0o640);
+      const before = await native.lstat(file);
+      const backend = await owned.open();
+      const controller = new AbortController();
+      const reason = new DOMException('Cancelled', 'AbortError');
+      owned.onOpened((handle, address) => {
+        if (!address.endsWith('/original')) return;
+        const write = handle.write.bind(handle);
+        let calls = 0;
+        vi.spyOn(handle, 'write').mockImplementation((async (
+          bytes: Buffer,
+          offset: number,
+          length: number,
+          position: number,
+        ) => {
+          if (calls++ === 0) {
+            const result = await write(bytes, offset, 1, position);
+            if (failure === 'abort') controller.abort(reason);
+            return result;
+          }
+          if (failure !== 'abort' && calls === 2) {
+            if (failure === 'enospc-with-abort') controller.abort(reason);
+            throw Object.assign(new Error('Quota exhausted'), {
+              code: 'ENOSPC',
+            });
+          }
+          return write(bytes, offset, length, position);
+        }) as typeof handle.write);
+      });
+      await expect(
+        backend.textFileIo.withMutation(file, controller.signal, (mutation) =>
+          mutation.write({ path: file, content: 'BB' }),
+        ),
       ).rejects.toThrow();
-      if (kind !== 'reserved') await expect(backend.close()).rejects.toThrow();
-      else expect(backend.getDrainInspection().blocked).toBe(false);
+      expect(await fs.readFile(file)).toEqual(original);
+      const after = await native.lstat(file);
+      expect(after.ino).toBe(before.ino);
+      expect(after.mode).toBe(before.mode);
+      if (failure === 'abort') {
+        expect(backend.getDrainInspection()).toMatchObject({
+          blocked: false,
+          closed: false,
+        });
+        expect(await backend.readTextFile({ path: file })).toHaveProperty(
+          'content',
+        );
+      } else {
+        expect(backend.getDrainInspection().blocked).toBe(true);
+        await expect(backend.close()).rejects.toThrow();
+      }
     },
   );
 

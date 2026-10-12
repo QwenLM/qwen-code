@@ -60,9 +60,34 @@ Hosted turn 或 Kubernetes 部署。
 history 一致；执行在文件效果前重复同一检查。改变 cwd 必须为新 Session 安装
 context，不能复用其他目录的历史。
 
+Boot 5 在记录前验证 native installation 契约：operation id 由原始 Session
+派生，context revision 为 1。非规范重装键和不支持的首次 revision 会被拒绝，
+不替换已有记录；规范身份的精确重放保留原绑定。Composition 或 preimage 准备
+之前的 authority 失败可以重试。Preparation 失败后，若验证 history 和 retained
+storage 完全未变也可重试；效果变化或无法验证时会封闭执行，
+返回 `managed_csi_history_retirement_required`，已排队的 snapshot 也适用。
+保留 pins，不静默重新复制同一 preparation。
+
+History 准备在复制前投影下一 snapshot、文件记录和 retained pins 的最大形状，
+为 authority envelope 预留 1 KiB，执行 100 个 snapshot 及 64 KiB 历史回包预算。
+保守容量拒绝返回 `managed_csi_history_capacity_exceeded`，保留之前的 snapshot
+和可用 Session；它可能比精确考虑备份复用的预算更早拒绝。Settled 执行回包
+允许 executor 已有的 1 MiB 结果预算及有界 16 KiB 请求 envelope，避免仅因
+UTF-8 字节数超过 64 KiB 而拒绝 Read 结果。
+
 Write 和 Edit 在 signal 已取消时重抛外层 mutation wrapper 捕获的错误，保留
 Core 工具 API 的取消传播。未取消的 wrapper 错误仍返回带类型的工具失败。这不改变
 scheduler 已有的取消分类或工具的内层 catch。
+
+Scoped writer 保留写入前的精确字节，在部分写入失败时恢复原文件，同时保持
+原 inode 和 mode；新文件写入失败会删除自己创建的 leaf。Rollback 验证原始
+描述符和命名项身份、备份 alias fence，且不再使用已取消的 signal。仅在成功
+恢复且错误正是 signal 的取消 reason 时恢复可用性；存储故障和 rollback 失败
+仍关闭 backend。不存在的文件及首次输入的非文件路径形状只拒绝该请求；mount、
+inode、device、备份 pin 或 inventory 变化仍是致命失败。这是观测到写入错误后的
+恢复，不是 crash 原子性或持续设备故障恢复的资格证明。Retained readiness 对
+跨 snapshot 的 working path 去重，同时保留每个 failed backup 和当前存储验证。
+完整 inventory 检查仍保留，不声称 pin 增长时整体成本为线性。
 
 Java 请求沿用 Broker 编码，保留规范 Session UUID 隔离、Workspace generation
 和存储身份、根相对工作目录及规范绝对 mount root。拒绝根据精确能力摘要，
@@ -123,6 +148,11 @@ attestation 授权及封闭路由处理。执行契约使用真实 HTTP authorit
 以及实际 worker、composer、executor、Core 工具和 retained storage，观察完整
 bind/prepare/Read/Write/Edit/history-snapshot 序列、原始 preimage 和结果字节。
 篡改身份、grant、resource，错误所有权、不可用 authority 和封闭准入应无新文件效果。
+
+还需验证非法 context 安装不替换已接受身份，文件效果前的 authority 失败可重试，
+效果后的准备失败让已排队 snapshot 返回明确退役码，容量拒绝发生在复制之前。
+取消或部分写入失败后比较完整原字节、inode 和 mode，真实完整性失败仍须关闭准入。
+通过真实 HTTP worker 验证超过 64 KiB 的中文 Read 结果及精确重试。
 
 Fixture 传输证据与真实 SQL issuer 证据分开记录。非 Linux 主机上的任何 Linux
 mount 或描述符映射都必须明确标注；未修改的生产启动仍应拒绝不支持的 mount。

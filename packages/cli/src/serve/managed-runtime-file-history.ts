@@ -51,13 +51,17 @@ export class ManagedRuntimeFileHistory {
   async ready(checkPaths = true): Promise<void> {
     await this.history.ready();
     await this.history.service.validateRestoredSnapshots();
+    const checked = new Set<string>();
     for (const snapshot of this.history.state().snapshots) {
       for (const [file, backup] of Object.entries(
         snapshot.trackedFileBackups,
       )) {
-        if (checkPaths) await this.resolve(file.split(path.sep).join('/'));
         if (backup.failed)
           throw new Error('Hosted file history backup is unavailable.');
+        if (checkPaths && !checked.has(file)) {
+          await this.resolve(file.split(path.sep).join('/'));
+          checked.add(file);
+        }
       }
     }
   }
@@ -231,16 +235,19 @@ export class ManagedRuntimeFileHistory {
   private async fingerprint(
     file: string,
   ): Promise<HostedFileHistoryState['files'][string]> {
-    const absolute = await this.resolve(file);
+    historyPath(file);
     if (this.retainedStorage)
-      return this.retainedStorage.withWorkingFile(absolute, async (source) =>
-        source
-          ? {
-              digest: `sha256:${await digestFileReadSource(source)}`,
-              mode: source.stats.mode & 0o7777,
-            }
-          : null,
+      return this.retainedStorage.withWorkingFile(
+        path.join(this.directory, file),
+        async (source) =>
+          source
+            ? {
+                digest: `sha256:${await digestFileReadSource(source)}`,
+                mode: source.stats.mode & 0o7777,
+              }
+            : null,
       );
+    const absolute = await this.resolve(file);
     try {
       const before = await lstat(absolute);
       const digest = createHash('sha256');

@@ -75,11 +75,16 @@ class LocalProcessRuntimeProvisionerTest {
                         new RuntimeResourceHandle(request.getProvisionerKind(), 1,
                                 java.util.Map.of("provider", request.getProvisionerKind())),
                         1, false, null, null, 0, 1, null, Instant.now(), Instant.now());
-                assertEquals(409, assertThrows(RuntimeBrokerException.class,
-                        () -> provisioner.verifyOperatorRegistration(binding)).getStatusCode());
-                assertEquals(409, assertThrows(RuntimeBrokerException.class,
-                        () -> provisioner.attestOperatorStop(binding, java.util.UUID.randomUUID().toString()))
-                        .getStatusCode());
+                RuntimeBrokerException registration = assertThrows(RuntimeBrokerException.class,
+                        () -> provisioner.verifyOperatorRegistration(binding));
+                assertEquals(409, registration.getStatusCode());
+                assertEquals("runtime_provision_failed", registration.getCode());
+                assertFalse(registration.isRetryable());
+                RuntimeBrokerException stop = assertThrows(RuntimeBrokerException.class,
+                        () -> provisioner.attestOperatorStop(binding, java.util.UUID.randomUUID().toString()));
+                assertEquals(409, stop.getStatusCode());
+                assertEquals("runtime_provision_failed", stop.getCode());
+                assertFalse(stop.isRetryable());
                 var operations = List.of(provisioner.provision(request), provisioner.provision(request, seed),
                         provisioner.ensureResource(request, seed, null),
                         provisioner.ensureResource(request, seed, handle),
