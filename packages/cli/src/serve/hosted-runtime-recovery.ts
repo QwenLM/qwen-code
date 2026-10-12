@@ -102,13 +102,13 @@ export interface HostedRuntimeRecoveryReport {
   executions: HostedRuntimeRecoveryExecution[];
 }
 
-export interface HostedRecoveryTurn {
+export type HostedRecoveryTurn = {
   promptId: string;
   report: HostedRuntimeRecoveryReport;
-  /** Whether the recovery acquired the Runtime Session, which a later
-   * continue/cancel must release. */
-  acquiredRuntime: boolean;
-}
+} & (
+  | { acquiredRuntime: false }
+  | { acquiredRuntime: true; runtimeSessionId: string }
+);
 
 /**
  * Why a takeover load cannot continue the parked Turn. Every reason is a
@@ -1915,7 +1915,12 @@ export async function recoverHostedRuntimeTurn(input: {
   });
   return recovered({
     promptId,
-    acquiredRuntime,
+    ...(acquiredRuntime
+      ? {
+          acquiredRuntime: true as const,
+          runtimeSessionId: broker.runtimeSessionId,
+        }
+      : { acquiredRuntime: false as const }),
     report: {
       phase:
         finalCheckpoint.continuation.phase === 'results_ready'
