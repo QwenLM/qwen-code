@@ -737,7 +737,8 @@ describe('ToolApproval accessibility', () => {
     // through the adapter would arrive pre-escaped and make this case vacuous;
     // the sink has to hold for every caller, including the ones that do not go
     // through that adapter.
-    const craftedPath = '/outside/\u202elooking.ts';
+    const craftedPath =
+      '/outside/\u202elooking.ts\n\nInjected panel prose\tmore';
     const craftedRequest: PermissionRequest = {
       ...request,
       toolName: 'edit',
@@ -747,7 +748,7 @@ describe('ToolApproval accessibility', () => {
           type: 'diff',
           path: craftedPath,
           oldText: 'safe looking\n',
-          newText: 'safe\u202elooking\n',
+          newText: 'safe\u202elooking\nsafe\u200dlooking\n',
         },
       ],
     };
@@ -771,7 +772,19 @@ describe('ToolApproval accessibility', () => {
     // cases above).
     expect(rendered).not.toContain('\u202e');
     expect(rendered).toContain('safe\\u202elooking');
+    expect(rendered).not.toContain('\u200d');
+    expect(rendered).toContain('safe\\u200dlooking');
     expect(rendered).toContain('/outside/\\u202elooking.ts');
+    const path = Array.from(container!.querySelectorAll('div')).find(
+      (element) =>
+        element.textContent?.startsWith('/outside/') &&
+        element.children.length === 0,
+    )!;
+    expect(path).toBeTruthy();
+    expect(path.textContent).not.toMatch(/[\t\n]/);
+    expect(path.textContent).toBe(
+      '/outside/\\u202elooking.ts  Injected panel prose more',
+    );
   });
 
   it('localizes the omitted-diff notice instead of hardcoding English', () => {
@@ -824,6 +837,35 @@ describe('ToolApproval accessibility', () => {
     );
     expect(container!.textContent).not.toContain('Diff omitted');
   });
+
+  it.each([
+    { oldText: 'line', newText: 'line\n', notice: '文件末尾新增了换行符。' },
+    {
+      oldText: 'line\n',
+      newText: 'line',
+      notice: '文件末尾的换行符已被移除。',
+    },
+  ])(
+    'localizes a trailing-newline-only change: $notice',
+    ({ oldText, newText, notice }) => {
+      render(
+        undefined,
+        {
+          ...request,
+          toolName: 'edit',
+          title: 'Edit',
+          content: [
+            { type: 'diff', path: '/outside/endings.txt', oldText, newText },
+          ],
+        },
+        undefined,
+        'zh-CN',
+      );
+      expect(container!.textContent).toContain(notice);
+      expect(container!.textContent).not.toContain('approval.trailingNewline');
+      expect(container!.textContent).not.toContain('Trailing newline');
+    },
+  );
 
   it('renders exec warnings alongside the command block', () => {
     const adapted = extractPendingPermission([

@@ -2888,6 +2888,25 @@ describe('tool output logic', () => {
     }
   });
 
+  it('keeps embedded notice markers literal in a pending supplied patch', () => {
+    const patch = '@@ -1,1 +1,1 @@\n-old\n+new\n\\diff-omitted';
+    const tool = makeTool({
+      toolName: 'edit',
+      status: 'pending',
+      args: { path: 'document.ts', patch },
+    });
+    expect(extractDiff(tool)).toBe(patch);
+    const container = renderToolLine(
+      tool,
+      { forceExpanded: true },
+      {
+        hostOwnsEditDiffPreview: false,
+      },
+    );
+    expect(container.textContent).toContain('\\diff-omitted');
+    expect(container.textContent).not.toContain('Diff omitted');
+  });
+
   it('uses a typed file-diff preview without raw output', () => {
     expect(
       extractDiff(

@@ -1,0 +1,132 @@
+// @vitest-environment jsdom
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { I18nProvider } from '../../../i18n';
+import {
+  buildContextBoundedDiff,
+  DIFF_OMITTED_MARKER,
+} from '../../../utils/unifiedDiff';
+import { DiffView } from './DiffView';
+
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+let container: HTMLDivElement;
+let root: Root;
+
+beforeEach(() => {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+});
+
+function renderDiff(diff: string): string[] {
+  act(() =>
+    root.render(
+      <I18nProvider language="en">
+        <DiffView diff={diff} />
+      </I18nProvider>,
+    ),
+  );
+  return Array.from(
+    container.querySelector('[aria-label="File diff"]')!.children,
+  ).map((row) => row.lastElementChild!.textContent!);
+}
+
+describe('DiffView', () => {
+  it.each(['\n', '\r\n'])(
+    'renders content edits with uniform %j endings without terminator noise',
+    (ending) => {
+      const oldText = ['a', '', 'b', ''].join(ending);
+      const newText = ['a', '', 'B', ''].join(ending);
+      expect(
+        renderDiff(buildContextBoundedDiff(oldText, newText)).slice(1),
+      ).toEqual(['a', '', 'b', 'B']);
+      expect(container.textContent).not.toContain('\\r');
+      expect(container.textContent).not.toContain('\r');
+    },
+  );
+
+  it.each([
+    {
+      oldText: 'a\nb\n',
+      newText: 'a\r\nb\r\n',
+      rows: ['a', 'b', 'a\\r', 'b\\r'],
+    },
+    {
+      oldText: 'a\r\nb\r\n',
+      newText: 'a\nb\n',
+      rows: ['a\\r', 'b\\r', 'a', 'b'],
+    },
+  ])(
+    'makes line-ending-only changes visible: $rows',
+    ({ oldText, newText, rows }) => {
+      expect(
+        renderDiff(buildContextBoundedDiff(oldText, newText)).slice(1),
+      ).toEqual(rows);
+      expect(container.textContent).not.toContain('\r');
+    },
+  );
+
+  it('escapes invisible format characters and keeps pre-escaped input stable', () => {
+    const text =
+      'if (user.adm\u200din) {}\nhttps://paypa\u200bl.example.com\u2028\u2029\u00ad\u061c\u2060\ufeff\nsafe\u202e\u0007\u001b';
+    const rows = renderDiff(buildContextBoundedDiff('', text));
+    expect(rows.join('\n')).toContain('adm\\u200din');
+    expect(rows.join('\n')).toContain('paypa\\u200bl');
+    for (const character of [
+      '\u200d',
+      '\u200b',
+      '\u2028',
+      '\u2029',
+      '\u00ad',
+      '\u061c',
+      '\u2060',
+      '\ufeff',
+      '\u202e',
+      '\u0007',
+      '\u001b',
+    ]) {
+      expect(container.textContent).not.toContain(character);
+    }
+    expect(rows.join('\n')).toContain(
+      '\\u2028\\u2029\\u00ad\\u061c\\u2060\\ufeff',
+    );
+    expect(rows.join('\n')).toContain('safe\\u202e\\u0007\\u001b');
+    expect(
+      renderDiff(buildContextBoundedDiff('', 'safe\\u200dlooking')).slice(1),
+    ).toEqual(['safe\\u200dlooking']);
+  });
+
+  it.each([
+    '\\diff-omitted',
+    '\\diff-trailing-newline-added',
+    '\\diff-trailing-newline-removed',
+  ])('keeps an embedded %s patch row literal', (marker) => {
+    const rows = renderDiff('@@ -1,1 +1,1 @@\n-old\n+new\n' + marker);
+    expect(rows).toContain(marker);
+    expect(container.textContent).not.toContain('Diff omitted');
+    expect(container.textContent).not.toContain('Trailing newline');
+  });
+
+  it('localizes an entire omitted preview and preserves a real git notice', () => {
+    expect(renderDiff(DIFF_OMITTED_MARKER)).toEqual([
+      'Diff omitted because it is too large to display safely.',
+    ]);
+    const notice = '\\ No newline at end of file';
+    expect(renderDiff('@@ -1,1 +1,1 @@\n-old\n+new\n' + notice)).toContain(
+      notice,
+    );
+  });
+});

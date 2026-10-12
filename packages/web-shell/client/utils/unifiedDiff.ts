@@ -29,10 +29,9 @@ type Translate = (
 ) => string;
 
 /**
- * Maps the marker lines {@link buildContextBoundedDiff} emits onto their
- * localized copy. Every other line — real diff content, hunk headers, and
- * git's own `\ No newline at end of file` notice — is returned unchanged, so
- * this is safe to run over any parsed line.
+ * Resolves a complete marker-only preview, never individual parsed rows:
+ * raw patches may contain identical marker text. All other previews are
+ * returned unchanged.
  */
 export function localizeDiffNotice(content: string, t: Translate): string {
   switch (content) {

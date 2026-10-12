@@ -10,6 +10,7 @@ import {
 } from 'react';
 import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
+import { escapePreviewText } from '../../adapters/transcriptAdapter';
 import { useI18n } from '../../i18n';
 import { GoalApprovalContent } from './GoalApprovalContent';
 import { PlanExecutionView } from './PlanExecutionView';
@@ -688,7 +689,14 @@ export function ToolApproval({
                   above the diff body, so it is the same unsanitized class as
                   `GitDiffDialog`'s file paths: escape it here rather than
                   leaving the gap half-closed. */}
-              <div>{block.path ? sanitizeControlChars(block.path) : null}</div>
+              <div>
+                {block.path
+                  ? escapePreviewText(sanitizeControlChars(block.path)).replace(
+                      /[\t\n]/g,
+                      ' ',
+                    )
+                  : null}
+              </div>
               <DiffView diff={block.diff} />
             </div>
           ))}
