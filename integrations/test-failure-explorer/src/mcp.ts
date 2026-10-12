@@ -3,11 +3,23 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import { readFile } from 'node:fs/promises';
+import {
+  registerAppResource,
+  registerAppTool,
+  RESOURCE_MIME_TYPE,
+} from '@modelcontextprotocol/ext-apps/server';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { ExplorerError } from './contracts.js';
-import { importResult, queryReport, querySchema } from './report-query.js';
+import {
+  importResult,
+  queryReport,
+  querySchema,
+  showResult,
+} from './report-query.js';
+import { APP_URI } from './app-contract.js';
 import type { ReportStore } from './report-store.js';
 
 export function createReportServer(store: ReportStore): McpServer {
@@ -65,7 +77,7 @@ export function createReportServer(store: ReportStore): McpServer {
         idempotentHint: true,
         openWorldHint: false,
       },
-      _meta: { ui: { visibility: ['model'] } },
+      _meta: { ui: { visibility: ['model', 'app'] } },
     },
     async ({ reportId, query }, extra) => {
       try {
@@ -74,6 +86,53 @@ export function createReportServer(store: ReportStore): McpServer {
         return errorResult(error);
       }
     },
+  );
+  registerAppTool(
+    server,
+    'test_report_show',
+    {
+      description:
+        'Show a fixed interactive failure explorer for an already imported reportId. Displays report-only evidence with text fallback; does not run tests, infer process success, or modify the snapshot.',
+      inputSchema: { reportId: z.string().regex(/^r1_[0-9a-f]{64}$/) },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: { ui: { resourceUri: APP_URI, visibility: ['model'] } },
+    },
+    async ({ reportId }, extra) => {
+      try {
+        return showResult(await store.load(reportId, extra.signal));
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+  const ui = {
+    csp: {
+      connectDomains: [],
+      resourceDomains: [],
+      frameDomains: [],
+      baseUriDomains: [],
+    },
+  };
+  registerAppResource(
+    server,
+    'Test Failure Explorer',
+    APP_URI,
+    { _meta: { ui } },
+    async () => ({
+      contents: [
+        {
+          uri: APP_URI,
+          mimeType: RESOURCE_MIME_TYPE,
+          text: await readFile(new URL('./app.html', import.meta.url), 'utf8'),
+          _meta: { ui },
+        },
+      ],
+    }),
   );
   return server;
 }

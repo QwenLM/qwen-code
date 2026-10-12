@@ -55,7 +55,6 @@ public final class HostedProcessCrashFixtureMain {
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
-                "--qwen.managed-agent.runtime-broker.cli-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace);

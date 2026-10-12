@@ -1718,18 +1718,23 @@ class HttpRuntimeTransportTest {
         RuntimeSession session = toolSession();
         Map<String, Object> reference = toolReference();
 
+        // Six 1 MiB loopback exchanges; on a contended CI host a healthy
+        // exchange can outlast a short wait, so budget past the transport's
+        // own 30 s request deadline and let a wedge surface as the client's
+        // classified failure instead of a bare test timeout.
         transport.execute(lease, session, reference)
-                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                .toCompletableFuture().get(60, TimeUnit.SECONDS);
         transport.status(lease, session, reference, 0)
-                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                .toCompletableFuture().get(60, TimeUnit.SECONDS);
         transport.cancel(lease, session, reference)
-                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                .toCompletableFuture().get(60, TimeUnit.SECONDS);
 
         reply.set(json(200, Arrays.copyOf(padded, limit + 1)));
         for (String operation : List.of("execute", "status", "cancel")) {
             assertEquals(limit, toolRoute(operation)
                     .required("responseBodyLimitBytes").intValue());
-            RuntimeBrokerException failure = awaitToolFailure(operation);
+            RuntimeBrokerException failure = awaitToolFailure(operation, 60,
+                    TimeUnit.SECONDS);
             assertEquals(413, failure.getStatusCode());
             assertEquals("managed_runtime_attestation_too_large",
                     failure.getCode());
@@ -1806,6 +1811,11 @@ class HttpRuntimeTransportTest {
     }
 
     private RuntimeBrokerException awaitToolFailure(String operation) {
+        return awaitToolFailure(operation, 5, TimeUnit.SECONDS);
+    }
+
+    private RuntimeBrokerException awaitToolFailure(String operation,
+            long timeout, TimeUnit unit) {
         RuntimeLease lease = toolLease(server.getAddress().getPort());
         RuntimeSession session = toolSession();
         Map<String, Object> reference = toolReference();
@@ -1813,14 +1823,14 @@ class HttpRuntimeTransportTest {
                 () -> {
                     switch (operation) {
                         case "execute" -> transport.execute(lease, session,
-                                reference).toCompletableFuture().get(5,
-                                        TimeUnit.SECONDS);
+                                reference).toCompletableFuture().get(timeout,
+                                        unit);
                         case "status" -> transport.status(lease, session,
-                                reference, 0).toCompletableFuture().get(5,
-                                        TimeUnit.SECONDS);
+                                reference, 0).toCompletableFuture()
+                                .get(timeout, unit);
                         case "cancel" -> transport.cancel(lease, session,
-                                reference).toCompletableFuture().get(5,
-                                        TimeUnit.SECONDS);
+                                reference).toCompletableFuture().get(timeout,
+                                        unit);
                         default -> throw new AssertionError(
                                 "unknown operation");
                     }
