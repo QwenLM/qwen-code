@@ -20,7 +20,7 @@ class StoreModelsTest {
                 "session-carry", "agent-carry", "revision-carry",
                 "title-carry", "ACTIVE", "boot-carry", "epoch-carry", 11L,
                 12L, 13L, 14L, 15L, 16L, 17L, workspace, "approval-carry",
-                "profile-carry");
+                "profile-carry", "digest-carry");
 
         SessionRecord projected = session.withStatus("CLOSED");
 
@@ -42,5 +42,7 @@ class StoreModelsTest {
         assertThat(projected.workspace()).isSameAs(workspace);
         assertThat(projected.approvalMode()).isEqualTo("approval-carry");
         assertThat(projected.toolProfile()).isEqualTo("profile-carry");
+        assertThat(projected.agentDefinitionDigest())
+                .isEqualTo("digest-carry");
     }
 }

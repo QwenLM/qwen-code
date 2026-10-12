@@ -16,6 +16,7 @@ import com.sun.source.tree.MemberReferenceTree;
 import com.sun.source.tree.MemberSelectTree;
 import com.sun.source.tree.MethodInvocationTree;
 import com.sun.source.tree.MethodTree;
+import com.sun.source.tree.NewClassTree;
 import com.sun.source.tree.ParenthesizedTree;
 import com.sun.source.tree.StatementTree;
 import com.sun.source.tree.SwitchExpressionTree;
@@ -85,14 +86,16 @@ import org.junit.jupiter.api.Test;
 //   the lock — and the implicit row lock of an INSERT or UPDATE on the
 //   session table counts, which is what admits the create path: it writes
 //   the session row before the turn row.
-// - Anonymous class bodies fold into the enclosing member (their methods
-//   answer only through the interface they implement), and calls that
-//   leave the file are outside the audit; the sibling boundary below pins
-//   which files lock the session row or touch the turn row at all. A
-//   lambda handed straight into a call folds there — its body runs within
-//   the call — while a lambda in any other position whose body would
-//   contribute an event fails closed: the parse cannot see its invocation
-//   site, so the body never folds at its declaration.
+// - Calls that leave the file are outside the audit; the sibling
+//   boundary below pins which files lock the session row or touch the
+//   turn row at all. A lambda handed straight into a call folds there —
+//   its body runs within the call — while a lambda in any other position,
+//   or an anonymous-class method body, runs where it is invoked, which
+//   the parse cannot see: such a body is held aside and fails closed when
+//   it reaches a side instead of folding at its declaration. A nested
+//   held body propagates to the enclosing member's held set, and a
+//   literal an embedded expression cannot resolve still joins the
+//   statement's spelling.
 //   Transactionality is runtime wiring — a Spring proxy, or a
 //   TransactionTemplate in another file's caller — not a spelling a
 //   same-file parse can see, so the audit pins the order, not the
@@ -1001,6 +1004,37 @@ class SessionRowLockOrderTest {
                 "embeddingWriter");
     }
 
+    // A table name handed to a helper inside the SQL's own concatenation
+    // is still the statement's text: the partial flatten cannot resolve
+    // the call, but the literal it carries joins the spelling, so the
+    // turn-row read ahead of the lock violates exactly like the inline
+    // spelling.
+    @Test
+    void theAuditReadsALiteralInsideAnUnresolvableCallOperand() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void concatReader(String tenantId,
+                            String sessionId) {
+                        jdbc.query("SELECT * FROM "
+                                + jdbcSupport.tableName("managed_agent_turn"));
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        Audit audit = audit(synthetic);
+        assertThat(audit.violations()).containsExactly("concatReader");
+        assertThat(audit.turnRowAccessors())
+                .containsExactlyInAnyOrder("concatReader");
+    }
+
     // A call embedded in the SQL's own concatenation evaluates before the
     // statement runs: scoring the spelling first would pass a writer whose
     // embedded helper writes the turn row ahead of the lock the outer
@@ -1087,6 +1121,75 @@ class SessionRowLockOrderTest {
         assertThatThrownBy(() -> audit(synthetic))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("lambdaWriter");
+    }
+
+    // A held lambda's own held lambdas run no closer to the declaration:
+    // the grandchild's events must propagate to the enclosing member's
+    // held set, or a turn-row write one nesting level down is dropped and
+    // the inversion is certified clean.
+    @Test
+    void theAuditFailsClosedOnANestedHeldLambdaReachingASide() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void nestedLambdaWriter(String tenantId,
+                            String sessionId) {
+                        Runnable outer = () -> {
+                            Runnable inner = () -> jdbc.update("UPDATE"
+                                    + " managed_agent_turn SET status"
+                                    + " = 'FAILED'");
+                            inner.run();
+                        };
+                        outer.run();
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThatThrownBy(() -> audit(synthetic))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("nestedLambdaWriter");
+    }
+
+    // An anonymous-class body's methods run where they are invoked, which
+    // the parse cannot see — exactly like a held lambda: folding the body
+    // at the declaration would order a lock the body takes before a
+    // turn-row write that runs first, so the body is held aside and fails
+    // closed when it reaches a side.
+    @Test
+    void theAuditFailsClosedOnAnAnonymousClassBodyReachingASide() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void anonLocker(String tenantId,
+                            String sessionId) {
+                        Runnable lock = new Runnable() {
+                            public void run() {
+                                lockSession(tenantId, sessionId);
+                            }
+                        };
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        lock.run();
+                    }
+
+                    private void lockSession(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThatThrownBy(() -> audit(synthetic))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("anonLocker");
     }
 
     // A lambda handed straight into a call runs within it, so its body
@@ -1365,11 +1468,11 @@ class SessionRowLockOrderTest {
         }
         Set<Key> lockReaching = reaching(events, true);
         Set<Key> turnReaching = reaching(events, false);
-        // A held lambda body is benign only while every event it carries
-        // provably reaches neither side — like an ambiguous reference; the
-        // moment one does, the audit fails closed instead of folding the
-        // body at its declaration, a position its invocation may never
-        // share.
+        // A held lambda or anonymous-class body is benign only while
+        // every event it carries provably reaches neither side — like an
+        // ambiguous reference; the moment one does, the audit fails closed
+        // instead of folding the body at its declaration, a position its
+        // invocation may never share.
         for (Map.Entry<Key, List<List<Event>>> member
                 : heldLambdas.entrySet()) {
             for (List<Event> held : member.getValue()) {
@@ -1380,11 +1483,11 @@ class SessionRowLockOrderTest {
                                         || turnReaching.contains(
                                                 event.callee()));
                 if (sideReaching) {
-                    throw new IllegalStateException("a lambda body in "
+                    throw new IllegalStateException("a lambda or"
+                            + " anonymous-class body in "
                             + member.getKey().handle() + " reaches the"
-                            + " session lock or the turn row but is not a"
-                            + " direct call argument, so its invocation site"
-                            + " is invisible to the audit");
+                            + " session lock or the turn row, and its"
+                            + " invocation site is invisible to the audit");
                 }
                 events.get(member.getKey()).addAll(held);
             }
@@ -1550,8 +1653,9 @@ class SessionRowLockOrderTest {
         return reaching;
     }
 
-    // One member's ordered events plus the lambda bodies held aside: SQL
-    // spellings and calls to same-file members, in evaluation order. A
+    // One member's ordered events plus the lambda and anonymous-class
+    // bodies held aside: SQL spellings and calls to same-file members, in
+    // evaluation order. A
     // spelling is the flattened static text of the expression that carries
     // it — a split literal cannot hide a table name, and every branch of a
     // conditional or switch is credited — scored after the calls the
@@ -1574,10 +1678,11 @@ class SessionRowLockOrderTest {
     // The statement walk over one body. The constants map is the member's
     // own overlay of the file's class constants: the String locals the
     // walk records land in it, so a local's spelling scores at its uses.
-    // Lambdas not passed straight into a call are held aside for the
-    // reachability check in audit(): their invocation site is invisible to
-    // the parse, so a body that reaches a side fails closed there instead
-    // of folding at its declaration.
+    // Lambdas not passed straight into a call — and anonymous-class
+    // method bodies — are held aside for the reachability check in
+    // audit(): their invocation site is invisible to the parse, so a body
+    // that reaches a side fails closed there instead of folding at its
+    // declaration.
     private static final class EventScanner extends TreeScanner<Void, Void> {
         private final List<Event> events;
         private final List<List<Event>> heldLambdas = new ArrayList<>();
@@ -1697,6 +1802,37 @@ class SessionRowLockOrderTest {
                     methods, constants, ambiguous);
             held.scan(node.getBody(), null);
             heldLambdas.add(held.events);
+            heldLambdas.addAll(held.heldLambdas);
+            return null;
+        }
+
+        @Override
+        public Void visitNewClass(NewClassTree node, Void unused) {
+            if (node.getClassBody() == null) {
+                return super.visitNewClass(node, unused);
+            }
+            // An anonymous-class method body runs where it is invoked,
+            // which the parse cannot see — hold it aside exactly like a
+            // held lambda. Field initializers and initializer blocks run
+            // at construction, so they still fold at this position, as do
+            // the construction's own arguments.
+            scan(node.getEnclosingExpression(), null);
+            scan(node.getIdentifier(), null);
+            scan(node.getTypeArguments(), null);
+            scan(node.getArguments(), null);
+            EventScanner held = new EventScanner(new ArrayList<>(), caller,
+                    methods, constants, ambiguous);
+            for (Tree member : node.getClassBody().getMembers()) {
+                if (member instanceof MethodTree method) {
+                    if (method.getBody() != null) {
+                        held.scan(method.getBody(), null);
+                    }
+                } else {
+                    scan(member, null);
+                }
+            }
+            heldLambdas.add(held.events);
+            heldLambdas.addAll(held.heldLambdas);
             return null;
         }
 
@@ -1904,18 +2040,32 @@ class SessionRowLockOrderTest {
             return constants.getOrDefault(select.getIdentifier().toString(),
                     "");
         }
-        return "";
+        // An expression the walk cannot resolve still carries its string
+        // literals — a table name handed to a helper inside the SQL's own
+        // concatenation is part of the text the statement runs, so it
+        // joins the spelling rather than dropping out with the call.
+        StringBuilder text = new StringBuilder();
+        new TreeScanner<Void, Void>() {
+            @Override
+            public Void visitLiteral(LiteralTree literal, Void unused) {
+                if (literal.getValue() instanceof String value) {
+                    text.append(value);
+                }
+                return null;
+            }
+        }.scan(node, null);
+        return text.toString();
     }
 
 
     // The bytecode's own member enumeration, recursively over the named
     // nested types and projected to owner#name/arity, for the harvest
-    // cross-check. Anonymous classes are skipped: their bodies fold into
-    // the enclosing member on the parse side, and their methods answer
-    // only through the implemented interface. Compiler-generated record
-    // members — the component accessors and toString/equals/hashCode — are
-    // absent from the parse tree unless the record declares them, so only
-    // the undeclared ones are filtered.
+    // cross-check. Anonymous classes are skipped: their methods answer
+    // only through the implemented interface and never enter the
+    // parse-side harvest. Compiler-generated record members — the
+    // component accessors and toString/equals/hashCode — are absent from
+    // the parse tree unless the record declares them, so only the
+    // undeclared ones are filtered.
     private static List<String> compiledMembers(Class<?> type,
             List<String> parsed) {
         List<String> compiled = new ArrayList<>();

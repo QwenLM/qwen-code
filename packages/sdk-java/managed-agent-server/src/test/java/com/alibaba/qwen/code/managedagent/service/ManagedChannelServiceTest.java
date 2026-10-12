@@ -216,6 +216,29 @@ class ManagedChannelServiceTest {
                 admitted.sessionId())).isEqualTo("email: Build status");
     }
 
+    // The senderId fallback composes the same title and is validated only
+    // as @NotBlank @Size(max = 512) — no character class — so a TAB in it
+    // refuses the route's Session exactly like an unfolded subject, and
+    // with no binding row written every later event of the route re-drives
+    // the same refusal: the fallback folds control characters too.
+    @Test
+    void bindsARouteWhoseSenderIdCarriesAControlCharacter() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                new InboundEventRequest(1, "1700:98", 1,
+                        new RouteScope("chat_thread", null,
+                                "alice@example.com", "thread-8"),
+                        "alice\t@example.com", "alice@example.com",
+                        "thread-8", null, "check the build", List.of(),
+                        null));
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(instances.findBinding(TENANT, channel, admitted.routeId()))
+                .isPresent();
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, TENANT,
+                admitted.sessionId())).isEqualTo("email: alice @example.com");
+    }
+
     @Test
     void recoversAnAdmissionWhoseAnswerWasLost() {
         // The Harness committed, the control plane died before marking the
