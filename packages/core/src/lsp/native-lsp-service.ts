@@ -777,9 +777,11 @@ export class NativeLspService {
   }
 
   private canonicalDocumentUri(uri: string): string {
-    if (!/^file:/i.test(uri)) return uri;
     try {
-      return pathToFileURL(fileURLToPath(uri)).toString();
+      const url = new URL(uri);
+      return url.protocol === 'file:'
+        ? pathToFileURL(fileURLToPath(url)).toString()
+        : uri;
     } catch {
       // Preserve malformed input for the existing scope refusal.
       return uri;
@@ -813,6 +815,7 @@ export class NativeLspService {
     );
     if (!uri) return handles;
 
+    uri = this.canonicalDocumentUri(uri);
     const directories = /^file:/i.test(uri)
       ? this.workspaceContext.getDirectories()
       : [];
@@ -897,7 +900,7 @@ export class NativeLspService {
     }
     cache.set(uri, current);
     if (!current && filePath !== undefined) {
-      this.deferWorkspaceDocument(pathToFileURL(filePath).toString());
+      this.deferWorkspaceDocument(uri);
     }
     return current;
   }
@@ -931,6 +934,7 @@ export class NativeLspService {
   private resolveWorkspaceDocument(
     uri: string,
     directories: readonly string[],
+    routingHandle?: LspServerHandle,
   ): string {
     let resolved: string;
     try {
@@ -949,6 +953,26 @@ export class NativeLspService {
       this.deferWorkspaceDocument(uri, refusal);
       throw refusal;
     }
+    if (routingHandle) {
+      let roots: readonly string[];
+      try {
+        roots = getLspWorkspaceRoots(
+          routingHandle.config,
+          resolveWorkspacePath(this.workspaceRoot),
+          directories,
+        );
+      } catch (error) {
+        throw new LspDocumentScopeError(
+          `Cannot resolve LSP server ${routingHandle.config.name} workspaceFolder`,
+          { cause: error },
+        );
+      }
+      if (!isSubpaths(roots, resolved)) {
+        const message = `Document ${uri} is outside LSP server ${routingHandle.config.name} workspaceFolder or its root is unusable; retry with serverName to bypass the workspaceFolder filter (not workspace containment)`;
+        debugLogger.warn(message);
+        throw new LspDocumentScopeError(message);
+      }
+    }
     return resolved;
   }
 
@@ -956,10 +980,12 @@ export class NativeLspService {
     connection: LspConnectionInterface,
     method: string,
     params: { textDocument: { uri: string }; [key: string]: unknown },
+    routingHandle?: LspServerHandle,
   ): Promise<unknown> {
     this.resolveWorkspaceDocument(
       params.textDocument.uri,
       this.workspaceContext.getDirectories(),
+      routingHandle,
     );
     try {
       return await connection.request(method, params);
@@ -967,6 +993,7 @@ export class NativeLspService {
       this.resolveWorkspaceDocument(
         params.textDocument.uri,
         this.workspaceContext.getDirectories(),
+        routingHandle,
       );
     }
   }
@@ -1231,7 +1258,15 @@ export class NativeLspService {
     serverName: string,
     handle: LspServerHandle & { connection: LspConnectionInterface },
     uri: string,
+    routingHandle?: LspServerHandle,
   ): Promise<boolean> {
+    if (routingHandle) {
+      this.resolveWorkspaceDocument(
+        uri,
+        this.workspaceContext.getDirectories(),
+        routingHandle,
+      );
+    }
     const { opened: justOpened, deferred } = this.synchronizeDocument(
       serverName,
       handle,
@@ -1774,12 +1809,14 @@ export class NativeLspService {
           name,
           handle,
           location.uri,
+          serverName ? undefined : handle,
         );
 
         let response = await this.requestDocument(
           handle.connection,
           'textDocument/definition',
           requestParams,
+          serverName ? undefined : handle,
         );
 
         if (
@@ -1791,6 +1828,7 @@ export class NativeLspService {
             handle.connection,
             'textDocument/definition',
             requestParams,
+            serverName ? undefined : handle,
           );
         }
 
@@ -1848,12 +1886,14 @@ export class NativeLspService {
           name,
           handle,
           location.uri,
+          serverName ? undefined : handle,
         );
 
         let response = await this.requestDocument(
           handle.connection,
           'textDocument/references',
           requestParams,
+          serverName ? undefined : handle,
         );
 
         if (
@@ -1865,6 +1905,7 @@ export class NativeLspService {
             handle.connection,
             'textDocument/references',
             requestParams,
+            serverName ? undefined : handle,
           );
         }
 
@@ -1917,12 +1958,14 @@ export class NativeLspService {
           name,
           handle,
           location.uri,
+          serverName ? undefined : handle,
         );
 
         let response = await this.requestDocument(
           handle.connection,
           'textDocument/hover',
           requestParams,
+          serverName ? undefined : handle,
         );
 
         if (
@@ -1934,6 +1977,7 @@ export class NativeLspService {
             handle.connection,
             'textDocument/hover',
             requestParams,
+            serverName ? undefined : handle,
           );
         }
 
@@ -1969,12 +2013,14 @@ export class NativeLspService {
           name,
           handle,
           uri,
+          serverName ? undefined : handle,
         );
 
         let response = await this.requestDocument(
           handle.connection,
           'textDocument/documentSymbol',
           requestParams,
+          serverName ? undefined : handle,
         );
 
         if (
@@ -1986,6 +2032,7 @@ export class NativeLspService {
             handle.connection,
             'textDocument/documentSymbol',
             requestParams,
+            serverName ? undefined : handle,
           );
         }
 
@@ -2056,12 +2103,14 @@ export class NativeLspService {
           name,
           handle,
           location.uri,
+          serverName ? undefined : handle,
         );
 
         let response = await this.requestDocument(
           handle.connection,
           'textDocument/implementation',
           requestParams,
+          serverName ? undefined : handle,
         );
 
         if (
@@ -2073,6 +2122,7 @@ export class NativeLspService {
             handle.connection,
             'textDocument/implementation',
             requestParams,
+            serverName ? undefined : handle,
           );
         }
 
@@ -2128,10 +2178,16 @@ export class NativeLspService {
     assertActive();
     const readText = (target: string): string | undefined => {
       try {
-        this.resolveWorkspaceDocument(
-          target,
-          this.workspaceContext.getDirectories(),
-        );
+        // Unknown scope is not confirmed loss: refuse the read, keep delivered state.
+        if (
+          !this.isCurrentWorkspaceDocument(
+            target,
+            this.workspaceContext.getDirectories(),
+            new Map<string, boolean>(),
+          )
+        ) {
+          return undefined;
+        }
         return fs.readFileSync(fileURLToPath(target), 'utf-8');
       } catch {
         return undefined;
@@ -2303,9 +2359,11 @@ export class NativeLspService {
               this.resolveWorkspaceDocument(
                 location.uri,
                 this.workspaceContext.getDirectories(),
+                serverName ? undefined : handle,
               );
               current = fs.readFileSync(fileURLToPath(location.uri), 'utf-8');
-            } catch {
+            } catch (error) {
+              if (error instanceof LspDocumentScopeError) throw error;
               throw new StaleCallHierarchyItemError();
             }
             if (current !== originalText)
@@ -2318,6 +2376,7 @@ export class NativeLspService {
           name,
           handle,
           location.uri,
+          serverName ? undefined : handle,
         );
         assertOriginal();
         revision = this.captureCallHierarchyRevision(
@@ -2325,9 +2384,11 @@ export class NativeLspService {
           handle,
           location.uri,
         );
-        let response = await connection.request(
+        let response = await this.requestDocument(
+          connection,
           'textDocument/prepareCallHierarchy',
           requestParams,
+          serverName ? undefined : handle,
         );
         revision.checkpoint();
         if (
@@ -2336,9 +2397,11 @@ export class NativeLspService {
         ) {
           await this.delay(DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS);
           revision.checkpoint();
-          response = await connection.request(
+          response = await this.requestDocument(
+            connection,
             'textDocument/prepareCallHierarchy',
             requestParams,
+            serverName ? undefined : handle,
           );
           revision.checkpoint();
         }
@@ -2365,13 +2428,9 @@ export class NativeLspService {
         for (const item of items) item.documentRevision = revision.sign(item);
         if (items.length > 0) return items;
       } catch (error) {
+        if (error instanceof LspDocumentScopeError) throw error;
         revision?.checkpoint();
-        if (
-          error instanceof StaleCallHierarchyItemError ||
-          error instanceof LspDocumentScopeError
-        ) {
-          throw error;
-        }
+        if (error instanceof StaleCallHierarchyItemError) throw error;
         debugLogger.warn(
           `LSP textDocument/prepareCallHierarchy failed for ${name}:`,
           error,
@@ -2572,7 +2631,12 @@ export class NativeLspService {
       queried.push([name, handle]);
       // A sync failure must reject, not report incomplete diagnostics as clean.
       await this.warmupAndTrack(name, handle);
-      await this.ensureDocumentSynchronized(name, handle, uri);
+      await this.ensureDocumentSynchronized(
+        name,
+        handle,
+        uri,
+        serverName ? undefined : handle,
+      );
 
       try {
         // Request pull diagnostics if the server supports it
@@ -2582,14 +2646,16 @@ export class NativeLspService {
           {
             textDocument: { uri },
           },
+          serverName ? undefined : handle,
         );
 
         if (response == null) {
           failures.push({
             name,
             handle,
+            // Disposed connections resolve undefined, not a clean report.
             error: new Error(
-              'Invalid diagnostic report: server returned no response',
+              'Invalid diagnostic report: server returned no response (disposed connection or null result)',
             ),
           });
         } else {
@@ -2794,8 +2860,9 @@ export class NativeLspService {
         if (response == null) {
           failures.push({
             name,
+            // Disposed connections resolve undefined without changing handle identity.
             error: new Error(
-              'Invalid diagnostic report: server returned no response',
+              'Invalid diagnostic report: server returned no response (disposed connection or null result)',
             ),
           });
         } else {
@@ -2936,7 +3003,12 @@ export class NativeLspService {
     for (const [name, handle] of handles) {
       try {
         await this.warmupAndTrack(name, handle);
-        await this.ensureDocumentSynchronized(name, handle, uri);
+        await this.ensureDocumentSynchronized(
+          name,
+          handle,
+          uri,
+          serverName ? undefined : handle,
+        );
 
         // Convert context diagnostics to LSP format
         const lspDiagnostics = context.diagnostics.map((d: LspDiagnostic) =>
@@ -2958,6 +3030,7 @@ export class NativeLspService {
                   : 1, // CodeActionTriggerKind.Invoked
             },
           },
+          serverName ? undefined : handle,
         );
 
         if (!Array.isArray(response)) {

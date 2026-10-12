@@ -53,9 +53,9 @@ transport. Workspace edits use the same fresh containment check as reads.
 
 ## Delivery and navigation
 
-Canonicalize syntactically equivalent file URI spellings (`file:/`, `FILE:///`
-and percent-encoding variants) with `fileURLToPath` / `pathToFileURL` before
-routing, synchronization and requests. State keys and outgoing document URIs
+Canonicalize syntactically equivalent file URI spellings (`file:/`, `FILE:///`,
+percent-encoding variants and whitespace padding accepted by URL parsing) with
+`fileURLToPath` / `pathToFileURL` before routing, synchronization and requests. State keys and outgoing document URIs
 share this spelling, including lifecycle deferral and restart replay. Preserve
 the symlink alias path; physical resolution still controls scope, not URI
 identity. Canonicalize returned hierarchy URIs before signing and emitting them,
@@ -64,8 +64,13 @@ including nested incoming/outgoing items. Non-file result URIs remain unchanged.
 The shared synchronization entry point rechecks current containment before any
 read or notification. Document queries refuse deferred synchronization and check
 scope immediately before sending each request, including retries, and after each
-request settles, including failures. Scope refusals propagate rather than becoming
-empty or stale results. Revoked or unresolvable URIs lose delivered text snapshots
+request settles, including failures. Default file queries also recheck the selected
+server's current root before synchronization and before and after each request,
+including hierarchy preparation and retries. A symlink retargeted to another
+registered directory during an await must not silently bypass the server-root
+filter. Server-root refusals leave globally authorized document state intact;
+explicit server selection retains its root override. Scope refusals propagate
+rather than becoming empty or stale results. Revoked or unresolvable URIs lose delivered text snapshots
 but retain replay obligations, version and pending-close metadata for the
 existing connection. A revoked durable-only URI stays parked across connection
 replacement and is delivered at version 1 once scope returns. Configuration reload
@@ -73,7 +78,7 @@ intentionally discards revoked replay obligations. No document notification or c
 is invalid. Once scope returns, file queries and workspace sweeps finish the old
 close before fresh delivery, without resetting the version or stranding healthy
 survivors when a close fails. Connection replacement discards obsolete close
-obligations. Observing a scope refusal invalidates delivered snapshots for that
+obligations. Observing confirmed scope loss invalidates delivered snapshots for that
 URI on every owning server without notifications; this also covers initial file
 routing, workspace-result filtering and hierarchy-only observations without a
 workspace sweep. Rejected hierarchy tokens cannot revive after same-text scope
@@ -82,8 +87,10 @@ connection-scoped invalidation generations in hierarchy signatures and checkpoin
 validation. Revocation changes only that URI's generation, preserving healthy
 items and requiring no unsupported document notifications. Hierarchy disk
 observations reject revoked targets as stale
-without reading outside current scope. Valid in-scope missing-file reads retain
-their errors.
+without reading outside current scope. Unknown physical scope during a read-only
+hierarchy observation leaves delivered snapshots, pending-close metadata and
+generations unchanged, and the item cannot be signed. Valid in-scope missing-file
+reads retain their errors.
 
 External definition, implementation and reference locations remain visible, but
 are marked as requiring `/directory add` before another file query. No automatic
@@ -119,7 +126,10 @@ to examine another entry after either budget is exhausted raises an explicit err
 never a partial or clean result. Exactly a full budget with no remaining entries
 can return normally. Diagnostic scan errors advise increasing `limit` above the
 exhausted budget or selecting `serverName`, not narrowing an unused `query`. No persistent path cache
-weakens containment. Output formatting snapshots directories and scope decisions
+weakens containment. Output formatting classifies and displays file URIs through
+URL parsing, so accepted padded spellings are not labeled as non-file or
+unqueryable. Malformed file URIs retain their unresolvable marker, and virtual
+URIs remain unchanged. Output formatting snapshots directories and scope decisions
 only for one response, labels each affected location, and gives each kind of
 advice once with short tags on subsequent locations. Request descriptions carry
 no result-scope advice. URI-specific notes follow protocol JSON without modifying
@@ -139,7 +149,10 @@ The manual E2E harness uses real `WorkspaceContext` root normalization.
   close removal on connection replacement and no same-text hierarchy-token revival.
 - Document queries must refuse scope loss across warmup, didOpen settling, retry
   delays and successful or failed pending requests; no request after revocation
-  and no stale/clean result. A hierarchy-only or initial file-query refusal must
+  and no stale/clean result. Retargeting a symlink across server subroots within the
+  global workspace must also refuse default queries across those awaits, while
+  explicit overrides and same-server-root retargeting remain allowed.
+  A hierarchy-only or initial file-query refusal must
   invalidate old tokens before same-text scope restoration, without a sweep.
   Cover buffered and disk-reading synchronization modes, all owning connections,
   unrelated healthy items, and pending responses spanning observed revocation and
@@ -169,6 +182,16 @@ The manual E2E harness uses real `WorkspaceContext` root normalization.
 - Equivalent file URI spellings share one didOpen, monotonic versions and one
   lifecycle, replay once after restart, and defer the same state on scope loss.
   Canonical server-echoed hierarchy items remain traversable after signing.
+  Whitespace-padded workspace results remain queryable and are displayed as files
+  without a non-file warning in both symbol and diagnostic output; virtual result
+  warnings remain present. Buffered revocation
+  defers a canonical close before reopening. Explicit workspace symbol selection
+  queries only the named ready server. Unknown-scope hierarchy observations leave
+  state unchanged and nested items unsigned; restored scope permits signing.
+  Mid-prepare scope loss retains the scope error and `/directory add` guidance,
+  while genuine read failures remain staleness errors. Pending hierarchy requests
+  preserve scope-specific guidance even when retargeting also changes the text;
+  scope refusals take precedence over the stale-snapshot checkpoint.
 - Regression tests must fail on baseline or targeted mutants; verification reports
   distinguish focused tests, build checks and blocked E2E/platform coverage.
 

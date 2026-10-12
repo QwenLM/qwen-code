@@ -600,40 +600,46 @@ describe('LspTool', () => {
       expect(result.llmContent).not.toContain('/directory add');
     });
 
-    it('formats uppercase file URIs and leaves non-file URIs verbatim', async () => {
-      const { result } = await run(
-        { operation: 'workspaceDiagnostics' },
-        (client) =>
-          client.workspaceDiagnostics.mockResolvedValue([
-            {
-              uri: toUri(appPath).replace('file:', 'FILE:'),
-              diagnostics: [
-                {
-                  range: lineSpan(0, 0, 1),
-                  message: 'file',
-                  severity: 'error',
-                },
-              ],
-            },
-            {
-              uri: 'untitled:buffer',
-              diagnostics: [
-                {
-                  range: lineSpan(0, 0, 1),
-                  message: 'virtual',
-                  severity: 'error',
-                },
-              ],
-            },
-          ]),
-      );
-      expectContains(
-        result.llmContent,
-        `\n${displayPath(appPath)}:`,
-        'untitled:buffer [non-file URI',
-      );
-      expect(result.llmContent).not.toContain('FILE:');
-    });
+    it.each(
+      (['workspaceSymbol', 'workspaceDiagnostics'] as const).flatMap(
+        (operation) =>
+          ['uppercase', 'padded'].map((spelling) => ({ operation, spelling })),
+      ),
+    )(
+      'formats $spelling file URIs in $operation and preserves virtual URIs',
+      async ({ operation, spelling }) => {
+        const targets = [
+          spelling === 'uppercase'
+            ? toUri(appPath).replace('file:', 'FILE:')
+            : ` \t${toUri(appPath)} \r\n`,
+          'untitled:buffer',
+        ];
+        const { result } = await run({ operation, query: 'fn' }, (client) => {
+          client.workspaceSymbols.mockResolvedValue(
+            targets.map((uri) => ({
+              name: 'fn',
+              location: { uri, range: lineSpan(0, 0, 1) },
+            })),
+          );
+          client.workspaceDiagnostics.mockResolvedValue(
+            targets.map((uri) => ({
+              uri,
+              diagnostics: [{ range: lineSpan(0, 0, 1), message: 'issue' }],
+            })),
+          );
+        });
+        for (const content of [result.llmContent, result.returnDisplay]) {
+          expectContains(content, displayPath(appPath), 'untitled:buffer');
+          expect(content).not.toContain(targets[0]);
+          const fileLine = String(content)
+            .split('\n')
+            .find((line) => line.includes(displayPath(appPath)));
+          expect(fileLine).not.toContain('cannot query');
+          expect(fileLine).not.toContain('non-file URI');
+          expect(content).toContain('non-file URI');
+        }
+      },
+    );
 
     it('marks an invalid server-produced file URI without failing formatting', async () => {
       const { result } = await run(at('goToDefinition'), (client) =>

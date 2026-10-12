@@ -947,25 +947,21 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
   }
 
   private formatUriForDisplay(uri: string, workspaceRoot: string): string {
-    let filePath = uri;
-    if (/^file:/i.test(uri)) {
-      try {
-        filePath = fileURLToPath(uri);
-      } catch {
-        return uri;
-      }
+    try {
+      return path.relative(workspaceRoot, fileURLToPath(uri)) || '.';
+    } catch {
+      return path.isAbsolute(uri)
+        ? path.relative(workspaceRoot, uri) || '.'
+        : uri;
     }
-    if (path.isAbsolute(filePath)) {
-      return path.relative(workspaceRoot, filePath) || '.';
-    }
-    return filePath;
   }
 
   private scopeSuffixForUri(uri: string): string {
     const cached = this.scopeSuffixes.get(uri);
     if (cached !== undefined) return cached;
     let suffix = '';
-    if (!/^file:/i.test(uri)) {
+    const url = URL.canParse(uri) ? new URL(uri) : undefined;
+    if (url?.protocol !== 'file:' && !/^file:/i.test(uri)) {
       suffix = ' [non-file URI; cannot query with file operations]';
     } else {
       try {
@@ -975,7 +971,7 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
         if (
           !isSubpaths(
             this.scopeDirectories,
-            resolveWorkspacePath(fileURLToPath(uri)),
+            resolveWorkspacePath(fileURLToPath(url ?? uri)),
           )
         ) {
           suffix =
