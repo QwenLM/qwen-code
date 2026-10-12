@@ -55,6 +55,7 @@ import {
   parseHarnessCheckpointV1,
   type HarnessRunAuthorization,
   harnessCheckpointIsAgentWait,
+  harnessCheckpointIsCommandWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
@@ -1087,6 +1088,7 @@ export async function settleCrashedWakeTurnAftermath(params: {
       children: session.childAgents,
       teams: session.teams,
       messages: session.messages,
+      commands: session.commands,
     });
     // Consume the crashed input: until its turnId settles, every reload
     // re-classifies it as recovery and re-blocks the Session over the
@@ -1507,6 +1509,7 @@ async function settleCancelledHarnessTurn(
     children: session.childAgents,
     teams: session.teams,
     messages: session.messages,
+    commands: session.commands,
   });
   await managed.sink.write(
     record(session, sessionId, 'system', null, {
@@ -4633,6 +4636,7 @@ export function registerHostedHarnessSessionRoutes(
             children: session.childAgents,
             teams: session.teams,
             messages: session.messages,
+            commands: session.commands,
           });
         } catch (cause) {
           writeStderrLineSafe(
@@ -5060,6 +5064,7 @@ export function registerHostedHarnessSessionRoutes(
             children: session.childAgents,
             teams: session.teams,
             messages: session.messages,
+            commands: session.commands,
           });
         const projected = await managed.sink.project();
         const current = projected.filter(
@@ -7308,8 +7313,13 @@ export function registerHostedHarnessSessionRoutes(
         'results_ready' &&
       // The agent wait (#13708): still outstanding, or folded past it —
       // the consumed advance lands as model_output_committed carrying the
-      // wait's group. Both re-enter through the same resume arm below.
+      // wait's group. Both re-enter through the same resume arm below, and
+      // so does the command wait (H4e-b3), which the takeover reports as
+      // await_command.
       !harnessCheckpointIsAgentWait(
+        continueAuthorization.authorization.checkpoint,
+      ) &&
+      !harnessCheckpointIsCommandWait(
         continueAuthorization.authorization.checkpoint,
       )
     ) {
@@ -7615,6 +7625,7 @@ export function registerHostedHarnessSessionRoutes(
             children: session.childAgents,
             teams: session.teams,
             messages: session.messages,
+            commands: session.commands,
           });
           if (answered > 0) {
             projected = await session.managed.sink.project();
@@ -7973,6 +7984,7 @@ export function registerHostedHarnessSessionRoutes(
           children: session.childAgents,
           teams: session.teams,
           messages: session.messages,
+          commands: session.commands,
         });
         // Whatever shape the wait was in, its round is fully answered now:
         // the folds above landed (or the journaled proof they were never

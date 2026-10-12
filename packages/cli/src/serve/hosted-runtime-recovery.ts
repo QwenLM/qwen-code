@@ -43,6 +43,7 @@ import {
   type HostedSessionCommandSession,
 } from './hosted-session-command-session.js';
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
+import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import {
   HOSTED_TEAM_TOOL_NAMES,
   type HostedTeamSession,
@@ -65,6 +66,7 @@ import {
 import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import {
   HostedChildChains,
+  hostedPromptKey,
   hostedMemberView,
   hostedRouteDetails,
   isEndedMember,
@@ -435,6 +437,7 @@ async function answerAbandonedTurnCalls(input: {
   children?: HostedChildAgentSession;
   teams?: HostedTeamSession;
   messages?: HostedSessionMessageSession;
+  commands?: HostedSessionCommandSession;
 }): Promise<number> {
   const uncommitted = input.uncommitted ?? 'all';
   const records = (await input.session.sink.project()).filter(
@@ -466,8 +469,30 @@ async function answerAbandonedTurnCalls(input: {
       call.name === 'send_message'
         ? sentMessageText(input, functionCallId, callKey)
         : undefined;
+    // A member's board call shares the team tools' names, but once its
+    // outbound committed (H4e-b3) it is a command: answered by its own
+    // journal, never as a call that never ran — that would leave the
+    // entry live for the relay to deliver after the Turn gave it up.
+    const commandId =
+      input.commands === undefined
+        ? undefined
+        : sessionCommandId({
+            senderSessionId:
+              input.session.authority.sessionHeader.sessionKey.sessionId,
+            promptKey: hostedPromptKey(input.promptId),
+            callId: functionCallId,
+          });
     let parts: Part[];
-    if (sent !== undefined) {
+    if (
+      commandId !== undefined &&
+      input.commands!.command(commandId) !== undefined
+    ) {
+      parts = await sessionCommandJournalAnswer(input.commands!, {
+        commandId,
+        functionCallId,
+        toolName: call.name,
+      });
+    } else if (sent !== undefined) {
       parts = convertToFunctionResponse(call.name, functionCallId, [
         { text: sent },
       ]);
@@ -658,6 +683,7 @@ export function answerCommittedTurnCalls(input: {
   children?: HostedChildAgentSession;
   teams?: HostedTeamSession;
   messages?: HostedSessionMessageSession;
+  commands?: HostedSessionCommandSession;
 }): Promise<number> {
   return answerAbandonedTurnCalls({
     ...input,
@@ -683,6 +709,7 @@ export function answerResumedTurnCalls(input: {
   children?: HostedChildAgentSession;
   teams?: HostedTeamSession;
   messages?: HostedSessionMessageSession;
+  commands?: HostedSessionCommandSession;
 }): Promise<number> {
   return answerAbandonedTurnCalls({
     ...input,
@@ -975,6 +1002,63 @@ export async function fillParkedRoundAgentGaps(input: {
 }
 
 /**
+ * A member command call's answer by what its journal committed (H4e-b3
+ * decision 14): an accepted entry's reply; a planned entry cancelled and
+ * told as not sent; a handed-over one told it reached the leader with its
+ * reply still missing and a write possibly landed; rejected, cancelled
+ * and unknown said so. The settle's conflict is the relay race's own
+ * evidence: once it loses, the journal is re-read and answered as it
+ * committed. It never consumes the entry — no waiting call reads it.
+ */
+async function sessionCommandJournalAnswer(
+  commands: HostedSessionCommandSession,
+  run: Pick<HarnessCommandWaitRun, 'commandId' | 'functionCallId' | 'toolName'>,
+): Promise<Part[]> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const record = commands.command(run.commandId);
+    const state =
+      record === undefined
+        ? 'planned'
+        : (record.run.delivery?.state ?? 'planned');
+    if (state === 'accepted' || state === 'consumed') {
+      const reply = await commands.readReply(run.commandId);
+      if (reply === null) continue;
+      return reply.outcome === 'answered'
+        ? convertToFunctionResponse(run.toolName, run.functionCallId, [
+            { text: reply.text },
+          ])
+        : convertToFunctionErrorResponse(
+            run.toolName,
+            run.functionCallId,
+            [],
+            reply.text,
+          );
+    }
+    try {
+      if (record !== undefined && state === 'planned') {
+        await commands.settle(run.commandId, 'cancelled');
+      } else if (state === 'accepting') {
+        await commands.settle(run.commandId, 'unknown');
+      }
+    } catch (cause) {
+      if (cause instanceof ManagedSessionConflictError) continue;
+      throw cause;
+    }
+    return convertToFunctionErrorResponse(
+      run.toolName,
+      run.functionCallId,
+      [],
+      sessionCommandEvidenceText(
+        // The accepted/consumed arm above answered already; what remains
+        // of the delivery vocabulary is exactly the settle-relevant five.
+        state as 'planned' | 'accepting' | 'rejected' | 'cancelled' | 'unknown',
+      ),
+    );
+  }
+  throw new Error(`Session command ${run.commandId} never settled.`);
+}
+
+/**
  * The command wait's cancellation settlement (H4e-b3 decision 14): every
  * outstanding wait run is answered by what its own journal committed —
  * an accepted entry's reply; a planned entry cancelled and told as not
@@ -997,57 +1081,7 @@ export async function settleCancelledCommandWaitRuns(input: {
   const harness = createManagedHarnessHandle(input.managed);
   const journaled = await journaledToolResultIds(input.managed, input.promptId);
   for (const run of input.runs) {
-    let parts: Part[] | undefined;
-    for (let attempt = 0; attempt < 4 && parts === undefined; attempt += 1) {
-      const record = input.commands.command(run.commandId);
-      const state =
-        record === undefined
-          ? 'planned'
-          : (record.run.delivery?.state ?? 'planned');
-      if (state === 'accepted' || state === 'consumed') {
-        const reply = await input.commands.readReply(run.commandId);
-        if (reply === null) continue;
-        parts =
-          reply.outcome === 'answered'
-            ? convertToFunctionResponse(run.toolName, run.functionCallId, [
-                { text: reply.text },
-              ])
-            : convertToFunctionErrorResponse(
-                run.toolName,
-                run.functionCallId,
-                [],
-                reply.text,
-              );
-        continue;
-      }
-      try {
-        if (record !== undefined && state === 'planned') {
-          await input.commands.settle(run.commandId, 'cancelled');
-        } else if (state === 'accepting') {
-          await input.commands.settle(run.commandId, 'unknown');
-        }
-      } catch (cause) {
-        if (cause instanceof ManagedSessionConflictError) continue;
-        throw cause;
-      }
-      parts = convertToFunctionErrorResponse(
-        run.toolName,
-        run.functionCallId,
-        [],
-        sessionCommandEvidenceText(
-          // The accepted/consumed arm above folded already; what remains
-          // of the delivery vocabulary is exactly the settle-relevant five.
-          state as
-            | 'planned'
-            | 'accepting'
-            | 'rejected'
-            | 'cancelled'
-            | 'unknown',
-        ),
-      );
-    }
-    if (parts === undefined)
-      throw new Error(`Session command ${run.commandId} never settled.`);
+    const parts = await sessionCommandJournalAnswer(input.commands, run);
     if (!journaled.has(run.functionCallId))
       await input.managed.sink.write({
         uuid: randomUUID(),
@@ -1385,6 +1419,7 @@ export async function settleInterruptedTurnRuntime(input: {
       children: input.children,
       teams: input.teams,
       messages: input.messages,
+      commands: input.commands,
     });
   } else {
     // A Turn whose checkpoint never bound it — a batch of team calls and
@@ -1398,6 +1433,7 @@ export async function settleInterruptedTurnRuntime(input: {
       children: input.children,
       teams: input.teams,
       messages: input.messages,
+      commands: input.commands,
     });
   }
   // The handback owed for a taken Workspace survives a settlement split

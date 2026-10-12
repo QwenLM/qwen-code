@@ -20,6 +20,7 @@ import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/mana
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { HarnessCommandWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   HostedSessionCommandSession,
@@ -1094,6 +1095,80 @@ it('keeps the Turn locked across Runtime work and a takeover after it', async ()
   expect(texts(next)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
   expect(commands.command(commandIdOf('call-next'))).toBeUndefined();
 });
+
+// The load routes answer an interrupted Turn's owed calls before they
+// read its round. A member's board call shares the team tools' names,
+// but once its outbound committed it is a command: its journal answers
+// it — cancelled, so the relay can no longer deliver it — never the
+// "never ran" text a team call that committed nothing gets.
+it.each([
+  ['planned', 'was not sent and nothing happened', 'cancelled'],
+  ['accepting', 'reached the leader, but its reply did not arrive', 'unknown'],
+] as const)(
+  'answers an interrupted %s member command by its journal on a resumed load',
+  async (handedOver, text, settled) => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+        'write the board',
+    );
+    const args = { subject: 'x', description: 'y' };
+    await session.sink.write({
+      uuid: 'assistant-cut',
+      parentUuid: null,
+      sessionId: sessionKey.sessionId,
+      timestamp: new Date().toISOString(),
+      model: 'model',
+      type: 'assistant',
+      cwd: rootDir,
+      version: 'test',
+      daemonPromptId: 'prompt',
+      message: {
+        role: 'model',
+        parts: [
+          { functionCall: { id: 'call-cut', name: 'task_create', args } },
+        ],
+      },
+    });
+    const commandId = commandIdOf('call-cut');
+    await commands.runCommand({
+      commandId,
+      kind: 'board_write',
+      args,
+      executionCallId: 'call-cut',
+      closing: false,
+    });
+    if (handedOver === 'accepting') await commands.handover(commandId, PARENT);
+
+    const answered = await answerResumedTurnCalls({
+      session,
+      sessionId: sessionKey.sessionId,
+      cwd: rootDir,
+      promptId: 'prompt',
+      children,
+      commands,
+    });
+    expect(answered).toBe(1);
+    const results = await journaledResults();
+    expect(results).toContain(text);
+    expect(results).not.toContain('The tool call never ran');
+    expect(commands.command(commandId)?.run.delivery?.state).toBe(settled);
+    // Replayed, the answer stays single.
+    await answerResumedTurnCalls({
+      session,
+      sessionId: sessionKey.sessionId,
+      cwd: rootDir,
+      promptId: 'prompt',
+      children,
+      commands,
+    });
+    expect(
+      (await session.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === 'prompt' && entry.type === 'tool_result',
+      ),
+    ).toHaveLength(1);
+  },
+);
 
 // A budget refusal is a normal local answer, so it owes the parked wait
 // its fold: a durable wait left behind turns the Turn's next call into a
