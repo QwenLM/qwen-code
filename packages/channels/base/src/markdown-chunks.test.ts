@@ -829,6 +829,16 @@ it.each(['utf16', 'utf8'] as const)(
     const chunks = splitMarkdown(entityLike, options);
     expect(chunks.join('')).toBe(entityLike);
     checkBudget(chunks, options);
+    const withDefinition =
+      '&' +
+      'a'.repeat(19_000) +
+      ';\n\n[ref]: https://docs.example.com/' +
+      'b'.repeat(8000);
+    const definedChunks = splitMarkdown(withDefinition, options);
+    expect(
+      definedChunks.map((chunk) => chunk.split('\n\n[ref]:')[0]).join(''),
+    ).toBe('&' + 'a'.repeat(19_000) + ';');
+    checkBudget(definedChunks, options);
     const task = '- [x] ' + 'a'.repeat(5000) + '\n\n  ' + 'b'.repeat(600);
     const taskChunks = splitMarkdown(task, options);
     expect(taskChunks.flatMap(code)).toEqual([]);

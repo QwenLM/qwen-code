@@ -95,6 +95,7 @@ function chunkMarkdown(
     value: string,
     budget: number,
     firstOnly = false,
+    hardBudget = budget,
   ): string[] {
     const parts: string[] = [];
     while (value) {
@@ -145,7 +146,7 @@ function chunkMarkdown(
           if (entity && ampersand + entity[0].length > end) {
             end =
               ampersand ||
-              (size(entity[0]) <= maxLength ? entity[0].length : end);
+              (size(entity[0]) <= hardBudget ? entity[0].length : end);
           }
         }
         // Keep escaped punctuation with its escape character.
@@ -367,6 +368,7 @@ function chunkMarkdown(
           remaining,
           Math.max(budget, size(first)),
           true,
+          limit,
         )[0]!;
         if (size(piece) > limit)
           throw new RangeError('Markdown budget is too small');
