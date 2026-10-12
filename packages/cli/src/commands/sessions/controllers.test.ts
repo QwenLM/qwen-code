@@ -105,6 +105,7 @@ describe('controllers add', () => {
     const out = stdout.join('\n');
     expect(out).toContain('agents.crossSessionMessaging turned off');
     expect(out).toContain('restarted after changing that setting');
+    expect(out).toContain('without --bare or --safe-mode');
     expect(out).toContain('without per-message review');
     expect(out).toContain('agents.crossSessionInbound');
   });

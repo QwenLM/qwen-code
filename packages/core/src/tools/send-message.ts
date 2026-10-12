@@ -107,6 +107,14 @@ class SendMessageInvocation extends BaseToolInvocation<
    */
   private peerMessagingOff = false;
 
+  private peerMessagingOffReason(): string {
+    if (this.config.isSafeMode?.())
+      return '--safe-mode disables peer messaging';
+    if (this.config.getBareMode?.())
+      return '--bare mode disables peer messaging';
+    return 'agents.crossSessionMessaging is off, or its inbox did not start';
+  }
+
   /**
    * Try to deliver to another Qwen Code session on this machine.
    *
@@ -473,7 +481,7 @@ class SendMessageInvocation extends BaseToolInvocation<
 
     if (!teamManager) {
       const msg = this.peerMessagingOff
-        ? `No active team and no task_id, and cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so "${to}" cannot be another session. ` +
+        ? `No active team and no task_id, and cross-session messaging is not active in this session (${this.peerMessagingOffReason()}), so "${to}" cannot be another session. ` +
           'Create a team, or pass `task_id` to message a background task.'
         : `No active team, no task_id, and no reachable session named "${to}". ` +
           (rosterReachable(this.config)
@@ -506,7 +514,7 @@ class SendMessageInvocation extends BaseToolInvocation<
         // that the name it wants could belong to a session this setting
         // is hiding.
         errMsg += this.peerMessagingOff
-          ? ` Cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so another session could not have taken that name either.`
+          ? ` Cross-session messaging is not active in this session (${this.peerMessagingOffReason()}), so another session could not have taken that name either.`
           : ` No reachable session has that name either${
               rosterReachable(this.config)
                 ? '; use list_agents to see who is reachable.'
