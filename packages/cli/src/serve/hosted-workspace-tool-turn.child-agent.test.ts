@@ -64,6 +64,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    acquired = false;
     runtime = {
       bindingId: 'binding',
       generation: '1',
@@ -71,14 +72,20 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     };
     fileHistory = broker.fileHistory;
     warm = broker.warm;
-    acquire = broker.acquire;
+    acquire = async (...args: Parameters<typeof broker.acquire>) => {
+      await broker.acquire(...args);
+      this.acquired = true;
+    };
     prepare = broker.prepare;
     prepareV3 = broker.prepareV3;
     execute = broker.execute;
     executeV3 = broker.executeV3;
     acknowledgeV3 = broker.acknowledgeV3;
     cancel = broker.cancel;
-    release = broker.release;
+    release = async (...args: Parameters<typeof broker.release>) => {
+      await broker.release(...args);
+      this.acquired = false;
+    };
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
     hookControl = broker.hookControl;
