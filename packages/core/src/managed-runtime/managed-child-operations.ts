@@ -183,11 +183,16 @@ export function encodeWorkflowLaunchEnvelope(
         args: envelope.args ?? null,
       },
       // JSON.stringify silently DROPS function- and symbol-valued members
-      // instead of throwing; without this replacer the encoder could emit
-      // bytes its own decoder refuses, or (worse) launch evidence that
-      // carries fewer arguments than the caller passed.
+      // and rewrites a non-finite number as null instead of throwing;
+      // without this replacer the encoder could emit bytes its own decoder
+      // refuses, or (worse) launch evidence that carries other arguments
+      // than the caller passed.
       (_key, value: unknown) => {
-        if (typeof value === 'function' || typeof value === 'symbol') {
+        if (
+          typeof value === 'function' ||
+          typeof value === 'symbol' ||
+          (typeof value === 'number' && !Number.isFinite(value))
+        ) {
           throw new ManagedSessionRecordError(
             'Workflow launch arguments must be JSON values (byte_limit).',
           );

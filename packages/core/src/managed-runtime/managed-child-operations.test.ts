@@ -639,6 +639,17 @@ describe('managed workflow child operations (#13803)', () => {
           args: { s: Symbol('k'), x: 1 },
         }),
       ).toThrow(ManagedSessionRecordError);
+      // R1-36: JSON.stringify writes a non-finite number as null, which
+      // would commit an argument the caller never passed.
+      for (const n of [Infinity, -Infinity, NaN]) {
+        expect(() =>
+          encodeWorkflowLaunchEnvelope({
+            definition: WORKFLOW_DEFINITION,
+            script: SCRIPT,
+            args: { n: [n] },
+          }),
+        ).toThrow(ManagedSessionRecordError);
+      }
     });
 
     it('refuses malformed envelope bytes', () => {
