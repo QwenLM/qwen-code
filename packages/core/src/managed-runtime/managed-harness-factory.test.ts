@@ -1962,6 +1962,25 @@ describe('command wait', () => {
     await session.close();
   });
 
+  it('stamps the timeout lock on the fold that carried it and keeps it past a takeover', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitCommand([commandWaitRun('cmd_1')], turn, {
+      holdsWorkspaceMount: false,
+    });
+    const folded = await handle.resolveAwaitCommand('cmd_1', {
+      timedOut: true,
+    });
+    expect(folded?.commandWait?.timedOut).toBe(true);
+    expect(folded?.continuation.phase).toBe('model_output_committed');
+    await session.replaceActivation();
+    const settled = await session.authority.harnessRunAuthorization();
+    if (settled.status !== 'runnable')
+      throw new Error(`expected runnable, got ${settled.status}`);
+    expect(settled.checkpoint.commandWait?.timedOut).toBe(true);
+    await session.close();
+  });
+
   it('resolves nothing outside the command wait', async () => {
     const session = await open(await createWorkspace());
     const { handle } = await modelOutputCommittedTurn(session);

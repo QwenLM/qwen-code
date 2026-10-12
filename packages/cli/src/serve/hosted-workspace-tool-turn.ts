@@ -4501,6 +4501,21 @@ export class HostedWorkspaceToolTurn {
    * Turn; once one call of the Turn timed out, every later command call
    * of it refuses at once.
    */
+  /** Decision 4's lock is the wait group's own durable state, not just
+   * Turn memory: a replacement owner of the same Turn re-arms from the
+   * carried group, so a timed-out leader stays unanswering for every
+   * later command, across restarts as across seconds. */
+  private async syncCommandTimedOutFromDurable(): Promise<void> {
+    if (this.commandTimedOut) return;
+    const authorization =
+      await this.session.authority.harnessRunAuthorization();
+    if (
+      authorization.status === 'runnable' &&
+      authorization.checkpoint.commandWait?.timedOut === true
+    )
+      this.commandTimedOut = true;
+  }
+
   private async acceptSessionCommand(
     request: { call: ToolCallRequestInfo },
     model: string,
@@ -4511,6 +4526,7 @@ export class HostedWorkspaceToolTurn {
     const commands = this.commands;
     if (commands === undefined)
       throw new Error('A member command call has no command funnel.');
+    await this.syncCommandTimedOutFromDurable();
     const kind: SessionCommandKind =
       name === 'task_list' ? 'board_read' : 'board_write';
     const key = this.session.authority.sessionHeader.sessionKey;
@@ -4552,8 +4568,10 @@ export class HostedWorkspaceToolTurn {
     if (this.commandTimedOut) {
       const parts = await answer(SESSION_COMMAND_LEADER_UNANSWERING_TEXT, true);
       // The locked run still folds, or the Turn's wait never completes —
-      // its answer rides the batch the same as a call that ran.
-      await this.harness.resolveAwaitCommand(commandId);
+      // its answer rides the batch the same as a call that ran. The fold
+      // re-stamps the fresh group's lock, so the refusal outlives this
+      // owner too.
+      await this.harness.resolveAwaitCommand(commandId, { timedOut: true });
       return parts;
     }
     if (signal.aborted) {
@@ -4628,7 +4646,11 @@ export class HostedWorkspaceToolTurn {
           commandId,
           model,
         );
-        await this.harness.resolveAwaitCommand(commandId);
+        // Decision 4's lock rides the fold: a replacement owner of this
+        // Turn re-arms from the group and refuses the next command too.
+        await this.harness.resolveAwaitCommand(commandId, {
+          timedOut: true,
+        });
         return parts;
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -4750,6 +4772,7 @@ export class HostedWorkspaceToolTurn {
       await this.acquire(false, signal);
     }
     const journaled = await journaledToolResultIds(this.session, this.promptId);
+    await this.syncCommandTimedOutFromDurable();
     for (const run of runs) {
       if (run.folded) continue;
       const request = {
@@ -4767,7 +4790,9 @@ export class HostedWorkspaceToolTurn {
           );
           if (!journaled.has(run.functionCallId))
             await this.commit('tool_result', locked, model);
-          await this.harness.resolveAwaitCommand(run.commandId);
+          await this.harness.resolveAwaitCommand(run.commandId, {
+            timedOut: true,
+          });
           break;
         }
         if (signal.aborted) {
@@ -4839,7 +4864,9 @@ export class HostedWorkspaceToolTurn {
             model,
             journaled,
           );
-          await this.harness.resolveAwaitCommand(run.commandId);
+          await this.harness.resolveAwaitCommand(run.commandId, {
+            timedOut: true,
+          });
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 250));

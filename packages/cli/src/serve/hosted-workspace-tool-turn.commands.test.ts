@@ -476,3 +476,55 @@ it('on resume folds a checkpointed call whose outbound never committed, as not s
   // Nothing settled a record: none exists, and that is the point.
   expect(commands.command(commandId)).toBeUndefined();
 });
+
+// Decision 4's lock is durable: once one command of the Turn timed out
+// the fold carries the stamp, so a replacement owner of the same prompt
+// refuses the next command at once — and re-stamps the fresh group, so
+// the lock outlives every owner.
+it('keeps a timed-out Turn locked across owners', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const turn = createTurn();
+  const running = execute(turn, [
+    call({ subject: 'x', description: 'y' }, 'call-live', 'task_create'),
+  ]);
+  const commandId = commandIdOf('call-live');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  await commands.handover(commandId, PARENT);
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.now() + 121_000);
+  await running;
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
+  vi.useRealTimers();
+  const stamped = await session.authority.harnessRunAuthorization();
+  if (stamped.status !== 'runnable')
+    throw new Error(`expected runnable, got ${stamped.status}`);
+  expect(stamped.checkpoint.commandWait?.timedOut).toBe(true);
+
+  // The replacement owner: the same prompt, a fresh Turn.
+  const restarted = createTurn();
+  const parts = await execute(restarted, [
+    call({ subject: 'z', description: 'w' }, 'call-after', 'task_create'),
+  ]);
+  expect(texts(parts)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+  expect(commands.command(commandIdOf('call-after'))).toBeUndefined();
+  const restamped = await session.authority.harnessRunAuthorization();
+  if (restamped.status !== 'runnable')
+    throw new Error(`expected runnable, got ${restamped.status}`);
+  expect(restamped.checkpoint.commandWait?.timedOut).toBe(true);
+
+  // And the owner after that, from the re-stamped group alone.
+  const next = createTurn();
+  const again = await execute(next, [
+    call({ status: 'pending' }, 'call-final', 'task_list'),
+  ]);
+  expect(texts(again)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+  expect(commands.command(commandIdOf('call-final'))).toBeUndefined();
+});

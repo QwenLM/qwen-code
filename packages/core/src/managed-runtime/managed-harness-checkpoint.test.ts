@@ -1230,6 +1230,7 @@ function commandWaitOf(
       folded: false,
     })),
     holdsWorkspaceMount,
+    timedOut: false,
   };
 }
 
@@ -1275,6 +1276,57 @@ describe('command wait', () => {
     expect(advanced.continuation.phase).toBe('model_output_committed');
     expect(advanced.commandWait?.runs.every((run) => run.folded)).toBe(true);
     expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
+  });
+
+  // Decision 4: the fold that carried the timeout stamps the group, and
+  // the stamp rides every later fold of the same wait — a replacement
+  // owner re-arms from it.
+  it('carries the timeout lock on every fold after the one that stamped it', () => {
+    const wait = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: commandWaitOf(['cmd_1', 'cmd_2']),
+    });
+    const stamped = createConsumedCommandWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      commandId: 'cmd_1',
+      timedOut: true,
+    });
+    expect(stamped.continuation.phase).toBe('await_command');
+    expect(stamped.commandWait?.timedOut).toBe(true);
+    const advanced = createConsumedCommandWaitHarnessCheckpoint({
+      previous: stamped,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      commandId: 'cmd_2',
+    });
+    expect(advanced.continuation.phase).toBe('model_output_committed');
+    expect(advanced.commandWait?.timedOut).toBe(true);
+    expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
+  });
+
+  it('reads a group written before the lock existed as not timed out', () => {
+    const wait = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: commandWaitOf(['cmd_1']),
+    });
+    const json = JSON.parse(bytesOf(wait).toString('utf8'));
+    delete json['commandWait']['timedOut'];
+    const parsed = parseHarnessCheckpointV1(
+      Buffer.from(JSON.stringify(json), 'utf8'),
+    );
+    expect(parsed.commandWait?.timedOut).toBe(false);
   });
 
   it('treats a checkpoint without a commandWait key as carrying none', () => {
@@ -1412,7 +1464,7 @@ describe('command wait', () => {
         coveredSequence: 5,
         previousCheckpointId: 'ckpt-5',
         attempt: committedAttempt(),
-        commandWait: { runs: [], holdsWorkspaceMount: false },
+        commandWait: { runs: [], holdsWorkspaceMount: false, timedOut: false },
       }),
     ).toThrow(/requires at least one run/);
     expect(() =>
