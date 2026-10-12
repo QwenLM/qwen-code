@@ -4782,7 +4782,24 @@ export class HostedWorkspaceToolTurn {
           break;
         }
         const record = commands.command(run.commandId);
-        const state = record?.run.delivery?.state;
+        if (record === undefined) {
+          // The checkpoint names a call whose outbound was never
+          // committed — the dead owner exited between the two steps,
+          // and no process will ever commit it now. End the wait with
+          // the same not-sent answer the live arm gives; settling a
+          // record that does not exist only throws.
+          const unsent = convertToFunctionErrorResponse(
+            run.toolName,
+            run.functionCallId,
+            [],
+            sessionCommandEvidenceText('planned'),
+          );
+          if (!journaled.has(run.functionCallId))
+            await this.commit('tool_result', unsent, model);
+          await this.harness.resolveAwaitCommand(run.commandId);
+          break;
+        }
+        const state = record.run.delivery?.state;
         if (state === 'accepted' || state === 'consumed') {
           const reply = await commands.readReply(run.commandId);
           if (reply !== null) {

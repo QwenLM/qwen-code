@@ -412,3 +412,67 @@ it('answers a handed command as unknown past the bound and locks the batch after
   // The later call never minted an outbox entry of its own.
   expect(commands.command(commandIdOf('call-lw'))).toBeUndefined();
 });
+
+// The checkpoint names the whole batch, so an owner that dies between
+// the park commit and its first outbound leaves a run with no record.
+// The recovered wait answers it as not sent and folds — never tries to
+// settle a record that does not exist.
+it('on resume folds a checkpointed call whose outbound never committed, as not sent', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const commandId = commandIdOf('call-lost');
+  const harness = createManagedHarnessHandle(session);
+  const argsRef = await session.resources.publish(
+    'managed-command-args',
+    Buffer.from(JSON.stringify({ subject: 'x', description: 'y' }), 'utf8'),
+  );
+  await harness.commitAwaitCommand(
+    [
+      {
+        commandId,
+        functionCallId: 'call-lost',
+        toolName: 'task_create',
+        modelMessageId: 'assistant-lost',
+        folded: false,
+      },
+    ],
+    { turnId: 'prompt', promptId: 'prompt' },
+    {
+      holdsWorkspaceMount: false,
+      attempt: { attemptId: 'assistant-lost', routeRef: argsRef },
+    },
+  );
+  expect(commands.command(commandId)).toBeUndefined();
+  const parked = await session.authority.harnessRunAuthorization();
+  if (parked.status !== 'runnable')
+    throw new Error(`expected runnable, got ${parked.status}`);
+  expect(parked.checkpoint.continuation.phase).toBe('await_command');
+  const turn = createTurn();
+  await expect(
+    turn.resumeCommandWaitRuns(
+      parked.checkpoint.commandWait?.runs ?? [],
+      false,
+      'model',
+      new AbortController().signal,
+    ),
+  ).resolves.toBeUndefined();
+  // The not-sent answer is journaled under the call's own id — word for
+  // word the live arm's planned answer (decision 14).
+  const projected = await session.sink.project();
+  const parts = projected
+    .filter(
+      (entry) =>
+        entry.daemonPromptId === 'prompt' && entry.type === 'tool_result',
+    )
+    .flatMap((entry) => entry.message?.parts ?? []);
+  expect(JSON.stringify(parts)).toContain('call-lost');
+  expect(JSON.stringify(parts)).toContain('was not sent and nothing happened');
+  const settled = await session.authority.harnessRunAuthorization();
+  if (settled.status !== 'runnable')
+    throw new Error(`expected runnable, got ${settled.status}`);
+  expect(settled.checkpoint.continuation.phase).toBe('model_output_committed');
+  // Nothing settled a record: none exists, and that is the point.
+  expect(commands.command(commandId)).toBeUndefined();
+});
