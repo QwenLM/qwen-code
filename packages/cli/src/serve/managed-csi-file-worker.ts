@@ -150,6 +150,8 @@ export async function startManagedCsiFileWorker(
   let binding: Promise<CsiFileHistoryObservation> | undefined;
   let bindIdentity: string | undefined;
   let historyFailed = false;
+  let preparingHistory = false;
+  let activeExecutions = 0;
   let observationTail: Promise<unknown> = Promise.resolve();
   const preparations = new Map<
     string,
@@ -349,8 +351,10 @@ export async function startManagedCsiFileWorker(
               observationTail
                 .catch(() => undefined)
                 .then(async () => {
+                  preparingHistory = true;
                   await originalBinding;
-                  if (!canInstall() || !composition) throw new Error();
+                  if (!canInstall() || !composition || activeExecutions)
+                    throw new Error();
                   const current = readCsiPreparationEvidence(
                     await readCurrentCsiNative(boot, installed, 'prepare', ref),
                   );
@@ -407,6 +411,9 @@ export async function startManagedCsiFileWorker(
                   }
                   if (!historyFailed) preparations.delete(ref.resourceId);
                   throw error;
+                })
+                .finally(() => {
+                  preparingHistory = false;
                 }),
             );
             prepared = {
@@ -529,6 +536,7 @@ export async function startManagedCsiFileWorker(
             createManagedContextAttestationResponse(boot.context),
           ) ||
           !isDeepStrictEqual(request.installedContext, installed) ||
+          preparingHistory ||
           !canInstall()
         )
           throw new Error();
@@ -647,16 +655,22 @@ export async function startManagedCsiFileWorker(
             } else if (toolName !== 'read_file') {
               throw new Error();
             }
-            return executor.execute(
-              {
-                sessionId: reference['sessionId'] as string,
-                promptId: reference['promptId'] as string,
-                callId: reference['callId'] as string,
-                argsDigest: reference['argsDigest'] as string,
-              },
-              toolName as string,
-              payload['input'] as Record<string, unknown>,
-            );
+            if (preparingHistory) throw new Error();
+            activeExecutions++;
+            try {
+              return await executor.execute(
+                {
+                  sessionId: reference['sessionId'] as string,
+                  promptId: reference['promptId'] as string,
+                  callId: reference['callId'] as string,
+                  argsDigest: reference['argsDigest'] as string,
+                },
+                toolName as string,
+                payload['input'] as Record<string, unknown>,
+              );
+            } finally {
+              activeExecutions--;
+            }
           }),
         );
         const response = { ...request, state: 'settled', result };

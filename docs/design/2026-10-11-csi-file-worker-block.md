@@ -83,6 +83,14 @@ changed or unverifiable effects seal execution and report
 `managed_csi_history_retirement_required`, including already queued snapshots.
 Its retained pins are preserved and its preparation is never silently recopied.
 
+Preparation excludes execution until its retained observation and failure
+inspection finish. An active executor invocation refuses preparation before
+authority readback or preimage effects. A new execution, including one whose
+native readback began earlier, refuses before executor admission while preparation
+is active. These timing refusals leave the Session usable and can retry after the
+current operation finishes; they do not retire history or wait indefinitely for
+an idle backend. Snapshot retains its existing idle-backend requirement.
+
 History preparation projects the largest possible next snapshot, file records
 and retained pins before copying, with 1 KiB reserved for the authority envelope.
 It enforces 100 snapshots and the 64 KiB history response budget. Conservative
@@ -105,13 +113,22 @@ partial write while preserving the original inode and mode. A failed new-file
 write removes its own leaf. Rollback verifies original descriptor/named-entry
 identity and backup alias fences, and completes without the cancelled signal.
 Only the exact cancellation reason is recoverable after successful rollback;
-storage failures and failed rollback close the backend. Missing files and initial
-non-file path shapes refuse one request; mount, inode, device, backup pin and
+storage failures, including ENOSPC, and failed rollback close the backend even
+when original bytes were restored. The worker reports execution unavailable and
+requires retirement rather than treating restored bytes as storage recovery.
+Missing files and initial non-file path shapes refuse one request; mount, inode,
+device, backup pin and
 inventory changes remain fatal. This is recovery from observed write errors,
 not qualification of crash atomicity or persistent device failure recovery.
 Retained readiness deduplicates working paths across snapshots, but still checks
 each failed backup and authenticates current storage. Full inventory checking
 remains in place; this change does not claim linear total cost with growing pins.
+
+New scoped working files and directories request modes `0600` and `0700`,
+respectively, with further restriction by the process umask. Under umask `022`
+these differ from ordinary Write's `0644` and `0755` defaults. Existing-file updates
+preserve the original mode; callers sharing a volume with other UIDs must account
+for these creation modes.
 
 The Java request retains canonical Session UUID isolation, Workspace generation
 and storage identity, root-relative working directory and a canonical absolute
@@ -191,6 +208,9 @@ authority and sealed admission must cause no new file effects.
 Also verify illegal context installations do not replace the accepted identity,
 pre-effect authority failures can retry, post-effect preparation failure refuses
 queued snapshots with the retirement code, and capacity refusal precedes copies.
+Overlap preparation with new execution, pending native readback and an active
+executor invocation: timing refusals must precede file effects, then the same
+requests and a later snapshot must succeed without retiring the Session.
 After cancellation or partial write failure, compare complete original bytes,
 inode and mode; genuine integrity failure must still close admission. Exercise a
 Chinese Read result above 64 KiB and an exact retry through the real HTTP worker.

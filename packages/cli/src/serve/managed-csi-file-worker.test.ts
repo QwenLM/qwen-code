@@ -661,6 +661,130 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
     return sample;
   }
 
+  it.each(['new request', 'pending readback'])(
+    'refuses %s during preparation without retiring the retained owner',
+    async (timing) => {
+      mockMountFixture();
+      const preparation = csiHistoryPreparationFixture();
+      const retained = retainedHistory(preparation);
+      const read = readExecutionFixture();
+      let releasePreparation!: () => void;
+      const preparing = new Promise<void>((resolve) => {
+        releasePreparation = resolve;
+      });
+      retained.historyPrepare.mockImplementation(() => preparing);
+      let releaseReadback!: () => void;
+      const readback = new Promise<void>((resolve) => {
+        releaseReadback = resolve;
+      });
+      const native = vi
+        .spyOn(nativeReadback, 'readCurrentCsiNative')
+        .mockImplementation(async (_boot, _installed, action) => {
+          if (action === 'execute' && timing === 'pending readback')
+            await readback;
+          return (action === 'bind'
+            ? nativeFixture.valid[0].response
+            : action === 'prepare'
+              ? preparation.response
+              : read.response) as unknown as Awaited<
+            ReturnType<typeof nativeReadback.readCurrentCsiNative>
+          >;
+        });
+      const execute = vi
+        .spyOn(ManagedToolExecutor.prototype, 'execute')
+        .mockResolvedValue({
+          executionStatus: 'success',
+          responseParts: [{ text: 'owned Read result' }],
+        });
+      await start();
+      expect((await history('bind')).status).toBe(200);
+      let reading: Promise<Response> | undefined;
+      let preparingRequest: Promise<Response> | undefined;
+      let response: Response;
+      let executionsDuringPreparation: number;
+      try {
+        if (timing === 'pending readback') {
+          reading = send('execute', read.request);
+          await vi.waitFor(() =>
+            expect(native).toHaveBeenCalledWith(
+              candidate,
+              installed,
+              'execute',
+              read.request.subject,
+            ),
+          );
+        }
+        preparingRequest = prepare(preparation.intentRef);
+        await vi.waitFor(() =>
+          expect(retained.historyPrepare).toHaveBeenCalledTimes(1),
+        );
+        reading ??= send('execute', read.request);
+        releaseReadback();
+        response = await reading;
+        executionsDuringPreparation = execute.mock.calls.length;
+      } finally {
+        releaseReadback();
+        releasePreparation();
+      }
+      expect((await preparingRequest!).status).toBe(200);
+      expect(response!.status).toBe(409);
+      expect(executionsDuringPreparation!).toBe(0);
+      expect((await send('execute', read.request)).status).toBe(200);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect((await history('snapshot')).status).toBe(200);
+      expect((await prepare(preparation.intentRef)).status).toBe(200);
+      expect(retained.historyPrepare).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('refuses preparation before preimage effects while an execution is active and permits the same retry', async () => {
+    mockMountFixture();
+    const preparation = csiHistoryPreparationFixture();
+    const retained = retainedHistory(preparation);
+    const read = readExecutionFixture();
+    vi.spyOn(nativeReadback, 'readCurrentCsiNative').mockImplementation(
+      async (_boot, _installed, action) =>
+        (action === 'bind'
+          ? nativeFixture.valid[0].response
+          : action === 'prepare'
+            ? preparation.response
+            : read.response) as unknown as Awaited<
+          ReturnType<typeof nativeReadback.readCurrentCsiNative>
+        >,
+    );
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const execute = vi
+      .spyOn(ManagedToolExecutor.prototype, 'execute')
+      .mockImplementation(async () => {
+        await pending;
+        return {
+          executionStatus: 'success',
+          responseParts: [{ text: 'owned Read result' }],
+        };
+      });
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    const reading = send('execute', read.request);
+    let response: Response;
+    let preimagesBeforeRetry: number;
+    try {
+      await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+      response = await prepare(preparation.intentRef);
+      preimagesBeforeRetry = retained.historyPrepare.mock.calls.length;
+    } finally {
+      release();
+    }
+    expect((await reading).status).toBe(200);
+    expect(response!.status).toBe(409);
+    expect(preimagesBeforeRetry!).toBe(0);
+    expect((await prepare(preparation.intentRef)).status).toBe(200);
+    expect(retained.historyPrepare).toHaveBeenCalledTimes(1);
+    expect((await history('snapshot')).status).toBe(200);
+  });
+
   it('uses fresh original Read input on the private execute route with labelled authority/executor seams', async () => {
     mockMountFixture();
     retainedHistory(csiHistoryPreparationFixture());

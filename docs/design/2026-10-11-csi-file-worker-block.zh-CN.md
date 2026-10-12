@@ -68,6 +68,12 @@ storage 完全未变也可重试；效果变化或无法验证时会封闭执行
 返回 `managed_csi_history_retirement_required`，已排队的 snapshot 也适用。
 保留 pins，不静默重新复制同一 preparation。
 
+Preparation 在 retained 观测和失败检查结束前排除执行。若已有 executor invocation
+进行中，准备在 authority readback 或 preimage 效果之前拒绝；准备进行时，新执行
+及之前已开始 native readback 的执行均在 executor 准入前拒绝。此类时序拒绝保留
+可用 Session，当前操作结束后可以重试；不会退役 history，也不无限等待后端空闲。
+Snapshot 保留已有的后端空闲要求。
+
 History 准备在复制前投影下一 snapshot、文件记录和 retained pins 的最大形状，
 为 authority envelope 预留 1 KiB，执行 100 个 snapshot 及 64 KiB 历史回包预算。
 保守容量拒绝返回 `managed_csi_history_capacity_exceeded`，保留之前的 snapshot
@@ -84,12 +90,18 @@ Write 仅在 scoped `textFileIo` 路径使用该外层 catch；普通路径直�
 Scoped writer 保留写入前的精确字节，在部分写入失败时恢复原文件，同时保持
 原 inode 和 mode；新文件写入失败会删除自己创建的 leaf。Rollback 验证原始
 描述符和命名项身份、备份 alias fence，且不再使用已取消的 signal。仅在成功
-恢复且错误正是 signal 的取消 reason 时恢复可用性；存储故障和 rollback 失败
-仍关闭 backend。不存在的文件及首次输入的非文件路径形状只拒绝该请求；mount、
+恢复且错误正是 signal 的取消 reason 时恢复可用性；存储故障
+（包括 ENOSPC）和 rollback 失败即使恢复了原字节也仍关闭 backend。Worker 报告
+execution unavailable，并要求退役，不把字节恢复当作存储恢复。不存在的文件及
+首次输入的非文件路径形状只拒绝该请求；mount、
 inode、device、备份 pin 或 inventory 变化仍是致命失败。这是观测到写入错误后的
 恢复，不是 crash 原子性或持续设备故障恢复的资格证明。Retained readiness 对
 跨 snapshot 的 working path 去重，同时保留每个 failed backup 和当前存储验证。
 完整 inventory 检查仍保留，不声称 pin 增长时整体成本为线性。
+
+Scoped backend 新建工作文件和目录分别请求 `0600` 和 `0700` 权限，process umask
+可以进一步收紧。在 umask `022` 下，这与普通 Write 默认的 `0644` 和 `0755` 不同。
+已有文件更新保留原始 mode；与其他 UID 共享卷的调用方须考虑这些新建权限。
 
 Java 请求沿用 Broker 编码，保留规范 Session UUID 隔离、Workspace generation
 和存储身份、根相对工作目录及规范绝对 mount root。拒绝根据精确能力摘要，
@@ -153,6 +165,8 @@ bind/prepare/Read/Write/Edit/history-snapshot 序列、原始 preimage 和结果
 
 还需验证非法 context 安装不替换已接受身份，文件效果前的 authority 失败可重试，
 效果后的准备失败让已排队 snapshot 返回明确退役码，容量拒绝发生在复制之前。
+将准备分别与新执行、进行中的 native readback、已有 executor invocation 重叠：
+时序拒绝须发生在文件效果之前，之后相同请求和后续 snapshot 应成功，Session 不退役。
 取消或部分写入失败后比较完整原字节、inode 和 mode，真实完整性失败仍须关闭准入。
 通过真实 HTTP worker 验证超过 64 KiB 的中文 Read 结果及精确重试。
 
