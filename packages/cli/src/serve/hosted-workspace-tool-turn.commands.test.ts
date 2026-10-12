@@ -477,6 +477,67 @@ it('on resume folds a checkpointed call whose outbound never committed, as not s
   expect(commands.command(commandId)).toBeUndefined();
 });
 
+// The cancelled-signal arm of the same wait: a cancelled recovery must
+// not fall into the settle arm for a record that does not exist.
+it('on resume folds a checkpointed call whose outbound never committed, as not sent, with the recovery cancelled', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const commandId = commandIdOf('call-lost');
+  const harness = createManagedHarnessHandle(session);
+  const argsRef = await session.resources.publish(
+    'managed-command-args',
+    Buffer.from(JSON.stringify({ subject: 'x', description: 'y' }), 'utf8'),
+  );
+  await harness.commitAwaitCommand(
+    [
+      {
+        commandId,
+        functionCallId: 'call-lost',
+        toolName: 'task_create',
+        modelMessageId: 'assistant-lost',
+        folded: false,
+      },
+    ],
+    { turnId: 'prompt', promptId: 'prompt' },
+    {
+      holdsWorkspaceMount: false,
+      attempt: { attemptId: 'assistant-lost', routeRef: argsRef },
+    },
+  );
+  const parked = await session.authority.harnessRunAuthorization();
+  if (parked.status !== 'runnable')
+    throw new Error(`expected runnable, got ${parked.status}`);
+  const turn = createTurn();
+  const aborted = new AbortController();
+  aborted.abort();
+  await expect(
+    turn.resumeCommandWaitRuns(
+      parked.checkpoint.commandWait?.runs ?? [],
+      false,
+      'model',
+      aborted.signal,
+    ),
+  ).resolves.toBeUndefined();
+  const projected = await session.sink.project();
+  const parts = projected
+    .filter(
+      (entry) =>
+        entry.daemonPromptId === 'prompt' && entry.type === 'tool_result',
+    )
+    .flatMap((entry) => entry.message?.parts ?? []);
+  expect(JSON.stringify(parts)).toContain('call-lost');
+  expect(JSON.stringify(parts)).toContain('was not sent and nothing happened');
+  const settled = await session.authority.harnessRunAuthorization();
+  if (settled.status !== 'runnable')
+    throw new Error(`expected runnable, got ${settled.status}`);
+  expect(settled.checkpoint.commandWait?.runs.every((run) => run.folded)).toBe(
+    true,
+  );
+  expect(commands.command(commandId)).toBeUndefined();
+});
+
 // Decision 4's lock is durable: once one command of the Turn timed out
 // the fold carries the stamp, so a replacement owner of the same prompt
 // refuses the next command at once — and re-stamps the fresh group, so

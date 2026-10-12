@@ -4691,7 +4691,20 @@ export class HostedWorkspaceToolTurn {
     const { name, callId } = request.call;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const record = commands.command(commandId);
-      const state = record?.run.delivery?.state ?? 'planned';
+      if (record === undefined) {
+        // 未发送：没有记录要结算，直接给了计划态的答案，不再走
+        // settle（那只会抛 "has no record to revise"）。
+        const unsent = convertToFunctionErrorResponse(
+          name,
+          callId,
+          [],
+          sessionCommandEvidenceText('planned'),
+        );
+        if (!journaled?.has(callId))
+          await this.commit('tool_result', unsent, model);
+        return unsent;
+      }
+      const state = record.run.delivery?.state;
       if (state === 'accepted' || state === 'consumed') {
         const reply = await commands.readReply(commandId);
         if (reply !== null) {
@@ -4797,6 +4810,25 @@ export class HostedWorkspaceToolTurn {
       const anchor = commands.outboundCommittedAt(run.commandId) ?? Date.now();
       const deadline = anchor + COMMAND_WAIT_MS;
       for (;;) {
+        const record = commands.command(run.commandId);
+        if (record === undefined) {
+          // The checkpoint names a call whose outbound was never
+          // committed — the dead owner exited between the two steps,
+          // and no process will ever commit it now. This answer holds
+          // under any signal: a cancelled recovery must not fall into
+          // arm that would try (and fail) to settle a record that does
+          // not exist.
+          const unsent = convertToFunctionErrorResponse(
+            run.toolName,
+            run.functionCallId,
+            [],
+            sessionCommandEvidenceText('planned'),
+          );
+          if (!journaled.has(run.functionCallId))
+            await this.commit('tool_result', unsent, model);
+          await this.harness.resolveAwaitCommand(run.commandId);
+          break;
+        }
         if (this.commandTimedOut) {
           const locked = convertToFunctionErrorResponse(
             run.toolName,
@@ -4819,24 +4851,6 @@ export class HostedWorkspaceToolTurn {
             model,
             journaled,
           );
-          await this.harness.resolveAwaitCommand(run.commandId);
-          break;
-        }
-        const record = commands.command(run.commandId);
-        if (record === undefined) {
-          // The checkpoint names a call whose outbound was never
-          // committed — the dead owner exited between the two steps,
-          // and no process will ever commit it now. End the wait with
-          // the same not-sent answer the live arm gives; settling a
-          // record that does not exist only throws.
-          const unsent = convertToFunctionErrorResponse(
-            run.toolName,
-            run.functionCallId,
-            [],
-            sessionCommandEvidenceText('planned'),
-          );
-          if (!journaled.has(run.functionCallId))
-            await this.commit('tool_result', unsent, model);
           await this.harness.resolveAwaitCommand(run.commandId);
           break;
         }
