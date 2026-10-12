@@ -533,15 +533,17 @@ it('answers an aborted half-batch: the first launch commits, the aborted second 
   const controller = new AbortController();
   // The abort must arrive between admissions — early enough for the second
   // workflow arm's own `if (signal.aborted)` guard to fire, late enough to
-  // keep the first launch's commit. Waiting on the first record's
-  // appearance draws that line deterministically.
-  const driving = (async () => {
-    for (;;) {
-      if (children.record('prompt:wf-1') !== undefined) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    controller.abort();
-  })();
+  // keep the first launch's commit. Aborting as the first admission's
+  // commit returns draws that line deterministically: the batch admits its
+  // launches one after another (#13858 R2-3; a polling timer raced it).
+  const admitWorkflow = children.admitWorkflow.bind(children);
+  const admitted = vi
+    .spyOn(children, 'admitWorkflow')
+    .mockImplementation(async (params) => {
+      const launched = await admitWorkflow(params);
+      controller.abort();
+      return launched;
+    });
   const responses = (
     await Promise.all([
       turn.execute(
@@ -568,9 +570,10 @@ it('answers an aborted half-batch: the first launch commits, the aborted second 
         'model',
         controller.signal,
       ),
-      driving,
     ])
   )[0];
+  expect(admitted).toHaveBeenCalledTimes(1);
+  admitted.mockRestore();
   // The aborted admission answers the second call with the cancel text —
   // and mints no second record; the first had already landed.
   expect(JSON.stringify(responses)).toContain('Workflow child started');
