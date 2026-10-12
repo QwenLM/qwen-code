@@ -87,7 +87,7 @@ export async function runHostedHarnessTextTurn(input: {
     round: number,
     pendingToolResults: boolean,
     context: string | undefined,
-    continuationInFlight?: boolean,
+    captureUnsupported?: boolean,
   ) => Promise<
     | import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js').ManagedSessionDurableRef
     | undefined
@@ -477,7 +477,7 @@ export async function runHostedHarnessTextTurn(input: {
         completeAttempt?.attemptId ?? `${input.promptId}:${round}`;
       const prepare: LlmPreparedRequestCallback = async (
         prepared,
-        continuationInFlight,
+        captureUnsupported,
       ) => {
         if (completeAttempt) {
           const previous = completeAttempt;
@@ -489,7 +489,7 @@ export async function runHostedHarnessTextTurn(input: {
           round,
           pendingToolResults,
           input.workspaceContext?.read(),
-          continuationInFlight,
+          captureUnsupported,
         );
         completeAttempt = await input.modelScope?.beginMainAttempt(
           prepared.request.model,

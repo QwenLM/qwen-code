@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Stored
 import com.fasterxml.jackson.databind.JsonNode;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -237,8 +238,13 @@ public final class ManagedHostedRecoveryRecords {
                     && (body.get("workspaceContext").isNull() || body.get("workspaceContext").isTextual()), "Invalid model context.");
             require(body.get("requestDigest").isTextual() && body.get("requestDigest").asText().matches("[a-f0-9]{64}"), "Invalid model digest.");
             JsonNode prepared = body.get("prepared");
-            ManagedExtensionRecords.closed(prepared, Set.of("request", "history", "completedToolCallIds",
-                    "routeSelector", "providerPin", "promptTokensForClamp"), "prepared model request");
+            Set<String> preparedKeys = new HashSet<>(Set.of("request", "history", "completedToolCallIds",
+                    "routeSelector", "providerPin", "promptTokensForClamp"));
+            if (prepared.has("allowPersistentRetry")) {
+                preparedKeys.add("allowPersistentRetry");
+                require(prepared.get("allowPersistentRetry").isBoolean(), "Invalid model retry policy.");
+            }
+            ManagedExtensionRecords.closed(prepared, preparedKeys, "prepared model request");
             ManagedExtensionRecords.closed(prepared.get("request"), Set.of("model", "contents", "config"), "model request");
             ManagedExtensionRecords.id(prepared.get("routeSelector"), "routeSelector");
             ManagedExtensionRecords.id(prepared.path("request").get("model"), "model");

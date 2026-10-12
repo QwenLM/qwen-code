@@ -104,6 +104,7 @@ import {
   InMemoryImagePayloadStore,
   buildReattachParts,
   countAllInlineImages,
+  hasImagePayloadReferences,
   replaceImagePayloadsInPlace,
 } from '../services/image-payload-references.js';
 import {
@@ -603,10 +604,11 @@ export interface LlmPreparedRequest {
   routeSelector: string;
   providerPin: string;
   promptTokensForClamp: number;
+  allowPersistentRetry?: boolean;
 }
 export type LlmPreparedRequestCallback = ((
   prepared: LlmPreparedRequest,
-  continuationInFlight?: boolean,
+  captureUnsupported?: boolean,
 ) => Promise<void>) & {
   /** Over-budget requests are borrowed views and must not be retained. */
   maxSnapshotBytes?: number;
@@ -3073,6 +3075,10 @@ export class LlmChat {
     onPreparedRequest?: LlmPreparedRequestCallback,
   ): Promise<AsyncGenerator<StreamEvent>> {
     signal.throwIfAborted();
+    if (hasImagePayloadReferences(prepared.history))
+      throw new LlmRequestPreparationError(
+        'Saved image payloads are unavailable.',
+      );
     return this.sendMessageStream(
       `${prepared.routeSelector}\0`,
       {
@@ -3700,6 +3706,8 @@ export class LlmChat {
               contentGeneratorConfig: exactRoute.contentGeneratorConfig,
               retryAuthType: exactRoute.retryAuthType,
               retryErrorCodes: exactRoute.retryErrorCodes,
+              allowPersistentRetry:
+                options?.preparedRequest?.allowPersistentRetry === true,
             }
           : undefined;
         const maxRateLimitRetries =
@@ -5366,6 +5374,7 @@ export class LlmChat {
       contentGeneratorConfig?: ContentGeneratorConfig;
       retryAuthType?: string;
       retryErrorCodes?: readonly number[];
+      allowPersistentRetry?: boolean;
     },
     routeKey = this.currentRouteKey(),
     goalContext?: GoalTurnPermit,
@@ -5402,6 +5411,7 @@ export class LlmChat {
           routeSelector: `${actualConfig?.authType ?? ''}:${model}`,
           providerPin: llmPreparedProviderPin(actualConfig),
           promptTokensForClamp,
+          allowPersistentRetry: overrides?.allowPersistentRetry ?? !overrides,
         };
         const overBudget =
           onPreparedRequest.maxSnapshotBytes !== undefined &&
@@ -5409,7 +5419,9 @@ export class LlmChat {
             onPreparedRequest.maxSnapshotBytes;
         await onPreparedRequest(
           overBudget ? prepared : structuredClone(prepared),
-          continuationInFlight || transportContinuationPrefix !== undefined,
+          continuationInFlight ||
+            transportContinuationPrefix !== undefined ||
+            hasImagePayloadReferences(this.history),
         );
       } catch (cause) {
         throw new LlmRequestPreparationError(cause);
@@ -5423,7 +5435,8 @@ export class LlmChat {
       overrides?.retryErrorCodes ?? cgConfig?.retryErrorCodes;
     // Fallback models never enter persistent retry mode — persistent mode
     // is the caller's explicit opt-in for the primary model only.
-    const persistentMode = overrides ? false : isUnattendedMode();
+    const persistentMode =
+      (overrides?.allowPersistentRetry ?? !overrides) && isUnattendedMode();
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof ResponsesHttpError) {

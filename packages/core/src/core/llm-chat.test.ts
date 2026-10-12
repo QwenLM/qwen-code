@@ -990,6 +990,149 @@ describe('LlmChat', async () => {
       });
     });
 
+    it('preserves primary persistent retry intent through prepared replay', async () => {
+      vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'true');
+      try {
+        const routeConfig = {
+          model: 'test-model',
+          authType: AuthType.USE_GEMINI,
+        };
+        mockGeneratorConfig();
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          resolveForModel: vi.fn().mockResolvedValue({
+            model: 'test-model',
+            contentGenerator: mockContentGenerator,
+            contentGeneratorConfig: routeConfig,
+          }),
+        } as unknown as ReturnType<Config['getBaseLlmClient']>);
+        let saved: LlmPreparedRequest | undefined;
+        streamMock().mockImplementation(async () => textStream('answer'));
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'original' },
+            'primary-replay',
+            undefined,
+            {
+              onPreparedRequest: async (prepared) => {
+                saved = prepared;
+              },
+            },
+          ),
+        );
+        expect(saved!.allowPersistentRetry).toBe(true);
+        expect(mockRetryWithBackoff.mock.calls.at(-1)?.[1]).toMatchObject({
+          persistentMode: true,
+          heartbeatFn: expect.any(Function),
+        });
+        mockRetryWithBackoff.mockClear();
+        await drain(
+          await newChat().sendPreparedMessageStream(
+            saved!,
+            'primary-replay',
+            new AbortController().signal,
+          ),
+        );
+        expect(mockRetryWithBackoff).toHaveBeenCalledOnce();
+        expect(mockRetryWithBackoff.mock.calls[0]?.[1]).toMatchObject({
+          persistentMode: true,
+          heartbeatFn: expect.any(Function),
+        });
+        vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'false');
+        await drain(
+          await newChat().sendPreparedMessageStream(
+            saved!,
+            'primary-replay-without-opt-in',
+            new AbortController().signal,
+          ),
+        );
+        expect(mockRetryWithBackoff.mock.calls.at(-1)?.[1].persistentMode).toBe(
+          false,
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('keeps externalized images live while refusing lossy prepared replay', async () => {
+      mockGeneratorConfig();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: mockConfig.getContentGeneratorConfig(),
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        imagePayloadThreshold: 1,
+        maxRecentImagesToRetain: 1,
+      });
+      chat.setHistory([
+        content('user', {
+          inlineData: { mimeType: 'image/png', data: 'earlier-image' },
+        }),
+        modelText('I saw the image'),
+      ]);
+      streamMock().mockImplementation(async () => textStream('answer'));
+      const prepared = vi.fn();
+      for (const message of ['first question', 'next question']) {
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message },
+            message,
+            undefined,
+            { onPreparedRequest: prepared },
+          ),
+        );
+      }
+      expect(prepared).toHaveBeenCalledTimes(2);
+      for (const [saved, captureUnsupported] of prepared.mock.calls) {
+        expect(captureUnsupported).toBe(true);
+        expect(JSON.stringify(saved.history)).toContain('[Image #');
+        expect(JSON.stringify(saved.history)).not.toContain('"inlineData"');
+      }
+      for (const [request] of streamMock().mock.calls) {
+        expect(
+          (request.contents as Content[])
+            .flatMap((entry) => entry.parts ?? [])
+            .filter((part) => part.inlineData),
+        ).toEqual([
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'earlier-image',
+              displayName: undefined,
+            },
+          },
+        ]);
+      }
+      streamMock().mockClear();
+      mockRetryWithBackoff.mockClear();
+      const fresh = newChat();
+      await expect(
+        fresh.sendPreparedMessageStream(
+          prepared.mock.calls[0]![0],
+          'old-image-snapshot',
+          new AbortController().signal,
+        ),
+      ).rejects.toBeInstanceOf(LlmRequestPreparationError);
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+      expect(fresh.getHistory()).toEqual([]);
+      await drain(
+        await fresh.sendPreparedMessageStream(
+          {
+            ...prepared.mock.calls[0]![0],
+            history: [content('user', { text: 'original' })],
+          },
+          'safe-image-control',
+          new AbortController().signal,
+        ),
+      );
+      expect(streamMock()).toHaveBeenCalledOnce();
+    });
+
     it('pins provider semantics while excluding credential rotation', () => {
       const base = {
         model: 'test',
@@ -5619,6 +5762,66 @@ describe('LlmChat', async () => {
         'prompt-rollback-transient',
         5_000,
       );
+    });
+
+    it('keeps a captured fallback request outside persistent retry on replay', async () => {
+      const fallbackGenerate = vi
+        .fn()
+        .mockImplementation(async () => textStream('fallback answer'));
+      const fallbackConfig = {
+        model: 'fallback-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      const resolver = wireFallbacks(
+        ['fallback-model'],
+        vi
+          .fn()
+          .mockResolvedValue(
+            fallbackRoute('fallback-model', fallbackGenerate, fallbackConfig),
+          ),
+      );
+      streamMock().mockRejectedValue(tpmCapacityError());
+      const saved: LlmPreparedRequest[] = [];
+      vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'false');
+      try {
+        await drain(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'original' },
+            'fallback-replay',
+            undefined,
+            {
+              onPreparedRequest: async (prepared) => {
+                saved.push(prepared);
+              },
+            },
+          ),
+        );
+        const fallback = saved.find(
+          (prepared) => prepared.request.model === 'fallback-model',
+        );
+        expect(fallback).toBeDefined();
+        expect(fallback!.allowPersistentRetry).toBe(false);
+        vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'true');
+        mockRetryWithBackoff.mockClear();
+        resolver.mockClear();
+        await drain(
+          await newChat().sendPreparedMessageStream(
+            fallback!,
+            'fallback-replay',
+            new AbortController().signal,
+          ),
+        );
+        expect(mockRetryWithBackoff).toHaveBeenCalledOnce();
+        expect(mockRetryWithBackoff.mock.calls[0]?.[1].persistentMode).toBe(
+          false,
+        );
+        expect(mockRetryWithBackoff.mock.calls[0]?.[1]).not.toHaveProperty(
+          'heartbeatFn',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
 
     it('does not enter the fallback chain in unattended retry mode', async () => {

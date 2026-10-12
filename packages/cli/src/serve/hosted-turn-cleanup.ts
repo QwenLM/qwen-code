@@ -10,6 +10,7 @@ import { parseHostedRecoveryResource } from '@qwen-code/qwen-code-core/managed-r
 import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  MANAGED_SESSION_LIMITS,
   type ManagedSessionDurableRef,
   type ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -39,10 +40,15 @@ async function commitCleanup(
 ): Promise<void> {
   const authority = session.authority;
   const activation = session.activation;
+  const rawEventId = `${cleanupId}:${state}`;
+  const eventId =
+    Buffer.byteLength(rawEventId) <= MANAGED_SESSION_LIMITS.maxIdBytes
+      ? rawEventId
+      : `hosted-cleanup:${createHash('sha256').update(rawEventId).digest('hex')}`;
   await authority.appendExecutionEvent(
     {
       operation: 'hostedCleanup',
-      commandId: `${cleanupId}:${state}`,
+      commandId: eventId,
       sessionKey: authority.sessionHeader.sessionKey,
       contentDigest: createHash('sha256')
         .update(`${descriptorRef.digest}:${state}`)
@@ -51,7 +57,7 @@ async function commitCleanup(
     (sequence) => ({
       v: 1,
       sequence,
-      eventId: `${cleanupId}:${state}`,
+      eventId,
       sessionKey: authority.sessionHeader.sessionKey,
       kind: 'hosted.cleanup',
       occurredAt: Date.now(),
@@ -72,13 +78,20 @@ export async function oweHostedTurnCleanup(
   broker: HostedWorkspaceBroker,
 ): Promise<void> {
   if (!broker.runtime) return;
-  const cleanupId = `hosted-cleanup:${promptId}:${broker.runtimeSessionId}`;
+  const originalId = `hosted-cleanup:${promptId}:${broker.runtimeSessionId}`;
+  let cleanupId = originalId;
+  if (
+    Buffer.byteLength(`${cleanupId}:confirmed`) >
+    MANAGED_SESSION_LIMITS.maxIdBytes
+  )
+    cleanupId = `hosted-cleanup:${createHash('sha256').update(cleanupId).digest('hex')}`;
   const existing = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
     .findLast(
       (event) =>
         event.kind === 'hosted.cleanup' &&
-        event.payload['cleanupId'] === cleanupId,
+        (event.payload['cleanupId'] === cleanupId ||
+          event.payload['cleanupId'] === originalId),
     );
   if (existing) {
     if (existing.payload['state'] !== 'owed')

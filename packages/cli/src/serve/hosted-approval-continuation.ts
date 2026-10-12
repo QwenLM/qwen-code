@@ -177,8 +177,9 @@ export async function readHostedApprovalContinuation(
       item.partIndex < 0 ||
       parts[item.partIndex]?.functionCall?.id !== item.call.callId ||
       parts[item.partIndex]?.functionCall?.name !== item.call.name ||
-      item.prepareKey !== `${promptId}:${item.runtimeCallId}` ||
-      item.prepareReference?.sessionId !== promptId ||
+      item.prepareKey !==
+        `${hostedRuntimeSessionId(promptId)}:${item.runtimeCallId}` ||
+      item.prepareReference?.sessionId !== hostedRuntimeSessionId(promptId) ||
       item.prepareReference.promptId !== promptId ||
       item.prepareReference.callId !== item.runtimeCallId ||
       item.prepareReference.argsDigest !== item.requestDigest ||

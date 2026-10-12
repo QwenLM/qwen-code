@@ -1458,6 +1458,7 @@ export async function settleCancelledHookTurn(
       ),
     );
     session.blocked = false;
+    session.cleanupBlocked = false;
   } finally {
     session.hooksBusy = false;
   }
@@ -1566,6 +1567,7 @@ function runSettleProjection(
       if (brokerOptions) await retryHostedCleanup(session, brokerOptions);
     });
     session.blocked = false;
+    session.cleanupBlocked = false;
   })()
     .catch((cause: unknown) => {
       session.blocked = true;
@@ -1583,10 +1585,10 @@ async function retryHostedCleanup(
   session: HostedSession,
   options: HostedWorkspaceBrokerOptions,
 ): Promise<void> {
-  if (!hasHostedCleanupDebt(session.managed) || unsettledPromptId(session))
-    return;
+  if (unsettledPromptId(session)) return;
   try {
-    await reconcileHostedTurnCleanup(session.managed, options);
+    if (hasHostedCleanupDebt(session.managed))
+      await reconcileHostedTurnCleanup(session.managed, options);
     if (session.cleanupBlocked) session.blocked = false;
     session.cleanupBlocked = false;
   } catch (cause) {
@@ -2345,17 +2347,7 @@ async function startHostedRecoveredTurn(
         event.payload['turnId'] === resume.promptId,
     );
   const deadline = accepted?.payload['deadline'];
-  const timer =
-    typeof deadline === 'number'
-      ? setTimeout(
-          () => abort.abort(HOSTED_TURN_DEADLINE),
-          Math.max(0, deadline - Date.now()),
-        )
-      : undefined;
-  timer?.unref();
-  if (typeof deadline === 'number' && deadline <= Date.now())
-    abort.abort(HOSTED_TURN_DEADLINE);
-  if (
+  const cancelled =
     cancellationTakeover ||
     session.managed.authority
       .eventsInSequenceRange(1, session.managed.authority.committedSequence)
@@ -2363,9 +2355,18 @@ async function startHostedRecoveredTurn(
         (event) =>
           event.kind === 'cancel.requested' &&
           object(event.payload['target'])?.['turnId'] === resume.promptId,
-      )
-  )
-    abort.abort();
+      );
+  const timer =
+    !cancelled && typeof deadline === 'number'
+      ? setTimeout(
+          () => abort.abort(HOSTED_TURN_DEADLINE),
+          Math.max(0, deadline - Date.now()),
+        )
+      : undefined;
+  timer?.unref();
+  if (cancelled) abort.abort();
+  else if (typeof deadline === 'number' && deadline <= Date.now())
+    abort.abort(HOSTED_TURN_DEADLINE);
   session.active = {
     promptId: resume.promptId,
     digest: '',
@@ -2408,6 +2409,7 @@ async function startHostedRecoveredTurn(
     });
   await ready;
   session.blocked = false;
+  session.cleanupBlocked = false;
 }
 
 async function executeHostedTurn(
@@ -2760,9 +2762,9 @@ async function executeHostedTurn(
                     round,
                     pendingToolResults,
                     context,
-                    continuationInFlight,
+                    captureUnsupported,
                   ) => {
-                    if (continuationInFlight) return undefined;
+                    if (captureUnsupported) return undefined;
                     const snapshot = createHostedModelRequest(
                       session.managed,
                       promptId,
@@ -2960,6 +2962,7 @@ export function registerHostedHarnessSessionRoutes(
     }
     refusedAdoptions.delete(sessionId);
     resident.blocked = false;
+    resident.cleanupBlocked = false;
     sendAttachment(res, sessionId, resident);
     if (settle !== null)
       runSettleProjection(resident, sessionId, settle, brokerOptions);
@@ -3315,12 +3318,27 @@ export function registerHostedHarnessSessionRoutes(
       // and before the recovery it drives can start one.
       if (stopMessages) resident.messagesStopped = true;
       if (!resident.mcp) {
+        if (resident.mcpClosing) {
+          noteOwedAdoption(resident, sessionId);
+          return error(res, 409, 'hosted_session_closing');
+        }
+        if (resident.mcpRecovering)
+          return error(res, 409, 'hosted_turn_active');
+        resident.mcpRecovering += 1;
         try {
           const committed = await findHostedCommittedModelOutput(
             resident.managed,
             parked,
           );
           if (committed) {
+            if (sessions.get(sessionId) !== resident) {
+              noteOwedAdoption(resident, sessionId);
+              return error(res, 404, 'hosted_session_not_found');
+            }
+            if (resident.mcpClosing) {
+              noteOwedAdoption(resident, sessionId);
+              return error(res, 409, 'hosted_session_closing');
+            }
             runSettleProjection(
               resident,
               sessionId,
@@ -3349,6 +3367,14 @@ export function registerHostedHarnessSessionRoutes(
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
               );
+            if (sessions.get(sessionId) !== resident) {
+              noteOwedAdoption(resident, sessionId);
+              return error(res, 404, 'hosted_session_not_found');
+            }
+            if (resident.mcpClosing) {
+              noteOwedAdoption(resident, sessionId);
+              return error(res, 409, 'hosted_session_closing');
+            }
             await startHostedRecoveredTurn(
               resident,
               sessionId,
@@ -3358,6 +3384,14 @@ export function registerHostedHarnessSessionRoutes(
               approval,
               model,
             );
+            if (sessions.get(sessionId) !== resident) {
+              noteOwedAdoption(resident, sessionId);
+              return error(res, 404, 'hosted_session_not_found');
+            }
+            if (resident.mcpClosing) {
+              noteOwedAdoption(resident, sessionId);
+              return error(res, 409, 'hosted_session_closing');
+            }
             sendAttachment(res, sessionId, resident);
             return;
           }
@@ -3368,6 +3402,8 @@ export function registerHostedHarnessSessionRoutes(
           );
           error(res, 409, 'hosted_turn_recovery_required');
           return;
+        } finally {
+          resident.mcpRecovering -= 1;
         }
       }
       if (resident.toolProfile === undefined || !brokerOptions) {
@@ -4182,6 +4218,7 @@ export function registerHostedHarnessSessionRoutes(
                 const aftermath = await wakeAftermath(turn.turnId);
                 if (aftermath === 'settled') {
                   session.blocked = false;
+                  session.cleanupBlocked = false;
                 }
               }
               if (
@@ -4223,7 +4260,10 @@ export function registerHostedHarnessSessionRoutes(
             const first = firstPendingWakeInput(session);
             if (first === undefined) return;
             const aftermath = await wakeAftermath(first.turnId);
-            if (aftermath === 'settled') session.blocked = false;
+            if (aftermath === 'settled') {
+              session.blocked = false;
+              session.cleanupBlocked = false;
+            }
           },
           failed: (cause) => {
             session.blocked = true;
@@ -4982,6 +5022,8 @@ export function registerHostedHarnessSessionRoutes(
       session.hooksBusy
     )
       return error(res, 409, 'hosted_turn_active');
+    if (hasHostedCleanupDebt(session.managed) && unsettledPromptId(session))
+      return error(res, 503, 'hosted_lifecycle_recovery_required');
     const previousAuthority = session.lifecycle;
     session.stores!.setLifecycleAuthority(authority);
     session.hooksBusy = true;
@@ -5777,12 +5819,24 @@ export function registerHostedHarnessSessionRoutes(
       promptId,
     );
     if (states.get(promptId) === 'owed') return false;
-    if (!states.has(promptId))
-      await new HostedWorkspaceBroker(
-        options,
-        session.managed.authority.sessionHeader.sessionKey,
-        hostedRuntimeSessionId(promptId),
-      ).release();
+    if (!states.has(promptId)) {
+      try {
+        await new HostedWorkspaceBroker(
+          options,
+          session.managed.authority.sessionHeader.sessionKey,
+          hostedRuntimeSessionId(promptId),
+        ).release();
+      } catch (cause) {
+        if (
+          !(cause instanceof HostedWorkspaceBrokerRejection) ||
+          cause.status !== 404 ||
+          cause.code !== 'runtime_session_not_found'
+        )
+          throw cause;
+      }
+    }
+    if (!hasHostedCleanupDebt(session.managed))
+      await retryHostedCleanup(session, options);
     return true;
   };
 
@@ -5819,12 +5873,19 @@ export function registerHostedHarnessSessionRoutes(
       session,
       { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
       promptId,
-    ).then((confirmed) => {
-      if (!confirmed)
-        throw new Error('Original Runtime cleanup is still owed.');
-      if (session.runtimeLeaseHeld === promptId)
-        session.runtimeLeaseHeld = undefined;
-    });
+    ).then(
+      (confirmed) => {
+        if (!confirmed)
+          throw new Error('Original Runtime cleanup is still owed.');
+        if (session.runtimeLeaseHeld === promptId)
+          session.runtimeLeaseHeld = undefined;
+      },
+      (cause: unknown) => {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness release of recovered Runtime ${promptId} failed: ${String(cause)}`,
+        );
+      },
+    );
   };
 
   /**
@@ -7868,6 +7929,7 @@ export function registerHostedHarnessSessionRoutes(
                 const aftermath = await session.wakeAftermath(first.turnId);
                 if (aftermath === 'settled') {
                   session.blocked = false;
+                  session.cleanupBlocked = false;
                   repaired = true;
                 }
               }

@@ -462,3 +462,15 @@ pruning 都另行处理。
 本机取消立即触发 abort。若持久化追加失败，接口返回 503：当前进程停止，但取消尚未持久化，需要重试后才能依赖替代进程恢复。清理按请求的 Turn 区分其它 Turn 的债务，只有确认原 owner 释放后才清除持有租约标记。wake 输入 ID 使用与普通 acquire 相同的路径安全 Runtime 映射。暂时清理故障继续阻止新工作，直到 attachment 重试成功后解除清理阻塞。
 
 准备请求时，防御性克隆限定为 64 KiB；超限的借用视图由 Hosted publisher 同步序列化并拒绝保存，不予保留。恢复的 generation 配置只在其请求期间生效，历史恢复执行常规 registry 对账。Hosted 引用闭包校验在每个事务中共享一次引用 memo 与已验证资源缓存；引用元数据冲突检查和完整事务 census 仍保持生效。
+
+## 复审修正：请求意图与清理可用性（2026-10-12）
+
+prepared request 新增可选 boolean `allowPersistentRetry`，记录主模型或 fallback 的重试资格。重发还需当前 unattended-retry 显式开启；不持久化凭据，也不为 fallback 开启无限重试。TS 和 Java reader 接受旧六字段 prepared 及新七字段形状，校验 boolean 类型并拒绝未知字段。旧快照没有主模型资格证据，继续使用有限重试。这修改的是尚未合入的 G3 嵌套 codec，不证明与本 PR 早期修订兼容，也不放宽已发布 G2 的 reader-floor 门禁。
+
+包含外部化图片引用的 history 依赖内存 payload 表，该表不在持久快照中。普通在线请求保留原有图片重新附加行为，但 capture callback 将该快照标记为不支持。冷 reader 和直接 prepared 重发也会在推理前拒绝旧的不安全图片引用快照。主模型已完成且最终回答已提交时仍可只补终态；这不代表恢复图片历史。
+
+审批 continuation 按 acquire 相同的路径安全映射校验 prepare key 和 Runtime Session 引用，原始 prompt 身份仍保留。短 cleanup ID 不变；较长组合 ID 使用 digest，保证 owed 和 confirmed 事件均满足 stable-ID 字节上限。历史 owed 保留原 payload 身份与 descriptor，仅在确认事件或命令 ID 超限时缩短该 ID。descriptor 继续指向原 prompt、binding 和 generation。
+
+清理确认只解除对应清理阻塞；成功解除阻塞的状态转换同时退役该标记，避免以后误清其它恢复阻塞。没有 descriptor 的当前 Runtime 返回精确 `404 runtime_session_not_found` 时，按已不存在完成 handback；有原 owner descriptor 的释放仍要求确认。已接管 Session 的释放遇到传输故障时，close 继续完成本地 teardown，未确认持久债务留待后续对账。停靠状态的 lifecycle 请求在写入 closing claim 之前拒绝，使普通恢复控制仍可操作。resident 模型 redrive 在异步读取期间持有现有 recovery busy fence，并在 attachment 之前校验注册身份。
+
+恢复先处理已经持久化的取消，再安装恢复后的 deadline timer。因此较早取消在墙钟超过 deadline 后仍保持取消；没有持久取消的 deadline 仍正常过期。R3 修正与上述历史打包验收快照分开验证，该快照不能认证本次新修订。

@@ -180,6 +180,178 @@ it.each(['ordinary-prompt', 'monitor:wake:run'])(
   },
 );
 
+it.each([
+  ['a'.repeat(243), false],
+  ['a'.repeat(244), true],
+  ['a'.repeat(496), true],
+  ['猫'.repeat(140), true],
+] as const)(
+  'preserves cleanup identity through confirmation (case %#)',
+  async (promptId, hashed) => {
+    const f = await fixture(promptId);
+    const original = `hosted-cleanup:${promptId}:${f.broker.runtimeSessionId}`;
+    const expected = hashed
+      ? `hosted-cleanup:${createHash('sha256').update(original).digest('hex')}`
+      : original;
+    const cleanupEvents = () =>
+      f.session.authority
+        .eventsInSequenceRange(1, f.session.authority.committedSequence)
+        .filter((event) => event.kind === 'hosted.cleanup');
+    try {
+      await oweHostedTurnCleanup(f.session, promptId, f.broker);
+      await oweHostedTurnCleanup(f.session, promptId, f.broker);
+      expect(cleanupEvents()).toHaveLength(1);
+      expect(cleanupEvents()[0]!.payload['cleanupId']).toBe(expected);
+      expect(cleanupEvents()[0]!.eventId).toBe(`${expected}:owed`);
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      await f.terminal();
+      await reconcileHostedTurnCleanup(f.session, f.brokerOptions, promptId);
+      await reconcileHostedTurnCleanup(f.session, f.brokerOptions, promptId);
+      expect(release).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledWith({
+        bindingId: 'original-binding',
+        generation: '7',
+      });
+      expect(cleanupEvents().map((event) => event.payload['state'])).toEqual([
+        'owed',
+        'confirmed',
+      ]);
+      expect(cleanupEvents()[1]!.payload['cleanupId']).toBe(expected);
+      expect(cleanupEvents()[1]!.eventId).toBe(`${expected}:confirmed`);
+      expect(
+        Buffer.byteLength(cleanupEvents()[1]!.eventId),
+      ).toBeLessThanOrEqual(512);
+      expect(hasHostedCleanupDebt(f.session)).toBe(false);
+    } finally {
+      await f.session.close();
+    }
+  },
+);
+
+it('journals cleanup for a maximum-length stable prompt without changing its owner', async () => {
+  const f = await fixture();
+  const promptId = 'a'.repeat(512);
+  const broker = new HostedWorkspaceBroker(
+    f.brokerOptions,
+    f.session.authority.sessionHeader.sessionKey,
+    hostedRuntimeSessionId(promptId),
+  );
+  broker.runtime = f.broker.runtime;
+  try {
+    await oweHostedTurnCleanup(f.session, promptId, broker);
+    const event = f.session.authority
+      .eventsInSequenceRange(1, f.session.authority.committedSequence)
+      .findLast((event) => event.kind === 'hosted.cleanup')!;
+    const original = `hosted-cleanup:${promptId}:${promptId}`;
+    expect(event.payload['cleanupId']).toBe(
+      `hosted-cleanup:${createHash('sha256').update(original).digest('hex')}`,
+    );
+    const descriptor = JSON.parse(
+      (
+        await f.session.resources.read(
+          event.payload['descriptorRef'] as unknown as Parameters<
+            typeof f.session.resources.read
+          >[0],
+        )
+      ).toString('utf8'),
+    );
+    expect(descriptor).toMatchObject({
+      promptId,
+      runtimeSessionId: promptId,
+      fileHistoryTurnId: promptId,
+      ...broker.runtime,
+    });
+  } finally {
+    await f.session.close();
+  }
+});
+
+it.each([244, 245])(
+  'confirms an existing raw cleanup identity after cold recovery (%s bytes)',
+  async (length) => {
+    const promptId = 'a'.repeat(length);
+    const f = await fixture(promptId);
+    const cleanupId = `hosted-cleanup:${promptId}:${f.broker.runtimeSessionId}`;
+    const descriptorRef = await f.session.resources.publish(
+      'hosted-turn-cleanup',
+      Buffer.from(
+        JSON.stringify({
+          v: 1,
+          sessionKey: f.session.authority.sessionHeader.sessionKey,
+          promptId,
+          runtimeSessionId: f.broker.runtimeSessionId,
+          ...f.broker.runtime,
+          fileHistoryTurnId: promptId,
+        }),
+      ),
+    );
+    try {
+      // This exact legacy owed event fits; only its confirmation ID does not.
+      await f.session.authority.appendExecutionEvent(
+        {
+          operation: 'hostedCleanup',
+          commandId: `${cleanupId}:owed`,
+          sessionKey: f.session.authority.sessionHeader.sessionKey,
+          contentDigest: createHash('sha256')
+            .update(`${descriptorRef.digest}:owed`)
+            .digest('hex'),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `${cleanupId}:owed`,
+          sessionKey: f.session.authority.sessionHeader.sessionKey,
+          kind: 'hosted.cleanup',
+          occurredAt: Date.now(),
+          subject: {
+            type: 'activation',
+            scopeId: f.session.activation.activationId,
+            ...f.session.activation,
+          },
+          payload: { cleanupId, descriptorRef, state: 'owed' },
+        }),
+        { class: 'harness', activation: f.session.activation },
+      );
+      await f.terminal();
+    } finally {
+      await f.session.close();
+    }
+    const replacement = await f.reopen();
+    const events = () =>
+      replacement.authority
+        .eventsInSequenceRange(1, replacement.authority.committedSequence)
+        .filter((event) => event.kind === 'hosted.cleanup');
+    try {
+      await oweHostedTurnCleanup(replacement, promptId, f.broker);
+      expect(events()).toHaveLength(1);
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      await reconcileHostedTurnCleanup(replacement, f.brokerOptions, promptId);
+      await reconcileHostedTurnCleanup(replacement, f.brokerOptions, promptId);
+      expect(release).toHaveBeenCalledOnce();
+      expect(release).toHaveBeenCalledWith({
+        bindingId: 'original-binding',
+        generation: '7',
+      });
+      expect(events().map((event) => event.payload)).toEqual([
+        { cleanupId, descriptorRef, state: 'owed' },
+        { cleanupId, descriptorRef, state: 'confirmed' },
+      ]);
+      expect(events()[1]!.eventId).not.toBe(`${cleanupId}:confirmed`);
+      expect(Buffer.byteLength(events()[1]!.eventId)).toBeLessThanOrEqual(512);
+      expect(hasHostedCleanupDebt(replacement)).toBe(false);
+      await expect(
+        oweHostedTurnCleanup(replacement, promptId, f.broker),
+      ).rejects.toThrow('already released');
+    } finally {
+      await replacement.close();
+    }
+  },
+);
+
 it.each([undefined, 'already loaded'])(
   'refreshes saved-batch context only when missing (%s)',
   async (context) => {
@@ -408,14 +580,24 @@ const prepared: LlmPreparedRequest = {
   promptTokensForClamp: 12,
 };
 
-it.each([false, true])(
+it.each(
+  [false, true].flatMap((finished) =>
+    [undefined, false, true].map((allowPersistentRetry) => ({
+      finished,
+      allowPersistentRetry,
+    })),
+  ),
+)(
   'restores an unfinished request even when stream Finished was recorded (%s)',
-  async (finished) => {
+  async ({ finished, allowPersistentRetry }) => {
     const f = await fixture();
     const request = createHostedModelRequest(
       f.session,
       f.promptId,
-      prepared,
+      {
+        ...prepared,
+        ...(allowPersistentRetry === undefined ? {} : { allowPersistentRetry }),
+      },
       0,
       false,
       undefined,
@@ -568,7 +750,7 @@ it('retracts only the original streamed message after replacement, once', async 
   }
 });
 
-it.each([true, false])(
+it.each([true, false, 'image-history'])(
   'recognizes committed final output as terminal-only compensation (saved request=%s)',
   async (saved) => {
     const f = await fixture();
@@ -576,7 +758,19 @@ it.each([true, false])(
       const request = createHostedModelRequest(
         f.session,
         f.promptId,
-        prepared,
+        saved === 'image-history'
+          ? {
+              ...prepared,
+              history: [
+                {
+                  role: 'user',
+                  parts: [
+                    { text: '[Image #0123456789ab: image/png, 3 bytes]' },
+                  ],
+                },
+              ],
+            }
+          : prepared,
         0,
         false,
         undefined,
@@ -594,6 +788,10 @@ it.each([true, false])(
           await finish(true, {});
         },
       );
+      if (saved === 'image-history')
+        expect(
+          await findHostedModelRequest(f.session, f.promptId),
+        ).toBeUndefined();
       await f.session.sink.write({
         uuid: request.messageId,
         parentUuid: null,

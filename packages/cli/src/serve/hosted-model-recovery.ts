@@ -6,6 +6,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { LlmPreparedRequest } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { hasImagePayloadReferences } from '@qwen-code/qwen-code-core/services/image-payload-references.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { parseHostedRecoveryResource } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
 import {
@@ -128,7 +129,10 @@ async function readHostedModelRequest(
     !Number.isSafeInteger(saved.sourceActivation.epoch) ||
     saved.sourceActivation.epoch < 1 ||
     !saved.prepared ||
-    Object.keys(saved.prepared).length !== 6 ||
+    Object.keys(saved.prepared).length !==
+      6 + (Object.hasOwn(saved.prepared, 'allowPersistentRetry') ? 1 : 0) ||
+    (Object.hasOwn(saved.prepared, 'allowPersistentRetry') &&
+      typeof saved.prepared.allowPersistentRetry !== 'boolean') ||
     !Array.isArray(saved.prepared.history) ||
     !Array.isArray(saved.prepared.completedToolCallIds) ||
     !Array.isArray(saved.prepared.request?.contents) ||
@@ -213,6 +217,11 @@ async function readHostedModelRequest(
       'results_ready',
       'turn_settled',
     ].includes(verdict.checkpoint.continuation.phase)
+  )
+    return undefined;
+  if (
+    !allowCommittedOutput &&
+    hasImagePayloadReferences(saved.prepared.history)
   )
     return undefined;
   return saved;

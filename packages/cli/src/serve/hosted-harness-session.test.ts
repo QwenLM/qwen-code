@@ -29,6 +29,7 @@ import {
   type MockInstance,
 } from 'vitest';
 import * as hostedHistory from './hosted-file-history.js';
+import * as modelRecovery from './hosted-model-recovery.js';
 import type { HostedFileHistoryState } from './hosted-file-history-protocol.js';
 import {
   LocalJsonlManagedSessionJournalHandle,
@@ -47,7 +48,10 @@ import { channelInputId } from '@qwen-code/qwen-code-core/managed-runtime/manage
 import { HostedChannelSession } from './hosted-channel-session.js';
 import { commitHostedFileHistory } from './hosted-file-history.js';
 import { oweHostedTurnCleanup } from './hosted-turn-cleanup.js';
-import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import {
+  LlmRequestPreparationError,
+  type LlmPreparedRequest,
+} from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { parseToolResultManifestBytes } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type {
@@ -114,7 +118,10 @@ import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorWakeScheduler } from './hosted-monitor-wake.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { LocalShellStreamCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-stream-capture.js';
-import { monitorWakeNeedsRecovery } from './hosted-monitor-wake-turn.js';
+import {
+  createMonitorWakeRunTurn,
+  monitorWakeNeedsRecovery,
+} from './hosted-monitor-wake-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedSessionMessageSession } from './hosted-session-message-session.js';
 import { HostedTeamSession } from './hosted-team-session.js';
@@ -4673,6 +4680,7 @@ describe('Hosted Harness no-tool session', () => {
    */
   async function prewriteChannelWriteInterruption(
     cleanupDebt = false,
+    previousPromptId?: string,
   ): Promise<string> {
     const key = {
       tenantId: 'tenant',
@@ -4707,7 +4715,9 @@ describe('Hosted Harness no-tool session', () => {
               engine: 'managed',
               sessionId: SESSION_ID,
               toolProfile: 'hosted-workspace-files/1',
-              ...(cleanupDebt ? {} : { hookCatalog: hookPin }),
+              ...(cleanupDebt || previousPromptId
+                ? {}
+                : { hookCatalog: hookPin }),
             }),
           ),
         ),
@@ -4735,6 +4745,50 @@ describe('Hosted Harness no-tool session', () => {
         },
         key,
       );
+
+      if (previousPromptId) {
+        const content = Buffer.from(
+          JSON.stringify([{ type: 'text', text: 'prior completed turn' }]),
+        );
+        await managed.authority.submitInput(
+          {
+            operation: 'submitInput',
+            commandId: previousPromptId,
+            sessionKey: key,
+            contentDigest: createHash('sha256').update(content).digest('hex'),
+          },
+          {
+            inputId: previousPromptId,
+            turnId: previousPromptId,
+            source: 'hosted-harness',
+            contentRef: await resources.publish('managed-input', content),
+            admissionRef: await resources.publish(
+              'managed-admission',
+              Buffer.from('{}'),
+            ),
+            deadline: null,
+            wakeReason: 'input',
+          },
+        );
+        await createManagedHarnessHandle(managed).ensureRunnable();
+        await managed.sink.write({
+          uuid: `${previousPromptId}:terminal`,
+          parentUuid: null,
+          sessionId: SESSION_ID,
+          timestamp: new Date().toISOString(),
+          type: 'system',
+          subtype: 'turn_result',
+          cwd: state.root,
+          version: 'hosted-harness/1',
+          daemonPromptId: previousPromptId,
+          systemPayload: {
+            promptId: previousPromptId,
+            state: 'completed',
+            stopReason: 'end_turn',
+            endedAt: Date.now(),
+          },
+        } as ChatRecord);
+      }
       await channels.submitInput({
         inputId: channelTurn,
         channelInstanceId: channelIdentity.channelInstanceId,
@@ -14013,6 +14067,427 @@ describe('Hosted Harness no-tool session', () => {
     expect(state.model).not.toHaveBeenCalled();
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
+  function capturedWakeSession() {
+    return (
+      wakeDeps.last as {
+        session: {
+          managed: Awaited<ReturnType<typeof openManagedSession>>;
+          runtimeLeaseHeld?: string;
+          blocked: boolean;
+          cleanupBlocked?: boolean;
+          mcpClosing?: boolean;
+        };
+      }
+    ).session;
+  }
+
+  async function recoveryFileSession() {
+    mockBrokerBroker();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+        approvalMode: 'yolo',
+      })
+      .expect(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+    const prompt = [{ type: 'text', text: 'original' }];
+    const submit = (deadlineMs?: number) =>
+      authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          ...(deadlineMs ? { deadlineMs } : {}),
+        })
+        .expect(202);
+    const status = () =>
+      authorize(supertest(server).get(`/session/${SESSION_ID}/status`)).expect(
+        200,
+      );
+    const idle = () =>
+      vi.waitFor(
+        async () => expect((await status()).body.hasActivePrompt).toBe(false),
+        { timeout: 10_000 },
+      );
+    const resident = capturedWakeSession();
+    const owe = async (promptId = PROMPT_ID) => {
+      const broker = new HostedWorkspaceBroker(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        resident.managed.authority.sessionHeader.sessionKey,
+        hostedRuntimeSessionId(promptId),
+      );
+      broker.runtime = {
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      };
+      await oweHostedTurnCleanup(resident.managed, promptId, broker);
+    };
+    return { server, authorize, submit, status, idle, resident, owe };
+  }
+
+  it('clears a cleanup-only block when continue confirms the original owner (R3-14)', async () => {
+    const f = await recoveryFileSession();
+    f.resident.runtimeLeaseHeld = PROMPT_ID;
+    state.model.mockImplementationOnce(async () => {
+      await f.owe();
+      return { text: 'completed', model: 'test-model' };
+    });
+    vi.spyOn(
+      HostedWorkspaceToolTurn.prototype,
+      'cleanup',
+    ).mockRejectedValueOnce(new Error('release unavailable'));
+    await f.submit();
+    await f.idle();
+    expect(f.resident.cleanupBlocked).toBe(true);
+    const authorization =
+      await f.resident.managed.authority.harnessRunAuthorization();
+    if (authorization.status !== 'runnable')
+      throw new Error('fixture checkpoint is not runnable');
+    await f
+      .authorize(
+        supertest(f.server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: authorization.checkpoint.identity.checkpointId,
+        activationId: f.resident.managed.activation.activationId,
+      })
+      .expect(409);
+    await vi.waitFor(() => {
+      expect(f.resident.runtimeLeaseHeld).toBeUndefined();
+      expect(
+        f.resident.managed.authority
+          .eventsInSequenceRange(
+            1,
+            f.resident.managed.authority.committedSequence,
+          )
+          .some(
+            (event) =>
+              event.kind === 'hosted.cleanup' &&
+              event.payload['state'] === 'confirmed',
+          ),
+      ).toBe(true);
+    });
+    const loaded = await headers(
+      supertest(f.server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+      })
+      .expect(200);
+    expect(loaded.body.recoveryRequired).not.toBe(true);
+    expect((await f.status()).body.recoveryBlocked).toBe(false);
+    expect(f.resident.cleanupBlocked).toBe(false);
+    await f
+      .authorize(supertest(f.server).delete(`/session/${SESSION_ID}`))
+      .expect(204);
+  });
+
+  it('leaves a parked owner operable after lifecycle close requires recovery (R3-5)', async () => {
+    const f = await recoveryFileSession();
+    state.model.mockImplementationOnce(async () => {
+      await f.owe();
+      throw new LlmRequestPreparationError('parked request');
+    });
+    await f.submit();
+    await f.idle();
+    state.setLifecycleAuthority.mockClear();
+    await f
+      .authorize(supertest(f.server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({
+        kind: 'close',
+        sessionKey: f.resident.managed.authority.sessionHeader.sessionKey,
+        authority: { operationId: 'close-parked', claimGeneration: 1 },
+      })
+      .expect(503);
+    expect(state.setLifecycleAuthority).not.toHaveBeenCalled();
+    const cancel = await f
+      .authorize(
+        supertest(f.server).post(
+          `/session/${SESSION_ID}/managed-runtime/cancel`,
+        ),
+      )
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: 'checkpoint',
+        activationId: f.resident.managed.activation.activationId,
+      });
+    expect(cancel.body.code).not.toBe('hosted_session_closing');
+    expect(cancel.body.code).not.toBe('hosted_lifecycle_operation_active');
+    await f
+      .authorize(supertest(f.server).delete(`/session/${SESSION_ID}`))
+      .expect(204);
+  });
+
+  it('keeps a journaled cancellation after the recovered request deadline passes (R3-2)', async () => {
+    const f = await recoveryFileSession();
+    let modelWaiting = false;
+    state.model.mockImplementationOnce(async ({ modelScope, signal }) => {
+      const prepared: LlmPreparedRequest = {
+        request: {
+          model: 'fixture',
+          contents: [{ role: 'user', parts: [{ text: 'original' }] }],
+          config: { temperature: 0.3 },
+        },
+        history: [{ role: 'user', parts: [{ text: 'original' }] }],
+        completedToolCallIds: [],
+        routeSelector: 'openai:fixture',
+        providerPin: 'a'.repeat(64),
+        promptTokensForClamp: 12,
+      };
+      const request = modelRecovery.createHostedModelRequest(
+        f.resident.managed,
+        PROMPT_ID,
+        prepared,
+        0,
+        false,
+        undefined,
+        { bootId: BOOT_ID, eventEpoch: 'source-epoch' },
+      );
+      await modelScope!.beginMainAttempt(
+        'fixture',
+        await modelRecovery.publishHostedModelRequest(
+          f.resident.managed,
+          request,
+        ),
+      );
+      return new Promise<never>((_resolve, reject) => {
+        signal.addEventListener('abort', () =>
+          reject(
+            new LlmRequestPreparationError('park cancellation before terminal'),
+          ),
+        );
+        modelWaiting = true;
+      });
+    });
+    await f.submit(10_000);
+    await vi.waitFor(() => expect(modelWaiting).toBe(true), {
+      timeout: 10_000,
+    });
+    await f
+      .authorize(supertest(f.server).post(`/session/${SESSION_ID}/cancel`))
+      .expect(204);
+    await f.idle();
+    const events = () =>
+      f.resident.managed.authority.eventsInSequenceRange(
+        1,
+        f.resident.managed.authority.committedSequence,
+      );
+    const deadline = events().find((event) => event.kind === 'input.accepted')!
+      .payload['deadline'] as number;
+    const cancellation = events().find(
+      (event) => event.kind === 'cancel.requested',
+    )!;
+    expect(cancellation.occurredAt).toBeLessThan(deadline);
+    const now = Date.now.bind(Date);
+    const elapsedStart = now();
+    const clock = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => deadline + 1 + now() - elapsedStart);
+    try {
+      state.model.mockImplementationOnce(async ({ signal }) => {
+        signal.throwIfAborted();
+        return { text: 'unexpected', model: 'fixture' };
+      });
+      await headers(supertest(f.server).post(`/session/${SESSION_ID}/load`))
+        .send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          driveRuntimeRecovery: true,
+        })
+        .expect(200);
+      await vi.waitFor(
+        () =>
+          expect(
+            events().filter((event) => event.kind === 'turn.settled'),
+          ).toHaveLength(1),
+        { timeout: 10_000 },
+      );
+      expect(
+        events().find((event) => event.kind === 'turn.settled')!.payload,
+      ).toMatchObject({ outcome: 'cancelled', stopReason: 'cancelled' });
+    } finally {
+      clock.mockRestore();
+    }
+    await f.idle();
+    await f
+      .authorize(supertest(f.server).delete(`/session/${SESSION_ID}`))
+      .expect(204);
+  });
+
+  it('keeps resident recovery and concurrent close consistent (R3-8)', async () => {
+    const f = await recoveryFileSession();
+    const publish = LocalManagedSessionResourceStore.prototype.publish;
+    const refuse = vi
+      .spyOn(LocalManagedSessionResourceStore.prototype, 'publish')
+      .mockImplementation(function (
+        this: LocalManagedSessionResourceStore,
+        kind,
+        bytes,
+      ) {
+        return kind === 'managed-turn-result'
+          ? Promise.reject(new Error('terminal unavailable'))
+          : publish.call(this, kind, bytes);
+      });
+    state.model.mockImplementationOnce(async ({ modelScope }) => {
+      const finish = await modelScope!.beginMainAttempt('fixture');
+      await finish(true, {});
+      return { text: 'committed answer', model: 'fixture' };
+    });
+    await f.submit();
+    await f.idle();
+    refuse.mockRestore();
+    const find = modelRecovery.findHostedCommittedModelOutput;
+    let release!: () => void;
+    let reading = false;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    vi.spyOn(
+      modelRecovery,
+      'findHostedCommittedModelOutput',
+    ).mockImplementationOnce(async (...args) => {
+      const committed = await find(...args);
+      expect(committed).toBeDefined();
+      reading = true;
+      await gate;
+      return committed;
+    });
+    const loading = headers(
+      supertest(f.server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+        driveRuntimeRecovery: true,
+      })
+      .then((response) => response);
+    try {
+      await vi.waitFor(() => expect(reading).toBe(true), { timeout: 10_000 });
+      f.resident.mcpClosing = true;
+      const closingRefusal = await headers(
+        supertest(f.server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+        driveRuntimeRecovery: true,
+      });
+      expect(closingRefusal.status).toBe(409);
+      expect(closingRefusal.body.code).toBe('hosted_session_closing');
+      f.resident.mcpClosing = false;
+      await headers(supertest(f.server).post(`/session/${SESSION_ID}/load`))
+        .send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          driveRuntimeRecovery: true,
+        })
+        .expect(409);
+      const closed = await f.authorize(
+        supertest(f.server).delete(`/session/${SESSION_ID}`),
+      );
+      release();
+      const loaded = await loading;
+      if (closed.status === 204) {
+        expect([404, 409]).toContain(loaded.status);
+        await f
+          .authorize(supertest(f.server).get(`/session/${SESSION_ID}/status`))
+          .expect(404);
+      } else {
+        expect(closed.status).toBe(409);
+        expect(closed.body.code).toBe('hosted_turn_active');
+        expect(loaded.status).toBe(200);
+        await f.status();
+        await f.idle();
+        await f
+          .authorize(supertest(f.server).delete(`/session/${SESSION_ID}`))
+          .expect(204);
+      }
+    } finally {
+      f.resident.mcpClosing = false;
+      release();
+      await loading;
+    }
+  });
+
+  it('settles a channel wake whose missing Runtime has another prompt cleanup owner (R2-63)', async () => {
+    const previous = 'previous-prompt';
+    const channelTurn = await prewriteChannelWriteInterruption(false, previous);
+    mockBrokerBroker();
+    vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick').mockImplementation(
+      () => {},
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      if (this.runtimeSessionId === channelTurn)
+        throw new HostedWorkspaceBrokerRejection(
+          404,
+          'runtime_session_not_found',
+        );
+    });
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      })
+      .expect(200);
+    const resident = capturedWakeSession();
+    const broker = new HostedWorkspaceBroker(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      resident.managed.authority.sessionHeader.sessionKey,
+      previous,
+    );
+    broker.runtime = {
+      bindingId: 'binding',
+      generation: '1',
+      workspaceGeneration: '1',
+    };
+    await oweHostedTurnCleanup(resident.managed, previous, broker);
+    const params = wakeDeps.last as Parameters<
+      typeof createMonitorWakeRunTurn
+    >[0];
+    const runTurn = createMonitorWakeRunTurn(params);
+    await expect(
+      runTurn({
+        turnId: channelTurn,
+        text: 'write deploy.txt',
+        source: 'channel',
+      }),
+    ).resolves.toBe('settled');
+    expect(resident.blocked).toBe(false);
+    expect(state.model).not.toHaveBeenCalled();
+    const events = resident.managed.authority.eventsInSequenceRange(
+      1,
+      resident.managed.authority.committedSequence,
+    );
+    expect(
+      events.filter(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === channelTurn,
+      ),
+    ).toHaveLength(1);
+    expect(
+      events.filter((event) => event.kind === 'hosted.cleanup').at(-1)!.payload[
+        'state'
+      ],
+    ).toBe('confirmed');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .expect(204);
+  });
 });
 
 describe('Hosted Harness tool approvals', () => {
@@ -15537,6 +16012,33 @@ describe('Hosted Harness Runtime turn takeover', () => {
     return { server, loaded };
   }
 
+  it('closes an adopted Session after a transient handback transport fault (R2-1)', async () => {
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'prepared',
+    });
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    const releaseActivation = vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'releaseActivation',
+    );
+    release.mockRejectedValueOnce(
+      new TypeError('Broker handback transport fault'),
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    ).expect(204);
+    expect(release).toHaveBeenCalledOnce();
+    expect(releaseActivation).toHaveBeenCalledOnce();
+    await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .expect(404);
+  });
+
   /**
    * Drives a Workspace turn to the parked agent wait through the
    * PRODUCTION admission itself (R1-8): the model launches a foreground
@@ -17014,11 +17516,16 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const { server, loaded } = await loadReplacement();
     expect(loaded.status).toBe(200);
     release.mockClear();
+    acquireSpy.mockClear();
+    let acquireEntered = false;
     let finishAcquire!: () => void;
     const acquireGate = new Promise<void>((resolve) => {
       finishAcquire = resolve;
     });
-    acquireSpy.mockImplementationOnce(() => acquireGate as never);
+    acquireSpy.mockImplementationOnce(() => {
+      acquireEntered = true;
+      return acquireGate as never;
+    });
     let redriving: Promise<supertest.Response> | undefined;
     try {
       redriving = replacementHeaders(
@@ -17030,11 +17537,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
           driveRuntimeRecovery: true,
         })
         .then((response) => response);
-      await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalledOnce(), {
+      await vi.waitFor(() => expect(acquireEntered).toBe(true), {
         timeout: 10_000,
       });
-      // The close route fences an active Turn, MCP work and Hooks — not a
-      // parked redrive whose await has not recorded its lease yet.
+      expect(acquireSpy).toHaveBeenCalledOnce();
+      expect(
+        (acquireSpy.mock.contexts[0] as HostedWorkspaceBroker).runtimeSessionId,
+      ).toBe(PROMPT_ID);
+      // This fixture has no G3 request/approval snapshot and reaches the G1 acquire window.
       await replacementHeaders(
         supertest(server).delete(`/session/${SESSION_ID}`),
       ).expect(204);
@@ -17046,6 +17556,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
       // adoption is named instead of released, because a release would
       // persist RELEASED and wedge every retried acquire of the identity.
       expect(release).toHaveBeenCalledOnce();
+      expect(
+        (release.mock.contexts[0] as HostedWorkspaceBroker).runtimeSessionId,
+      ).toBe(PROMPT_ID);
       expect(owedLines()).toHaveLength(1);
     } finally {
       finishAcquire();

@@ -13,7 +13,10 @@ import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
-import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import {
+  HostedWorkspaceBroker,
+  hostedRuntimeSessionId,
+} from './hosted-workspace-broker.js';
 import {
   endHostedAction,
   HOSTED_TOOL_APPROVAL_POLICY,
@@ -24,16 +27,21 @@ import { findHostedApprovalContinuation } from './hosted-approval-continuation.j
 
 afterEach(() => vi.restoreAllMocks());
 
-it.each(['allow', 'deny', 'cancelled', 'expired'])(
-  'restores the original native batch and final Action under a replacement owner (%s)',
-  async (decision) => {
+it.each(
+  ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
+    [randomUUID(), 'mon_1:notify:3', `arun_${'a'.repeat(32)}:input`].map(
+      (promptId) => ({ decision, promptId }),
+    ),
+  ),
+)(
+  'restores the original native batch and final Action under a replacement owner ($decision, $promptId)',
+  async ({ decision, promptId }) => {
     const root = await mkdtemp(path.join(tmpdir(), 'g3-step3-baseline-'));
     const sessionKey = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
       sessionId: randomUUID(),
     };
-    const promptId = randomUUID();
     const options = {
       runtimeBaseDir: root,
       cwd: root,
@@ -236,13 +244,17 @@ it.each(['allow', 'deny', 'cancelled', 'expired'])(
           runtime: {
             bindingId: 'original-binding',
             generation: '1',
-            runtimeSessionId: promptId,
+            runtimeSessionId: hostedRuntimeSessionId(promptId),
           },
         });
         expect(saved!.plan.calls[0].call).toEqual(call);
         expect(saved!.plan.calls[0].prepareKey).toBe(
-          `${promptId}:${saved!.plan.calls[0].runtimeCallId}`,
+          `${hostedRuntimeSessionId(promptId)}:${saved!.plan.calls[0].runtimeCallId}`,
         );
+        expect(saved!.plan.calls[0].prepareReference).toMatchObject({
+          sessionId: hostedRuntimeSessionId(promptId),
+          promptId,
+        });
         expect(saved!.inputs[0].input).toEqual(call.args);
         expect(descriptor.v).toBe(3);
         expect(prepare).not.toHaveBeenCalled();
