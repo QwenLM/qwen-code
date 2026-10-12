@@ -40,6 +40,7 @@ export interface ManagedAgentSessionSummary {
     canSend: boolean;
     canCancel: boolean;
     actions?: boolean;
+    tasks?: boolean;
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
@@ -105,6 +106,13 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
 }
 
 export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
+export type ManagedTask = components['schemas']['WebShellTask'];
+export type ManagedTaskPage = components['schemas']['WebShellTaskPage'];
+export type ManagedTaskEvent = components['schemas']['WebShellTaskEvent'];
+export type ManagedTaskEventPage =
+  components['schemas']['WebShellTaskEventPage'];
+export type ManagedTaskCancelOperation =
+  components['schemas']['WebShellCommandOperation'] & { type: 'task_cancel' };
 
 /** A Hosted tool approval waiting for the Session owner's answer. */
 export interface ManagedAgentPendingAction {
@@ -139,6 +147,35 @@ export interface ManagedAgentProvider {
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  readonly tasks?: {
+    list(
+      sessionId: string,
+      options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
+    ): Promise<ManagedTaskPage>;
+    get(
+      sessionId: string,
+      taskId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedTask>;
+    listEvents(
+      sessionId: string,
+      taskId: string,
+      options: ManagedAgentRequestOptions & { after?: string; limit?: number },
+    ): Promise<ManagedTaskEventPage>;
+    readonly cancel?: {
+      submit(
+        sessionId: string,
+        taskId: string,
+        options: ManagedAgentCommandOptions,
+      ): Promise<ManagedTaskCancelOperation>;
+      query(
+        sessionId: string,
+        taskId: string,
+        operationId: string,
+        options: ManagedAgentRequestOptions,
+      ): Promise<ManagedTaskCancelOperation>;
+    };
+  };
   readonly cwdChange?: {
     submit(
       sessionId: string,

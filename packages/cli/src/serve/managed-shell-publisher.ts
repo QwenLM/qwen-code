@@ -176,6 +176,7 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
   private started = false;
   private processResult: ShellExecutionResult | null = null;
   private failed = false;
+  private stopRequested = false;
   private readonly offsets = { stdout: 0, stderr: 0 };
   private readonly ended = { stdout: false, stderr: false };
   // Node may resume paused pipes on exit before prior write ACKs arrive.
@@ -193,6 +194,9 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
   }
   setProcessResult(result: ShellExecutionResult): void {
     this.processResult = result;
+  }
+  setStopRequested(): void {
+    this.stopRequested = true;
   }
   failCapture(): void {
     this.failed = true;
@@ -275,6 +279,9 @@ class RemoteShellCapture implements ManagedShellCaptureSink {
                 exitCode: physical.exitCode,
                 signal: physical.signal,
                 previewBytes: physical.rawOutput.byteLength,
+                // Present only when the platform asked for the stop: the
+                // foreground lane's exact key set never sees it (#13856 A8).
+                ...(this.stopRequested ? { stopRequested: true } : {}),
               }
             : null,
         executionStatus: this.started ? executionStatus : 'not_started',
