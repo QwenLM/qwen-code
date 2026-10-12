@@ -182,6 +182,16 @@ public final class InMemoryRuntimeBindingRepository
     }
 
     @Override
+    public synchronized RuntimeSessionRecord createSessionTombstone(
+            RuntimeSessionRepository sessions, RuntimeSessionRecord candidate) {
+        if (candidate.getState() != RuntimeSessionRecord.State.RELEASED) {
+            throw new IllegalArgumentException("Tombstone must be RELEASED");
+        }
+        RuntimeAdmission.requireRelease(findById(candidate.getBindingId()), candidate);
+        return sessions.findOrCreate(candidate);
+    }
+
+    @Override
     public synchronized ToolExecutionRecord admitExecution(
             RuntimeSessionRepository sessions, ToolExecutionRepository executions,
             ToolExecutionRecord candidate) {
