@@ -1465,30 +1465,65 @@ export class HostedTeamSession {
         );
       const notCommitted: string[] = [];
       for (const place of pending) {
-        const target = board.get(place === 0 ? number : blocks[place - 1]!)!;
+        // Each remaining place is re-validated against the board as it
+        // stands now — the board may have moved since the place before
+        // it committed: a target can be gone, and an edge the original
+        // validation allowed can now close a cycle. Deterministic
+        // refusals ride the receipt; they never escape as faults.
+        const liveBoard = this.memberBoardOf(team.teamId);
         if (place > 0) {
+          const targetNumber = blocks[place - 1]!;
+          const target = liveBoard.get(targetNumber);
+          if (target === undefined) {
+            notCommitted.push(`#${targetNumber} not found`);
+            continue;
+          }
           if (!this.memberMayWrite(target, memberName)) {
             notCommitted.push(
               `#${target.number} is owned by ${target.owner ?? 'someone'} (not unowned for you)`,
             );
             continue;
           }
+          const selfTask = liveBoard.get(number);
+          if (selfTask === undefined) {
+            notCommitted.push(`#${number} not found`);
+            continue;
+          }
+          const cycle = dependencyCycle(liveBoard, number, [targetNumber], []);
+          if (cycle !== null) {
+            notCommitted.push(
+              `#${targetNumber} would create a dependency cycle (${cycle
+                .map((each) => `#${each}`)
+                .join(' → ')})`,
+            );
+            continue;
+          }
           const current = this.task(target.taskId);
-          await this.commit(
-            'team_task',
-            teamTaskRevisionBody(current, {
-              addBlockedBy: [board.get(number)!.taskId],
-            }),
-            'updateTeamTask',
-            commandId_(place),
-          );
+          try {
+            await this.commit(
+              'team_task',
+              teamTaskRevisionBody(current, {
+                addBlockedBy: [selfTask.taskId],
+              }),
+              'updateTeamTask',
+              commandId_(place),
+            );
+          } catch (cause) {
+            // Inside this serial scope the authority's conflict is the
+            // board's own verdict for this shape: fold it like the
+            // checks above, never a rotate-and-fault.
+            if (cause instanceof ManagedSessionConflictError) {
+              notCommitted.push(cause.message);
+              continue;
+            }
+            throw cause;
+          }
           continue;
         }
-        const current = this.task(target.taskId);
         try {
           this.validateMemberUpdate(
             team,
-            this.memberBoardOf(team.teamId),
+            liveBoard,
             memberName,
             number,
             args,
@@ -1501,6 +1536,7 @@ export class HostedTeamSession {
           notCommitted.push(cause.message);
           continue;
         }
+        const current = this.task(board.get(number)!.taskId);
         const revision = deleting
           ? teamTaskRevisionBody(current, { status: 'deleted' })
           : await this.memberUpdatedTask(
@@ -1568,6 +1604,20 @@ export class HostedTeamSession {
         `Task #${number} is owned by ${task.owner}; you can change only tasks you own or that are unowned.`,
       );
     }
+    // Existence comes before ownership: the probe below reads the tasks
+    // this gate proves present, and an absent number is a refusal,
+    // never an undefined read.
+    const live = (eachNumber: number) => {
+      const each = board.get(eachNumber);
+      return each !== undefined && each.status !== 'deleted';
+    };
+    const missing = [...new Set([...blocks, ...blockedBy])]
+      .filter((each) => !live(each))
+      .sort((left, right) => left - right);
+    if (missing.length > 0)
+      throw new HostedTeamRefusal(
+        `Cannot update task #${number}: referenced task${missing.length === 1 ? '' : 's'} ${missing.map((each) => `#${each}`).join(', ')} not found.`,
+      );
     if (blocks.length > 0) {
       const held = blocks
         .map((each) => board.get(each)!)
@@ -1587,20 +1637,9 @@ export class HostedTeamSession {
       );
     }
     if (deleting) return;
-    const live = (eachNumber: number) => {
-      const each = board.get(eachNumber);
-      return each !== undefined && each.status !== 'deleted';
-    };
     if (blocks.includes(number) || blockedBy.includes(number))
       throw new HostedTeamRefusal(
         `Cannot update task #${number}: a task cannot block or be blocked by itself.`,
-      );
-    const missing = [...new Set([...blocks, ...blockedBy])]
-      .filter((each) => !live(each))
-      .sort((left, right) => left - right);
-    if (missing.length > 0)
-      throw new HostedTeamRefusal(
-        `Cannot update task #${number}: referenced task${missing.length === 1 ? '' : 's'} ${missing.map((each) => `#${each}`).join(', ')} not found.`,
       );
     const crowded = [
       [number, blockedBy] as const,
