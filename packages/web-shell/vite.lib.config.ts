@@ -187,6 +187,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/messages/SelectionCopyMenu.tsx',
       './client/components/messages/SelectionCopyMenu.transcript-stub.tsx',
     ],
+    [
+      './client/components/managed/managed-task-messages.ts',
+      './client/components/managed/managed-task-messages.transcript-stub.ts',
+    ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
     normalizePath(resolve(__dirname, stub)),
