@@ -1831,6 +1831,13 @@ class RuntimeBrokerServiceTest {
             Map<String, Object> stop = Map.of("kind", "monitor-stop",
                     "sessionKey", key, "operationId", invocation.getExecutionCallId(),
                     "targetOperationId", "call");
+            // An unproven stop keeps the hold: the watch may still run.
+            Map<String, Object> unknown = Map.of("operationId", "call", "state", "unknown");
+            fixture.transport.controlResult = CompletableFuture.completedFuture(unknown);
+            assertEquals(unknown, join(fixture.service.control("harness", "runtime", stop)));
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    fixture.executionRepository.findByExecutionCallId(rowId).getState());
+
             Map<String, Object> exited = Map.of("operationId", "call",
                     "state", "exited", "unitName", "qwen-mon-call",
                     "evidence", Map.of("exitSignal", "SIGTERM"));
@@ -1959,7 +1966,14 @@ class RuntimeBrokerServiceTest {
                             "operationId", invocation.getExecutionCallId(),
                             "targetOperationId", "foreign-call"),
                     Map.of("kind", "monitor-status", "sessionKey", key,
-                            "operationId", "missing", "targetOperationId", "call"));
+                            "operationId", "missing", "targetOperationId", "call"),
+                    // Ids no hold row can carry: the ledger's own id bounds
+                    // refused them on the way in.
+                    Map.of("kind", "monitor-stop", "sessionKey", key,
+                            "operationId", invocation.getExecutionCallId() + "\0",
+                            "targetOperationId", "call"),
+                    Map.of("kind", "monitor-stop", "sessionKey", key,
+                            "operationId", "w".repeat(510), "targetOperationId", "call"));
             for (Map<String, Object> operation : refused) {
                 RuntimeBrokerException error = failure(fixture.service.control("harness", "runtime", operation));
                 assertEquals(400, error.getStatusCode());

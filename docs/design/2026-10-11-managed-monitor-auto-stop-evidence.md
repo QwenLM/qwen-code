@@ -78,8 +78,9 @@ check, the operation must name one of this Runtime Session's watches:
   the watch's unit from.
 
 Anything else — another Session's key, another Session's watch, a
-background Shell's row, a mismatched pair, a missing row — is refused with
-the protocol's shape (400 `runtime_control_operation_invalid`) before the
+background Shell's row, a mismatched pair, a missing row, an id no hold row
+can carry (a NUL, or too long once suffixed) — is refused with the
+protocol's shape (400 `runtime_control_operation_invalid`) before the
 worker sees it.
 
 A Monitor control runs outside the control fence (the active-control count
@@ -210,14 +211,15 @@ answers a stop only after the same finalize returns.
 ## 7. Validation
 
 - Broker (`RuntimeBrokerServiceTest`): admission of `monitor-status` and
-  `monitor-stop`, settlement of the hold row on `exited` and a routine
+  `monitor-stop`, the hold row kept on `unknown` and settled on `exited`, and a routine
   release with no further maintenance call; a routine release that answers
   held, not busy, while a stop is still in flight; a stop during a Harness
   drain; refusal of another Session's key, of a watch that differs from the
   Session's in exactly one ownership field (Harness Session, Runtime
-  Session, binding, generation), of a Shell row, a mismatched pair and a
-  missing row, none of them forwarded.
-- CLI: `monitorControl()` forwarding and answer validation, and the
+  Session, binding, generation), of a Shell row, a mismatched pair, a
+  missing row and an id no hold row can carry, none of them forwarded.
+- CLI: `monitorControl()` forwarding, its admission of `running` and
+  `unknown` and its answer validation, and the
   refusal surfacing as a rejection (`hosted-workspace-broker.test.ts`);
   the handle's proof mapping (`hosted-monitor-remote-executor.test.ts`);
   the turn's wiring of the Runtime call (`hosted-workspace-tool-turn.test.ts`);
@@ -227,13 +229,14 @@ answers a stop only after the same finalize returns.
   `hosted-monitor-loop.test.ts`). The loop also pins the stop in flight
   (`hosted-monitor-loop.test.ts`): an exit that lands before the worker's
   answer settles at the stop's reason whether that answer is proven or
-  lost; a close stop waits out the auto-stop and acts only on its park; a
+  lost; an end without evidence settles `watch_failed`; a close stop waits out the auto-stop and acts only on its park; a
   close stop keeps the settlement its exit made; and an idle timer that
   fires inside the quota flush issues no second stop.
-- Mutation pass: 26 mutants over the Broker gate, the row settle, each
-  ownership check on its own, the control fence, the wrapper's validation,
-  the proof mapping, the exit-chain settle, the turn wiring and each rule
-  of the stop in flight, all killed.
+- Mutation pass, run on the code merged with main: 27 mutants over the
+  Broker gate, the row settle, each ownership check on its own, the id
+  screen, the `unknown` keep, the control fence, the wrapper's validation
+  and accepted states, the proof mapping, the exit chain, the turn wiring
+  and each stop-in-flight rule, all killed.
 - `npm run build && npm run typecheck`, the touched CLI suites, and
   `mvn test` / `checkstyle:check` for `runtime-broker`.
 - Physical: not run in this change. The H3 rig's Monitor arm is where an

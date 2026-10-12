@@ -707,6 +707,19 @@ it('forwards a Monitor stop on the control route and admits only a watch answer 
     return { body: { ...identity, result: answer } };
   });
   expect(await broker.monitorControl(control)).toEqual(exited);
+  // An unproven answer is still a watch answer: the handle, not the
+  // wrapper, maps it to an unproven stop.
+  for (const accepted of [
+    {
+      operationId: 'runtime-call',
+      state: 'running',
+      unitName: 'qwen-mon-runtime-call',
+    },
+    { operationId: 'runtime-call', state: 'unknown' },
+  ]) {
+    answer = accepted;
+    expect(await broker.monitorControl(control)).toEqual(accepted);
+  }
   for (const invalid of [
     { ...exited, operationId: 'another-call' },
     // A Hook/MCP settlement state is not a watch answer.

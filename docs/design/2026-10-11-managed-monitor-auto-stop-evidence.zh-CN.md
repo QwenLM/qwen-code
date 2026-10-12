@@ -71,7 +71,8 @@ recovery kind，因此即便新准入已关闭（Harness 正在 drain），停�
   `callId` —— 即 worker 据以派生 watch unit 的 Runtime call。
 
 其余一切 —— 别的 Session 的 key、别的 Session 的 watch、后台 Shell 的
-行、不配对的组合、不存在的行 —— 都在 worker 看到之前以协议的形状拒绝
+行、不配对的组合、不存在的行、任何持有行都不可能带有的 id（含 NUL，或加
+后缀后超长）—— 都在 worker 看到之前以协议的形状拒绝
 （400 `runtime_control_operation_invalid`）。
 
 Monitor control 在 control 栅栏（release 的忙检查所读的活跃 control 计数）
@@ -178,12 +179,14 @@ finalize 冲刷的最后一个窗口达到配额时，该窗口照常提交，�
 ## 7. 验证
 
 - Broker（`RuntimeBrokerServiceTest`）：接纳 `monitor-status` 与
-  `monitor-stop`，在 `exited` 时结算持有行，以及之后不再发出任何维护调用
+  `monitor-stop`，在 `unknown` 时保留、在 `exited` 时结算持有行，以及之后不再发出任何维护调用
   的 routine release；停止仍在途时 routine release 应答 held 而不是 busy；
   Harness drain 期间的停止；拒绝别的 Session 的 key、恰在一个归属字段
   （Harness Session、Runtime Session、binding、generation）上与本 Session
-  的 watch 不同的 watch、Shell 行、不配对的组合与不存在的行，且都不转发。
-- CLI：`monitorControl()` 的转发与应答校验，以及拒绝以 rejection 浮现
+  的 watch 不同的 watch、Shell 行、不配对的组合、不存在的行与任何持有行都
+  不可能带有的 id，且都不转发。
+- CLI：`monitorControl()` 的转发、对 `running` 与 `unknown` 的接纳与应答
+  校验，以及拒绝以 rejection 浮现
   （`hosted-workspace-broker.test.ts`）；句柄的证明映射
   （`hosted-monitor-remote-executor.test.ts`）；turn 对 Runtime call 的
   接线（`hosted-workspace-tool-turn.test.ts`）；`max_events` 与
@@ -191,12 +194,14 @@ finalize 冲刷的最后一个窗口达到配额时，该窗口照常提交，�
   自然退出不经停止即结算（`hosted-shell-publisher.background.test.ts`、
   `hosted-monitor-loop.test.ts`）。loop 还钉住在途的停止
   （`hosted-monitor-loop.test.ts`）：先于 worker 应答落地的退出以停止的
-  原因结算，无论该应答被证明还是丢失；close 的停止等待自动停止，只在其
+  原因结算，无论该应答被证明还是丢失；不带证据的结束结算为
+  `watch_failed`；close 的停止等待自动停止，只在其
   park 时才行动；close 的停止保留其退出造成的结算；在配额 flush 之内触发
   的空闲计时器不发出第二次停止。
-- 变异轮：覆盖 Broker 门禁、行结算、逐一的各项归属校验、control 栅栏、
-  包装的校验、证明映射、退出链结算、turn 接线与在途停止的每条规则的 26 个
-  变异体，全部被杀死。
+- 变异轮（在与 main 合并后的代码上运行）：覆盖 Broker 门禁、行结算、逐一
+  的各项归属校验、id 筛查、`unknown` 保留、control 栅栏、包装的校验与接纳
+  状态、证明映射、退出链、turn 接线与在途停止的每条规则的 27 个变异体，
+  全部被杀死。
 - `npm run build && npm run typecheck`、被触及的 CLI 套件，以及
   `runtime-broker` 的 `mvn test` / `checkstyle:check`。
 - 物理：本改动未运行。H3 rig 的 Monitor 臂是加入自动停止走查的位置

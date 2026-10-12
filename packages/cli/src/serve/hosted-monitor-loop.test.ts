@@ -603,6 +603,33 @@ describe('HostedMonitorLoop', () => {
     },
   );
 
+  it('settles watch_failed for an end without evidence while its stop waits (#13896)', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    rig.executor.holdStop = true;
+    await rig.loop.start(params({ maxEvents: 1 }));
+
+    rig.executor.onLine?.('one');
+    const fired = rig.clock.advance(1_000);
+    await vi.waitFor(() => expect(rig.executor.terminateCalls).toBe(1));
+    // An end without evidence proves no stop: it reports the failed watch,
+    // never the stop's reason, and the answer that follows changes nothing.
+    await rig.executor.fail();
+    expect(committed(rig.authority)).toMatchObject({
+      stopReason: 'watch_failed',
+      run: { state: 'failed', execution: 'settled' },
+    });
+
+    rig.executor.answerStop(true);
+    await fired;
+    await rig.loop.done;
+    expect(committed(rig.authority)).toMatchObject({
+      stopReason: 'watch_failed',
+      run: { state: 'failed', execution: 'settled' },
+    });
+    await closeLoop(rig);
+  });
+
   it.each([
     ['runtime_lost', 'exitNaturally', 'exited', 'settled'],
     ['stop_requested', 'exitStopped', 'stop_requested', 'cancelled'],

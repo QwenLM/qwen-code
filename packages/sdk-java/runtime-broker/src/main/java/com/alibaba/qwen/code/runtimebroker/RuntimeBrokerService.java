@@ -698,8 +698,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private ToolExecutionRecord requireMonitorWatch(SessionContext context,
             Map<String, Object> operation) {
         ManagedMonitorProtocol.validateSession(context.session(), operation);
-        ToolExecutionRecord watch = executionRepository.findByExecutionCallId(
-                operation.get("operationId") + ":process");
+        String rowId = operation.get("operationId") + ":process";
+        // Every hold row passed the ledger's id bounds on the way in, so an
+        // id that cannot (a NUL, or too long once suffixed) names no watch:
+        // it gets the protocol's refusal, not the ledger's (#13896).
+        ToolExecutionRecord watch;
+        try {
+            watch = executionRepository.findByExecutionCallId(
+                    BrokerValues.requireId(rowId, "operationId"));
+        } catch (IllegalArgumentException unnamed) {
+            watch = null;
+        }
         if (watch == null || ManagedHoldFamily.of(watch) != ManagedHoldFamily.MONITOR
                 || !operation.get("targetOperationId").equals(watch.getReference().get("callId"))
                 || !watch.getHarnessSessionId().equals(context.session().getHarnessSessionId())

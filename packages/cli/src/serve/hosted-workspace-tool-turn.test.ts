@@ -5619,13 +5619,22 @@ describe('hosted Monitor admission arm', () => {
     );
     (bare as unknown as { publisher: unknown }).publisher = publisher;
     const resume = (
-      bare as unknown as { resumeMonitorWatch: (id: string) => Promise<void> }
+      bare as unknown as {
+        resumeMonitorWatch: (
+          executionCallId: string,
+          runtimeCallId: string,
+        ) => Promise<void>;
+      }
     ).resumeMonitorWatch.bind(bare);
-    await expect(resume('monitor-x')).rejects.toThrow('observer bridge gone');
+    await expect(resume('monitor-x', 'runtime-call-x')).rejects.toThrow(
+      'observer bridge gone',
+    );
     // The failed start leaves no dead loop behind to short-circuit the
     // retry that comes from a fresh accept.
     expect(shell.monitorLoops.has('monitor-x')).toBe(false);
-    await expect(resume('monitor-x')).resolves.toBeUndefined();
+    await expect(
+      resume('monitor-x', 'runtime-call-x'),
+    ).resolves.toBeUndefined();
     expect(shell.monitorLoops.has('monitor-x')).toBe(true);
   });
 
