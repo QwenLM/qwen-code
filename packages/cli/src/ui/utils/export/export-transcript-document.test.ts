@@ -2928,7 +2928,7 @@ describe('ExportTranscriptDocumentV1', () => {
       (block) => 'text' in block && block.text === 'Relay done',
     );
     expect(peer).toBeDefined();
-    expect('author' in peer ? peer.author : undefined).toEqual({
+    expect('author' in peer! ? peer!.author : undefined).toEqual({
       name: '/root/scribe',
       kind: 'teammate',
     });
