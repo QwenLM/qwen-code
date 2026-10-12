@@ -7,11 +7,17 @@ import {
   useState,
 } from 'react';
 import { useI18n } from '../../i18n';
+import shellStyles from '../../App.module.css';
 import { MessageList } from '../MessageList';
+import { ChatEditor } from '../ChatEditor';
+import { WelcomeHeader } from '../WelcomeHeader';
+import type {
+  EditorHandle,
+  ComposerSubmitCommit,
+} from '../../hooks/useComposerCore';
 import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
-import { Textarea } from '../ui/textarea';
 import { managedEventsToMessages } from './managed-session-messages';
 import {
   getManagedClientId,
@@ -147,7 +153,9 @@ function ManagedSessionsContent({
   const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
     undefined,
   );
-  const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const composerRef = useRef<EditorHandle | null>(null);
+  const composerContainerRef = useRef<HTMLDivElement | null>(null);
+  const composerCommit = useRef<ComposerSubmitCommit | undefined>(undefined);
   const sessionsNavRef = useRef<HTMLElement | null>(null);
   const lifetime = useRef<AbortController | undefined>(undefined);
   const listLifetime = useRef<AbortController | undefined>(undefined);
@@ -220,15 +228,14 @@ function ManagedSessionsContent({
       focusComposer.current = undefined;
       return;
     }
-    const composer =
-      composerFormRef.current?.querySelector<HTMLTextAreaElement>(
-        'textarea:not([disabled])',
-      );
+    const composer = composerContainerRef.current?.querySelector(
+      '[contenteditable="true"], textarea:not([disabled])',
+    );
     const parked = document.activeElement;
     const ours = parked === document.body || parked === sessionsNavRef.current;
     if (composer) {
       focusComposer.current = undefined;
-      if (ours) composer.focus();
+      if (ours) composerRef.current?.focus();
       return;
     }
     if (!ours) {
@@ -313,23 +320,27 @@ function ManagedSessionsContent({
     }
   }
 
-  async function submit() {
+  async function submit(submittedText = text, commit?: ComposerSubmitCommit) {
     const abort = lifetime.current;
     if (!abort || abort.signal.aborted || busy || cwd.isBlocked()) return;
     setDiscarded(false);
     let attempt = pendingRef.current;
     if (!attempt) {
-      if (!text.trim() || (sessionId && !detail.summary?.capabilities.canSend))
+      if (
+        !submittedText.trim() ||
+        (sessionId && !detail.summary?.capabilities.canSend)
+      )
         return;
       attempt = {
         idempotencyKey: managedRequestId(),
-        text,
+        text: submittedText,
         sessionId,
         cwd: workspaceCwd,
       };
       pendingRef.current = attempt;
       setPending(attempt);
       persistPending(pendingKey, attempt);
+      composerCommit.current = commit;
     }
     setBusy(true);
     setError(undefined);
@@ -361,7 +372,12 @@ function ManagedSessionsContent({
       persistPending(pendingKey, undefined);
       setListRevision((current) => current + 1);
       if (selection.current === selectedAtSubmit) {
-        setText('');
+        if (attempt.sessionId === selectedAtSubmit) {
+          if (composerCommit.current) composerCommit.current();
+          else composerRef.current?.clearText();
+          setText('');
+        }
+        composerCommit.current = undefined;
         onSelectSession(admission.sessionId);
         detail.reload();
       }
@@ -525,7 +541,7 @@ function ManagedSessionsContent({
           )}
         </nav>
         <section
-          className="flex min-h-0 min-w-0 flex-col gap-3"
+          className={`${shellStyles.chatPane} gap-3`}
           aria-label={t('managed.conversation')}
         >
           {summary && (
@@ -538,6 +554,14 @@ function ManagedSessionsContent({
                 <span className="text-muted-foreground">
                   {t('managed.runtime')}:{' '}
                   {t(`managed.runtime.${summary.runtimeState}`)}
+                </span>
+              )}
+              {summary.agentId && (
+                <span className="text-muted-foreground" data-managed-model>
+                  {t('managed.modelPreset')}:{' '}
+                  {provider.workspaceBinding?.modelPresets?.find(
+                    (item) => item.agentId === summary.agentId,
+                  )?.label ?? summary.agentId}
                 </span>
               )}
               {summary.capabilities.artifacts && provider.toolResults && (
@@ -611,7 +635,7 @@ function ManagedSessionsContent({
               }}
             />
           ) : (
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
               <MessageList
                 messages={messages}
                 onToolResultOpen={
@@ -629,11 +653,14 @@ function ManagedSessionsContent({
                 workspaceCwd={summary?.workspaceCwd}
                 hideSessionTimeline
                 welcomeHeader={
-                  summary?.workspace ? null : (
-                    <p className="p-4 text-muted-foreground">
-                      {t('managed.prompt')}
-                    </p>
-                  )
+                  messages.length === 0 && !detail.loading ? (
+                    <WelcomeHeader
+                      version=""
+                      cwd={summary?.workspaceCwd ?? ''}
+                      currentModel={summary?.agentId ?? ''}
+                      currentMode=""
+                    />
+                  ) : undefined
                 }
               />
             </div>
@@ -643,6 +670,13 @@ function ManagedSessionsContent({
               <p className="text-sm text-muted-foreground">
                 {t('managed.uncertain')}
               </p>
+              <Button
+                size="sm"
+                disabled={busy || cwd.blocked}
+                onClick={() => void submit()}
+              >
+                {t('managed.retry')}
+              </Button>
               {/* Offered only where the handler can restore the draft:
                   destroying the only copy from a foreign session would lose
                   it for good. */}
@@ -659,7 +693,11 @@ function ManagedSessionsContent({
                     // The pending record is client-scoped but the draft
                     // belongs to the session it was written for: restore it
                     // only there.
-                    if (pending.sessionId === sessionId) setText(pending.text);
+                    if (pending.sessionId === sessionId) {
+                      setText(pending.text);
+                      composerRef.current?.setText(pending.text);
+                    }
+                    composerCommit.current = undefined;
                     setError(undefined);
                     // A create that committed server-side before an
                     // unconfirmed failure is otherwise invisible until the
@@ -774,24 +812,39 @@ function ManagedSessionsContent({
           />
           {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
           (!provider.workspaceBinding || (sessionId && summary)) ? (
-            <form
-              ref={composerFormRef}
-              className="flex shrink-0 flex-col gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submit();
-              }}
+            <div
+              ref={composerContainerRef}
+              className={`${shellStyles.footer} flex flex-col gap-2`}
             >
-              <Textarea
-                aria-label={t('managed.prompt')}
-                value={pending?.text ?? text}
-                onChange={(event) => setText(event.target.value)}
+              <ChatEditor
+                key={`${provider.storageKey}:${sessionId ?? 'new'}`}
+                ref={composerRef}
+                composerScopeKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
+                disableLegacyHistoryFallback
+                shellModeEnabled={false}
+                composerInput={
+                  pending && pending.sessionId === sessionId
+                    ? { text: pending.text }
+                    : undefined
+                }
+                composerInputVersion={0}
+                onInputTextChange={setText}
+                onSubmit={(value, _images, _files, commit) => {
+                  void submit(value, commit);
+                  return false;
+                }}
+                commands={[]}
+                workspaceFeaturesEnabled={false}
+                attachmentsEnabled={false}
+                visibleToolbarActions={[]}
+                showChatWidthToggle={false}
+                isPreparing={busy || cwd.blocked}
                 disabled={
                   busy ||
                   Boolean(pending) ||
                   Boolean(sessionId && !summary?.capabilities.canSend)
                 }
-                placeholder={t('managed.prompt')}
+                placeholderText={t('managed.prompt')}
               />
               <div className="flex items-center justify-end gap-2">
                 {sessionId &&
@@ -803,24 +856,8 @@ function ManagedSessionsContent({
                     </span>
                   )}
                 {cancelButton}
-                <Button
-                  type="submit"
-                  disabled={
-                    busy ||
-                    cwd.blocked ||
-                    (!pending &&
-                      (!text.trim() ||
-                        Boolean(sessionId && !summary?.capabilities.canSend)))
-                  }
-                >
-                  {busy
-                    ? t('managed.sending')
-                    : pending
-                      ? t('managed.retry')
-                      : t('managed.send')}
-                </Button>
               </div>
-            </form>
+            </div>
           ) : (
             cancelButton && (
               <div className="flex shrink-0 justify-end">{cancelButton}</div>

@@ -35,6 +35,7 @@ function Harness({
   atWorkspaceCwd,
   composerScopeKey,
   disableLegacyHistoryFallback,
+  shellModeEnabled,
   commands,
   allowEmptySlashMenu,
   cycleModeOnTab,
@@ -61,6 +62,7 @@ function Harness({
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   allowEmptySlashMenu?: boolean;
   cycleModeOnTab?: boolean;
@@ -89,6 +91,7 @@ function Harness({
     atWorkspaceCwd,
     composerScopeKey,
     disableLegacyHistoryFallback,
+    shellModeEnabled,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
@@ -119,6 +122,7 @@ async function mount({
   atWorkspaceCwd,
   composerScopeKey,
   disableLegacyHistoryFallback,
+  shellModeEnabled,
   commands,
   allowEmptySlashMenu,
   cycleModeOnTab,
@@ -145,6 +149,7 @@ async function mount({
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   allowEmptySlashMenu?: boolean;
   cycleModeOnTab?: boolean;
@@ -182,6 +187,7 @@ async function mount({
             atWorkspaceCwd={currentWorkspaceCwd}
             composerScopeKey={composerScopeKey}
             disableLegacyHistoryFallback={disableLegacyHistoryFallback}
+            shellModeEnabled={shellModeEnabled}
             commands={currentCommands}
             allowEmptySlashMenu={currentAllowEmptySlashMenu}
             cycleModeOnTab={cycleModeOnTab}
@@ -1373,6 +1379,29 @@ describe('useComposerCore paste', () => {
     expect.soft(event.defaultPrevented).toBe(false);
     expect.soft(latest!.pastedFiles).toEqual([]);
     expect.soft(latest!.getText()).toBe('');
+  });
+
+  it('keeps Managed bang input literal and cannot enter the global Shell history mode', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    act(() => latest!.toggleShellMode());
+    expect(latest!.shellMode).toBe(false);
+    act(() => latest!.setShellMode(true));
+    expect(latest!.shellMode).toBe(false);
+    const event = new KeyboardEvent('keydown', {
+      key: '!',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      (document.activeElement as HTMLElement)?.blur();
+      document.body.dispatchEvent(event);
+    });
+    expect(latest!.shellMode).toBe(false);
+    expect(latest!.getText()).toBe('!');
   });
 
   it('leaves a long paste inline in shell mode', async () => {

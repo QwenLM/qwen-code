@@ -93,10 +93,15 @@ describe('ManagedAgentWebShell', () => {
           baseUrl="https://product.example"
           productScope="tenant-a:actor-a"
           enableWorkspaceBinding
+          modelPresets={[{ agentId: 'agent-a', label: 'Model A' }]}
           sessionId="old-session"
         />,
       );
     });
+    expect(
+      (captured.props as { managedAgentProvider: ManagedAgentProvider })
+        .managedAgentProvider.workspaceBinding?.modelPresets,
+    ).toEqual([{ agentId: 'agent-a', label: 'Model A' }]);
     await act(async () => {
       root.render(
         <ManagedAgentWebShell

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
@@ -12,9 +12,12 @@ import type {
   ManagedAgentSessionEvent,
   ManagedAgentSessionTranscript,
 } from './managed-agent-provider';
+import type { EditorHandle } from '../../hooks/useComposerCore';
+import type { ComponentProps } from 'react';
 
 const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
+  restoreEditorDraft: vi.fn<() => string>(),
   client: {
     listSessions: vi.fn(),
     getSession: vi.fn(),
@@ -38,14 +41,17 @@ vi.mock('../MessageList', () => ({
     onLoadOlderHistory,
     onToolResultOpen,
     pendingApproval,
+    welcomeHeader,
   }: {
     messages: unknown[];
     hasOlderHistory: boolean;
     onLoadOlderHistory: () => Promise<void>;
     onToolResultOpen?: (itemId: string) => void;
     pendingApproval?: unknown;
+    welcomeHeader?: ReactNode;
   }) => (
     <>
+      {welcomeHeader}
       <button onClick={() => onToolResultOpen?.('item-1')}>
         Open tool output
       </button>
@@ -61,6 +67,62 @@ vi.mock('../MessageList', () => ({
     </>
   ),
 }));
+
+vi.mock('../ChatEditor', async () => {
+  const { forwardRef, useImperativeHandle, useRef, useState } = await import(
+    'react'
+  );
+  return {
+    ChatEditor: forwardRef<
+      EditorHandle,
+      ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
+    >((props, ref) => {
+      const [value, setValue] = useState(
+        () => props.composerInput?.text ?? mocks.restoreEditorDraft(),
+      );
+      const input = useRef<HTMLTextAreaElement>(null);
+      const update = (text: string) => {
+        setValue(text);
+        props.onInputTextChange?.(text);
+      };
+      useImperativeHandle(
+        ref,
+        () =>
+          ({
+            setText: update,
+            clearText: () => update(''),
+            focus: () => input.current?.focus(),
+          }) as EditorHandle,
+      );
+      return (
+        <form
+          data-managed-composer-scope={props.composerScopeKey}
+          onSubmit={(event) => {
+            event.preventDefault();
+            const accepted = props.onSubmit(value, undefined, undefined, () =>
+              update(''),
+            );
+            if (accepted !== false) update('');
+          }}
+        >
+          <textarea
+            ref={input}
+            aria-label={props.placeholderText}
+            value={value}
+            disabled={props.disabled}
+            onChange={(event) => update(event.target.value)}
+          />
+          <button
+            type="submit"
+            disabled={props.disabled || props.isPreparing || !value.trim()}
+          >
+            Send
+          </button>
+        </form>
+      );
+    }),
+  };
+});
 
 import { ManagedSessionsPage } from './ManagedSessionsPage';
 import { artifact, result } from './managed-tool-result.test-fixtures';
@@ -123,6 +185,7 @@ describe('ManagedSessionsPage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.restoreEditorDraft.mockReturnValue('');
     provider = {
       kind: 'java',
       storageKey: 'http://managed-test',
@@ -1109,6 +1172,19 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
   });
 
+  it.each([true, false])(
+    'shows the standard welcome only for an empty conversation (empty=%s)',
+    async (empty) => {
+      if (empty)
+        mocks.client.getTranscript.mockResolvedValue({
+          events: [],
+          lastEventId: 0,
+        });
+      await render('s1');
+      expect(container.textContent?.includes('Welcome to')).toBe(empty);
+    },
+  );
+
   it('renders Chinese Managed labels and states without English fallback overriding them', async () => {
     await render('s1', 'zh-CN');
     expect(container.querySelector('nav')?.getAttribute('aria-label')).toBe(
@@ -1263,6 +1339,42 @@ describe('ManagedSessionsPage', () => {
       JSON.stringify(record),
     );
   }
+
+  it('preserves another session draft when retrying a restored pending prompt', async () => {
+    seedPending({
+      idempotencyKey: 'restored-a',
+      sessionId: 's1',
+      text: 'For session A',
+    });
+    mocks.restoreEditorDraft.mockReturnValue('Saved draft for session B');
+    await render('s2');
+    expect(container.querySelector('textarea')?.value).toBe(
+      'Saved draft for session B',
+    );
+    await click('Retry the same request');
+    expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
+      's1',
+      { text: 'For session A' },
+      expect.objectContaining({ idempotencyKey: 'restored-a' }),
+    );
+    expect(container.querySelector('textarea')?.value).toBe(
+      'Saved draft for session B',
+    );
+    expect(onSelect).toHaveBeenLastCalledWith('s1');
+  });
+
+  it('clears the owning editor after a restored pending prompt is accepted', async () => {
+    seedPending({
+      idempotencyKey: 'restored-a',
+      sessionId: 's1',
+      text: 'For session A',
+    });
+    await render('s1');
+    expect(container.querySelector('textarea')?.value).toBe('For session A');
+    await click('Retry the same request');
+    expect(container.querySelector('textarea')?.value).toBe('');
+    expect(onSelect).toHaveBeenLastCalledWith('s1');
+  });
 
   async function focusAndClickDiscard() {
     const discard = [...container.querySelectorAll('button')].find(
