@@ -12,6 +12,7 @@ import type {
   DaemonWorkspaceProviderStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { isVisibleComposerModel } from '../../utils/composerModels';
 import styles from './ModelManagementSection.module.css';
 
 export interface ModelDeleteTarget {
@@ -143,6 +144,13 @@ export function ModelManagementSection({
       isCurrent: false,
       isRuntime: false,
     });
+  }
+  for (const provider of displayProviders) {
+    provider.models = provider.models.filter((model) =>
+      isVisibleComposerModel({
+        id: `${model.baseModelId}(${provider.authType})`,
+      }),
+    );
   }
   const hasModels = displayProviders.some((p) => p.models.length > 0);
   const currentRowKey = findCurrentRowKey(providers, currentModelId);

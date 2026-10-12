@@ -95,6 +95,66 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
 }
 
 describe('ModelManagementSection', () => {
+  it('hides the retired OAuth model and its empty provider group', () => {
+    const { container } = renderSection({
+      providers: [
+        ...providers(),
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'qwen-oauth',
+          current: false,
+          models: [
+            {
+              modelId: 'coder-model(qwen-oauth)',
+              baseModelId: 'coder-model',
+              name: 'coder-model',
+              baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+              isCurrent: false,
+              isRuntime: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(container.textContent).not.toContain('coder-model');
+    expect(container.textContent).not.toContain('qwen-oauth');
+    expect(container.textContent).not.toContain('DYNAMIC_QWEN_OAUTH_BASE_URL');
+    expect(container.textContent).toContain('GPT-4o');
+    expect(container.textContent).toContain('DeepSeek V4');
+  });
+
+  it('does not restore the hidden OAuth model from saved configurations', () => {
+    const { container } = renderSection({
+      providers: [],
+      configurations: [
+        {
+          key: 'saved-oauth',
+          authType: 'qwen-oauth',
+          modelId: 'coder-model',
+          baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+          purpose: 'chat',
+        },
+        {
+          key: 'saved-openai-coder',
+          authType: 'openai',
+          modelId: 'coder-model',
+          baseUrl: 'https://example.com/v1',
+          purpose: 'chat',
+        },
+      ],
+    });
+
+    expect(container.textContent).not.toContain('qwen-oauth');
+    expect(container.textContent).not.toContain('DYNAMIC_QWEN_OAUTH_BASE_URL');
+    expect(container.textContent).toContain('coder-model');
+    expect(container.textContent).toContain('https://example.com/v1');
+    expect(
+      container.querySelectorAll('button[aria-label="Delete coder-model"]'),
+    ).toHaveLength(1);
+  });
+
   it.each([
     {
       result: { updated: true as const, requiresRestart: true },

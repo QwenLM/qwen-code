@@ -7,7 +7,8 @@
 /**
  * Model IDs hidden from the composer's model picker — internal / duplicate
  * entries that must not be user-selectable. Shared by the main chat composer
- * (App) and the split-view pane composers (ChatPane) so both hide the same set.
+ * (App), split-view pane composers (ChatPane), and Settings model management
+ * so all hide the same set.
  */
 export const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
 
