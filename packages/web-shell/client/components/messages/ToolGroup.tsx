@@ -179,11 +179,12 @@ export function extractDiff(tool: ACPToolCall): string {
   const rawFileDiff = getRawFileDiff(tool);
   if (rawFileDiff) return rawFileDiff;
 
-  // Pending previews stay compact; settled and confirmed diffs retain full context.
-  const buildDiff =
-    tool.status === 'pending' || tool.status === 'in_progress'
-      ? buildContextBoundedDiff
-      : buildUnifiedDiff;
+  // Only the two builders below are status-gated: pending/in-progress calls
+  // render bounded previews. The verbatim `getRawFileDiff` early return above
+  // and the `args.patch` return below are not bounded by design.
+  const buildDiff = isActiveToolStatus(tool.status)
+    ? buildContextBoundedDiff
+    : buildUnifiedDiff;
 
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
