@@ -10,7 +10,10 @@ AutoSkill 仍默认关闭；确认流程、managed skill 写入限制和内存�
 本设计替换触发条件，不改变评审 agent 或 shell 进程生命周期。
 本设计取代[最初 AutoSkill 提案](skill-nudge/skill-nudge.md)中的计数、触发和
 `ScheduleSkillReviewParams` 章节。该提案只按次数触发的代码片段仅作为历史记录，
-不再是当前调用方契约；评审 agent 和写入沙箱设计保持不变。
+不再是当前调用方契约；评审 agent 和写入沙箱设计保持不变。本设计也取代
+[ACP managed auto-memory](auto-memory/acp-managed-auto-memory.md) 第 7 节及
+对应的完成工具验收条件：ACP 转发所有终态完成记录，携带调用 ID 与执行状态，
+包括取消结果；由共享客户端决定保护与记账。
 
 ## 设计
 
@@ -65,7 +68,8 @@ Auto Memory 的提取、dream 和迁移保留原有类型门控。已派发评�
   覆盖历史移除与主聊天重建。
 - headless CLI、TUI 和 ACP 完成路径：提供已有结构化响应，覆盖全部生产调用者。
   TUI 即使对已去重或属于次级交互的模型完成记录，也转发取消结果，由共享客户端
-  统一处理保护与经验过滤；client-initiated 工具仍排除。ACP 使用原始聊天流，
+  统一处理保护与经验过滤；client-initiated 工具仍排除。ACP 也转发取消的完成
+  记录，保留已结算的执行状态和取消的 span 结果。ACP 使用原始聊天流，
   因此也转发已接受的结果批次。基线 ACP 不调度 AutoSkill
   评审；本改动保留这一启用范围，不新增 ACP 功能。
 - 同目录测试和既有 skill-review 集成测试：门控、结果、接线和生命周期回归。
@@ -86,6 +90,8 @@ AutoSkill 和重复重放。真实聊天流 normalization 测试覆盖截断、r
 compact 形状的历史替换与聊天重建后复用 provider ID 或生成 ID：新完成调用
 仍计数并保留 skill 写入保护，重放仍幂等。clear 与会话切换对照允许新会话
 复用 ID。ACP iterator 在首个 chunk 前后失败时，结果仍恰好接受一次。
+ACP 取消测试覆盖未开始、执行中及执行后取消的结果；执行后取消的 skill 写入
+仍设置保护并保留调用 ID，但不计入经验或最近工具提示。
 不引入新的 shell 进程取消语义。
 
 ## 风险与开放问题

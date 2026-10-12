@@ -16839,7 +16839,7 @@ export class Session implements SessionContext {
             debugLogger.warn('Tool invocation resource cleanup failed:', error);
           });
       }
-      if (terminalStatus && terminalStatus !== 'cancelled') {
+      if (terminalStatus) {
         this.config.getLlmClient().recordCompletedToolCall(toolName, args, {
           callId,
           executionStatus,
