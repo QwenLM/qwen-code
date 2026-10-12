@@ -19,7 +19,7 @@ Managed Runtime 可能被回收,Harness 也可能被替换。此时工具的完�
 - **Session 资源。** `packages/core/src/managed-runtime/managed-session-resources.ts` 中的 `LocalManagedSessionResourceStore` 整块发布 `Buffer`、整文件读取,读取时校验长度和 SHA-256。它没有流式发布,也没有按区间读取。资源通过 `DurableRef` 引用:`resourceId`、`kind`、`schemaVersion`、`byteLength` 和不带前缀的小写十六进制 SHA-256 `digest`。
 - **Session 回执。** Managed Session 事件 `tool.receipt` 携带 `executionCallId`、`toolOutcomeRef`、`resultRef`、`resources` 和 `historyRevision`。
 - **Tool v2。** `managed-runtime-tool-v2.schema.json` 把已结算的 `result` 封闭为 `executionStatus`、`responseParts` 和可选的 `error`,每个响应上限 1 MiB。worker 会把更大的结果替换为一个小的终态错误。
-- **路由闸门。** worker 的所有路由都经过 `ownedManagedRuntimeRouteGate`,它只放行其 boot 版本的路由:boot v1 下是 `OWNED_MANAGED_RUNTIME_ROUTES`,boot v2 下是 `MANAGED_CONTEXT_WORKER_ROUTES`(W0c-1,#12732);对其他路径,它在任何处理器运行前返回空的 404。
+- **路由闸门。** worker 的所有路由都经过 `ownedManagedRuntimeRouteGate`,它只放行其 boot 版本的路由:boot v1 下是 `OWNED_MANAGED_RUNTIME_ROUTES`,boot v2 下是 `MANAGED_CONTEXT_WORKER_ROUTES`(W0c-1,#12732);对其他路径,它在任何处理器运行前返回空的 404。(此快照之后,[Broker provider 控制契约](2026-09-27-broker-provider-control.zh-CN.md)把 `MANAGED_RUNTIME_PROVIDER_ROUTE` 加入了两个 boot 版本放行的路由;配置了 capture 或远程 publisher 时,本契约自己的路由也会加入 boot v2 的集合。)
 
 ## 目标
 
@@ -75,7 +75,7 @@ manifest 是 kind 为 `managed-tool-result-manifest`、schema 版本为 1 的 Se
 | `sessionId`         | id:Managed Session,而不是 Runtime Session                                                    |
 | `turnId`            | id                                                                                           |
 | `executionCallId`   | id:Session 回执将要指明的 `tool.intent` 身份                                                 |
-| `callId`            | id:模型的调用 ID                                                                             |
+| `callId`            | id:原始 Runtime `reference.callId`；模型配对标识独立保存                                     |
 | `invocationDigest`  | id:原始引用的 `argsDigest`,与 Runtime 收到的完全一致                                         |
 | `bindingGeneration` | generation:执行该调用的 Runtime 绑定代数                                                     |
 | `captureId`         | token:每次执行捕获一个;分段以它为键                                                          |

@@ -762,12 +762,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       return;
     }
     clipboardUnavailableShownRef.current = true;
+    const messageKey =
+      process.platform === 'linux'
+        ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+        : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.';
     uiState.historyManager?.addItem(
       {
         type: 'error',
-        text: t(
-          'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
-        ),
+        text: t(messageKey),
       },
       Date.now(),
     );
@@ -1549,7 +1551,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
         }
 
-        if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
+        // While suggestions are loading the list is empty and there is
+        // nothing to accept; the dropdown state is render-derived and can lag
+        // the buffer, so Enter must fall through to SUBMIT instead of being
+        // swallowed here.
+        if (
+          keyMatchers[Command.ACCEPT_SUGGESTION](key) &&
+          !key.paste &&
+          completion.suggestions.length > 0
+        ) {
           // Capture the suggestion BEFORE acceptActiveCompletionSuggestion
           // mutates the buffer/index. When the suggestion's command opted
           // into `submitOnAccept` (a leaf command whose bare action takes

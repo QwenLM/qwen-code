@@ -18,75 +18,41 @@ import {
   HARD_MAX_TOKENS_CEILING,
 } from './workflow-budget.js';
 
+const envCap = (raw: string) => ({ [MAX_TOKENS_PER_WORKFLOW_ENV]: raw });
+
 describe('resolveMaxTokensPerWorkflow', () => {
+  const resolve = (raw: string) => resolveMaxTokensPerWorkflow(envCap(raw));
+
   it('returns null when env is unset', () => {
     expect(resolveMaxTokensPerWorkflow({})).toBeNull();
   });
 
-  it('returns null when env is empty / whitespace', () => {
-    expect(
-      resolveMaxTokensPerWorkflow({ [MAX_TOKENS_PER_WORKFLOW_ENV]: '' }),
-    ).toBeNull();
-    expect(
-      resolveMaxTokensPerWorkflow({ [MAX_TOKENS_PER_WORKFLOW_ENV]: '   ' }),
-    ).toBeNull();
-  });
-
   it('parses a positive integer env value', () => {
-    expect(
-      resolveMaxTokensPerWorkflow({
-        [MAX_TOKENS_PER_WORKFLOW_ENV]: '50000',
-      }),
-    ).toBe(50_000);
+    expect(resolve('50000')).toBe(50_000);
   });
 
-  it('returns null on non-integer override (treats misconfig as no cap)', () => {
-    expect(
-      resolveMaxTokensPerWorkflow({
-        [MAX_TOKENS_PER_WORKFLOW_ENV]: 'abc',
-      }),
-    ).toBeNull();
-    expect(
-      resolveMaxTokensPerWorkflow({
-        [MAX_TOKENS_PER_WORKFLOW_ENV]: '1.5',
-      }),
-    ).toBeNull();
-  });
-
-  it('returns null on hex / scientific / non-decimal-integer overrides', () => {
+  it.each([
+    ['returns null when env is empty / whitespace', ['', '   ']],
+    [
+      'returns null on non-integer override (treats misconfig as no cap)',
+      ['abc', '1.5'],
+    ],
     // Number('0x2BF20')=180000, Number('1e6')=1000000, Number('5.0')=5 all
     // pass Number.isInteger; only plain decimal integers should set a cap.
-    for (const raw of ['0x2BF20', '1e6', '5.0']) {
-      expect(
-        resolveMaxTokensPerWorkflow({ [MAX_TOKENS_PER_WORKFLOW_ENV]: raw }),
-      ).toBeNull();
-    }
-  });
-
-  it('returns null on zero / negative override', () => {
-    expect(
-      resolveMaxTokensPerWorkflow({
-        [MAX_TOKENS_PER_WORKFLOW_ENV]: '0',
-      }),
-    ).toBeNull();
-    expect(
-      resolveMaxTokensPerWorkflow({
-        [MAX_TOKENS_PER_WORKFLOW_ENV]: '-100',
-      }),
-    ).toBeNull();
+    [
+      'returns null on hex / scientific / non-decimal-integer overrides',
+      ['0x2BF20', '1e6', '5.0'],
+    ],
+    ['returns null on zero / negative override', ['0', '-100']],
+  ])('%s', (_title, raws) => {
+    for (const raw of raws) expect(resolve(raw)).toBeNull();
   });
 
   it('clamps to HARD_MAX_TOKENS_CEILING on over-large override', () => {
-    expect(
-      resolveMaxTokensPerWorkflow({
-        [MAX_TOKENS_PER_WORKFLOW_ENV]: String(HARD_MAX_TOKENS_CEILING + 1),
-      }),
-    ).toBe(HARD_MAX_TOKENS_CEILING);
-    expect(
-      resolveMaxTokensPerWorkflow({
-        [MAX_TOKENS_PER_WORKFLOW_ENV]: '999999999',
-      }),
-    ).toBe(HARD_MAX_TOKENS_CEILING);
+    expect(resolve(String(HARD_MAX_TOKENS_CEILING + 1))).toBe(
+      HARD_MAX_TOKENS_CEILING,
+    );
+    expect(resolve('999999999')).toBe(HARD_MAX_TOKENS_CEILING);
   });
 });
 
@@ -145,9 +111,7 @@ describe('WorkflowBudgetImpl', () => {
   });
 
   it('fromEnv reads the env override', () => {
-    const b = WorkflowBudgetImpl.fromEnv({
-      [MAX_TOKENS_PER_WORKFLOW_ENV]: '25000',
-    });
+    const b = WorkflowBudgetImpl.fromEnv(envCap('25000'));
     expect(b.total).toBe(25_000);
     expect(b.remaining()).toBe(25_000);
   });
@@ -170,9 +134,8 @@ describe('WorkflowBudgetExceededError', () => {
 
   it('R2 #14: message does NOT advise removing/raising the cap (model-coaching mitigation)', () => {
     const err = new WorkflowBudgetExceededError('wf_abc123', 10_000, 12_500);
-    // The error reaches the LLM via `tool_result`; the advisory tail
-    // would coach the model to tell the user how to disable the
-    // operator's budget. Keep the factual portion only.
+    // The error reaches the LLM via `tool_result`; an advisory tail would
+    // coach the model to tell the user how to disable the operator's budget.
     expect(err.message).not.toMatch(/Increase /i);
     expect(err.message).not.toMatch(/remove the cap/i);
     expect(err.message).not.toContain(MAX_TOKENS_PER_WORKFLOW_ENV);
@@ -278,9 +241,7 @@ describe('WorkflowBudgetImpl.fromConfig', () => {
     charge(70_000);
     beginTurn(300_000);
     charge(5_000);
-    const b = WorkflowBudgetImpl.fromConfig(config, {
-      [MAX_TOKENS_PER_WORKFLOW_ENV]: '1000',
-    });
+    const b = WorkflowBudgetImpl.fromConfig(config, envCap('1000'));
     expect(b.source).toBe('directive');
     expect(b.total).toBe(300_000);
     expect(b.spent()).toBe(5_000);
@@ -290,9 +251,7 @@ describe('WorkflowBudgetImpl.fromConfig', () => {
   it('falls back to the env cap when the turn set no target', () => {
     const { config, beginTurn } = session();
     beginTurn(null);
-    const b = WorkflowBudgetImpl.fromConfig(config, {
-      [MAX_TOKENS_PER_WORKFLOW_ENV]: '1000',
-    });
+    const b = WorkflowBudgetImpl.fromConfig(config, envCap('1000'));
     expect(b.source).toBe('env');
     expect(b.total).toBe(1_000);
   });
@@ -339,9 +298,10 @@ describe('WorkflowBudgetImpl.fromConfig', () => {
   });
 
   it('works for a config with no turn support at all', () => {
-    const b = WorkflowBudgetImpl.fromConfig({} as unknown as Config, {
-      [MAX_TOKENS_PER_WORKFLOW_ENV]: '5000',
-    });
+    const b = WorkflowBudgetImpl.fromConfig(
+      {} as unknown as Config,
+      envCap('5000'),
+    );
     expect(b.source).toBe('env');
     expect(b.total).toBe(5_000);
   });

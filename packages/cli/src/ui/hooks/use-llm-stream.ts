@@ -83,6 +83,7 @@ import {
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   type BackgroundNotificationKind,
   renderGoalContinuationTurn,
+  getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -558,6 +559,10 @@ export const useLlmStream = (
   onDebugMessage: (message: string) => void,
   handleSlashCommand: (
     cmd: PartListUnion,
+    oneTimeShellAllowlist?: Set<string>,
+    overwriteConfirmed?: boolean,
+    existingInvocationItemId?: number,
+    invocationPromptId?: string,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -1642,7 +1647,13 @@ export const useLlmStream = (
 
         // Handle UI-only commands first
         const slashCommandResult = isSlashCommand(trimmedQuery)
-          ? await handleSlashCommand(trimmedQuery)
+          ? await handleSlashCommand(
+              trimmedQuery,
+              undefined,
+              undefined,
+              undefined,
+              submitType === SendMessageType.UserQuery ? prompt_id : undefined,
+            )
           : false;
 
         if (slashCommandResult) {
@@ -3820,7 +3831,10 @@ export const useLlmStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: renderGoalContinuationTurn(queuedGoal),
+                    queryToSend: renderGoalContinuationTurn(
+                      queuedGoal,
+                      config.getToolRegistry?.(),
+                    ),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }
@@ -4180,7 +4194,10 @@ export const useLlmStream = (
                     errorType: response.errorType,
                     executionStatus: response.executionStatus,
                   },
-                  goalToolResultProvenance(request),
+                  goalToolResultProvenance(
+                    request,
+                    finalized[index].responseParts,
+                  ),
                 );
               },
             );
@@ -5469,7 +5486,10 @@ export const useLlmStream = (
             errorType: response.errorType,
             executionStatus: response.executionStatus,
           },
-          goalToolResultProvenance(request),
+          goalToolResultProvenance(
+            request,
+            finalizedResponses[index].responseParts,
+          ),
         );
       });
 
@@ -6114,6 +6134,11 @@ export const useLlmStream = (
             const fileName = path.basename(filePath);
             const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
             const clientHistory = llmClient?.getHistoryShallow();
+            // JSON.stringify drops the Symbol-keyed prompt identity, so
+            // persist it as a parallel array for /restore to re-mark against.
+            const promptIds = clientHistory?.map(
+              (content) => getApiHistoryPromptId(content) ?? null,
+            );
             const toolCallWithSnapshotFilePath = path.join(
               checkpointDir,
               toolCallWithSnapshotFileName,
@@ -6125,6 +6150,7 @@ export const useLlmStream = (
                 {
                   history,
                   clientHistory,
+                  ...(promptIds?.some(Boolean) ? { promptIds } : {}),
                   toolCall: {
                     name: toolCall.request.name,
                     args: toolCall.request.args,

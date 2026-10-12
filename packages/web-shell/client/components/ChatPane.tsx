@@ -119,7 +119,7 @@ import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { parsePlanCommand } from '../utils/planMode';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
-import { serializeContextUsageMessage } from './messages/ContextUsageMessage';
+import { createContextUsageMessageData } from './messages/ContextUsageMessage';
 import type {
   TurnOutputKind,
   TurnOutputOpenRequest,
@@ -681,6 +681,9 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canSendMidTurnNow =
+    connection.capabilities?.features.includes('session_mid_turn_send_now') ===
+    true;
   const canInjectMidTurnMedia =
     connection.capabilities?.features.includes('session_attachments') === true;
   const {
@@ -689,6 +692,7 @@ export function ChatPane({
     enqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    sendQueuedPromptNow,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -1445,7 +1449,8 @@ export function ChatPane({
         store.dispatch([
           {
             type: 'status',
-            text: serializeContextUsageMessage(result),
+            text: t('contextUsage.title'),
+            data: createContextUsageMessageData(result),
             clearActiveText: false,
           },
         ]);
@@ -1454,7 +1459,14 @@ export function ChatPane({
         if (!owner.isCurrent()) return;
         reportError(error, 'Failed to load context usage');
       });
-  }, [actions, contextUsageAvailable, reportError, sessionOwnerGuard, store]);
+  }, [
+    actions,
+    contextUsageAvailable,
+    reportError,
+    sessionOwnerGuard,
+    store,
+    t,
+  ]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
@@ -1772,6 +1784,7 @@ export function ChatPane({
         {pendingToolApproval && (
           <div className={styles.approval} data-testid="pane-approval">
             <ToolApproval
+              showBrowserNotifications
               disabled={isExitPlanApproval && modeControlsBusy}
               planExecutionMode={connection.planExecutionMode}
               request={pendingToolApproval}
@@ -1860,7 +1873,9 @@ export function ChatPane({
                   streamingState !== 'idle' || sessionHasActivePrompt
                 }
                 onDelete={removeQueuedPrompt}
+                canSendMidTurnNow={canSendMidTurnNow}
                 onInsert={insertQueuedPrompt}
+                onSendNow={sendQueuedPromptNow}
                 onEdit={editQueuedPrompt}
                 onImagePreview={handleImagePreview}
                 onAttachmentPreview={handleAttachmentPreview}

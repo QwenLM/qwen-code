@@ -22,6 +22,11 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
 import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { MODEL_CATALOG_ENV } from '@qwen-code/qwen-code-core/models/model-catalog.js';
+import {
+  MODEL_CATALOG_REFRESH_ENV,
+  MODEL_CATALOG_URL_ENV,
+} from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { BWRAP_MIGRATION_MESSAGE } from '../config/execution-sandbox-settings.js';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -83,6 +88,9 @@ export function getSandboxPassthroughEnvArgs(
   return [
     'QWEN_DEBUG_LOG_FILE',
     'QWEN_CODE_LEGACY_MCP_BLOCKING',
+    MODEL_CATALOG_ENV,
+    MODEL_CATALOG_REFRESH_ENV,
+    MODEL_CATALOG_URL_ENV,
     SKIP_UPDATE_CHECK_ENV_VAR,
     CUSTOM_SANDBOX_IMAGE_ENV_VAR,
     HOST_UPDATE_RELAUNCH_ENV_VAR,

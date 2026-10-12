@@ -319,10 +319,34 @@ final class HostedShellOutputProbe implements AutoCloseable {
         }
     }
 
+    void observePublicPrefix(Map<String, Object> session) throws Exception {
+        try {
+            String id = session.get("sessionId").toString();
+            assertThat(owners.putIfAbsent(id, owner(session))).isNull();
+            capture(worker(execution(id)));
+            check(session, "prefix");
+        } catch (Exception | AssertionError error) {
+            failure.compareAndSet(null, error);
+            throw error;
+        }
+    }
+
+    void assertPublicFault(Map<String, Object> session) throws Exception {
+        assertThat(failure.get()).as("public Shell output probe").isNull();
+        check(session, "finished");
+        var row = execution(session.get("sessionId").toString());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+                Integer.class, session.get("sessionId"))).isEqualTo(1);
+        assertThat(((Number) row.get("dispatch_generation")).longValue()).isEqualTo(1);
+        System.out.println("PUBLIC_FG6F_LEDGER " + session.get("fault") + " original=" + row.get("execution_call_id")
+                + " state=UNKNOWN owner=retained");
+    }
+
     void assertReport(Map<String, Object> session, JsonNode report) throws Exception {
         assertThat(failure.get()).as("independent Shell output probe").isNull();
         assertThat(report.path("fault").asText()).isEqualTo(session.get("fault"));
-        assertThat(report.path("injections").asInt()).isEqualTo(1);
+        assertThat(report.path("injections").asInt())
+                .isEqualTo(session.get("fault").toString().startsWith("receipt-") ? 3 : 1);
         assertThat(report.path("modelCalls").asInt()).isEqualTo(1);
         var row = execution(session.get("sessionId").toString());
         assertThat(row.get("execution_call_id")).isEqualTo(report.path("executionCallId").asText());

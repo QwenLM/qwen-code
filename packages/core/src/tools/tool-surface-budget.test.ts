@@ -145,7 +145,6 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['exit_plan_mode', (c) => new ExitPlanModeTool(c), 2_450],
   ['skill', (c) => new SkillTool(c), 2_400],
   ['edit', (c) => new EditTool(c), 2_400],
-  ['update_goal', (c) => new UpdateGoalTool(c), 2_050],
   ['todo_write', (c) => new TodoWriteTool(c), 1_950],
   ['write_file', (c) => new WriteFileTool(c), 1_850],
   [
@@ -155,10 +154,8 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ],
   ['tool_search', (c) => new ToolSearchTool(c), 1_600],
   ['enter_plan_mode', (c) => new EnterPlanModeTool(c), 1_400],
-  ['propose_goal', (c) => new ProposeGoalTool(c), 1_350],
   ['task_update', (c) => new TaskUpdateTool(c), 1_250],
   ['notebook_edit', (c) => new NotebookEditTool(c), 1_200],
-  ['list_agents', (c) => new ListAgentsTool(c), 1_200],
   ['grep_search (ripgrep)', (c) => new RipGrepTool(c), 1_200],
   ['list_directory', (c) => new LSTool(c), 1_100],
   ['grep_search (fallback)', (c) => new GrepTool(c), 1_050],
@@ -169,13 +166,16 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['image_gen', (c) => new ImageGenTool(c), 600],
   ['manage_memory', (c) => new ManageMemoryTool(c), 600],
   ['display_image', (c) => new DisplayImageTool(c), 550],
-  ['get_goal', (c) => new GetGoalTool(c), 550],
   ['task_list', (c) => new TaskListTool(c), 500],
   ['team_delete', (c) => new TeamDeleteTool(c), 300],
 ];
 
 /** Tools that stay out of the first request until `tool_search` loads them. */
 const DEFERRED: ReadonlyArray<[name: string, build: Build]> = [
+  ['get_goal', (c) => new GetGoalTool(c)],
+  ['list_agents', (c) => new ListAgentsTool(c)],
+  ['propose_goal', (c) => new ProposeGoalTool(c)],
+  ['update_goal', (c) => new UpdateGoalTool(c)],
   ['advisor', (c) => new AdvisorTool(c)],
   ['create_sub_session', (c) => new CreateSubSessionTool(c)],
   ['cron_create', (c) => new CronCreateTool(c)],

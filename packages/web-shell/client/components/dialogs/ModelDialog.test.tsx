@@ -80,6 +80,42 @@ describe('ModelDialog current marker', () => {
 });
 
 describe('ModelDialog keyboard confirmation', () => {
+  it('keeps the exact ACP route when confirming a fast model', () => {
+    const onSelect = vi.fn();
+    const models = [
+      { id: 'qwen-route:v1:a', baseModelId: 'shared', label: 'Endpoint A' },
+      { id: 'qwen-route:v1:b', baseModelId: 'shared', label: 'Endpoint B' },
+    ];
+    mount(
+      <ModelDialog
+        mode="fast"
+        onSelect={onSelect}
+        models={models}
+        currentModelId="qwen-route:v1:b"
+      />,
+    );
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })),
+    );
+    expect(onSelect).toHaveBeenCalledWith('qwen-route:v1:b');
+  });
+
+  it('does not replace an unresolved fast-model pin on Enter', () => {
+    const onSelect = vi.fn();
+    mount(
+      <ModelDialog
+        mode="fast"
+        onSelect={onSelect}
+        models={[{ id: 'qwen-route:v1:a', baseModelId: 'shared' }]}
+        currentModelId={'openai:shared\0https://removed.example/v1'}
+      />,
+    );
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })),
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it.each([
     { currentModelId: 'removed', models: [{ id: '', name: 'Use main model' }] },
     { currentModelId: 'current', models: [], loading: true },

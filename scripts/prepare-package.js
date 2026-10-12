@@ -69,6 +69,8 @@ function verifyBundleArtifacts(rootDir, distDir) {
   const requiredPaths = [
     path.join(distDir, 'cli.js'),
     path.join(distDir, 'execution-worker.js'),
+    path.join(distDir, 'mem0', 'main.js'),
+    path.join(distDir, 'mem0', 'write-confirmation.js'),
     path.join(distDir, 'sandboxBwrapRelay.js'),
     path.join(distDir, 'sandboxLandlockRelay.js'),
     path.join(distDir, 'sandboxFileWorker.js'),
@@ -347,10 +349,13 @@ function writeDistPackageJson(rootDir, distDir) {
       // Must ship in the tarball or the @-picker silently falls back to the
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
+      'glob-search-worker.js',
       'codeModeHost.js',
+      'mod-worker.js',
       'sandboxBwrapRelay.js',
       'sandboxLandlockRelay.js',
       'sandboxFileWorker.js',
+      'mem0',
       'chunks',
       'vendor',
       '*.sb',

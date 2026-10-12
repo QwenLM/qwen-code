@@ -169,6 +169,8 @@ export default {
     'Das Zurückspulen wirkt sich nicht auf Dateien aus, die manuell oder per Shell-Befehl geändert wurden.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Zu einem komprimierten Turn kann nicht zurückgespult werden. Bitte einen aktuelleren Turn versuchen.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Die Unterhaltung kann nicht zu diesem Turn zurückgespult werden: Er passt nicht mehr zum Modellverlauf (z. B. nach einem erneuten Versuch). Bitte einen aktuelleren Turn versuchen.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'Datei-Wiederherstellung ist für diesen Turn nicht verfügbar (keine erfassten Dateiänderungen, oder dieser Turn liegt vor der aktuellen Sitzung).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':

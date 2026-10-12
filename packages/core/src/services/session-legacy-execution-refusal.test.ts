@@ -156,6 +156,59 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
     expect(await readFile(transcriptPath, 'utf8')).toBe(before);
   });
 
+  it('refuses to rename an archived transcript whose only Managed evidence is its owner record', async () => {
+    const archivedPath = path.join(
+      path.dirname(
+        config.getSessionService().getSessionTranscriptPath(SESSION_ID),
+      ),
+      'archive',
+      `${SESSION_ID}.jsonl`,
+    );
+    await mkdir(path.dirname(archivedPath), { recursive: true });
+    await writeFile(archivedPath, `${owner('managed')}\n`);
+    const before = await readFile(archivedPath, 'utf8');
+
+    await expect(
+      config
+        .getSessionService()
+        .renameSession(SESSION_ID, 'renamed on Legacy', 'manual', 'archived'),
+    ).rejects.toThrow(SessionExecutionEngineError);
+    expect(await readFile(archivedPath, 'utf8')).toBe(before);
+  });
+
+  it('keeps a legacy transcript whose glued tail merely carries marker text on the legacy paths', async () => {
+    // A torn append can glue unparseable marker-looking text onto a valid
+    // line; the marker is quoted evidence, not a Managed header record.
+    const transcriptPath = await writeTranscript(
+      `${owner('legacy')}\n${userMessage('hello')} and the raw bytes "subtype":"managed_session_header_v1" landed here\n`,
+    );
+
+    expect(isManagedSessionTranscriptSync(transcriptPath)).toBe(false);
+    expect(isManagedExecutionTranscriptSync(transcriptPath)).toBe(false);
+    expect(() =>
+      config.getSessionService().assertLegacySessionExecution(SESSION_ID),
+    ).not.toThrow();
+    await expect(
+      config.getSessionService().renameSession(SESSION_ID, 'renamed on Legacy'),
+    ).resolves.toBe(true);
+  });
+
+  it('detects a Managed header whose subtype is written with JSON escapes', async () => {
+    const header = line({
+      type: 'system',
+      subtype: 'managed_session_header_v1',
+      managedSession: { engine: 'managed' },
+    }).replace(
+      '"managed_session_header_v1"',
+      '"managed\\u005fsession\\u005fheader\\u005fv1"',
+    );
+    const transcriptPath = await writeTranscript(
+      `${owner('managed')}\n${header}\n`,
+    );
+
+    expect(isManagedSessionTranscriptSync(transcriptPath)).toBe(true);
+  });
+
   it('keeps a Managed create that stopped before its header completable', async () => {
     // What a Managed create leaves when it stops between its owner record and
     // its header.
@@ -358,6 +411,14 @@ describe('Managed owner evidence', () => {
     [
       'followed by another record on its line',
       (ownerLine) => `${ownerLine}${userMessage('hello')}\n`,
+    ],
+    [
+      'preceded by another record on its line',
+      (ownerLine) => `${userMessage('hello')}${ownerLine}\n`,
+    ],
+    [
+      'on a later head line',
+      (ownerLine) => `${userMessage('hello')}\n${ownerLine}\n`,
     ],
     [
       'after a byte-order mark',

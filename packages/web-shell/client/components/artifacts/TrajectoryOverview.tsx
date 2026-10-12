@@ -15,7 +15,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import { Maximize2Icon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
+import { Maximize2Icon, XIcon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDuration } from '../messages/StatsMessage';
 import type {
@@ -27,6 +27,10 @@ import {
   rowKeysInRange,
   type TimelineRange,
 } from '../../trajectory/timelineRange';
+import type {
+  TimelineViewport as Viewport,
+  TimelineViewportController,
+} from '../../trajectory/useTimelineViewport';
 import styles from './TrajectoryOverview.module.css';
 
 /**
@@ -74,14 +78,9 @@ const WHEEL_NOTCH_PX = 120;
  */
 const WHOLE_RUN_FRACTION = 0.999;
 
-/** A stretch of the domain shown across the strip's width, in ms. */
-interface Viewport {
-  start: number;
-  end: number;
-}
-
 export interface TrajectoryOverviewProps {
   model: TimelineModel | undefined;
+  viewportControl: TimelineViewportController;
   /** Shown inside the box when there is no model to draw. */
   notice?: string;
   selectedKey?: string;
@@ -100,17 +99,6 @@ export interface TrajectoryOverviewProps {
    * model's own, so the strip can never draw one mode under the other's label.
    */
   onModeChange: (mode: TimelineMode) => void;
-}
-
-/**
- * The viewport, and the model it was set on. A refresh or another session
- * brings a new model whose compressed axis is laid out afresh, so the same
- * numbers would frame a different stretch of the run; holding the model
- * alongside lets the viewport lapse in the render the model changes.
- */
-interface ViewportState {
-  viewport: Viewport;
-  of: TimelineModel;
 }
 
 /** One press on the track, from pointerdown until it is released. */
@@ -270,6 +258,7 @@ function spanStyle(span: TimelineSpan, total: number): CSSProperties {
 
 export function TrajectoryOverview({
   model,
+  viewportControl,
   notice,
   selectedKey,
   onSelect,
@@ -294,51 +283,24 @@ export function TrajectoryOverview({
   const [panning, setPanning] = useState(false);
   const total = model?.total ?? 0;
 
-  const [viewportState, setViewportState] = useState<ViewportState | undefined>(
-    undefined,
-  );
-  const viewport =
-    viewportState !== undefined && viewportState.of === model
-      ? viewportState.viewport
-      : undefined;
+  const {
+    viewport,
+    currentView,
+    applyViewport: commitViewport,
+  } = viewportControl;
   const vStart = viewport?.start ?? 0;
   const vLength = viewport ? viewport.end - viewport.start : total;
-
-  // The wheel listener is attached outside React and several wheel events can
-  // land before the next render. Each has to build on the viewport the one
-  // before it set, not on the one last rendered, or a fast spin of the wheel
-  // would lose most of its travel. So the latest viewport is also kept here,
-  // written in the same breath as the state.
   const modelRef = useRef(model);
-  const viewportRef = useRef<ViewportState | undefined>(undefined);
   useLayoutEffect(() => {
     modelRef.current = model;
   }, [model]);
-
-  /** The viewport as of the latest change, whether or not it has rendered. */
-  const currentView = useCallback((): { start: number; length: number } => {
-    const current = modelRef.current;
-    const whole = current?.total ?? 0;
-    const held = viewportRef.current;
-    if (held === undefined || held.of !== current) {
-      return { start: 0, length: whole };
-    }
-    return {
-      start: held.viewport.start,
-      length: held.viewport.end - held.viewport.start,
-    };
-  }, []);
-
-  const applyViewport = useCallback((next: Viewport | undefined) => {
-    setLastAction('zoom');
-    const current = modelRef.current;
-    const value =
-      next !== undefined && current !== undefined
-        ? { viewport: next, of: current }
-        : undefined;
-    viewportRef.current = value;
-    setViewportState(value);
-  }, []);
+  const applyViewport = useCallback(
+    (next: Viewport | undefined) => {
+      setLastAction('zoom');
+      commitViewport(next);
+    },
+    [commitViewport],
+  );
 
   /** Where along the track a pointer is, clamped to the track's ends. */
   const fractionAt = useCallback((clientX: number): number => {
@@ -644,6 +606,8 @@ export function TrajectoryOverview({
             className={styles.plot}
             aria-hidden="true"
             data-testid="trajectory-plot"
+            data-from={viewport?.start ?? 0}
+            data-to={viewport?.end ?? model?.total ?? 0}
             data-panning={panning ? 'true' : undefined}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
@@ -827,7 +791,9 @@ export function TrajectoryOverview({
               {t('trajectory.legend.after')}
             </span>
             <span>
-              <i className={styles.errorKey}>×</i>
+              <i className={styles.errorKey} aria-hidden="true">
+                <XIcon size={11} strokeWidth={2.5} />
+              </i>
               {t('trajectory.legend.error')}
             </span>
           </div>

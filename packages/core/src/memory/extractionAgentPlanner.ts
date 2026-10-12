@@ -46,6 +46,8 @@ const EXTRACTION_AGENT_SYSTEM_PROMPT = [
   '',
   'Rules:',
   '- Read existing memory files first to avoid creating duplicates.',
+  '- When editing an existing memory file, preserve its existing emphasis delimiter style (`_text_` or `*text*`); do not mix styles for italic emphasis within a file. For new files, follow the format reference and keep emphasis style consistent within each file.',
+  '- Keep a blank line before and after lists.',
   '- Extract only durable facts stated by the user.',
   '- Ignore temporary, session-specific, speculative, or question content.',
   '- If the user explicitly asks the assistant to remember something durable, preserve it.',

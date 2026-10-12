@@ -61,8 +61,8 @@ function skillFrontmatter(): string {
  * models a user who turned off the whole bundled level, and
  * `skillDisabledByName: true` one who named this reference in
  * `skills.disabled`; in either the description carries neither.
- * `toolMode: ToolMode.CodeModeOnly` models a session where both bridge tools
- * are hidden, so a deferred Skill tool is reached through the `exec` binding
+ * `toolMode: ToolMode.CodeModeOnly` models a session where `tool_call` is
+ * hidden, so a deferred Skill tool is reached through the `exec` binding
  * instead.
  */
 async function agentDescription({

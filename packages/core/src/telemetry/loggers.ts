@@ -8,6 +8,10 @@ import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
+// The #13003 experiment flag is read through its single definition, kept in a
+// no-import leaf module so telemetry can share it with `memory/recall.ts`
+// (which owns the flag but already imports this file) without a module cycle.
+import { isSkipSelectorOnUniqueStrongHitEnabled } from '../memory/recall-experiment.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
@@ -1617,6 +1621,9 @@ export function logMemoryRecall(
     fast_duration_ms: event.fast_duration_ms,
     selector_duration_ms: event.selector_duration_ms,
   };
+  if (event.selector_skipped !== undefined) {
+    attributes['selector_skipped'] = event.selector_skipped;
+  }
 
   const logger = logs.getLogger(SERVICE_NAME);
   logger.emit({
@@ -1626,6 +1633,18 @@ export function logMemoryRecall(
   recordMemoryRecallMetrics(config, event.duration_ms, {
     strategy: event.strategy,
     docs_selected: event.docs_selected,
+    // The selector_skipped metric dimension belongs to the #13003
+    // skip-selector experiment: attach it only while the experiment is
+    // enabled AND the recall mode had a skip decision to make (structured;
+    // legacy recalls leave the event field undefined), so deployments
+    // without the flag keep the pre-existing attribute space on these
+    // series and legacy-mode recalls do not mix a constant `false` into the
+    // experiment's control series. Logs keep any explicit decision,
+    // regardless of the experiment flag.
+    ...(isSkipSelectorOnUniqueStrongHitEnabled() &&
+    typeof event.selector_skipped === 'boolean'
+      ? { selector_skipped: event.selector_skipped }
+      : {}),
   });
 }
 

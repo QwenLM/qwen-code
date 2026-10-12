@@ -166,6 +166,7 @@ import {
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -178,6 +179,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_SEND_NOW_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
@@ -766,6 +768,14 @@ interface SessionEntry {
    * caller still observes the rejection on its own returned promise.
    */
   promptQueue: Promise<void>;
+  /**
+   * Settled state of the last admitted rewind. A rewind waits its turn on
+   * `promptQueue` and cannot be taken back once admitted, so a listing of
+   * rewindable history answered ahead of it would describe turns the
+   * bridge has already agreed to drop; such listings wait for this. Always
+   * resolves — a failed rewind must not block later listings.
+   */
+  rewindTail: Promise<void>;
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
   /** Invalidates continuation pre-checks when cancellation starts. */
@@ -2118,7 +2128,7 @@ function extractPromptText(
       return record['text'];
     }
   }
-  return hasImage ? '[image]' : '';
+  return hasImage ? IMAGE_ONLY_PROMPT_TEXT : '';
 }
 
 function liveTurnStatus(
@@ -4616,6 +4626,7 @@ export function createSessionControlPlane(
     if (count === undefined) return;
     if (count <= 1) {
       entry.clientIds.delete(clientId);
+      entry.attachments.cancelClientUploads(clientId);
       for (const call of entry.mcpAppCalls?.values() ?? []) {
         if (call.clientId === clientId) call.cancel();
       }
@@ -5393,6 +5404,7 @@ export function createSessionControlPlane(
     onNewSessionAbandoned?: (settlement: Promise<void>) => void,
     selection?: BridgeExecutionSelection,
     startupConfig?: SessionStartupConfig,
+    mcpServers?: BridgeSpawnRequest['mcpServers'],
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -5477,7 +5489,7 @@ export function createSessionControlPlane(
             // for any ACP request, not only prompts.
             const request = telemetry.injectPromptContext({
               cwd: boundWorkspace,
-              mcpServers: [],
+              mcpServers: mcpServers ?? [],
               _meta: {
                 ...sessionSourceRequestMeta(
                   sourceType,
@@ -7358,6 +7370,7 @@ export function createSessionControlPlane(
       closing: false,
       cwdChangeQueue: Promise.resolve(),
       promptQueue: Promise.resolve(),
+      rewindTail: Promise.resolve(),
       pendingPromptCount: 0,
       cancelGeneration: 0,
       pendingAgentNotificationCount: 0,
@@ -8852,12 +8865,11 @@ export function createSessionControlPlane(
               const request = telemetry.injectPromptContext({
                 sessionId: req.sessionId,
                 cwd: workspaceKey,
-                // Restore path drops per-request `mcpServers` (matches
-                // `doSpawn`); daemon-wide MCP comes from settings on
-                // the agent side. The SDK's `RestoreSessionRequest`
-                // intentionally has no `mcpServers` field for the
-                // same reason.
-                mcpServers: [],
+                // Daemon-wide MCP comes from settings on the agent
+                // side. Only a daemon-internal caller sets
+                // `req.mcpServers` (the SDK's `RestoreSessionRequest`
+                // intentionally has no such field).
+                mcpServers: req.mcpServers ?? [],
                 _meta: {
                   ...sessionSourceRequestMeta(
                     req.sourceType,
@@ -8901,7 +8913,7 @@ export function createSessionControlPlane(
             const request = telemetry.injectPromptContext({
               sessionId: req.sessionId,
               cwd: workspaceKey,
-              mcpServers: [],
+              mcpServers: req.mcpServers ?? [],
               _meta: {
                 ...sessionSourceRequestMeta(
                   req.sourceType,
@@ -9234,9 +9246,25 @@ export function createSessionControlPlane(
             workspaceAccess: 'metadata-only',
           })),
         );
-        const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
+      } else {
+        artifactRestoreWarnings.push(
+          ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
+        );
+      }
+      const legacyOnlyDrop = entry.artifacts.consumeLegacyOnlyRestore();
+      for (const warning of artifactRestoreWarnings) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
+      const artifactRestoreFailed =
+        legacyOnlyDrop ||
+        artifactRestoreWarnings.some((warning) =>
           isArtifactRestoreFailureWarning(warning),
         );
+      if (deferArtifactWorkspace) {
         entry.pendingArtifactRestore = {
           ...(restoredArtifactSnapshot !== undefined
             ? { snapshot: restoredArtifactSnapshot }
@@ -9247,21 +9275,7 @@ export function createSessionControlPlane(
               : [],
           warnings: artifactRestoreWarnings,
         };
-      } else {
-        artifactRestoreWarnings.push(
-          ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
-        );
       }
-      for (const warning of artifactRestoreWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
-            warning,
-          )}`,
-        );
-      }
-      const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
-        isArtifactRestoreFailureWarning(warning),
-      );
       if (replayUpdates.length > 0) {
         await ci.client.seedSessionUpdates(entry, replayUpdates, {
           ingestArtifacts:
@@ -10859,6 +10873,7 @@ export function createSessionControlPlane(
             }
           : undefined,
         startupConfig,
+        req.mcpServers,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
@@ -11030,7 +11045,7 @@ export function createSessionControlPlane(
             (req.prompt.some(
               (block) => isRecord(block) && block['type'] === 'image',
             )
-              ? '[image]'
+              ? IMAGE_ONLY_PROMPT_TEXT
               : '');
       const pendingEntry: PendingPromptEntry = {
         eventDetailMode,
@@ -14597,6 +14612,44 @@ export function createSessionControlPlane(
       return { sessionId, state: 'idle' as const };
     },
 
+    createSessionAttachmentUpload(sessionId, metadata, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.createUpload(metadata, clientId);
+    },
+
+    appendSessionAttachmentUpload(sessionId, uploadId, offset, data, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.appendUpload(uploadId, offset, data, clientId);
+    },
+
+    async completeSessionAttachmentUpload(
+      sessionId,
+      uploadId,
+      context,
+      assertCanCommit,
+    ) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.completeUpload(uploadId, clientId, () => {
+        assertCanCommit?.();
+        if (byId.get(sessionId) !== entry)
+          throw new SessionNotFoundError(sessionId);
+        resolveTrustedClientId(entry, clientId);
+      });
+    },
+
+    cancelSessionAttachmentUpload(sessionId, uploadId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      entry.attachments.cancelUpload(uploadId, clientId);
+    },
+
     async storeSessionAttachment(sessionId, data, mimeType, context, name) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -14771,7 +14824,7 @@ export function createSessionControlPlane(
           const sameMedia =
             JSON.stringify(promotedMedia) === JSON.stringify(mediaBlocks);
           const promotedText =
-            promoted.text === '[image]' && trimmed.length === 0
+            promoted.text === IMAGE_ONLY_PROMPT_TEXT && trimmed.length === 0
               ? ''
               : promoted.text;
           if (
@@ -14908,6 +14961,27 @@ export function createSessionControlPlane(
       return { accepted: true, messageId };
     },
 
+    sendMidTurnMessagesNow(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      // Only the user's own messages ask for this; queue-only steering keeps
+      // its tool-boundary delivery unless user input travels with it.
+      if (!entry.midTurnMessageQueue.some((message) => !message.queueOnly)) {
+        return { requested: false };
+      }
+      // Best-effort: an agent without the method still drains the queue at its
+      // next tool boundary.
+      void entry.connection
+        .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
+        .catch((error: unknown) => {
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
+          );
+        });
+      return { requested: true };
+    },
+
     removeMidTurnMessage(sessionId, messageId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -14985,6 +15059,55 @@ export function createSessionControlPlane(
           entry.pendingAgentNotificationCount - 1,
         );
         void maybeCloseIdleSession(entry, 'agent_notification_settled');
+        drainQuarantinedChannelFor(entry);
+      }
+    },
+
+    async appendExternalRecord(sessionId, request) {
+      // Same lookup, timeout, transport-closed race and pending-work hold as
+      // `enqueueBackgroundNotification`: the hold keeps a session whose last
+      // client detached (user closed the tab while an agent ran) from being
+      // idle-closed under the write.
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.harness.isDying)
+        throw new SessionNotFoundError(sessionId);
+      entry.pendingAgentNotificationCount++;
+      try {
+        const response = await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+              { sessionId, ...request },
+            ),
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+          ),
+          getTransportClosedReject(entry),
+        ]);
+        const recordId = response['recordId'];
+        if (response['deferred'] === true) {
+          // The child holds the record until its running turn settles.
+          return {
+            sessionId,
+            recordId: typeof recordId === 'string' ? recordId : '',
+            created: response['created'] === true,
+            deferred: true,
+          };
+        }
+        if (typeof recordId !== 'string' || recordId.length === 0) {
+          throw new Error(
+            `${SERVE_CONTROL_EXT_METHODS.sessionExternalRecord} returned no recordId`,
+          );
+        }
+        return { sessionId, recordId, created: response['created'] === true };
+      } finally {
+        entry.pendingAgentNotificationCount = Math.max(
+          0,
+          entry.pendingAgentNotificationCount - 1,
+        );
+        void maybeCloseIdleSession(entry, 'agent_external_record_settled');
         drainQuarantinedChannelFor(entry);
       }
     },
@@ -15330,6 +15453,12 @@ export function createSessionControlPlane(
     },
 
     async getRewindSnapshots(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Answer after any rewind admitted before this call has run: a caller
+      // asking whether a rewind landed must not be told the turn is still
+      // there while the bridge is holding that very rewind in its queue.
+      await entry.rewindTail;
       return requestSessionStatus(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
@@ -15442,9 +15571,9 @@ export function createSessionControlPlane(
                   preserveLiveEphemeral: true,
                 })
               : [];
-        const artifactRestoreFailed = artifactRestoreWarnings.some(
-          isArtifactRestoreFailureWarning,
-        );
+        const artifactRestoreFailed =
+          entry.artifacts.consumeLegacyOnlyRestore() ||
+          artifactRestoreWarnings.some(isArtifactRestoreFailureWarning);
         const shouldRecordArtifactSnapshot =
           shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
         const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
@@ -15503,10 +15632,12 @@ export function createSessionControlPlane(
             : {}),
         };
       });
-      entry.promptQueue = rewindResult.then(
+      const rewindSettled = rewindResult.then(
         () => undefined,
         () => undefined,
       );
+      entry.promptQueue = rewindSettled;
+      entry.rewindTail = rewindSettled;
       return rewindResult;
     },
 
@@ -16262,7 +16393,7 @@ export function createSessionControlPlane(
         );
         const teardownResults = await Promise.allSettled([
           ...channels.map((ci) => harness.terminate(ci)),
-          ...[...byId.values()].map((entry) => entry.attachments.close()),
+          ...entries.map((entry) => entry.attachments.close()),
           ...inFlightSessionAwaits,
           ...inFlightRestoreAwaits,
           ...abandonedNewSessionAwaits,

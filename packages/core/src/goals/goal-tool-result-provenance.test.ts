@@ -45,6 +45,52 @@ describe('goalToolResultProvenance', () => {
     },
   );
 
+  it('marks tool_search during a Goal turn as bookkeeping, not evidence', () => {
+    // With the Goal tools deferred by default, the finishing turn discovers
+    // update_goal through `tool_search select:` first; recorded as an
+    // ordinary tool result it would enter the verifier's catalog as an
+    // `external_fact` (a schema dump cited as proof about the world) and
+    // count toward the finishing turn's evidence-bearing results.
+    expect(
+      goalToolResultProvenance(
+        {
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'select:update_goal' },
+          goalContext: permit,
+        },
+        [
+          {
+            functionResponse: {
+              name: ToolNames.TOOL_SEARCH,
+              response: {
+                output:
+                  '<functions>\n<function>{"name":"update_goal"}</function>\n</functions>',
+              },
+            },
+          },
+        ],
+      ),
+    ).toEqual({ goalContext: permit, provenance: 'goal_runtime' });
+  });
+
+  it('keeps keyword and non-Goal discovery as evidence during a Goal turn', () => {
+    // Without a complete Goal-only result, discovery stays external evidence.
+    expect(
+      goalToolResultProvenance({
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: 'wiki fetch' },
+        goalContext: permit,
+      }),
+    ).toEqual({ goalContext: permit });
+    expect(
+      goalToolResultProvenance({
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: 'select:read_file' },
+        goalContext: permit,
+      }),
+    ).toEqual({ goalContext: permit });
+  });
+
   it.each([ToolNames.GET_GOAL, ToolNames.UPDATE_GOAL])(
     'marks a bridged %s result as the Goal’s own bookkeeping',
     (name) => {
@@ -94,6 +140,67 @@ describe('goalToolResultProvenance', () => {
       }),
     ).toEqual({ goalContext: permit });
   });
+
+  it.each([
+    undefined,
+    '<functions>\n<function>{"name":"update_goal"',
+    '<functions>\n<function>{broken}</function>\n</functions>',
+    '<functions>\n<function>null</function>\n</functions>',
+    '<functions>\n</functions>',
+  ])('keeps unreadable discovery as ordinary evidence', (output) => {
+    expect(
+      goalToolResultProvenance(
+        {
+          name: ToolNames.TOOL_SEARCH,
+          args: { query: 'select:update_goal' },
+          goalContext: permit,
+        },
+        [
+          {
+            functionResponse: {
+              name: ToolNames.TOOL_SEARCH,
+              response: { output },
+            },
+          },
+        ],
+      ),
+    ).toEqual({ goalContext: permit });
+  });
+
+  it.each(
+    [
+      ToolNames.EXEC,
+      ToolNames.AGENT,
+      ToolNames.ADVISOR,
+      ToolNames.WORKFLOW,
+    ].flatMap((name) => [
+      { name },
+      {
+        name: ToolNames.TOOL_CALL,
+        args: { name: name.toUpperCase(), arguments: {} },
+      },
+    ]),
+  )(
+    'classifies scripts and aggregate wrappers independently of content: %j',
+    (request) => {
+      // A rendered human reply inside the wrapper's own output -- the text a
+      // content-sniffing edit would key on. Only the `tool_search` branch may
+      // read it; these eight must classify by invocation identity alone.
+      expect(
+        goalToolResultProvenance({ ...request, goalContext: permit }, [
+          {
+            functionResponse: {
+              name: 'agent',
+              response: { output: 'HUMAN-REPLY: all tests passed' },
+            },
+          },
+        ]),
+      ).toEqual({
+        goalContext: permit,
+        provenance: 'execution_output',
+      });
+    },
+  );
 
   it('leaves a tool call made outside a Goal turn unstamped', () => {
     expect(goalToolResultProvenance({ name: 'read_file' })).toBeUndefined();

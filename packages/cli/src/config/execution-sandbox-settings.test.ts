@@ -230,6 +230,23 @@ describe('operator execution sandbox policy', () => {
     expect(() => createMinimalSettings()).toThrow('literal');
     expect(() => loadServeFastPathSettings(workspace)).toThrow('literal');
   });
+  it.each(['user', 'system', 'defaults'] as const)(
+    'uses the fatal configuration contract for malformed %s settings',
+    (scope) => {
+      const file = { user, system, defaults }[scope]!;
+      write(file, {});
+      fs.writeFileSync(file, '{broken');
+      try {
+        readOperatorSandboxSettings();
+        throw new Error('expected rejection');
+      } catch (error) {
+        expect(error).toMatchObject({ exitCode: 52 });
+        expect(String(error)).toContain(`Repair the JSON object in ${file}`);
+      }
+      expect(fs.readFileSync(file, 'utf8')).toBe('{broken');
+    },
+  );
+
   it('does not reset malformed operator settings to an unconfined runtime', () => {
     write(user, {});
     fs.writeFileSync(user, '{"tools":{"executionSandbox":');

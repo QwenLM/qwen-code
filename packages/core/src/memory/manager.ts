@@ -2140,6 +2140,24 @@ export class MemoryManager {
           keywordBackfilled: result.keywordBackfilled,
         },
       });
+      logMemoryDream(
+        params.config!,
+        new MemoryDreamEvent({
+          trigger: 'auto',
+          scope: 'user',
+          status: result.touchedTopics.length > 0 ? 'updated' : 'noop',
+          created_entries: result.createdEntries,
+          updated_entries: result.updatedEntries,
+          deleted_entries: result.deletedEntries,
+          deduped_entries: result.dedupedEntries,
+          split_entries: result.splitEntries,
+          keyword_backfilled: result.keywordBackfilled,
+          dirty_mutations: dirtyAtStart,
+          scheduling_reason: runningMetadata.pendingReason,
+          touched_topics: result.touchedTopics,
+          duration_ms: Date.now() - startedAt,
+        }),
+      );
       try {
         const metadata = await completeUserAutoMemoryDream(
           dirtyAtStart,
@@ -2154,24 +2172,6 @@ export class MemoryManager {
             lastDreamAt: metadata.lastDreamAt,
           },
         });
-        logMemoryDream(
-          params.config!,
-          new MemoryDreamEvent({
-            trigger: 'auto',
-            scope: 'user',
-            status: result.touchedTopics.length > 0 ? 'updated' : 'noop',
-            created_entries: result.createdEntries,
-            updated_entries: result.updatedEntries,
-            deleted_entries: result.deletedEntries,
-            deduped_entries: result.dedupedEntries,
-            split_entries: result.splitEntries,
-            keyword_backfilled: result.keywordBackfilled,
-            dirty_mutations: dirtyAtStart,
-            scheduling_reason: runningMetadata.pendingReason,
-            touched_topics: result.touchedTopics,
-            duration_ms: Date.now() - startedAt,
-          }),
-        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         debugLogger.warn('Failed to persist User Dream metadata:', error);
@@ -2407,8 +2407,8 @@ export class MemoryManager {
 
   /**
    * Build the managed auto-memory section of the system prompt. This is the
-   * volatile prompt layer — it is rewritten in-session on every memory save,
-   * so callers must keep it after the stable/context layers. When
+   * policy plus indexes by default. Session callers exclude indexes and send
+   * them as request-only catalog data. When
    * `userSection` is provided, the prompt teaches the model to route saves
    * between the project dir and the user (cross-project) dir using the
    * per-type scope guidance.

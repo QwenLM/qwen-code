@@ -28,6 +28,7 @@ import {
   ensureConfigInitialized,
   livePromptEvents,
   nextApprovalMode,
+  nextLivePromptId,
   resetPromptCountForTesting,
   selectAutoApprovals,
   STARTUP_CHAT_WAIT_MS,
@@ -369,6 +370,21 @@ describe('livePromptEvents', () => {
     atMocks.hang = null;
     atMocks.abortAfter = null;
     visionMocks.run.mockReset();
+  });
+
+  it('seeds prompt ids past claims in the resumed transcript', () => {
+    const messages = [0, 1, 2].map((turn) => ({
+      type: 'user' as const,
+      sessionId: 'session-1',
+      promptId: `session-1########${turn}`,
+      message: { parts: [{ text: `prompt ${turn}` }] },
+    }));
+    const config = {
+      getSessionId: () => 'session-1',
+      getResumedSessionData: () => ({ conversation: { messages } }),
+    } as unknown as Config;
+
+    expect(nextLivePromptId(config)).toBe('session-1########3');
   });
 
   it('forwards string prompts as an explicit UserQuery send', async () => {

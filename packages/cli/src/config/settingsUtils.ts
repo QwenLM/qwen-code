@@ -276,6 +276,9 @@ export function validateSettingValue(
  * runtime import cycle.
  */
 export const WORKSPACE_RESTRICTED_SETTINGS = [
+  { section: 'memory', key: 'mem0' },
+  { section: 'memory', key: 'agentMaxTurns' },
+  { section: 'memory', key: 'agentTimeoutMinutes' },
   { section: 'tools', key: 'executionSandbox' },
   { section: 'tools', key: 'workflowsEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
@@ -297,6 +300,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
 export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
   'advisorModel',
   'advisorMaxUses',
+  'pluginConfigs',
 ] as const;
 
 /**

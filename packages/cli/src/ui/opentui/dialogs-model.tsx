@@ -151,13 +151,18 @@ export function parseModelSelectionKey(key: string): {
 
 /**
  * Parity of `encodeAuxModelSelector` in ModelDialog.tsx: encode a selection
- * key into the `authType:modelId` form persisted for the fast/vision auxiliary
- * models (baseUrl discarded). Handles the three selection-key shapes.
+ * key into the `authType:modelId[\0baseUrl]` form persisted for the
+ * fast/vision auxiliary models, keeping the baseUrl endpoint disambiguator
+ * when the row carries one (#12760). Handles the three selection-key shapes.
  */
 export function encodeAuxModelSelector(selected: string): string {
   if (selected.includes('::')) {
     const parsed = parseModelSelectionKey(selected);
-    return `${parsed.authType}:${parsed.modelId}`;
+    const selector = `${parsed.authType}:${parsed.modelId}`;
+    // Parity of the ink dialog: the suffix is persisted registry-exact because
+    // it is the routing key consumers compare with `===`. Egress surfaces scrub
+    // it through `aux-model-selector.ts`.
+    return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
   }
   if (selected.startsWith('$runtime|')) {
     const parts = selected.split('|');
@@ -166,18 +171,9 @@ export function encodeAuxModelSelector(selected: string): string {
   return selected;
 }
 
-/**
- * Parity of `encodeVisionModelSelector` in ModelDialog.tsx: keep the selected
- * row's baseUrl when present (so same-provider same-id endpoints stay
- * distinct), otherwise fall back to the aux encoding.
- */
+/** Keep the existing vision/image export while sharing aux-selector encoding. */
 export function encodeVisionModelSelector(selected: string): string {
-  if (!selected.includes('::')) {
-    return encodeAuxModelSelector(selected);
-  }
-  const parsed = parseModelSelectionKey(selected);
-  const selector = `${parsed.authType}:${parsed.modelId}`;
-  return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
+  return encodeAuxModelSelector(selected);
 }
 
 /** Parity of the ModelDialog title line. */

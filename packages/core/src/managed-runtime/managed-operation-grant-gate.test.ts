@@ -20,6 +20,10 @@ interface Grant {
   readonly operationId: string;
   readonly operationRevision: number;
   readonly expiresAt: number;
+  readonly resourceScope: {
+    readonly phases: string[];
+    readonly recordRef: Readonly<Record<string, unknown>>;
+  };
 }
 
 const fixtures = JSON.parse(
@@ -32,12 +36,7 @@ const fixtures = JSON.parse(
     'utf8',
   ),
 ) as {
-  readonly grant: Grant & {
-    readonly resourceScope: {
-      readonly phases: string[];
-      readonly recordRef: Readonly<Record<string, unknown>>;
-    };
-  };
+  readonly grant: Grant;
   readonly grantSuccessorCases: ReadonlyArray<{
     readonly id: string;
     readonly valid: boolean;
@@ -80,12 +79,24 @@ describe('managed operation grant gate', () => {
         }
         if (
           each.id === 'invalid-next' ||
-          each.id === 'next-past-double-range'
+          each.id === 'next-past-double-range' ||
+          each.id === 'replacement-with-a-non-text-digest'
         ) {
           // A malformed grant is refused as malformed, not as a conflict,
           // which is a subclass of the record error.
           expect(thrown).toBeInstanceOf(ManagedSessionRecordError);
           expect(thrown).not.toBeInstanceOf(ManagedSessionConflictError);
+          expect(
+            gate.admits(
+              each.previous.sessionKey,
+              each.previous.operationId,
+              each.previous.resourceScope.phases[0],
+              0,
+            ),
+          ).toBe(true);
+          // The refusal left the previous grant installed, not the refused
+          // one: installing it again is idempotent, so it answers unchanged.
+          expect(gate.install(each.previous)).toBe('unchanged');
         } else {
           expect(thrown).toBeInstanceOf(ManagedSessionConflictError);
         }
@@ -197,7 +208,14 @@ describe('managed operation grant gate', () => {
           grant.operationRevision,
         ),
       () => gate.revoke(grant.sessionKey, '', grant.operationRevision),
-      ...[undefined, Number.NaN, 0, 1.5, Number.MAX_SAFE_INTEGER + 1].map(
+      ...[
+        undefined,
+        Number.NaN,
+        0,
+        1.5,
+        Number.MAX_SAFE_INTEGER,
+        Number.MAX_SAFE_INTEGER + 1,
+      ].map(
         (revision) => () =>
           gate.revoke(
             grant.sessionKey,
@@ -229,7 +247,116 @@ describe('managed operation grant gate', () => {
   it('keeps a revocation that arrives before its grant', () => {
     const gate = new ManagedOperationGrantGate();
     const grant = fixtures.grant;
+    const [phase] = grant.resourceScope.phases;
     gate.revoke(grant.sessionKey, grant.operationId, grant.operationRevision);
+    // An entry the first revocation created holds no grant, and a lookup
+    // admits nothing rather than reading it.
+    expect(gate.admits(grant.sessionKey, grant.operationId, phase, 0)).toBe(
+      false,
+    );
     expect(() => gate.install(grant)).toThrow(/was revoked/);
+  });
+
+  it('withdraws the phases a replacement does not list', () => {
+    const gate = new ManagedOperationGrantGate();
+    const narrowing = fixtures.grantSuccessorCases.find(
+      (each) => each.id === 'next-revision',
+    )!;
+    expect(narrowing.valid).toBe(true);
+    gate.install(narrowing.previous);
+    expect(
+      gate.admits(
+        narrowing.previous.sessionKey,
+        narrowing.previous.operationId,
+        'send_segment',
+        0,
+      ),
+    ).toBe(true);
+    expect(gate.install(narrowing.next)).toBe('installed');
+    // The newest revision narrowed the phases, so the older list admits no
+    // more of the phase it withdrew.
+    expect(
+      gate.admits(
+        narrowing.next.sessionKey,
+        narrowing.next.operationId,
+        'send_segment',
+        narrowing.previous.expiresAt,
+      ),
+    ).toBe(false);
+    expect(
+      gate.admits(
+        narrowing.next.sessionKey,
+        narrowing.next.operationId,
+        'query_receipt',
+        narrowing.previous.expiresAt,
+      ),
+    ).toBe(true);
+  });
+
+  it('renews a grant in place, so its lease extends', () => {
+    const gate = new ManagedOperationGrantGate();
+    const grant = fixtures.grant;
+    const [phase] = grant.resourceScope.phases;
+    gate.install(grant);
+    const renewal = { ...grant, expiresAt: grant.expiresAt + 60_000 };
+    // Decision 7: issuing the same revision again renews it.
+    expect(gate.install(renewal)).toBe('installed');
+    expect(
+      gate.admits(grant.sessionKey, grant.operationId, phase, grant.expiresAt),
+    ).toBe(true);
+    expect(
+      gate.admits(
+        grant.sessionKey,
+        grant.operationId,
+        phase,
+        renewal.expiresAt,
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps the incumbent when a conflict or a malformed grant is refused', () => {
+    const gate = new ManagedOperationGrantGate();
+    const grant = fixtures.grant;
+    const [phase] = grant.resourceScope.phases;
+    gate.install(grant);
+    expect(() =>
+      gate.install({
+        ...grant,
+        resourceScope: {
+          ...grant.resourceScope,
+          phases: ['other_phase'],
+        },
+      }),
+    ).toThrow(ManagedSessionConflictError);
+    expect(() =>
+      gate.install({
+        ...grant,
+        expiresAt: 'later' as unknown as number,
+      }),
+    ).toThrow(ManagedSessionRecordError);
+    expect(gate.admits(grant.sessionKey, grant.operationId, phase, 0)).toBe(
+      true,
+    );
+    expect(gate.install(grant)).toBe('unchanged');
+  });
+
+  it('keeps the grants of separate Workspaces apart', () => {
+    const gate = new ManagedOperationGrantGate();
+    const grant = fixtures.grant;
+    const other = {
+      ...grant,
+      sessionKey: { ...grant.sessionKey, workspaceId: 'workspace-2' },
+    };
+    const [phase] = grant.resourceScope.phases;
+    gate.install(grant);
+    expect(gate.install(other)).toBe('installed');
+    gate.revoke(grant.sessionKey, grant.operationId, grant.operationRevision);
+    expect(gate.admits(grant.sessionKey, grant.operationId, phase, 0)).toBe(
+      false,
+    );
+    // The other Workspace's bucket is independent of the revocation.
+    expect(gate.admits(other.sessionKey, other.operationId, phase, 0)).toBe(
+      true,
+    );
   });
 });

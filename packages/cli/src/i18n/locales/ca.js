@@ -192,6 +192,8 @@ export default {
     'El retrocés no afecta els fitxers editats manualment o mitjançant ordres de shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'No es pot retrocedir a un torn que ha estat comprimit. Prova amb un torn més recent.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    "No es pot retrocedir la conversa a aquest torn: ja no correspon a l'historial del model (per exemple, després d'un reintent). Prova amb un torn més recent.",
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'La restauració de fitxers no està disponible per a aquest torn (no s’han capturat canvis, o aquest torn és anterior a la sessió actual).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':

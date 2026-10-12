@@ -93,7 +93,7 @@ final class FaultGateBroker {
                         config.getBooleanValue("durable") ? new LocalRuntimeStore(
                                 Path.of(config.getString("stateDir")).resolve("durable"),
                                 "Linux".equals(System.getProperty("os.name")) ? LocalRuntimeStore.HostIdentity.linux()
-                                        : DurableLocalProcessRuntimeProvisionerTest.HOST) : null);
+                                        : DurableLocalProcessRuntimeProvisionerTest.HOST) : null, config.getBooleanValue("trustedReboot"));
         String records = config.getString("records");
         RuntimeProvisioner provisioner = records == null ? local
                 : new RecoverableProcessProvisioner(local, runtime,
@@ -146,9 +146,14 @@ final class FaultGateBroker {
                             "bindingId", record.getBindingId(),
                             "runtimeGeneration",
                             record.getRuntimeGeneration()));
-            case "create" -> service.createExecution(harness, session,
-                    command.getString("key"),
-                    command.getJSONObject("reference"))
+            case "create" -> service.prepareExecution(harness, session,
+                    command.getString("key"), command.getJSONObject("reference"))
+                    .thenCompose(record -> service.startExecution(harness, session,
+                            record.getExecutionCallId(), command.getString("payloadJson")))
+                    .thenApply(FaultGateBroker::execution);
+            // One step, as Broker HTTP's POST /executions.
+            case "createImmediate" -> service.createExecution(harness, session,
+                    command.getString("key"), command.getJSONObject("reference"))
                     .thenApply(FaultGateBroker::execution);
             case "get" -> service.getExecution(harness, session, execution)
                     .thenApply(FaultGateBroker::execution);

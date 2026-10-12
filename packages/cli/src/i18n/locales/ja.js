@@ -148,6 +148,8 @@ export default {
     '巻き戻しは、手動で編集されたファイルや shell コマンドで変更されたファイルには影響しません。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '圧縮されたターンへは巻き戻せません。より最近のターンをお試しください。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'このターンまで会話を巻き戻せません。モデル履歴と対応しなくなっています（再試行後など）。より最近のターンをお試しください。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'このターンではファイル復元できません（捕捉されたファイル変更がないか、現在のセッションより前のターンです）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
