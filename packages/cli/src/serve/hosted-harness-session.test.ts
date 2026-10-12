@@ -4680,6 +4680,86 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
+  it('preserves the named store failure on session status when turn_result cannot commit', async () => {
+    // Admission passes; the turn_result append dies once with a simulated
+    // exhausted 503, latching the authority's writer. Every later settlement
+    // write then dies with ManagedSessionWritesStoppedError without ever
+    // reaching the store again, ending the turn recovery-blocked with the
+    // named failure only remembered in memory (#13800 P1).
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    state.model.mockReset();
+    state.model.mockResolvedValue({
+      text: 'stub reply',
+      model: 'stub-model',
+    });
+    const originalAppend =
+      LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
+    const failing = vi
+      .spyOn(
+        LocalJsonlManagedSessionJournalHandle.prototype,
+        'appendTransaction',
+      )
+      .mockImplementation(async function (
+        this: LocalJsonlManagedSessionJournalHandle,
+        records: readonly unknown[],
+      ) {
+        // The settlement commit is the only batch carrying a turn.settled
+        // event: the transcript records before it commit as
+        // message.committed and the whole turn_result record itself is
+        // published as a resource, so the literal only names the terminal
+        // write.
+        if (!JSON.stringify(records).includes('"turn.settled"')) {
+          return originalAppend.call(this, records);
+        }
+        throw new ManagedSessionStoreHttpError(
+          503,
+          'synthetic-http-retry-exhaustion',
+          'synthetic 503 after HTTP retries are spent',
+        );
+      });
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    try {
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ prompt, promptId: randomUUID(), payloadDigest: digest })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(true);
+          expect(status.body.recoveryReason).toBe(
+            'managed_session_store_unavailable',
+          );
+        },
+        { timeout: 30_000 },
+      );
+    } finally {
+      failing.mockRestore();
+    }
+    // The uncertain-write constraint is preserved: the next prompt is still
+    // refused on the same block — the named failure only mirrors into memory,
+    // it does not claim a persisted terminal state.
+    const refused = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ prompt, promptId: randomUUID(), payloadDigest: digest });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  }, 60_000);
+
   const MONITOR_BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
 
   async function prewriteMonitorSession(): Promise<string> {

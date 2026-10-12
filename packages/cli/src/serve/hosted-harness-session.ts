@@ -301,6 +301,11 @@ interface HostedSession {
   active?: { promptId: string; digest: string; abort: AbortController };
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
+  /** #13800 D4: the named store failure kept in memory once a settlement's
+   * own journal write could not commit — surfaced via /session/:id/status
+   * until the block clears. Only `managed_session_store_unavailable` goes
+   * here; other recovery blocks keep naming themselves at the caller. */
+  recoveryReason?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
   shell?: HostedShellTurnOptions;
@@ -1630,6 +1635,7 @@ export async function settleCancelledHookTurn(
       ),
     );
     session.blocked = false;
+    session.recoveryReason = undefined;
   } finally {
     session.hooksBusy = false;
   }
@@ -2783,6 +2789,7 @@ export function registerHostedHarnessSessionRoutes(
     }
     refusedAdoptions.delete(sessionId);
     resident.blocked = false;
+    resident.recoveryReason = undefined;
     sendAttachment(res, sessionId, resident);
     if (settle !== null)
       runSettleProjection(resident, sessionId, settle, brokerOptions);
@@ -3950,6 +3957,7 @@ export function registerHostedHarnessSessionRoutes(
                 const aftermath = await wakeAftermath(turn.turnId);
                 if (aftermath === 'settled') {
                   session.blocked = false;
+                  session.recoveryReason = undefined;
                 }
               }
               if (
@@ -3991,7 +3999,10 @@ export function registerHostedHarnessSessionRoutes(
             const first = firstPendingWakeInput(session);
             if (first === undefined) return;
             const aftermath = await wakeAftermath(first.turnId);
-            if (aftermath === 'settled') session.blocked = false;
+            if (aftermath === 'settled') {
+              session.blocked = false;
+              session.recoveryReason = undefined;
+            }
           },
           failed: (cause) => {
             session.blocked = true;
@@ -5163,12 +5174,12 @@ export function registerHostedHarnessSessionRoutes(
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} could not finish after admission; retrying settlement: ${String(cause)}`,
           );
+          const outcome = settledTurnOutcome(abort);
+          const storeFailure =
+            outcome.stopReason === 'error'
+              ? namedStoreFailure(cause)
+              : undefined;
           try {
-            const outcome = settledTurnOutcome(abort);
-            const storeFailure =
-              outcome.stopReason === 'error'
-                ? namedStoreFailure(cause)
-                : undefined;
             await session.managed.sink.write(
               turnResult ??
                 turnResultRecord(
@@ -5178,6 +5189,18 @@ export function registerHostedHarnessSessionRoutes(
             );
           } catch (settleCause) {
             session.blocked = true;
+            // The settlement write couldn't commit (#13800): keep the named
+            // failure for the status surface instead of a bare boolean.
+            const recordedStopReason = (
+              turnResult?.systemPayload as { stopReason?: unknown } | undefined
+            )?.['stopReason'];
+            if (storeFailure !== undefined) {
+              session.recoveryReason = storeFailure;
+            } else if (
+              recordedStopReason === 'managed_session_store_unavailable'
+            ) {
+              session.recoveryReason = 'managed_session_store_unavailable';
+            }
             writeStderrLineSafe(
               `qwen serve: Hosted Harness turn ${promptId} could not settle: ${String(settleCause)}`,
             );
@@ -6765,6 +6788,11 @@ export function registerHostedHarnessSessionRoutes(
           await session.managed.sink.write(turnResultRecord('error'));
         } catch (settleCause) {
           session.blocked = true;
+          // The fallback terminal write couldn't commit either: keep the
+          // named store failure for the status surface (#13800).
+          if (failureReason === 'managed_session_store_unavailable') {
+            session.recoveryReason = failureReason;
+          }
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} could not settle: ${String(settleCause)}`,
           );
@@ -7150,6 +7178,9 @@ export function registerHostedHarnessSessionRoutes(
         session.blocked ||
         (session.mcp?.recoveryBlocked ?? false) ||
         (session.hooks?.hasPendingOperations ?? false),
+      ...(session.recoveryReason === undefined
+        ? {}
+        : { recoveryReason: session.recoveryReason }),
     });
   });
   app.get('/session/:id/transcript', (req, res) => {
@@ -7803,6 +7834,7 @@ export function registerHostedHarnessSessionRoutes(
                 const aftermath = await session.wakeAftermath(first.turnId);
                 if (aftermath === 'settled') {
                   session.blocked = false;
+                  session.recoveryReason = undefined;
                   repaired = true;
                 }
               }

@@ -231,7 +231,8 @@ turn must end with a named reason instead of journal-frozen silence:
   SSE/stderr line). If the `turn_result` itself cannot be committed (write
   path latched), the daemon keeps the named failure in memory and surfaces it
   via `/session/:id/status` (`recoveryBlocked` stays per-session; the
-  existing behavior sets `session.blocked`).
+  existing behavior sets `session.blocked`), as the `recoveryReason` field of
+  the same JSON payload while the block holds.
 - No change to the store client's timeout/retry budgets; the D2 change is
   what makes those budgets meaningful again.
 

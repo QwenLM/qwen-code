@@ -200,7 +200,8 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
   码）。若 `turn_result` 自身也无法提交（写路径已闭锁），daemon 在内存
   保留该具名失败并经由 `/session/:id/status` 反映
   （`recoveryBlocked` 保持 per-session；既有行为是置
-  `session.blocked`）。
+  `session.blocked`）——具名原因在 block 存续期经同一 JSON 载荷的
+  `recoveryReason` 字段返回。
 - store 客户端超时/重试预算不变；D2 让这些预算重新有意义。
 
 ### D5. 见证集成测试（W1 验收）
