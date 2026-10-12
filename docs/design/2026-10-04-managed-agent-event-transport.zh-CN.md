@@ -4,8 +4,11 @@
 
 [English](2026-10-04-managed-agent-event-transport.md) | [简体中文](2026-10-04-managed-agent-event-transport.zh-CN.md)
 
-**状态：设计预留·未交付。** 本文描述的任何内容均未实现。仓库中不存在
-`EventTransport` 接口、MQ 客户端、消费者以及跨节点唤醒。下文所有架构陈述都是
+**状态：设计预留·未交付。** 传输侧仍未实现：仓库中不存在 MQ 客户端、
+消费者以及跨节点唤醒。（成文时仓库中尚不存在 `EventTransport` 类型；MQ1
+此后已落地该接口与组合 seam——见
+[2026-10-11-managed-agent-event-transport-seam](2026-10-11-managed-agent-event-transport-seam.zh-CN.md)。）
+下文所有架构陈述都是
 前瞻性的设计预留，不是对运行中代码的描述；涉及架构的各节标题均再次标注。
 本文件不改变任何生产行为，不随附任何生产代码。
 
@@ -143,10 +146,13 @@ at-least-once 传输不可能损坏 Session——它至多浪费延迟。若所�
   公共事件流的 after-commit hub 扇出，加权威 Session commit 事务内的
   journal 事实发布点（同事务提交、after-commit drain)——MQ2 阶段并线第二个,
   且绝不把第一个牵强为已覆盖它。
-- **专用传输抽象——代码中不存在。** 代码搜索 `EventTransport`/`eventTransport`/
-  `RocketMQ` 在设计文档之外零匹配。没有传输配置属性、没有面向 broker 的 outbox
-  drain 循环、没有跨节点唤醒消费者。这个名字只存在于 2026-09-20 的存储与事件设计
-  （概念性接口、proposed follow-up work——见本文头部）。
+- **专用传输抽象——基线时不存在,MQ1 此后已命名。** 基线读取(`5ddfacc9d4`,
+  2026-10-04)时,代码搜索 `EventTransport`/`eventTransport`/`RocketMQ` 在设计
+  文档之外零匹配,该名字只存在于 2026-09-20 的存储与事件设计(概念性接口、
+  proposed follow-up work)。MQ1
+  ([2026-10-11-managed-agent-event-transport-seam](2026-10-11-managed-agent-event-transport-seam.zh-CN.md))
+  此后已在 after-commit 接缝后引入 `EventTransport` 接口;仍无实现、无传输配置
+  属性、无面向 broker 的 outbox drain 循环、无跨节点唤醒消费者。
 - **TypeScript 内嵌调度器——按设计无接缝。** `EmbeddedHarnessScheduler` 在单进程内
   从 `FileManagedActivationStore` 租约泵取激活，并用进程内定时器
   （`scheduleRecoveryWake()`）调度恢复唤醒。`managed-session-records.ts` 中已存在
@@ -352,8 +358,11 @@ MQ2 及以后不得启动。**
 | `packages/core/src/managed-runtime/managed-activation-store.ts`                              | activation 描述体、租约、fence、代际                                                                                   | 否                   |
 | `packages/core/src/managed-runtime/managed-extension-projection.ts`                          | `ManagedSessionTaskView` 投影，含 outbox/delivery 状态                                                                 | 否                   |
 
-**结论：部分存在（PARTIAL）。** Java 的 after-commit 接缝存在
-（`CommittedEventPublisher`，目前恰好只有一个进程内实现）；专用的
-`EventTransport`/唤醒抽象在代码中不存在（代码搜索零匹配；2026-09-20 的设计勾勒
-是文档而不是代码），必须在 MQ1 于该接缝之后引入。TypeScript 内嵌调度器按设计
-进程内运行，本地切片不给它增加 broker 依赖。
+**结论:部分存在(PARTIAL,基线 `5ddfacc9d4`,2026-10-04 读取)。** Java 的
+after-commit 接缝存在(`CommittedEventPublisher`,基线时恰好只有一个进程内
+实现);专用的 `EventTransport`/唤醒抽象在基线时的代码中不存在(代码搜索零
+匹配;2026-09-20 的设计勾勒是文档而不是代码),按计划须在 MQ1 于该接缝之后
+引入——MQ1 此后已完成
+([2026-10-11-managed-agent-event-transport-seam](2026-10-11-managed-agent-event-transport-seam.zh-CN.md):
+接口加组合体,无实现)。TypeScript 内嵌调度器按设计进程内运行,本地切片不给它
+增加 broker 依赖。
