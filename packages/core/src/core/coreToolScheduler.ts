@@ -42,6 +42,7 @@ import type {
 } from '../tools/tools.js';
 import type { EditorType } from '../utils/editor.js';
 import type { Config } from '../config/config.js';
+import type { ModToolCheck } from '../mods/tool-events.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
@@ -1504,6 +1505,12 @@ function withPostToolBatchStop(
 }
 
 interface CoreToolSchedulerOptions {
+  onToolExecutionStarted?: (callId: string, startedAt: number) => void;
+  onToolExecutionSettled?: (
+    callId: string,
+    status: ToolExecutionStatus,
+    durationMs: number,
+  ) => void;
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
@@ -1554,6 +1561,7 @@ interface CoreToolSchedulerOptions {
    * (owners without an execution allowlist).
    */
   isToolExecutionAllowed?: (toolName: string) => boolean;
+  modToolCheck?: ModToolCheck;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1659,6 +1667,20 @@ function withPreToolUseAskReason(
         ...details,
         prompt: `${reason}\n\n${details.prompt}`,
         renderPromptAsPlainText: true,
+      };
+    case 'mcp':
+      // MCP details have no body that can carry the reason, so the ask falls
+      // back to a literal-text info confirmation, as the pre-merge bounce did.
+      // The `info` shape has no server field and its `title` is not rendered in
+      // the TUI, so the destination is named in the body: the hook's reason
+      // alone need not identify which server receives the write.
+      return {
+        type: 'info',
+        title: `Hook requested confirmation to run ${details.toolName}`,
+        prompt: `${reason}\n\nMCP Server: ${details.serverName}\nTool: ${details.toolName}`,
+        renderPromptAsPlainText: true,
+        hideAlwaysAllow: true,
+        onConfirm: details.onConfirm,
       };
     default:
       return details;
@@ -1916,6 +1938,7 @@ export class CoreToolScheduler {
     if (this.nestedToolScheduler) return this.nestedToolScheduler;
     this.nestedToolScheduler = new CoreToolScheduler({
       ...this.schedulerOptions,
+      modToolCheck: undefined,
       onAllToolCallsComplete: async (calls) => {
         for (const call of calls) {
           const resolver = this.nestedResolvers.get(call.request.callId);
@@ -3750,6 +3773,49 @@ export class CoreToolScheduler {
           ) {
             continue;
           }
+          const modToolCheck = this.schedulerOptions.modToolCheck;
+          if (modToolCheck) {
+            const decision = await runInRequestGoalContext(reqInfo, () =>
+              modToolCheck(
+                {
+                  tool: canonicalName,
+                  input: structuredClone(toolParams),
+                  tool_use_id: reqInfo.callId,
+                },
+                {
+                  decision:
+                    flowResult.finalPermission === 'default'
+                      ? 'ask'
+                      : flowResult.finalPermission,
+                  ...(flowResult.denyMessage
+                    ? { reason: flowResult.denyMessage }
+                    : {}),
+                },
+                signal,
+              ),
+            );
+            if (
+              this.cancelPreExecutionIfAborted(reqInfo.callId, signal, toolSpan)
+            ) {
+              continue;
+            }
+            if (!['allow', 'ask', 'deny'].includes(decision.decision)) {
+              throw new Error('Invalid Mod tool.check decision.');
+            }
+            if (flowResult.finalPermission !== 'deny') {
+              if (decision.decision === 'deny') {
+                flowResult.finalPermission = 'deny';
+                flowResult.denyMessage =
+                  decision.reason?.trim() ||
+                  `Tool "${reqInfo.name}" is denied by a Mod.`;
+              } else if (
+                decision.decision === 'ask' &&
+                flowResult.finalPermission === 'allow'
+              ) {
+                flowResult.finalPermission = 'ask';
+              }
+            }
+          }
           const {
             defaultPermission,
             finalPermission,
@@ -3981,6 +4047,12 @@ export class CoreToolScheduler {
           // fallback state — otherwise every trivially safe tool would
           // force manual approval until the user toggles modes.
           let autoModeFallback: AutoModeFallbackConfirmation | undefined;
+          // Set when the fallback came from the deterministic destructive
+          // guard rather than the classifier. Tracked separately from
+          // `autoModeFallback` because that record is only built when the
+          // outcome carries a message, and because its `reason` is shared with
+          // the classifier escalation.
+          let autoModeFallbackRequiresHuman = false;
           if (
             !requiresUserInteraction &&
             !preToolUseAsk &&
@@ -4094,6 +4166,8 @@ export class CoreToolScheduler {
                 // pending dialog tells the user what's being asked;
                 // operators see recovery fallbacks in the debug log. A
                 // pmForcedAsk fallback isn't an audit-worthy event.
+                autoModeFallbackRequiresHuman =
+                  outcome.requiresHumanDecision === true;
                 if (
                   outcome.message &&
                   (isDenialFallbackReason(outcome.reason) ||
@@ -4213,6 +4287,10 @@ export class CoreToolScheduler {
               throw new Error('Unable to prepare shell confirmation.');
             }
 
+            // Plan mode judges the tool's own confirmation shape: the ask
+            // rewrite must not turn a blocked MCP call into an approvable
+            // `info` dialog.
+            const planModeDetails = confirmationDetails;
             if (preToolUseAsk) {
               confirmationDetails = withPreToolUseAskReason(
                 confirmationDetails,
@@ -4229,7 +4307,7 @@ export class CoreToolScheduler {
                 isPlanMode,
                 isExitPlanModeTool,
                 isAskUserQuestionTool,
-                confirmationDetails,
+                planModeDetails,
                 isEnterPlanModeTool,
               )
             ) {
@@ -4286,7 +4364,13 @@ export class CoreToolScheduler {
             const isNonInteractiveDeny =
               !this.config.isInteractive() &&
               !this.config.getExperimentalZedIntegration() &&
-              this.config.getInputFormat() !== InputFormat.STREAM_JSON;
+              // STREAM_JSON is exempt because a host can answer
+              // `can_use_tool` — but that host is programmatic, so it cannot
+              // give the human-only confirmation the destructive guard
+              // escalated to. Deny here rather than hand it a dialog it is
+              // allowed to approve.
+              (this.config.getInputFormat() !== InputFormat.STREAM_JSON ||
+                autoModeFallbackRequiresHuman);
 
             if (isNonInteractiveDeny) {
               const errorMessage =
@@ -4355,12 +4439,14 @@ export class CoreToolScheduler {
               }
 
               // A deny always applies. An allow never replaces a confirmation
-              // the user must give (an interactive tool or a PreToolUse
-              // 'ask'); under an 'ask' it only has a replacement checked,
-              // which the user then confirms.
+              // the user must give (an interactive tool, a PreToolUse 'ask', or
+              // an escalation from the deterministic destructive guard); under
+              // an 'ask' it only has a replacement checked, which the user then
+              // confirms.
               const allowApplies =
                 hookResult.shouldAllow === true &&
                 !requiresUserInteraction &&
+                !autoModeFallbackRequiresHuman &&
                 (!preToolUseAsk ||
                   (hookResult.updatedInput !== undefined &&
                     planShellDecision.classification === 'not-applicable'));
@@ -6031,8 +6117,20 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            const execute = () =>
-              invocation.execute(
+            const execute = () => {
+              executionStartedAt = performance.now();
+              try {
+                this.schedulerOptions.onToolExecutionStarted?.(
+                  callId,
+                  Date.now(),
+                );
+              } catch (error) {
+                debugLogger.warn(
+                  'Tool lifecycle start observer failed:',
+                  error,
+                );
+              }
+              return invocation.execute(
                 execSignal,
                 liveOutputCallback,
                 shellExecutionConfig,
@@ -6040,6 +6138,7 @@ export class CoreToolScheduler {
                 setPromoteAbortControllerCallback,
                 canPromoteForegroundShell,
               );
+            };
             return scheduledCall.request.name === ToolNames.EXEC ||
               scheduledCall.request.name === ToolNames.TOOL_SEARCH
               ? runWithToolCallRuntime(
@@ -6076,12 +6175,25 @@ export class CoreToolScheduler {
               callId,
             });
             executionStatus = 'error';
-            const execute = () =>
-              invocation.execute(
+            const execute = () => {
+              executionStartedAt = performance.now();
+              try {
+                this.schedulerOptions.onToolExecutionStarted?.(
+                  callId,
+                  Date.now(),
+                );
+              } catch (error) {
+                debugLogger.warn(
+                  'Tool lifecycle start observer failed:',
+                  error,
+                );
+              }
+              return invocation.execute(
                 execSignal,
                 liveOutputCallback,
                 shellExecutionConfig,
               );
+            };
             return scheduledCall.request.name === ToolNames.EXEC ||
               scheduledCall.request.name === ToolNames.TOOL_SEARCH
               ? runWithToolCallRuntime(
@@ -6297,6 +6409,15 @@ export class CoreToolScheduler {
           ? 'error'
           : 'success';
       executionSettled = true;
+      try {
+        this.schedulerOptions.onToolExecutionSettled?.(
+          callId,
+          executionStatus,
+          elapsedExecutionMs() ?? 0,
+        );
+      } catch (error) {
+        debugLogger.warn('Tool lifecycle end observer failed:', error);
+      }
       if (execSpan) {
         const completedExecSpan = execSpan;
         execSpan = undefined;
@@ -7306,6 +7427,15 @@ export class CoreToolScheduler {
       if (executionThrew) {
         executionStatus = aborted ? 'cancelled' : 'error';
         executionSettled = true;
+        try {
+          this.schedulerOptions.onToolExecutionSettled?.(
+            callId,
+            executionStatus,
+            elapsedExecutionMs() ?? 0,
+          );
+        } catch (error) {
+          debugLogger.warn('Tool lifecycle end observer failed:', error);
+        }
       }
       const exceptionErrorType =
         explicitErrorType ??

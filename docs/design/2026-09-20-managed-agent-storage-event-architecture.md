@@ -319,6 +319,15 @@ qwen:
 
 Do not switch MySQL/PG or MQ arbitrarily per request. Switching requires pausing writes, draining or checkpointing, migrating data, comparing sequences and digests, then switching and resuming. Running tools twice or dual-writing databases is not a lossless migration strategy.
 
+### 10.1 P2 EventTransport Candidate: RocketMQ LiteTopic
+
+Design-baseline note (2026-10-10, issue [#13200](https://github.com/QwenLM/qwen-code/issues/13200)): the preferred candidate for the optional P2 `EventTransport` adapter is **Apache RocketMQ LiteTopic (5.5.0+, RIP-83)**, qualifying the unqualified `rocketmq` entry in the configuration sample above. The detailed successor design — envelope invariants, the LiteTopic-versus-Redis-Streams comparison, the phase plan, and the fault matrix — is [EventTransport: MQ Distribution for the Managed Agent Control Plane](2026-10-04-managed-agent-event-transport.md). This note records four baseline points only:
+
+1. **Boundary.** The event-acceptance path stays unchanged: Session sequence, Turn state, and Harness cursor commit in one SQL transaction, and SSE pushes after commit (`ManagedAgentStore.publishAfterCommit`). LiteTopic carries distribution copies only; it replaces neither single-transaction atomicity, writer fencing, nor the public Session replay cursor.
+2. **Matched scenarios.** P2 multi-instance SSE node notification; stage H4 durable messaging between parent/child Sessions (the Supervisor–Worker per-TaskID LiteTopic pattern has the same shape); stage H5 Channels outbox dispatch. Classic Topics or a generic MQ adapter do not fit per-Session channels; LiteTopic does. Note that H4's delivery semantic (at-least-once with idempotent apply) differs from P2's ephemeral notification fan-out, so H4's ordering and dedup requirements are settled by the H4 contract rather than inherited from this baseline — do not assume the P2 adapter configuration carries over to H4 unchanged.
+3. **Prerequisites.** RocketMQ 5.5.0+ with `enableLmq=true`, `enableMultiDispatch=true`, and `storeType=defaultRocksDB`, plus deployed NameServer, Broker, and Proxy. Under the "no MQ just for SSE" rule from Section 1, adoption stays conditional on an existing RocketMQ platform at that version. When the P2 gate opens, the adapter must verify these broker capabilities at startup and fail fast on a mismatch instead of silently degrading to classic Topics, as part of the startup capability verification described above.
+4. **Out of scope.** No MQ on the acceptance path (P4 MQ-first remains the future gate in Section 12 and needs the durable-source-journal work first); no implementation work before the P2 gate opens; H4 transport selection waits for the H4 contract.
+
 ## 11. Failure Semantics
 
 | Failure point                                          | Handling and guarantee boundary                                                                                                               |

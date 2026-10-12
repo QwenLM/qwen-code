@@ -24,7 +24,12 @@ export interface ManagedAgentSessionSummary {
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
-  workspace?: { workspaceId: string; cwdRelative: string };
+  workspace?: {
+    workspaceId: string;
+    cwdRelative: string;
+    contextRevision?: number;
+    state?: 'ready' | 'changing' | 'recovery_blocked';
+  };
   createdAt: number;
   admittedAt: number;
   updatedAt: number;
@@ -35,9 +40,11 @@ export interface ManagedAgentSessionSummary {
     canSend: boolean;
     canCancel: boolean;
     actions?: boolean;
+    tasks?: boolean;
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
+    cwdChange?: boolean;
   };
   failure?: { code: string; message: string };
 }
@@ -60,6 +67,7 @@ export type ManagedAgentSessionEventType =
   | 'cancelling'
   | 'cancelled'
   | 'action_updated'
+  | 'context_changed'
   | 'stream_gap';
 
 export interface ManagedAgentSessionEvent {
@@ -97,6 +105,15 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
 }
 
+export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
+export type ManagedTask = components['schemas']['WebShellTask'];
+export type ManagedTaskPage = components['schemas']['WebShellTaskPage'];
+export type ManagedTaskEvent = components['schemas']['WebShellTaskEvent'];
+export type ManagedTaskEventPage =
+  components['schemas']['WebShellTaskEventPage'];
+export type ManagedTaskCancelOperation =
+  components['schemas']['WebShellCommandOperation'] & { type: 'task_cancel' };
+
 /** A Hosted tool approval waiting for the Session owner's answer. */
 export interface ManagedAgentPendingAction {
   actionId: string;
@@ -130,6 +147,47 @@ export interface ManagedAgentProvider {
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  readonly tasks?: {
+    list(
+      sessionId: string,
+      options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
+    ): Promise<ManagedTaskPage>;
+    get(
+      sessionId: string,
+      taskId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedTask>;
+    listEvents(
+      sessionId: string,
+      taskId: string,
+      options: ManagedAgentRequestOptions & { after?: string; limit?: number },
+    ): Promise<ManagedTaskEventPage>;
+    readonly cancel?: {
+      submit(
+        sessionId: string,
+        taskId: string,
+        options: ManagedAgentCommandOptions,
+      ): Promise<ManagedTaskCancelOperation>;
+      query(
+        sessionId: string,
+        taskId: string,
+        operationId: string,
+        options: ManagedAgentRequestOptions,
+      ): Promise<ManagedTaskCancelOperation>;
+    };
+  };
+  readonly cwdChange?: {
+    submit(
+      sessionId: string,
+      request: { cwdRelative: string; expectedContextRevision: number },
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedCwdOperation>;
+    query(
+      sessionId: string,
+      operationId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedCwdOperation>;
+  };
   readonly workspaceBinding?: {
     readonly agentId: string;
     list(
@@ -195,6 +253,12 @@ export interface ManagedAgentProvider {
        * depend on stream activity.
        */
       onEstablished?(): void;
+      /**
+       * Called for each complete heartbeat or comment frame the stream
+       * delivers. Heartbeats never decode into events, so on an idle
+       * Session this is the only sign of life an established stream gives.
+       */
+      onAlive?(): void;
     },
   ): AsyncIterable<ManagedAgentSessionEvent>;
 }

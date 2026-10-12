@@ -4,15 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Turn, LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  LlmRequestPreparationError,
+  type LlmPreparedRequest,
+  type LlmPreparedRequestCallback,
+} from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import type { HostedModelRequest } from './hosted-model-recovery.js';
+
 import type { Content, Part } from '@google/genai';
 import { createHash } from 'node:crypto';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
-import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+
+import {
+  HostedModelUnavailableError,
+  type HostedAgentDefinition,
+} from './hosted-agent-definition.js';
 
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import {
@@ -68,6 +80,18 @@ export async function runHostedHarnessTextTurn(input: {
   promptId: string;
   signal: AbortSignal;
   resumeFromToolResults?: readonly Part[];
+  initialRound?: number;
+  resumeModel?: HostedModelRequest;
+  prepareModel?: (
+    prepared: LlmPreparedRequest,
+    round: number,
+    pendingToolResults: boolean,
+    context: string | undefined,
+    captureUnsupported?: boolean,
+  ) => Promise<
+    | import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js').ManagedSessionDurableRef
+    | undefined
+  >;
   hooks?: HostedHookSession;
   modelScope?: ManagedHookModelScope;
   toolTurn?: Pick<
@@ -75,9 +99,14 @@ export async function runHostedHarnessTextTurn(input: {
     'execute' | 'consumeResults' | 'declarations' | 'setPromptHookRunner'
   > &
     Partial<
-      Pick<HostedWorkspaceToolTurn, 'resumeHookResults' | 'hookStopReason'>
+      Pick<
+        HostedWorkspaceToolTurn,
+        'resumeHookResults' | 'hookStopReason' | 'setModelRound'
+      >
     >;
   workspaceContext?: { read(): string | undefined };
+  agentDefinition?: HostedAgentDefinition;
+  agentInstructions?: string;
   textDeltas?: HostedHarnessTextDeltas;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
@@ -103,6 +132,43 @@ export async function runHostedHarnessTextTurn(input: {
     true,
     { toolInvocationGuard: () => ({ allowed: false }) },
   );
+  const contextWithInstructions = (context: string | undefined) =>
+    [
+      input.agentInstructions
+        ? `# Agent instructions\n\n${input.agentInstructions}`
+        : undefined,
+      context,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  const model = input.agentDefinition?.model;
+  if (model) {
+    try {
+      const matches = config
+        .getAllConfiguredModels()
+        .filter((entry) => !entry.isRuntimeModel && entry.id === model.id);
+      if (matches.length !== 1) throw new HostedModelUnavailableError();
+      const selected = matches[0]!;
+      await config.switchModel(selected.authType, selected.id, {
+        requireCachedCredentials: true,
+        ...(selected.registryBaseUrl
+          ? { baseUrl: selected.registryBaseUrl }
+          : {}),
+      });
+    } catch (cause) {
+      try {
+        await config.shutdown({
+          shutdownTelemetry: false,
+          strictResourceCleanup: true,
+        });
+      } catch (cleanupCause) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness model cleanup failed: ${String(cleanupCause)}`,
+        );
+      }
+      throw new HostedModelUnavailableError(cause);
+    }
+  }
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
   let historyReady = false;
@@ -119,7 +185,7 @@ export async function runHostedHarnessTextTurn(input: {
         ]
       : [],
   );
-  if (!input.resumeFromToolResults)
+  if (!input.resumeFromToolResults && !input.resumeModel)
     initialMessages.push({ role: 'user', parts: [{ text: input.prompt }] });
   const initializationHooks: Array<{
     fields: HookInput;
@@ -206,6 +272,12 @@ export async function runHostedHarnessTextTurn(input: {
   };
   try {
     await input.hooks?.ensureReady(input.signal);
+    // Seed instructions when memory reload is skipped; restore them after
+    // initialize() when its hierarchical memory refresh replaces user memory.
+    if (input.agentInstructions)
+      config.setUserMemory(
+        contextWithInstructions(input.workspaceContext?.read()),
+      );
     await config.initialize({
       signal: input.signal,
       skipHooks: true,
@@ -218,7 +290,19 @@ export async function runHostedHarnessTextTurn(input: {
     const authType = config.getModelsConfig().getCurrentAuthType();
     if (!authType)
       throw new Error('Hosted Harness model authentication is unavailable.');
-    await config.refreshAuth(authType, true);
+    if (input.agentInstructions) {
+      config.setUserMemory(
+        contextWithInstructions(input.workspaceContext?.read()),
+      );
+    }
+    try {
+      await config.refreshAuth(authType, true);
+    } catch (cause) {
+      if (model) throw new HostedModelUnavailableError(cause);
+      throw cause;
+    }
+    if (input.agentInstructions)
+      await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
     runPromptHook = input.modelScope
       ? createHostedPromptHookRunner(config, input.modelScope)
@@ -226,7 +310,7 @@ export async function runHostedHarnessTextTurn(input: {
     if (runPromptHook) input.toolTurn?.setPromptHookRunner?.(runPromptHook);
     modelReady = true;
     let effectivePrompt = input.prompt;
-    if (input.hooks && !input.resumeFromToolResults) {
+    if (input.hooks && !input.resumeFromToolResults && !input.resumeModel) {
       const startupId = `session-start:${input.sessionId}`;
       const start = input.hooks.hasCompletedOccurrence(
         HookEventName.SessionStart,
@@ -317,7 +401,8 @@ export async function runHostedHarnessTextTurn(input: {
     // history drops an empty assistant record while keeping its prompt. Omit
     // both kinds of unanswered prompt even when later completed turns follow.
     const answered = (entry: Content | undefined): boolean =>
-      entry?.role === 'model' && !!entry.parts?.some((part) => !!part.text);
+      entry?.role === 'model' &&
+      !!entry.parts?.some((part) => !part.thought && !!part.text);
     client
       .getChat()
       .setHistory(
@@ -340,16 +425,28 @@ export async function runHostedHarnessTextTurn(input: {
           input.signal,
         )) ?? [...input.resumeFromToolResults])
       : [{ text: effectivePrompt }];
-    let pendingToolResults = input.resumeFromToolResults !== undefined;
+    let pendingToolResults =
+      input.resumeFromToolResults !== undefined ||
+      (input.resumeModel?.pendingToolResults ?? false);
+    let preparedRecovery = input.resumeModel?.prepared;
     let stopHookActive =
       (await input.hooks?.wasStopBlocked(input.promptId)) ?? false;
-    for (let round = 0; round < 16; round++) {
+    for (
+      let round = input.resumeModel?.round ?? input.initialRound ?? 0;
+      round < 16;
+      round++
+    ) {
+      input.toolTurn?.setModelRound?.(round);
       input.signal.throwIfAborted();
       const contextAvailable = input.workspaceContext?.read();
-      if (contextAvailable && contextAvailable !== injectedContext) {
+      if (
+        !preparedRecovery &&
+        contextAvailable &&
+        contextAvailable !== injectedContext
+      ) {
         // setUserMemory alone never reaches the wire: the system instruction
         // was assembled during initialize() and is cached on the chat.
-        config.setUserMemory(contextAvailable);
+        config.setUserMemory(contextWithInstructions(contextAvailable));
         await client.refreshSystemInstruction();
         injectedContext = contextAvailable;
       }
@@ -371,28 +468,67 @@ export async function runHostedHarnessTextTurn(input: {
       let text = '';
       let finished = false;
       let modelFailure = true;
-      const completeAttempt = await input.modelScope?.beginMainAttempt(
-        config.getModel(),
-      );
-      const modelOccurrence =
+      let completeAttempt:
+        | Awaited<ReturnType<ManagedHookModelScope['beginMainAttempt']>>
+        | undefined = input.prepareModel
+        ? undefined
+        : await input.modelScope?.beginMainAttempt(config.getModel());
+      let modelOccurrence =
         completeAttempt?.attemptId ?? `${input.promptId}:${round}`;
+      const prepare: LlmPreparedRequestCallback = async (
+        prepared,
+        captureUnsupported,
+      ) => {
+        if (completeAttempt) {
+          const previous = completeAttempt;
+          completeAttempt = undefined;
+          await previous(finished, usage);
+        }
+        const recoveryRef = await input.prepareModel?.(
+          prepared,
+          round,
+          pendingToolResults,
+          input.workspaceContext?.read(),
+          captureUnsupported,
+        );
+        completeAttempt = await input.modelScope?.beginMainAttempt(
+          prepared.request.model,
+          recoveryRef,
+        );
+        modelOccurrence = completeAttempt?.attemptId ?? modelOccurrence;
+        finished = false;
+        usage.length = 0;
+      };
+      prepare.maxSnapshotBytes = 64 * 1024;
       const usage: unknown[] = [];
       try {
-        for await (const event of client.sendMessageStream(
-          request,
-          input.signal,
-          input.promptId,
-          {
-            type:
-              round === 0 && !input.resumeFromToolResults
-                ? SendMessageType.UserQuery
-                : SendMessageType.ToolResult,
-            // Published deltas cannot be un-glued after the fact: a cut that
-            // already delivered content replays the request, and the RETRY
-            // handling below retracts the orphaned prefix (#13319).
-            retractDeliveredOutputOnRetry: true,
-          },
-        )) {
+        const stream = preparedRecovery
+          ? new Turn(
+              client.getChat(),
+              input.promptId,
+              undefined,
+              undefined,
+              true,
+              prepare,
+            ).run(
+              preparedRecovery.request.model,
+              [],
+              input.signal,
+              preparedRecovery,
+            )
+          : client.sendMessageStream(request, input.signal, input.promptId, {
+              type:
+                round === 0 && !input.resumeFromToolResults
+                  ? SendMessageType.UserQuery
+                  : SendMessageType.ToolResult,
+              // Published deltas cannot be un-glued after the fact: a cut that
+              // already delivered content replays the request, and the RETRY
+              // handling below retracts the orphaned prefix (#13319).
+              retractDeliveredOutputOnRetry: true,
+              ...(input.prepareModel ? { onPreparedRequest: prepare } : {}),
+            });
+        preparedRecovery = undefined;
+        for await (const event of stream) {
           if (event.type === LlmEventType.Content) {
             text += event.value;
             await textDeltas?.delta(event.value);
@@ -446,7 +582,8 @@ export async function runHostedHarnessTextTurn(input: {
         if (
           modelFailure &&
           !input.signal.aborted &&
-          !(cause instanceof HostedHookRecoveryRequiredError)
+          !(cause instanceof HostedHookRecoveryRequiredError) &&
+          !(cause instanceof LlmRequestPreparationError)
         ) {
           await fire(
             HookEventName.StopFailure,
@@ -492,11 +629,16 @@ export async function runHostedHarnessTextTurn(input: {
         suppressDisplay = display?.suppressOutput ?? false;
         if (suppressDisplay) text = '';
       }
-      if (!input.toolTurn) return { text, model: config.getModel() };
       const output = client.getHistory().at(-1);
       if (output?.role !== 'model' || !output.parts)
         throw new Error('Hosted model output is unavailable.');
       const parts = structuredClone(output.parts);
+      if (!input.toolTurn)
+        return {
+          text,
+          parts: suppressDisplay ? [] : parts,
+          model: config.getModel(),
+        };
       const functions = parts.filter((part) => part.functionCall);
       if (functions.length !== calls.length)
         throw new Error('Hosted model call history is inconsistent.');

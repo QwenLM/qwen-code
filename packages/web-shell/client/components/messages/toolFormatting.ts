@@ -1,6 +1,9 @@
-import type { ACPToolCall } from '../../adapters/types';
+import type { ACPToolCall } from '../../adapters/types.js';
+import { isAskUserQuestionToolName } from '../../constants/toolNames.js';
 
-export { isActiveToolStatus } from '../../adapters/toolClassification';
+export { isAskUserQuestionToolName } from '../../constants/toolNames.js';
+
+export { isActiveToolStatus } from '../../adapters/toolClassification.js';
 
 /**
  * Internal-tool-name → display-name lookup. This is a standalone copy of
@@ -12,15 +15,6 @@ export { isActiveToolStatus } from '../../adapters/toolClassification';
  * write, …) are web-shell-only conveniences with no core equivalent.
  */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
-  // Workspace-agent collaboration surface. Named the same way core names them
-  // so the drift test above stays a real check rather than two lists that
-  // happen to agree.
-  thread_post: 'ThreadPost',
-  thread_wait: 'ThreadWait',
-  thread_block: 'ThreadBlock',
-  thread_review: 'ThreadReview',
-  thread_create: 'ThreadCreate',
-  thread_read: 'ThreadRead',
   exec: 'Exec',
   edit: 'Edit',
   write_file: 'WriteFile',
@@ -165,11 +159,6 @@ export function localizeToolDisplayName(
     if (translated !== key) return translated;
   }
   return displayName;
-}
-
-export function isAskUserQuestionToolName(toolName: string): boolean {
-  const normalized = toolName.toLowerCase();
-  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
 }
 
 export function isAdvisorToolName(toolName: string): boolean {
