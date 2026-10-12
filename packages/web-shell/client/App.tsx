@@ -6594,6 +6594,28 @@ export function App({
       artifactPanelStateBySessionRef.current.delete(nextSessionId);
       artifactPanelStateBySessionRef.current.set(nextSessionId, currentState);
     };
+    const retainCurrentTrajectory = () => {
+      const retainedTabs = artifactPanelTabsRef.current.filter(
+        (tab) =>
+          previousSessionId === nextSessionId &&
+          trajectoryAvailable &&
+          tab.kind === 'trajectory' &&
+          tab.loadPage ===
+            createTrajectoryPageLoader(
+              workspace.client,
+              tab.sessionId,
+              sessionContextKey(connection.sessionContext),
+            ),
+      );
+      setArtifactPanelTabs(retainedTabs);
+      setActiveArtifactPanelTabId(
+        retainedTabs.some(
+          (tab) => tab.id === activeArtifactPanelTabIdRef.current,
+        )
+          ? activeArtifactPanelTabIdRef.current
+          : null,
+      );
+    };
     if (connection.loadingTranscript) {
       saveCurrentState();
       artifactPanelRestoredSessionKeyRef.current = undefined;
@@ -6604,8 +6626,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (connection.status !== 'connected') {
@@ -6618,8 +6639,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (artifactsLoading) {
@@ -6632,8 +6652,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
 
