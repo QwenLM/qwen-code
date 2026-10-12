@@ -2887,6 +2887,54 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
   });
 
+  it('names the projected teammate on a peer notice block', () => {
+    // Identity projection (#13785): a teammate's report arrives as a block
+    // carrying the wire `agent` field. The export must keep that attribution
+    // — path-style name plus kind — or the exported transcript drops to
+    // anonymous system rows the live Web Shell attributes.
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('prompt', null),
+        record('peer-notice', 'prompt', {
+          type: 'user',
+          subtype: 'notification',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: '<teammate_message from="scribe">done</teammate_message>',
+              },
+            ],
+          },
+          systemPayload: {
+            displayText: 'Relay done',
+            backgroundTask: {
+              taskId: 'teammate-message-2',
+              status: 'message',
+              kind: 'peer',
+              agent: {
+                agentName: '/root/scribe',
+                depth: 1,
+                kind: 'teammate',
+              },
+            },
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const peer = document.blocks.find(
+      (block) => 'text' in block && block.text === 'Relay done',
+    );
+    expect(peer).toBeDefined();
+    expect('author' in peer ? peer.author : undefined).toEqual({
+      name: '/root/scribe',
+      kind: 'teammate',
+    });
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
+  });
+
   it('rejects an unsafe or widened block author', () => {
     const document = createExportTranscriptDocumentV1(
       [

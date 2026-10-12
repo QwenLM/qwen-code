@@ -140,11 +140,15 @@ export type ExportPermissionResolutionV1 =
   | 'resolved';
 
 /**
- * The workspace agent that wrote a user or assistant block: an agent's reply
- * (`agent_message`) or a message it posted into the session.
+ * The agent that wrote a user or assistant block: a workspace agent's reply
+ * (`agent_message`) or a message it posted into the session, or a projected
+ * subagent/teammate identity carried by the block's `agent` field (path-style
+ * name such as `/root/scribe`; the kind travels in `kind` so an exporter can
+ * tell a teammate from a delegated subagent).
  */
 export interface ExportTranscriptAuthorV1 {
   name: string;
+  kind?: 'root' | 'subagent' | 'teammate';
 }
 type ExportTextTranscriptBlockBaseV1 = Pick<
   DaemonTextTranscriptBlock,
@@ -478,20 +482,35 @@ function sanitizeBlock(
         );
         budget.markContentLoss();
       }
-      const authorName =
+      const metaAuthor =
         block.kind === 'thought' || block.parentToolCallId
           ? undefined
           : parseQwenAgentMessageMeta(
               block.meta?.[QWEN_AGENT_MESSAGE_META_KEY],
             )?.author?.name.trim();
+      // Identity projection (#13785): a block may carry its producer's
+      // identity directly. The agent-message meta author wins when both
+      // exist — it is the workspace agent that actually wrote the block,
+      // while `agent` names the projected subagent/teammate identity.
+      const blockAgent =
+        (block as DaemonTextTranscriptBlock).agent ??
+        (block as { agent?: DaemonTextTranscriptBlock['agent'] }).agent;
+      const author = metaAuthor
+        ? { name: budget.label(metaAuthor, 128) }
+        : blockAgent && blockAgent.agentName
+          ? {
+              name: budget.label(blockAgent.agentName, 128),
+              ...('kind' in blockAgent && blockAgent.kind
+                ? { kind: blockAgent.kind }
+                : {}),
+            }
+          : undefined;
       return {
         ...common,
         kind: block.kind,
         text,
         streaming: false,
-        ...(authorName
-          ? { author: { name: budget.label(authorName, 128) } }
-          : {}),
+        ...(author ? { author } : {}),
         ...(block.collapsed ? { collapsed: true } : {}),
         ...(block.parentToolCallId
           ? {
