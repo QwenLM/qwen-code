@@ -56,10 +56,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * <li>refusal-edges-live: per-family raw negatives replayed against the
  * captured OPEN grant with only its digests forged — shape-level negatives
  * can't be emitted by the turn and the digest-bound protocol admits no
- * spoofing; each replay answers 400 whose refusal names the broker
- * execution identity conflict, since forged digests are stopped at that
- * check before payload validation; the unit fixture corpus pins the
- * field-shape refusals.
+ * spoofing; each replay answers 400 whose refusal names the reservation
+ * replay conflict, since the placement check compares the replayed
+ * binding digest against the persisted row before identity or payload
+ * validation; the unit fixture corpus pins the field-shape refusals.
  * <li>foreground (v3 lane): reserve OPEN + close NOT_STARTED +
  * recovery-blocked — off-Linux the ephemeral lane declines all shell-typed
  * executions alike; byte-level foreground regression is held by
