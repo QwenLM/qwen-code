@@ -53,6 +53,26 @@ public final class InMemoryRuntimeBindingRepository
     }
 
     @Override
+    public synchronized RuntimeSessionRecord completeStoppedSessionRelease(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected, RuntimeBindingRecord claim) {
+        if (!(sessions instanceof InMemoryRuntimeSessionRepository)
+                || !(executions instanceof InMemoryToolExecutionRepository)) {
+            throw new IllegalArgumentException("Release requires matching in-memory repositories");
+        }
+        synchronized (sessions) {
+            synchronized (executions) {
+                RuntimeAdmission.requireStoppedRelease(findById(expected.getBindingId()), claim, expected, clock.instant());
+                if (executions.hasActiveByBinding(expected.getBindingId(), expected.getRuntimeGeneration())) {
+                    throw new RuntimeBrokerException(409, "workspace_close_execution_unsettled",
+                            "Original resources remain active", false);
+                }
+                return sessions.compareAndSet(expected,
+                        expected.withState(RuntimeSessionRecord.State.RELEASED, clock.instant()));
+            }
+        }
+    }
+
+    @Override
     public synchronized RuntimeSessionRecord beginSessionRelease(
             RuntimeSessionRepository sessions, ToolExecutionRepository executions,
             RuntimeSessionRecord expected) {

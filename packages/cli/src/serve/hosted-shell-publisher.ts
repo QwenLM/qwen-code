@@ -817,6 +817,24 @@ export class HostedShellPublisher {
             `The monitor_run record for ${executionCallId} is missing.`,
           );
         }
+        // A parked record's observation period already ended (its quota or
+        // idle window passed the stop unproven): the capture tail that
+        // follows is not a new observation, and committing it would be
+        // refused as an over-quota or illegal-successor revision ahead of the
+        // settle. The real exit evidence settles the parked record directly
+        // (#13856 R1-55).
+        if (record.run.state === 'recovery_blocked') {
+          if (evidence !== null) {
+            if (stopRequested) {
+              await this.monitors.settleStopRequested(executionCallId);
+            } else {
+              await this.monitors.settleQuiet(executionCallId, 'exited');
+            }
+          }
+          // An unproven end over a parked watch changes nothing: the park
+          // already recorded runtime_lost.
+          return envelope;
+        }
         const windowLines = background.remainder
           .split('\n')
           .filter((line) => line.length > 0);

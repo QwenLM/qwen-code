@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.sql.DataSource;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.slf4j.LoggerFactory;
@@ -43,6 +44,7 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
@@ -63,6 +65,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 //
 // Requires a real MySQL 8 server: pass -Dmysql.url/-Dmysql.user/
 // -Dmysql.password (defaults match a local throwaway server on 13306).
+//
+// The Hosted*IT classes share one failsafe fork and one MySQL schema, so
+// the context is closed after the class. Cached for the rest of the fork,
+// its recovery scans (operations, Turns, action responses) would go on
+// covering every tenant and claim later classes' work for this host, whose
+// fixture Harness and missing Runtime Broker can neither run that work nor
+// close its Workspace Sessions. For the same reason a round that stalls
+// has its work ended before the context closes.
 @SpringBootTest(properties = {
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.runtime-broker.enabled=false",
@@ -71,6 +81,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "qwen.managed-agent.events.materialize-interval=10ms"})
 @AutoConfigureMockMvc
 @Import(HostedConcurrentTurnBurstMySqlIT.BurstHarnessConfiguration.class)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class HostedConcurrentTurnBurstMySqlIT {
     private static final Duration ROUND_DEADLINE = Duration.ofSeconds(150);
     private static final Duration SILENCE_LIMIT = Duration.ofSeconds(20);
@@ -112,6 +123,21 @@ class HostedConcurrentTurnBurstMySqlIT {
                         + "&allowPublicKeyRetrieval=true&useSSL=false");
     }
 
+    private final List<String> tenants = new ArrayList<>();
+
+    @AfterEach
+    void endOwedWork() {
+        // A round that settled matches nothing.
+        for (String tenant : tenants) {
+            jdbc.update("UPDATE managed_agent_turn SET status = 'FAILED'"
+                    + " WHERE tenant_id = ? AND status NOT IN"
+                    + " ('COMPLETED', 'FAILED', 'CANCELLED')", tenant);
+            jdbc.update("UPDATE managed_agent_operation SET delivery_state"
+                    + " = 'CONFIRMED' WHERE tenant_id = ? AND delivery_state"
+                    + " IN ('PENDING', 'LEASED', 'BLOCKED')", tenant);
+        }
+    }
+
     @Test
     @Timeout(600)
     void turnBurstsSettleWithoutLockConvoy() throws Exception {
@@ -135,6 +161,7 @@ class HostedConcurrentTurnBurstMySqlIT {
     private List<String> runBurst(int burst, long staggerMs)
             throws Exception {
         String tenant = "burst-" + burst + "-" + UUID.randomUUID();
+        tenants.add(tenant);
         Logger coordinator = (Logger) LoggerFactory.getLogger(
                 HarnessCoordinator.class);
         ListAppender<ILoggingEvent> logs = new ListAppender<>();

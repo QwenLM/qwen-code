@@ -25,7 +25,7 @@ settling `max_events` or `idle_timeout`. The watch kept running, kept its
 `background_v3_monitor` hold row live, and kept its Runtime Session held
 until the Session close's drain ended it.
 
-## 2. Current state (verified at `b539c911d8`, the #13889 head)
+## 2. Current state (verified at `1bbaf93e8d`, #13889 merged)
 
 - `RuntimeBrokerService.control` routes anything that is not an MCP or Hook
   operation to `ProviderRuntimeProtocol.control`, whose default arm refuses
@@ -146,12 +146,12 @@ settled, and a lost answer changes nothing, because the exit already
 proved the end. After the settle the record contract allows only
 `notifiedThrough` to change.
 
-A settle that the exit itself triggers issues no stop. When a watch ends on
-its own (or through a drain) and the final window its finalize flushes
-reaches the quota, the loop settles `max_events` from that exit: the
-finalize is the proof, and the worker answers a stop only after the same
-finalize returns, so a stop issued from inside it would wait on itself
-until a request timeout broke the cycle.
+The exit chain itself never issues a stop. When a watch ends on its own (or
+through a drain) and the final window its finalize flushes reaches the
+quota, the window commits but does not fire the quota: the physical end
+supersedes it and the record settles at the exit (#13856 R1-30). A stop
+issued from inside that finalize would wait on itself, because the worker
+answers a stop only after the same finalize returns.
 
 ## 5. Decisions
 
@@ -222,7 +222,7 @@ until a request timeout broke the cycle.
   the handle's proof mapping (`hosted-monitor-remote-executor.test.ts`);
   the turn's wiring of the Runtime call (`hosted-workspace-tool-turn.test.ts`);
   `max_events` and `idle_timeout` settling through the real publisher only
-  after the final output landed, and a quota reached by a natural exit
+  after the final output landed, and a natural exit that crosses the quota
   settling with no stop (`hosted-shell-publisher.background.test.ts`,
   `hosted-monitor-loop.test.ts`). The loop also pins the stop in flight
   (`hosted-monitor-loop.test.ts`): an exit that lands before the worker's

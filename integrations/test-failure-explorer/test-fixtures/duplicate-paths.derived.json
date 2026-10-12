@@ -1,0 +1,93 @@
+{
+  "numTotalTestSuites": 4,
+  "numPassedTestSuites": 0,
+  "numFailedTestSuites": 4,
+  "numPendingTestSuites": 0,
+  "numTotalTests": 4,
+  "numPassedTests": 0,
+  "numFailedTests": 4,
+  "numPendingTests": 0,
+  "numTodoTests": 0,
+  "snapshot": {
+    "added": 0,
+    "failure": false,
+    "filesAdded": 0,
+    "filesRemoved": 0,
+    "filesRemovedList": [],
+    "filesUnmatched": 0,
+    "filesUpdated": 0,
+    "matched": 0,
+    "total": 0,
+    "unchecked": 0,
+    "uncheckedKeysByFile": [],
+    "unmatched": 0,
+    "updated": 0,
+    "didUpdate": false
+  },
+  "startTime": 1791649292547,
+  "success": false,
+  "testResults": [
+    {
+      "assertionResults": [
+        {
+          "ancestorTitles": ["same suite"],
+          "fullName": "same suite same title",
+          "status": "failed",
+          "title": "same title",
+          "duration": 3.198750000000004,
+          "failureMessages": [
+            "AssertionError: expected 'first' to be 'wrong' // Object.is equality\n    at /fixture-workspace/duplicate-titles/duplicate.fixture.ts:11:21\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at runSuite (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)\n    at runSuite (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": ["same suite"],
+          "fullName": "same suite same title",
+          "status": "failed",
+          "title": "same title",
+          "duration": 0.36479099999999676,
+          "failureMessages": [
+            "AssertionError: expected 'second' to be 'wrong' // Object.is equality\n    at /fixture-workspace/duplicate-titles/duplicate.fixture.ts:14:22\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at runSuite (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)\n    at runSuite (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)"
+          ],
+          "meta": {}
+        }
+      ],
+      "startTime": 1791649292890,
+      "endTime": 1791649292893.3647,
+      "status": "failed",
+      "message": "",
+      "name": "/fixture-workspace/duplicate-titles/duplicate.fixture.ts"
+    },
+    {
+      "assertionResults": [
+        {
+          "ancestorTitles": ["same suite"],
+          "fullName": "same suite same title",
+          "status": "failed",
+          "title": "same title",
+          "duration": 3.198750000000004,
+          "failureMessages": [
+            "AssertionError: expected 'first' to be 'wrong' // Object.is equality\n    at /fixture-workspace/duplicate-titles/duplicate.fixture.ts:11:21\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at runSuite (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)\n    at runSuite (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": ["same suite"],
+          "fullName": "same suite same title",
+          "status": "failed",
+          "title": "same title",
+          "duration": 0.36479099999999676,
+          "failureMessages": [
+            "AssertionError: expected 'second' to be 'wrong' // Object.is equality\n    at /fixture-workspace/duplicate-titles/duplicate.fixture.ts:14:22\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at runSuite (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)\n    at runSuite (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)"
+          ],
+          "meta": {}
+        }
+      ],
+      "startTime": 1791649292890,
+      "endTime": 1791649292893.3647,
+      "status": "failed",
+      "message": "",
+      "name": "/fixture-workspace/duplicate-titles/duplicate.fixture.ts"
+    }
+  ]
+}

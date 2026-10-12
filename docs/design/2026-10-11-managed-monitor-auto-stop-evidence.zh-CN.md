@@ -23,7 +23,7 @@ H3 启用的过渡方案（#13889）让 loop 不再声称它无法证明的结�
 `background_v3_monitor` 持有行保持存活，其 Runtime Session 一直被持有，
 直到 Session close 的 drain 结束它。
 
-## 2. 现状（已在 `b539c911d8`，即 #13889 的 head 上核实）
+## 2. 现状（已在 `1bbaf93e8d`，即 #13889 合入后核实）
 
 - `RuntimeBrokerService.control` 把任何不是 MCP 或 Hook 的操作交给
   `ProviderRuntimeProtocol.control`，其默认分支以
@@ -127,10 +127,11 @@ finalize 的 `stopRequested` 标记不会覆盖它。随后到达的 worker 应�
 记录已结算；应答丢失也不改变什么，因为退出已经证明了结束。结算之后，记录
 契约只允许 `notifiedThrough` 变化。
 
-由退出本身触发的结算不发出停止。当 watch 自行结束（或经 drain 结束），而
-其 finalize 冲刷的最后一个窗口达到配额时，loop 从该退出结算
-`max_events`：finalize 就是证明，而 worker 只在同一个 finalize 返回之后才
-应答停止，因此从它内部发出的停止会等待它自己，直到某个请求超时打破循环。
+退出链本身从不发出停止。当 watch 自行结束（或经 drain 结束），而其
+finalize 冲刷的最后一个窗口达到配额时，该窗口照常提交，但不触发配额：
+物理结束优先于配额，记录以退出结算（#13856 R1-30）。从该 finalize 内部
+发出的停止会等待它自己，因为 worker 只在同一个 finalize 返回之后才应答
+停止。
 
 ## 5. 决定
 
@@ -186,8 +187,8 @@ finalize 的 `stopRequested` 标记不会覆盖它。随后到达的 worker 应�
   （`hosted-workspace-broker.test.ts`）；句柄的证明映射
   （`hosted-monitor-remote-executor.test.ts`）；turn 对 Runtime call 的
   接线（`hosted-workspace-tool-turn.test.ts`）；`max_events` 与
-  `idle_timeout` 只在最终输出落地之后经真实 publisher 结算，以及自然退出
-  达到的配额不经停止即结算（`hosted-shell-publisher.background.test.ts`、
+  `idle_timeout` 只在最终输出落地之后经真实 publisher 结算，以及越过配额的
+  自然退出不经停止即结算（`hosted-shell-publisher.background.test.ts`、
   `hosted-monitor-loop.test.ts`）。loop 还钉住在途的停止
   （`hosted-monitor-loop.test.ts`）：先于 worker 应答落地的退出以停止的
   原因结算，无论该应答被证明还是丢失；close 的停止等待自动停止，只在其

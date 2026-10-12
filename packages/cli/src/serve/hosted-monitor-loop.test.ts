@@ -510,23 +510,26 @@ describe('HostedMonitorLoop', () => {
     await closeLoop(rig);
   });
 
-  it('settles max_events from the exit chain without a stop (#13896)', async () => {
-    // The final window of a watch that ended on its own reaches the quota:
-    // its exit is the proof, and a stop issued from inside that exit would
-    // wait on the very finalize that carries it.
+  it('settles an exit that crosses the quota as exited, without a false park (#13856 R1-30)', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
+    // The production remote watch cannot prove a terminate, which is exactly
+    // where the quota park would have minted a false runtime_lost revision.
     rig.executor.provesStop = false;
+    const parked = vi.spyOn(rig.session, 'blockedRuntimeLost');
     await rig.loop.start(params({ maxEvents: 1 }));
 
-    rig.executor.onLine?.('last line');
+    rig.executor.onLine?.('one');
+    // The physical end arrives with the quota just reached, ahead of any
+    // debounce window: the exit evidence wins over the quota.
     await rig.executor.exitNaturally();
+    await rig.loop.done;
+
     expect(committed(rig.authority)).toMatchObject({
-      observationSequence: 1,
-      stopReason: 'max_events',
+      stopReason: 'exited',
       run: { state: 'settled', execution: 'settled' },
     });
-    expect(rig.executor.terminateCalls).toBe(0);
+    expect(parked).not.toHaveBeenCalled();
     await closeLoop(rig);
   });
 

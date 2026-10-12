@@ -246,7 +246,10 @@ export class HostedMonitorLoop {
         return;
       }
       if (this.settled) return;
-      await this.flush(true);
+      // The watch's physical end supersedes its quota: this final window
+      // commits, but the quota must not park the record ahead of the exit's
+      // own settle (#13856 R1-30).
+      await this.flush(false);
       if (this.settled) return;
       if (this.stopping !== undefined) {
         this.settled = true;
@@ -346,13 +349,8 @@ export class HostedMonitorLoop {
     );
   }
 
-  /**
-   * Commits whatever the window buffered as one observation revision. On
-   * the exit chain the quota settles without a stop: the finalize that
-   * carries the exit is the watch's proven end, and a stop issued from
-   * inside it would wait on that same finalize (#13896).
-   */
-  private async flush(exiting = false): Promise<void> {
+  /** Commits whatever the window buffered as one observation revision. */
+  private async flush(settleQuota: boolean = true): Promise<void> {
     if (this.ended || this.buffered.length === 0) return;
     const lines = this.buffered;
     this.buffered = [];
@@ -365,11 +363,12 @@ export class HostedMonitorLoop {
     this.armIdle();
     const sequence = this.monitors.record(this.monitorId)?.observationSequence;
     if (
+      settleQuota &&
       this.params !== undefined &&
       sequence !== undefined &&
       sequence >= this.params.maxEvents
     )
-      await this.settle('max_events', !exiting);
+      await this.settle('max_events', true);
   }
 
   /** One notification per accepted observation, as the Legacy wake did. */
