@@ -780,24 +780,26 @@ class ComposerTagWidget extends WidgetType {
     tagLabel: string,
     tagValue: string,
   ) {
+    // The trailing box owns the chip's right edge: the remove button when the
+    // tag has one, otherwise the last piece of text, which would sit flush
+    // against the border without an inset of its own (issue #11997).
+    const rightInset = this.tag.removable === false ? '7px' : '0';
+
     if (tagLabel) {
       const label = document.createElement('span');
-      label.style.cssText =
-        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--agent-blue-500);';
+      label.style.cssText = `min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px ${tagValue ? '0' : rightInset} 3px 7px;color:var(--agent-blue-500);`;
       label.textContent = tagLabel;
       chip.appendChild(label);
     }
 
     if (tagValue) {
       const value = document.createElement('span');
-      value.style.cssText =
-        'max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 0.5ch;color:var(--foreground, #e4e4e4);';
+      value.style.cssText = `max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px ${rightInset} 3px 0.5ch;color:var(--foreground, #e4e4e4);`;
       value.textContent = tagValue;
       chip.appendChild(value);
     } else if (!tagLabel) {
       const fallback = document.createElement('span');
-      fallback.style.cssText =
-        'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 7px;color:var(--agent-blue-500);';
+      fallback.style.cssText = `min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px ${rightInset} 3px 7px;color:var(--agent-blue-500);`;
       fallback.textContent = this.tag.id;
       chip.appendChild(fallback);
     }
