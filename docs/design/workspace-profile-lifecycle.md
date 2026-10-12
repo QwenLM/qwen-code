@@ -36,6 +36,8 @@ Preparation disables new Monitor wakes and notification production without claim
 
 After original RuntimeSession drain, settle stdout/stderr capture, publication manifests and background/Monitor terminal records using original process exit/stop evidence. Cancel existing notifications without a model. Then close publishers and detach. Java checks tool receipts, output references, manifests, publication state and background records independently. Output must be sealed or have an explicit verifiable failure terminal; absence of pending in a new publisher is not evidence.
 
+For foreground inline capture, the receipt outcome is `REFERENCED`, while the indirectly referenced manifest, pages and segments may remain `PUBLISHED`. Verify the original journal source and retained outcome, then check the manifest's original execution identity, stream digests and seals. A blocked capture still requires its manifest evidence even when `resultRef` is null. O2 publication outcomes use `TOOL_PUBLICATION`: perform the existing object/receipt verification before the final transaction, then recheck the publication phase, quarantine flag and exact admission, receipt sequence and revision inside that transaction. The MCP inline-record reader is not an output reader.
+
 A stopped worker does not prove missing output was published. Unknown output remains blocked; do not rerun Shell, start a new capture or rebuild a Monitor to fabricate settlement. A known capture failure is retained as a failure rather than rewritten as successful output.
 
 ## MCP slice

@@ -135,11 +135,6 @@ public class WorkspaceProfileLifecycleVerifier {
                 unsettled();
             }
             results.getIfAvailable().verifySource(source);
-            for (JsonNode ref : List.of(source.outcomeRef(), source.resultRef())) {
-                if (ref != null && !ref.isNull()) {
-                    records.readRecordResource(operation.tenantId(), operation.sessionId(), ref);
-                }
-            }
             if (execution.getReference().get("publicationId") != null) {
                 if ("not_started".equals(execution.getExecutionStatus())
                         || "cancelled".equals(execution.getExecutionStatus()) && execution.getDispatchGeneration() == 0) {
@@ -163,6 +158,38 @@ public class WorkspaceProfileLifecycleVerifier {
                             || source.journalRevision() != ((Number) rows.getFirst().get("receipt_revision")).longValue()) {
                         unsettled();
                     }
+                }
+            }
+            if (execution.getReference().get("publicationId") == null || execution.getDispatchGeneration() == 0) {
+                JsonNode outcome = JSON.nullNode();
+                if (!source.outcomeRef().isNull()) {
+                    try {
+                        outcome = records.readRecordResource(operation.tenantId(), operation.sessionId(), source.outcomeRef());
+                    } catch (com.alibaba.qwen.code.managedagent.api.ApiException invalid) {
+                        unsettled();
+                    }
+                }
+                JsonNode capture = outcome.path("envelope").path("capture");
+                JsonNode ref = capture.path("manifest");
+                if (!ref.isNull() && !ref.isMissingNode()) {
+                    JsonNode manifest = verifyManifest(operation, ref, execution);
+                    boolean complete = "complete".equals(manifest.path("captureStatus").asText());
+                    if (outcome.path("version").asInt() != 1
+                            || !(complete ? "committed" : "blocked").equals(outcome.path("decision").asText())
+                            || !source.resultRef().equals(complete ? ref : JSON.nullNode())
+                            || !source.resources().equals(JSON.createArrayNode().add(ref))
+                            || !capture.path("captureStatus").equals(manifest.path("captureStatus"))
+                            || !outcome.path("envelope").path("executionStatus").equals(manifest.path("executionStatus"))
+                            || !execution.getExecutionStatus().equals(manifest.path("executionStatus").asText())) {
+                        unsettled();
+                    }
+                    for (String field : List.of("tenantId", "sessionId", "turnId", "executionCallId", "callId", "invocationDigest", "bindingGeneration", "captureId", "revision")) {
+                        if (!outcome.path("identity").path(field).equals(manifest.path(field))) {
+                            unsettled();
+                        }
+                    }
+                } else if (!source.resultRef().isNull() || !source.resources().isEmpty()) {
+                    unsettled();
                 }
             }
         }
@@ -257,6 +284,7 @@ public class WorkspaceProfileLifecycleVerifier {
                 || !java.util.Objects.equals(execution.getReference().get("argsDigest"), manifest.path("invocationDigest").asText())
                 || !operation.tenantId().equals(manifest.path("tenantId").asText())
                 || !operation.sessionId().equals(manifest.path("sessionId").asText())
+                || !execution.getTurnId().equals(manifest.path("turnId").asText())
                 || !execution.getExecutionCallId().equals(manifest.path("executionCallId").asText())
                 || !Long.toString(execution.getRuntimeGeneration()).equals(manifest.path("bindingGeneration").asText())
                 || "unknown".equals(manifest.path("executionStatus").asText())

@@ -121,6 +121,121 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"complete", "capture_failed", "wrong_identity", "missing_seal", "open", "receipt", "publication"})
+    void verifiesPublishedForegroundCaptureAndRejectsMissingOrChangedEvidence(String mode) throws Exception {
+        boolean captureFailed = "capture_failed".equals(mode);
+        boolean publication = "publication".equals(mode);
+        var f = fixture();
+        var binding = f.bindings.findOrCreate(new RuntimeProvisionRequest(f.scope(), f.session));
+        var ledger = new JdbcToolExecutionRepository(f.jdbc.getDataSource());
+        var reference = new java.util.HashMap<String, Object>(Map.of("sessionId", "original-owner", "promptId", "turn-1", "callId", "runtime-call", "argsDigest", "sha256:" + "a".repeat(64)));
+        if (publication) reference.put("publicationId", "pub-1");
+        ledger.findOrCreate(ToolExecutionRecord.prepared("call-1", "call-1", binding.getBindingId(), binding.getGeneration(),
+                f.session, "original-owner", "turn-1", "runtime-call", "sha256:" + "a".repeat(64),
+                reference));
+        var execution = ledger.claimDispatch("call-1", "dispatcher", Duration.ofSeconds(30));
+        ledger.compareAndSet(execution, execution.withResult(Map.of("executionStatus", "success"), 0, java.time.Instant.now()),
+                "dispatcher", execution.getDispatchGeneration());
+        var manifest = f.json.createObjectNode().put("toolResult", "managed-tool-result/1").put("type", "manifest")
+                .put("tenantId", "tenant").put("sessionId", f.session).put("turnId", "turn-1").put("executionCallId", "call-1")
+                .put("callId", "runtime-call").put("invocationDigest", "sha256:" + "a".repeat(64)).put("bindingGeneration", "1")
+                .put("captureId", "capture-1").put("revision", 1).put("executionStatus", "success")
+                .put("captureScope", "process_pipes").put("capturePolicy", "complete_required")
+                .put("captureStatus", captureFailed ? "unavailable" : "complete")
+                .put("captureReason", captureFailed ? "storage_failed" : null).put("upstreamTruncated", false)
+                .put("exitCode", 0).putNull("signal");
+        var contents = manifest.putArray("contents");
+        for (String stream : java.util.List.of("stdout", "stderr")) {
+            String segmentId = ToolPublicationContract.sha256(f.json.writeValueAsBytes(java.util.List.of("capture-1", stream, 0)));
+            var ref = f.resource(segmentId, "managed-tool-result-content", f.json.getNodeFactory().textNode("real output"));
+            var content = contents.addObject().put("streamId", stream).put("role", stream).put("mimeType", "application/octet-stream")
+                    .put("state", captureFailed ? "incomplete" : "sealed").put("byteLength", captureFailed ? 0 : ref.path("byteLength").asLong())
+                    .put("digest", captureFailed ? ToolPublicationContract.sha256(new byte[0]) : ref.path("digest").asText());
+            content.putArray("missingRanges");
+            var pages = content.putObject("body").putArray("pages");
+            if (!captureFailed) {
+                var page = f.json.createObjectNode().put("toolResult", "managed-tool-result/1").put("type", "page")
+                        .put("captureId", "capture-1").put("streamId", stream).put("firstOrdinal", 0).put("offset", 0);
+                page.putArray("segments").addObject().put("byteLength", ref.path("byteLength").asLong()).put("digest", ref.path("digest").asText());
+                var pageRef = f.resource(stream + "-page", "managed-tool-result-page", page);
+                pages.addObject().put("segmentCount", 1).put("byteLength", ref.path("byteLength").asLong()).set("ref", pageRef);
+                String sealId = ToolPublicationContract.sha256(f.json.writeValueAsBytes(java.util.List.of("capture-1", stream, "seal")));
+                f.resource(sealId, "managed-tool-result-content", f.json.createObjectNode().put("segmentCount", 1)
+                        .put("byteLength", ref.path("byteLength").asLong()).put("digest", ref.path("digest").asText()));
+            }
+        }
+        if ("open".equals(mode)) {
+            ((com.fasterxml.jackson.databind.node.ObjectNode) contents.get(0)).put("state", "open");
+            manifest.put("captureStatus", "pending").putNull("captureReason");
+        }
+        ToolPublicationContract.parseToolResult("manifest", f.json.writeValueAsBytes(manifest), 64 * 1024);
+        var manifestRef = f.resource("manifest", "managed-tool-result-manifest", manifest);
+        f.jdbc.update("UPDATE qwen_managed_session_resource SET state = 'PUBLISHED' WHERE resource_id <> 'outcome'");
+        boolean committed = !captureFailed && !"open".equals(mode);
+        var outcome = f.json.createObjectNode().put("version", 1).put("decision", committed ? "committed" : "blocked");
+        var identity = outcome.putObject("identity");
+        for (String field : java.util.List.of("tenantId", "sessionId", "turnId", "executionCallId", "callId", "invocationDigest", "bindingGeneration", "captureId", "revision")) {
+            identity.set(field, manifest.path(field));
+        }
+        if ("wrong_identity".equals(mode)) identity.put("bindingGeneration", "2");
+        var envelope = outcome.putObject("envelope").put("executionStatus", "success");
+        envelope.putArray("responseParts");
+        envelope.putObject("capture").put("captureStatus", "open".equals(mode) ? "partial" : manifest.path("captureStatus").asText())
+                .put("captureReason", committed ? null : "storage_failed").put("previewTruncated", false)
+                .put("deliveryStatus", committed ? "committed" : "blocked").set("manifest", manifestRef);
+        ToolPublicationContract.parseToolResult("result", f.json.writeValueAsBytes(envelope), 64 * 1024);
+        var outcomeRef = f.resource("outcome", "managed-tool-outcome", outcome);
+        var event = f.json.createObjectNode().put("kind", "tool.receipt").put("sequence", 1);
+        event.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", f.session);
+        var payload = event.putObject("payload").put("executionCallId", "call-1");
+        payload.set("toolOutcomeRef", outcomeRef);
+        payload.set("resultRef", !committed || "receipt".equals(mode) ? f.json.nullNode() : manifestRef);
+        payload.putArray("resources").add(manifestRef);
+        byte[] bytes = f.json.writeValueAsBytes(f.json.createObjectNode().put("subtype", "managed_session_event_v1").set("managedSession", event));
+        f.jdbc.update("INSERT INTO qwen_managed_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
+                + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence, last_sequence, event_count,"
+                + " writer_generation, writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes, byte_length, record_digest, created_at)"
+                + " VALUES ('tenant', 'workspace', ?, 1, ?, 'receipt', 'recordToolResult', 'call-1', ?, 1, 1, 1, 1, 'writer', ?, 0, 'identity', ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                f.session, "c".repeat(64), "c".repeat(64), "c".repeat(64), bytes, bytes.length, ToolPublicationContract.sha256(bytes));
+        var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
+        var results = new ManagedToolResultStore(f.jdbc, new org.springframework.jdbc.datasource.DataSourceTransactionManager(f.jdbc.getDataSource()), f.store);
+        results.captureEvents("tenant", "workspace", f.session, 1, java.util.List.of(event));
+        beans.registerSingleton("results", results);
+        var verifier = new WorkspaceProfileLifecycleVerifier(f.jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),
+                beans.getBeanProvider(ManagedToolResultStore.class));
+        var operation = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);
+        Runnable verify = () -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation, java.util.List.of(binding), WorkspaceToolProfiles.SHELL));
+        if (publication) {
+            f.jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id, execution_key,"
+                    + " capture_id, binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes, producer_phase,"
+                    + " admission_resource_id, receipt_sequence, receipt_revision) VALUES (?, ?, 'tenant', 'workspace', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?,"
+                    + " 'READY', 1024, 1024, 1024, 'REFERENCED', 'outcome', 1, 1)",
+                    "s".repeat(64), "t".repeat(64), f.session, "e".repeat(64), "b".repeat(64), "h".repeat(64));
+            f.jdbc.update("UPDATE qwen_managed_session_resource SET storage_kind = 'TOOL_PUBLICATION', inline_bytes = NULL WHERE resource_id = 'outcome'");
+            assertThatThrownBy(() -> verifier.verifyPublications(operation)).isInstanceOf(ApiException.class);
+            verify.run();
+            f.jdbc.update("UPDATE qwen_tool_publication SET quarantined = TRUE WHERE publication_id = 'pub-1'");
+            assertThatThrownBy(verify::run).isInstanceOf(ApiException.class);
+            return;
+        }
+        if ("missing_seal".equals(mode)) {
+            String sealId = ToolPublicationContract.sha256(f.json.writeValueAsBytes(java.util.List.of("capture-1", "stdout", "seal")));
+            f.jdbc.update("DELETE FROM qwen_managed_session_resource WHERE resource_id = ?", sealId);
+        }
+        if (java.util.List.of("wrong_identity", "missing_seal", "open", "receipt").contains(mode)) {
+            assertThatThrownBy(verify::run).isInstanceOf(ApiException.class);
+            return;
+        }
+        verify.run();
+        f.jdbc.update("UPDATE qwen_managed_session_resource SET sha256 = ? WHERE resource_id = 'manifest'", "0".repeat(64));
+        assertThatThrownBy(verify::run).isInstanceOf(ApiException.class);
+        f.jdbc.update("UPDATE qwen_managed_session_resource SET sha256 = ? WHERE resource_id = 'manifest'", manifestRef.path("digest").asText());
+        verify.run();
+        f.jdbc.update("DELETE FROM qwen_managed_session_resource WHERE resource_id = 'manifest'");
+        assertThatThrownBy(verify::run).isInstanceOf(ApiException.class);
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"exited", "signalled", "stop_requested", "capture_failed"})
     void verifiesOriginalBackgroundExitAndSealedOrKnownFailedOutput(String mode) throws Exception {
         var f = fixture();

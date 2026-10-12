@@ -36,6 +36,8 @@ prepare 禁止新 Monitor wake 和通知产生，不提前宣称物理停止；�
 
 原 RuntimeSession drain 后，按原进程退出/停止证据结算 stdout/stderr capture、publication manifest、后台任务与 Monitor 终态；无模型取消已有通知，然后关闭 publisher 并 detach。Java 独立核对 tool receipt、输出引用、manifest、publication 状态和后台记录。输出须封口或有明确可验证的失败终态；新 publisher 没有 pending 不构成证据。
 
+前台 inline capture 的 receipt outcome 为 `REFERENCED`，间接引用的 manifest、page 和 segment 可以仍为 `PUBLISHED`。先验证原 journal 来源和保留的 outcome，再检查 manifest 的原执行身份、stream 摘要与封口证据。capture 被阻塞时，即使 `resultRef` 为 null，仍须验证其 manifest。O2 publication outcome 使用 `TOOL_PUBLICATION`：在最终事务前执行已有对象/receipt 验证，再在事务内复核 publication phase、quarantine 标记和精确的 admission、receipt sequence 与 revision。MCP inline record 读取器不能用作输出读取器。
+
 worker 已停止不能证明缺失输出已发布。未知输出继续阻塞；禁止重跑 Shell、新建 capture 或 Monitor rebuild 来补造完成。已知 capture 失败保留为失败，不改成成功输出。
 
 ## MCP 切片
