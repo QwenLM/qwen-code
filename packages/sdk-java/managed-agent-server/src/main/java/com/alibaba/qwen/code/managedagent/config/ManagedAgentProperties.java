@@ -634,6 +634,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration maxVerificationTimeout;
         private boolean gcEnabled;
+        private boolean asyncVerificationEnabled;
+        private int verificationConcurrency = 2;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(24);
         // Off by default: the head's activation columns are only trustworthy
@@ -642,6 +644,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private boolean journalHeadAuthorization;
 
         public boolean isJournalHeadAuthorization() { return journalHeadAuthorization; }
+        public boolean isAsyncVerificationEnabled() { return asyncVerificationEnabled; }
+        public void setAsyncVerificationEnabled(boolean value) { asyncVerificationEnabled = value; }
+        public int getVerificationConcurrency() { return verificationConcurrency; }
+        public void setVerificationConcurrency(int value) { verificationConcurrency = value; }
         public void setJournalHeadAuthorization(boolean value) { journalHeadAuthorization = value; }
         public boolean isGcEnabled() { return gcEnabled; }
         public void setGcEnabled(boolean value) { gcEnabled = value; }

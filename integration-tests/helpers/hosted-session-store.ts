@@ -99,7 +99,13 @@ export async function startHostedSessionStore(sessionId: string) {
         activationEpoch: current.activation?.epoch ?? 0,
       };
       if (route === '/writers:acquire' || route === '/writers:renew') {
-        json({ ...head, leaseUntil: Date.now() + Number(body.leaseMillis) });
+        json({
+          ...head,
+          leaseUntil: Date.now() + Number(body.leaseMillis),
+          // Matches ManagedSessionReaderVersion.SUPPORTED on the Java store:
+          // the Harness writes Hosted recovery records at storage version 2.
+          supportedStorageVersion: 2,
+        });
       } else if (route === '/execution:authorize') {
         assert.equal(req.method, 'POST');
         assert(handle);
@@ -116,7 +122,10 @@ export async function startHostedSessionStore(sessionId: string) {
           recoveryStatus: 'READY',
           recoveryDetailCode: null,
         });
-      } else if (route === '/transactions:commit') {
+      } else if (
+        route === '/transactions:commit' ||
+        route === '/transactions:commit-v2'
+      ) {
         assert(handle);
         assert.equal(body.writerGeneration, writerGeneration);
         assert.equal(body.expectedJournalRevision, transactions.length);

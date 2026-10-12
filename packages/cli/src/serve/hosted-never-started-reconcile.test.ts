@@ -33,10 +33,24 @@ vi.mock(
       >();
     return {
       ...actual,
+      // The shell kind is enabled in production (#13856), so every kind the
+      // production list carries goes through the real gate; a case that
+      // needs the shell kind shut closes it per test. A kind production
+      // has not enabled stays a fixture, admitted so the case runs what it
+      // is about rather than the kind gate.
       assertManagedSessionChildRunKindEnabled: (kind: string) => {
-        if (!enablement.childRun) {
-          actual.assertManagedSessionChildRunKindEnabled(kind);
+        if (kind === 'shell' && !enablement.childRun) {
+          throw new actual.ManagedSessionRecordError(
+            'domain child_run kind shell is registered but not enabled for submission.',
+          );
         }
+        if (
+          !(
+            actual.MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]
+          ).includes(kind)
+        )
+          return;
+        actual.assertManagedSessionChildRunKindEnabled(kind);
       },
     };
   },
@@ -578,7 +592,7 @@ describe('reconcileNeverStartedChildRuns', () => {
     expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
   });
 
-  it('refuses a shell admit when the production kind gate is restored', async () => {
+  it('admits a shell when the production kind gate is restored', async () => {
     await open();
     await createManagedHarnessHandle(session!).ensureRunnable();
     enablement.childRun = false;
@@ -590,7 +604,11 @@ describe('reconcileNeverStartedChildRuns', () => {
         executionCallId: 'shell-1',
         args: { command: 'printf hi', is_background: true },
       }),
-    ).rejects.toThrow('registered but not enabled');
+    ).resolves.toMatchObject({ kind: 'managed-tool-args' });
+    expect(committed('shell-1')).toMatchObject({
+      kind: 'shell',
+      run: { state: 'admitted', execution: 'intent' },
+    });
   });
 
   it('never scans a child_agent record, the one kind production can commit today', async () => {
