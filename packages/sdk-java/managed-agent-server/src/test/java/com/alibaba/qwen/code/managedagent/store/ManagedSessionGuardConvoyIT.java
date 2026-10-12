@@ -119,8 +119,24 @@ class ManagedSessionGuardConvoyIT {
                         new BlockRecoveryRequest(workspace, "writer-blocked", 1, "BLOCKED_RESOURCE", "a2-witness"))));
                 renewed.get(30, TimeUnit.SECONDS);
                 authorized.get(30, TimeUnit.SECONDS);
-                committed.get(30, TimeUnit.SECONDS);
                 blockedAgain.get(30, TimeUnit.SECONDS);
+
+                // A record commit keeps bounded placement so it serializes
+                // with lifecycle admissions (#13800 R2); under a held guard
+                // it degrades to the named failure within the hot-path bound.
+                long commitBefore = System.nanoTime();
+                assertThatThrownBy(() -> committed.get(30, TimeUnit.SECONDS))
+                        .isInstanceOf(ExecutionException.class)
+                        .satisfies(error -> {
+                            var cause = error.getCause();
+                            assertThat(cause).isInstanceOf(ApiException.class);
+                            assertThat(((ApiException) cause).getStatus())
+                                    .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                            assertThat(((ApiException) cause).getCode())
+                                    .isEqualTo("tenant_guard_contended");
+                        });
+                long commitElapsedMs = (System.nanoTime() - commitBefore) / 1_000_000;
+                assertThat(commitElapsedMs).isLessThan(25_000);
             }
 
             // The admission that legitimately fences fails fast and named.
@@ -186,13 +202,17 @@ class ManagedSessionGuardConvoyIT {
     }
 
     /**
-     * A duplicate commit parked at the head lock must replay the winner
+     * A duplicate commit parked behind the winner must replay the winner
      * once the winner commits: the retry's snapshot is only allowed to be
      * pinned after the head row is locked, or it misses the winner's
-     * transaction and the duplicate surfaces a 409 (#13800 R1).
+     * transaction and the duplicate surfaces a 409 (#13800 R1). Since R2
+     * the duplicate parks at the commit's bounded placement guard first
+     * (placement precedes the head lock on the commit path), so the wait
+     * shows on the guard row, then the head FOR UPDATE runs unblocked
+     * (#13800 R2).
      */
     @Test
-    void duplicateCommitReplaysAfterWaitingForTheHeadLock() throws Exception {
+    void duplicateCommitReplaysOnceTheWinnerReleasesItsGuards() throws Exception {
         var jdbc = new JdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
         var transactions = new TransactionTemplate(manager);
@@ -212,16 +232,24 @@ class ManagedSessionGuardConvoyIT {
 
         // The winner runs inside a held transaction: every statement has
         // executed and the head row is locked, but nothing is visible yet.
+        // Roll the hold back on any failure path: a leaked transaction here
+        // turns removeSchema's DROP DATABASE into an MDL hang.
         var winner = manager.getTransaction(new DefaultTransactionDefinition());
         var first = journalWriter.commit(request);
-        try (var pool = Executors.newSingleThreadExecutor()) {
-            var retry = pool.submit(() ->
-                    transactions.execute(ignored -> journalWriter.commit(request)));
-            awaitWaitingLock(jdbc, "qwen_managed_session_journal_head");
-            manager.commit(winner);
-            var second = retry.get(30, TimeUnit.SECONDS);
-            assertThat(second.replayed()).isTrue();
-            assertThat(second.journalRevision()).isEqualTo(first.journalRevision());
+        try {
+            try (var pool = Executors.newSingleThreadExecutor()) {
+                var retry = pool.submit(() ->
+                        transactions.execute(ignored -> journalWriter.commit(request)));
+                awaitWaitingLock(jdbc, "qwen_runtime_placement_guard");
+                manager.commit(winner);
+                var second = retry.get(30, TimeUnit.SECONDS);
+                assertThat(second.replayed()).isTrue();
+                assertThat(second.journalRevision()).isEqualTo(first.journalRevision());
+            }
+        } finally {
+            if (!winner.isCompleted()) {
+                manager.rollback(winner);
+            }
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ? AND operation = 'commitMcpRecord'",

@@ -247,8 +247,10 @@ as the existing `*MySqlIT` suites):
    (`UPDATE ... WHERE tenant_id = ?`).
 3. **Witness assertions:** with the hold in place, the other session's
    `acquireWriter` (migration-admission case) fails within ≈ guard budget
-   with the named error, and `renewWriter`, `commit`, `authorizeOrdinary`,
-   `blockRecovery` (D1-decoupled cases) complete normally; the blocked row's
+   with the named error; `renewWriter`, `authorizeOrdinary`,
+   `blockRecovery` (D1-decoupled cases) complete normally, while the
+   ordinary record `commit` fails fast with the same named error (it
+   re-acquires the placement guard bounded since R2); the blocked row's
    `recovery_status` is unchanged.
 4. Release the hold; the previously named-failing operation retries to
    success.
@@ -330,7 +332,9 @@ stale snapshot in `findTransactionByCommand` and fell into
 `managed_session_head_conflict` 409. `findHeadForUpdate` now executes the
 head `SELECT ... FOR UPDATE` first; the snapshot-dependent reads follow
 under the held lock. Witness:
-`ManagedSessionGuardConvoyIT#duplicateCommitReplaysAfterWaitingForTheHeadLock`.
+`ManagedSessionGuardConvoyIT#duplicateCommitReplaysOnceTheWinnerReleasesItsGuards`
+(renamed in R2 — the retry now parks at the commit's bounded placement
+guard before the head lock).
 
 ### F2. Boundedness must sit at each lane's first acquisition, not downstream
 
@@ -357,6 +361,51 @@ through the bounded path instead of the correct 409). `acquireWriter` now
 takes the bounded placement guard before reading the drain fence.
 Witness:
 `ManagedSessionGuardConvoyIT#writerAcquisitionOrdersPlacementBeforeTheDrainFence`.
+
+## Review corrections (R2, 2026-10-12)
+
+The two Java/MySQL CI lanes went red after the R1 push; SHA-level
+reproduction at the pre-R1 head (`134ff291da`) shows all three failures
+trace to D1 itself rather than the R1 changes. The two mechanisms are
+fixed here and pinned by witnesses.
+
+### F4. Ordinary record commits still hold the bounded placement guard
+
+D1 left `commit()` acquiring no guard at all: the ordinary branch of
+`checkLifecycleWriter` early-returns, and nothing else on the path
+touched `qwen_runtime_placement_guard`. That row is the only
+serialization point a lifecycle admission
+(`INSERT INTO qwen_runtime_placement_guard`) has against an in-flight
+record commit, so
+`ManagedAgentMySqlIT#serializesDeletionBehindTheRecordCommit` observed
+the DELETE admission race past a commit still parked on the record row.
+`commit()` now re-acquires the placement guard right after
+`checkLifecycleWriter`, through the same bounded wrapper — the
+serialization returns, and a held row still degrades to
+`tenant_guard_contended` within the hot-path budget. The convoy
+witness's `committed` arm flips with it:
+`heldTenantGuardsDoNotWedgeUnrelatedSessions` now expects that commit to
+fail fast with the named 503 inside the bound instead of completing.
+Holding the row through the record commit is exactly the serialization
+the fence needs; acquiring it bounded is what keeps a held guard a named
+failure instead of the original wedge.
+
+### F5. `acquireWriter`'s first consistent read is pinned after the CAS wait
+
+In the R1 order `WorkspaceMigrationAdmission.requireSessionOpen` — a
+plain SELECT and this transaction's first consistent read — ran before
+the CAS acquisition, so the REPEATABLE READ snapshot was pinned before
+the wait on `qwen_tool_publication_tenant`; a retirement committed
+underneath that wait stayed invisible to the later `requireLive`. The
+retention harness surfaced `managed_session_not_writable` instead of
+`tool_output_session_retired`
+(`WorkspaceSessionRetentionMySqlIT#retirementSerializesQueuedWriterAndProjectionCompletion`),
+and the O4 gate's late writer was authorized where rejection was
+required
+(`O4MySqlGate#writerReallyWaitsOnRetirementTransactionAndThenIsRejected`).
+`acquireWriter` now runs the bounded placement acquisition, the bounded
+CAS acquisition, and only then `requireSessionOpen`, so the snapshot is
+pinned after the waits and sees the winner's commit.
 
 ## Follow-ups (not in this change)
 

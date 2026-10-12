@@ -212,9 +212,10 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
    现夹具手法）。
 2. 另开一个外部 JDBC 事务持两行（`UPDATE ... WHERE tenant_id = ?`）。
 3. **见证断言**：持锁期间，另一会话的 `acquireWriter`（migration 准入
-   情形）在约守卫预算内以具名错误失败，而 `renewWriter`、`commit`、
-   `authorizeOrdinary`、`blockRecovery`（D1 断耦情形）全部正常完成；被
-   卡行的 `recovery_status` 不变。
+   情形）在约守卫预算内以具名错误失败；`renewWriter`、
+   `authorizeOrdinary`、`blockRecovery`（D1 断耦情形）正常完成，而普通
+   记录 `commit` 以同一具名错误快速失败（R2 起它重新有界获取
+   placement 守卫）；被卡行的 `recovery_status` 不变。
 4. 释放持有；先前具名失败的操作重试成功。
 5. 变异反证：恢复 `checkLifecycleWriter` 的无条件获取后 D1 情形重新被
    拖死（测试夹具由此硬编码预期调用矩阵）。
@@ -282,7 +283,9 @@ timeoutSeconds)` 重载，并为 `ToolPublicationRetentionStore.lockTenant`
 快照，看不到赢家已提交的事务，落入 `validateHead`，把幂等重试变成
 `managed_session_head_conflict` 409。`findHeadForUpdate` 现在先执行 head 行
 `SELECT ... FOR UPDATE`，依赖快照的读取均在持锁之后。见证：
-`ManagedSessionGuardConvoyIT#duplicateCommitReplaysAfterWaitingForTheHeadLock`。
+`ManagedSessionGuardConvoyIT#duplicateCommitReplaysOnceTheWinnerReleasesItsGuards`
+（R2 起改名——重试先停在 commit 的有界 placement 守卫，head 行锁在其
+后）。
 
 ### F2. 有界必须落在各车道首次获取处，而不是下游
 
@@ -304,6 +307,40 @@ placement 成环，InnoDB 以击毙 writer 化解（经有界路径浮出水面�
 非正确的 409）。`acquireWriter` 现在先取有界的 placement guard，再读 drain
 栅栏。见证：
 `ManagedSessionGuardConvoyIT#writerAcquisitionOrdersPlacementBeforeTheDrainFence`。
+
+## 评审修正（R2，2026-10-12）
+
+R1 推送后两条 Java/MySQL CI 车道转红；在 R1 前基线（`134ff291da`）上的
+SHA 级复现给出完全相同的签名，三处失败均可归因于 D1 自身而非 R1 改
+动。两处机理在本改动内修复并以见证钉住。
+
+### F4. 普通记录提交仍须持有有界的 placement 守卫
+
+D1 让 `commit()` 完全不再取守卫：`checkLifecycleWriter` 的普通分支早
+退，而这条路径上再无他处触及 `qwen_runtime_placement_guard`。该行是生
+命周期准入（`INSERT INTO qwen_runtime_placement_guard`）相对在飞记录
+提交唯一的排序点，于是
+`ManagedAgentMySqlIT#serializesDeletionBehindTheRecordCommit` 观测到
+DELETE 准入绕过仍卡在记录行上的提交径直放行。`commit()` 现在在
+`checkLifecycleWriter` 之后经同一有界封装重新获取 placement
+guard——串行关系恢复，行被持有时仍在热路径预算内退化为
+`tenant_guard_contended`。convoy 见证的 `committed` 臂随之一并翻转：
+`heldTenantGuardsDoNotWedgeUnrelatedSessions` 现在等待该提交在上界内以
+具名 503 快速失败，而非完成。记录提交持有该行正是栅栏所需的排序点；
+有界获取使被持有场景退化为具名失败而非原先的拖死。
+
+### F5. `acquireWriter` 的首个一致性读在 CAS 等待之后钉住
+
+R1 的顺序把 `WorkspaceMigrationAdmission.requireSessionOpen`——一条普
+通 SELECT、本事务的首个一致性读——排在 CAS 获取之前，REPEATABLE
+READ 的快照由此在 `qwen_tool_publication_tenant` 等待之前钉住；在该等
+待之下提交的退休对随后的 `requireLive` 不可见。retention harness 抛出
+的是 `managed_session_not_writable` 而非 `tool_output_session_retired`
+（`WorkspaceSessionRetentionMySqlIT#retirementSerializesQueuedWriterAndProjectionCompletion`），
+O4 门控的迟到 writer 在应被拒绝处径直获得授权
+（`O4MySqlGate#writerReallyWaitsOnRetirementTransactionAndThenIsRejected`）。
+`acquireWriter` 现在依次执行有界 placement 获取、有界 CAS 获取，然后
+才是 `requireSessionOpen`，快照在等待之后钉住，可见赢家的提交。
 
 ## 后续（不在本次改动）
 

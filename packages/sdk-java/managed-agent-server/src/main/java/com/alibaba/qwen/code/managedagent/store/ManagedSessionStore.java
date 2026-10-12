@@ -328,10 +328,15 @@ public class ManagedSessionStore {
         // insert drain rows only after locking placement, so checking the
         // drain first would take its gap lock and deadlock against a
         // lifecycle that already holds placement (#13800).
-        lockBounded(() -> WorkspaceMigrationAdmission.sessionAdmission(jdbc,
-                tenantId, sessionId, GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // requireSessionOpen must run after the CAS guard: it is this
+        // transaction's first consistent read, so its REPEATABLE READ
+        // snapshot only sees a retirement committed underneath the CAS wait
+        // if it is pinned after that wait (#13800 R2).
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
                 tenantId, GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, sessionId);
         if (authority != null) {
             WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, false);
         } else {
@@ -545,6 +550,13 @@ public class ManagedSessionStore {
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         checkLifecycleWriter(tenantId, sessionId, authority);
+        // Ordinary record commits still hold the placement guard while they
+        // fly: a begin/lifecycle admission serializes with only that row, so
+        // without it an admission sails through mid-commit. The acquisition
+        // stays bounded — a held row degrades to a named failure within the
+        // hot-path budget rather than waiting out the caller (#13800).
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
+                GUARD_ACQUIRE_TIMEOUT_SECONDS));
         validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);

@@ -17,14 +17,6 @@ final class WorkspaceMigrationAdmission {
         });
     }
 
-    /**
-     * Bounded variant for hot paths: the admission must not out-wait the
-     * caller's own request budget behind a held placement guard (#13800).
-     */
-    static void lockTenant(JdbcTemplate jdbc, String tenant, int timeoutSeconds) {
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenant, timeoutSeconds);
-    }
-
     static String owner(JdbcTemplate jdbc, String tenant, String storage) {
         var rows = jdbc.queryForList("SELECT tenant_id, storage_id, operation_id FROM qwen_runtime_storage_fence"
                 + " WHERE tenant_key = ? AND storage_key = ?", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
@@ -42,11 +34,6 @@ final class WorkspaceMigrationAdmission {
         if (storage != null && owner(jdbc, tenant, storage) != null) {
             throw WorkspaceExecutionStore.unavailable();
         }
-    }
-
-    static void sessionAdmission(JdbcTemplate jdbc, String tenant, String session, int timeoutSeconds) {
-        lockTenant(jdbc, tenant, timeoutSeconds);
-        requireSessionOpen(jdbc, tenant, session);
     }
 
     static void requireSessionOpen(JdbcTemplate jdbc, String tenant, String session) {
