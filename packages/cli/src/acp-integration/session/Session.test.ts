@@ -44995,6 +44995,8 @@ describe('Session', () => {
         'postprocess_tool',
         {},
         expect.objectContaining({
+          status: 'error',
+          error: expect.any(Error),
           executionStatus: 'success',
           errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
           resultDisplay: 'completed',
