@@ -22,7 +22,7 @@ MQ2 是把命名的 seam 变成接好线的传输的阶段:outbox 排出的 MQ �
 - **MQ1 seam(公开事件流)。** `CompositeCommittedEventPublisher` 是唯一的 `CommittedEventPublisher` bean——先 hub、后 `List<EventTransport>`(默认为空)、逐 transport `RuntimeException` 隔离、丢弃日志携带 tenant/session/序号身份。它只挂在公开的 `managed_agent_event` 流上。
 - **权威 journal 提交路径。** `ManagedSessionStore.commit`(`@Transactional`)把 journal 事实写入 `qwen_managed_session_journal_tx` 并推进 `qwen_managed_session_journal_head`。这条路径上**没有**任何 after-commit 发布点——设计的第二条线尚不存在,且 MQ1 的范围边界禁止把 hub seam 重新标称为覆盖它。
 - **信封契约(#13498)。** 已冻结的 TS 契约(`managed-event-envelope-v1.schema.json` + fixtures):十个字段(`v`、`tenantId`、`workspaceId`、`sessionId`、`stream`、`sequence`、`eventId`、`kind`、`occurredAt`、`payloadRef.digest`)、禁用字段集、封闭对象。v1 的 stream 词表**只**列 `authoritative_journal`。**Java 镜像尚不存在**——一个重命名信封键或改动摘要规范化方式的 Java 生产者会通过现有的每一个测试(#13927 评审 R1-3)。Java fixture 消费方的房屋先例已存在(`ManagedMcpRecordContractTest` 等直接读 `packages/core/src/managed-runtime/contracts/*.fixtures.json`)。
-- **全 `sdk-java` 无 RocketMQ/gRPC 依赖。** 引入 `org.apache.rocketmq:rocketmq-client-java:5.1.0` 会传递拉入 gRPC/protobuf/guava;Spring Boot 3.5.16 BOM 会把这些对齐到它自己的版本,因此客户端钉死的 gRPC 与 Boot 对齐的 gRPC 之间的兼容性必须在生产者切片落地前证明。
+- **全 `sdk-java` 无 RocketMQ/gRPC 依赖。** 要引入的客户端 `org.apache.rocketmq:rocketmq-client-java:5.1.0` 是 **shaded** 制品：其构建把 `io.grpc`、`com.google` relocate 进私有命名空间（其 README 将其与 `noshade` 变体区分开），因此 Spring Boot BOM 绝不会重新对齐这些内嵌类，也没有版本冲突需要证伪。门禁由此是实证的而非版本表驱动的：加入 shaded 制品，证明依赖树与打包保持干净，且服务能启动并对真实 broker 完成一次收发。
 - **outbox 先例。** SQL 侧 drain 循环已存在(`SessionMessageRelayStore`、`ChildResultRelayStore`、`ManagedExtensionRecordStore` 的 delivery line)——MQ 生产者是同一纪律上的时延缩短器,绝不是真相。
 
 ## 设计:四个子切片
@@ -35,15 +35,15 @@ MQ2 是把命名的 seam 变成接好线的传输的阶段:outbox 排出的 MQ �
 
 ### MQ2b——journal 事实发布点 + LiteTopic 生产者
 
-加权威线:在 `ManagedSessionStore.commit` 上加 after-commit 发布点,把已提交的 journal 事实交给传输方;并实现 `LiteTopicEventTransport`,经 `rocketmq-client-java`(gRPC)发布 `authoritative_journal` 信封,收在 `qwen.managed-agent.event-transport.enabled`(默认关)之后。依赖兼容性证明(Boot 对齐的 gRPC 对客户端钉死的 gRPC)是本切片的门禁。broker 能力校验在启动时运行,不匹配即 fail fast(#13200 硬化)。
+加权威线:在 `ManagedSessionStore.commit` 上加 after-commit 发布点,把已提交的 journal 事实交给传输方;并实现 `LiteTopicEventTransport`,经 `rocketmq-client-java`(gRPC)发布 `authoritative_journal` 信封,收在 `qwen.managed-agent.event-transport.enabled`(默认关)之后。依赖证明是实证的而非版本表驱动的:shaded 制品的依赖树打包干净,且服务能启动并对真实 broker 完成一次收发。broker 能力校验在启动时运行,不匹配即 fail fast(#13200 硬化)。
 
 ### MQ2c——公开事件线 + 唤醒/物化消费者
 
-扩展已冻结的信封词表,加入 `public_event` 流(MQ1 seam 所在通道所需的、有跟踪的契约扩展),然后由第二个 `EventTransport` 实现把公开 `managed_agent_event` 流(MQ1 seam 所在通道)以 `public_event` 信封承载;两个消费者角色落地:唤醒消费者经 Session Authority 围栏尝试激活,物化消费者触发现有 `MessageMaterializer` 路径。消费者拓扑遵循 §11 路由决策:待激活唤醒走共享 bootstrap 组,加 owner 侧按 Session 动态订阅。每个消费者以 `(tenantId, sessionId, stream, sequence)` 对照 SQL 水位去重。
+扩展已冻结的信封词表,加入 `public_event` 流(MQ1 seam 所在通道所需的、有跟踪的契约扩展),然后由第二个 `EventTransport` 实现把公开 `managed_agent_event` 流(MQ1 seam 所在通道)以 `public_event` 信封承载;两个消费者角色落地:唤醒消费者经 Session Authority 围栏尝试激活,物化消费者触发现有 `MessageMaterializer` 路径。消费者拓扑遵循 §11 路由决策:待激活唤醒走共享 bootstrap 组,加 owner 侧按 Session 动态订阅。每个消费者以 `(tenantId, sessionId, stream, sequence)` 对照 SQL 水位去重。交接窗口期旧订阅可能短暂共存(租约到期而未干净退订);旧订阅者被围栏拒绝的空操作 ACK 仍会推进组位点,新 owner 可能错过该次通知,必须靠 SQL 对账恢复该待办——绝不能假设 MQ 已送达。
 
 ### MQ2d——CI 中的真实 broker E2E
 
-新增 failsafe profile + 带 RocketMQ 5.5.1 service 容器的 CI 作业,跑 MQ2 退出检查点名的 §8 故障注入行:重复与乱序注入均为无操作,post-commit SSE 延迟 p95 不回退,flag 关闭的部署字节级一致。本机无容器运行时,因此本切片按构造只属于 CI/云环境。
+新增 failsafe profile + 带 RocketMQ 5.5.1 service 容器的 CI 作业,跑 MQ2 退出检查点名的 §8 故障注入行:重复与乱序注入均为无操作,post-commit SSE 延迟 p95 不回退,flag 关闭的部署字节级一致。其中一条验收行是 owner 交接窗口:旧订阅与新 owner 共存时,旧 owner 不执行副作用且 ACK,新 owner 在未收到该 MQ 通知的情况下仍由 SQL 对账发现并处理待办。本机无容器运行时,因此本切片按构造只属于 CI/云环境。
 
 ## 关键决策
 
@@ -64,4 +64,4 @@ MQ2 是把命名的 seam 变成接好线的传输的阶段:outbox 排出的 MQ �
 - MQ2a:fixture 文件中某个信封键被重命名、或某个禁用字段反例被接受时,Java fixture 消费方必须变红。
 - MQ2b:flag 关闭的部署字节级一致;flag 开启时真实 broker 能收到信封(单 broker,预发或 CI)。
 - MQ2c:消费者去重使重投递的信封成为无操作;对已围栏 Session 的过期唤醒是无操作。
-- MQ2d:MQ2 退出检查点名的 §8 故障行在 CI 中全绿。
+- MQ2d:MQ2 退出检查点名的 §8 故障行在 CI 中全绿,含 owner 交接恢复行——旧 owner 的空操作 ACK 推进组位点,新 owner 在未收到该 MQ 通知的情况下仍由 SQL 对账发现并处理待办。

@@ -51,11 +51,15 @@ Read on `23add5ef9d` (2026-10-12, main tip after #13933).
   #13927). The house pattern for a Java fixture consumer exists
   (`ManagedMcpRecordContractTest` and siblings read
   `packages/core/src/managed-runtime/contracts/*.fixtures.json` directly).
-- **No RocketMQ/gRPC dependency anywhere** in `sdk-java`. Adding
-  `org.apache.rocketmq:rocketmq-client-java:5.1.0` pulls gRPC/protobuf/guava
-  transitively; the Spring Boot 3.5.16 BOM manages those to its own aligned
-  versions, so the client's pinned gRPC and Boot's aligned gRPC must be
-  proven compatible before the producer slice lands.
+- **No RocketMQ/gRPC dependency anywhere** in `sdk-java`. The client to add
+  is `org.apache.rocketmq:rocketmq-client-java:5.1.0`, which is a **shaded**
+  artifact: its build relocates `io.grpc` and `com.google` into private
+  namespaces (its README distinguishes it from the `noshade` variant), so the
+  Spring Boot BOM never re-aligns those embedded classes and there is no
+  version conflict to disprove. The gate is therefore empirical, not
+  version-table-based: add the shaded artifact, prove the dependency tree and
+  packaging stay clean, and prove the server starts and round-trips a message
+  against a real broker.
 - **Outbox precedents.** SQL-side drain loops already exist
   (`SessionMessageRelayStore`, `ChildResultRelayStore`,
   `ManagedExtensionRecordStore`'s delivery line) — the MQ producer is a
@@ -86,8 +90,9 @@ Add the authoritative wire: an after-commit publication point on
 transport, and a `LiteTopicEventTransport` implementation publishing
 `authoritative_journal` envelopes via `rocketmq-client-java` (gRPC), behind
 `qwen.managed-agent.event-transport.enabled` (default off). The dependency
-compatibility proof (Boot-aligned gRPC vs the client's pinned gRPC) is this
-slice's gate. The broker capability check runs at startup and fails fast on
+proof is empirical, not version-table-based: the shaded artifact's tree
+packages cleanly and the server starts and round-trips a message against a
+real broker. The broker capability check runs at startup and fails fast on
 mismatch (#13200 hardening).
 
 ### MQ2c — public-event wire + wake/materialization consumers
@@ -101,15 +106,24 @@ Session Authority fence, and a materialization consumer triggering the
 existing `MessageMaterializer` path. Consumer topology follows the §11
 routing decision: a shared bootstrap group for pending-activation wakes plus
 owner-side dynamic per-Session subscription. Every consumer dedups on
-`(tenantId, sessionId, stream, sequence)` against the SQL watermark.
+`(tenantId, sessionId, stream, sequence)` against the SQL watermark. During
+an owner handoff a stale subscription can coexist briefly (lease expiry
+without a clean unsubscribe); the stale subscriber's fenced no-op ACK still
+advances the group offset, so the new owner can miss that notification and
+must recover the pending item by SQL reconciliation — never by assuming the
+MQ delivered it.
 
 ### MQ2d — real-broker E2E in CI
 
 A new failsafe profile plus a CI job with a RocketMQ 5.5.1 service
 container, running the §8 fault-injection rows that MQ2's exit check names:
 duplicate and reorder injection are no-ops, post-commit SSE latency p95 does
-not regress, and a flag-off deployment is byte-identical. The local machine
-has no container runtime, so this slice is CI/cloud only by construction.
+not regress, and a flag-off deployment is byte-identical. One acceptance row
+is the owner-handoff window: with a stale subscription and a new owner
+coexisting, the old owner does no side effect and ACKs, and the new owner
+still discovers and processes the pending item via SQL reconciliation without
+receiving the MQ notification. The local machine has no container runtime, so
+this slice is CI/cloud only by construction.
 
 ## Key decisions
 
@@ -147,4 +161,8 @@ has no container runtime, so this slice is CI/cloud only by construction.
   real broker receives (single-broker, staging or CI).
 - MQ2c: consumer dedup makes a redelivered envelope a no-op; a stale wake
   for a fenced Session is a no-op.
-- MQ2d: the §8 fault rows named by the MQ2 exit check run green in CI.
+- MQ2d: the §8 fault rows named by the MQ2 exit check run green in CI,
+  including the owner-handoff recovery row — the old owner's fenced no-op
+  ACK advances the group offset, and the new owner still discovers and
+  processes the pending item via SQL reconciliation without the MQ
+  notification.
