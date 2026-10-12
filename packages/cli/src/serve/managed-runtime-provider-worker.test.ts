@@ -34,6 +34,7 @@ import {
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
 import type {
   ManagedToolCallIdentity,
+  ManagedToolConfirmationDetails,
   ManagedToolInvocationReference,
   ManagedToolPrepareResponse,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
@@ -1580,7 +1581,7 @@ const timer = setInterval(() => {
       ),
     );
     const limit = managedRuntimeProviderLimit('confirmation');
-    const oversizedConfirmation = {
+    const oversizedConfirmation: ManagedToolConfirmationDetails = {
       type: 'edit',
       title: 'Edit',
       fileName: 'large.txt',
@@ -1590,10 +1591,8 @@ const timer = setInterval(() => {
       newContent: 'n'.repeat(limit / 2),
       hideModify: false,
     };
-    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockReturnValue(
-      oversizedConfirmation as unknown as ReturnType<
-        ManagedToolRuntime['confirmation']
-      >,
+    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockResolvedValue(
+      oversizedConfirmation,
     );
     const response = await post({ kind: 'confirmation', reference: ref });
     expect(response.status).toBe(200);
@@ -1616,16 +1615,14 @@ const timer = setInterval(() => {
       await prepare('run_shell_command', { command: 'echo hello\n' }, 'exec'),
     );
     const limit = managedRuntimeProviderLimit('confirmation');
-    const oversizedConfirmation = {
+    const oversizedConfirmation: ManagedToolConfirmationDetails = {
       type: 'exec',
       title: 'Run command',
       command: 'echo ' + 'x'.repeat(limit * 2),
       rootCommand: 'echo',
     };
-    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockReturnValue(
-      oversizedConfirmation as unknown as ReturnType<
-        ManagedToolRuntime['confirmation']
-      >,
+    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockResolvedValue(
+      oversizedConfirmation,
     );
     const response = await post({ kind: 'confirmation', reference: ref });
     expect(response.status).toBe(200);
@@ -1649,7 +1646,10 @@ const timer = setInterval(() => {
       await prepare('run_shell_command', { command: 'echo hello\n' }, 'exec'),
     );
     const limit = managedRuntimeProviderLimit('confirmation');
-    const mcpConfirmation: Record<string, unknown> = {
+    const mcpConfirmation: Extract<
+      ManagedToolConfirmationDetails,
+      { type: 'mcp' }
+    > = {
       type: 'mcp',
       title: 'Call Tool',
       serverName: 'mcp-server',
@@ -1657,12 +1657,10 @@ const timer = setInterval(() => {
       toolDisplayName: 'Tool',
     };
     const padding = limit - Buffer.byteLength(JSON.stringify(mcpConfirmation));
-    mcpConfirmation.toolName = 'x'.repeat(padding);
+    mcpConfirmation['toolName'] = 'x'.repeat(padding);
     expect(Buffer.byteLength(JSON.stringify(mcpConfirmation))).toBe(limit);
-    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockReturnValue(
-      mcpConfirmation as unknown as ReturnType<
-        ManagedToolRuntime['confirmation']
-      >,
+    vi.spyOn(ManagedToolRuntime.prototype, 'confirmation').mockResolvedValue(
+      mcpConfirmation,
     );
     const response = await post({ kind: 'confirmation', reference: ref });
     expect(response.status).toBe(413);
