@@ -812,10 +812,16 @@ public final class LocalProcessRuntimeProvisioner
         if (!process.process.isAlive()) {
             // The worker is provably gone; holding its entry would leak the
             // ownership record for the broker's lifetime, while dropping the
-            // fact entirely would make the NOT_FOUND verdict one-shot.
-            owned.remove(ownershipKey(lastLease), process);
-            reaped.put(tombstone(ownershipKey(lastLease)),
-                    process.process.pid());
+            // fact entirely would make the NOT_FOUND verdict one-shot. Reap
+            // under stop()'s monitor, and only when the remove lands: a
+            // release that already moved the entry out also cleared the
+            // tombstone, and re-putting one here would outlive that clear.
+            synchronized (lifecycle) {
+                if (owned.remove(ownershipKey(lastLease), process)) {
+                    reaped.put(tombstone(ownershipKey(lastLease)),
+                            process.process.pid());
+                }
+            }
             if (handle == null) {
                 return RuntimeObservation.notFound();
             }

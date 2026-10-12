@@ -756,6 +756,71 @@ class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
+    void releaseRacingADeadWorkerReapNeverResurrectsTheTombstone()
+            throws Exception {
+        requireNode();
+        Path script = Path.of("src/test/resources/fake-attestation-worker.mjs")
+                .toAbsolutePath();
+        assumeTrue(Files.isRegularFile(script));
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
+                "/runtime/workspace", DIGEST, "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope, null, LocalProcessRuntimeProvisioner.KIND);
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "binding-1", 1);
+        Set<Long> before = childPids();
+        try (LocalProcessRuntimeProvisioner provisioner =
+                new LocalProcessRuntimeProvisioner(
+                        List.of("node", script.toString()),
+                        Path.of("").toAbsolutePath(),
+                        new HttpRuntimeTransport())) {
+            RuntimeResourceHandle handle = provisioner
+                    .ensureResource(request, seed, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            RuntimeLease lease = provisioner.provision(request, seed)
+                    .toCompletableFuture().get(30, TimeUnit.SECONDS);
+            ProcessHandle worker = ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .findFirst().orElseThrow();
+            worker.destroyForcibly();
+            worker.onExit().get(10, TimeUnit.SECONDS);
+            // Park the dead-worker observation between its liveness check and
+            // its reap, so the release provably lands in between: stop()
+            // removes the owned entry and clears the tombstone before the
+            // racing observe() gets to move anything.
+            var owned = ownedEntries(provisioner);
+            List<Object> key = List.of(lease.getRuntimeInstanceId(),
+                    lease.getEndpoint(), lease.getLeaseId(), lease.getEpoch(),
+                    lease.getToken());
+            Object registered = java.util.Objects.requireNonNull(
+                    owned.get(key), "provisioned worker must be owned");
+            BlockingExitProcess parked = new BlockingExitProcess(worker.pid());
+            owned.put(key, ownedProcess(registered, parked, seed));
+            java.util.concurrent.CompletableFuture<RuntimeObservation> racing =
+                    provisioner.reconcile(request, seed, handle, lease)
+                            .toCompletableFuture();
+            assertTrue(parked.livenessCheckStarted.await(10,
+                    TimeUnit.SECONDS));
+            provisioner.release(request, lease).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+            parked.finishLivenessCheck.countDown();
+            racing.get(10, TimeUnit.SECONDS);
+            // The release cleared the lease for good: no reaped tombstone may
+            // survive it, so the next read is UNKNOWN, never NOT_FOUND.
+            RuntimeObservation released = provisioner
+                    .reconcile(request, seed, handle, lease)
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeObservation.Outcome.UNKNOWN,
+                    released.getOutcome());
+        } finally {
+            ProcessHandle.current().children()
+                    .filter(process -> !before.contains(process.pid()))
+                    .forEach(ProcessHandle::destroyForcibly);
+            assertNoNewChildren(before);
+        }
+    }
+
+    @Test
     void tombstoneRetainsNoLeaseMaterialAcrossTheWholeIdentity()
             throws Exception {
         requireNode();
@@ -922,6 +987,93 @@ class LocalProcessRuntimeProvisionerTest {
             process.destroyForcibly();
         }
         return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static java.util.concurrent.ConcurrentMap<List<Object>, Object> ownedEntries(
+            LocalProcessRuntimeProvisioner provisioner) throws Exception {
+        var field = LocalProcessRuntimeProvisioner.class
+                .getDeclaredField("owned");
+        field.setAccessible(true);
+        return (java.util.concurrent.ConcurrentMap<List<Object>, Object>)
+                field.get(provisioner);
+    }
+
+    private static Object ownedProcess(Object registered, Process process,
+            RuntimeProvisionSeed seed) throws Exception {
+        var constructor = registered.getClass().getDeclaredConstructor(
+                Process.class, LocalRuntimeStore.Registration.class,
+                RuntimeProvisionSeed.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(process, null, seed);
+    }
+
+    /** A dead worker whose liveness check blocks until the test releases it. */
+    private static final class BlockingExitProcess extends Process {
+        private final java.util.concurrent.CountDownLatch
+                livenessCheckStarted = new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.CountDownLatch
+                finishLivenessCheck = new java.util.concurrent.CountDownLatch(1);
+        private final long pid;
+
+        BlockingExitProcess(long pid) {
+            this.pid = pid;
+        }
+
+        @Override
+        public boolean isAlive() {
+            livenessCheckStarted.countDown();
+            try {
+                finishLivenessCheck.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            return false;
+        }
+
+        @Override
+        public long pid() {
+            return pid;
+        }
+
+        @Override
+        public boolean waitFor(long timeout, TimeUnit unit) {
+            return true;
+        }
+
+        @Override
+        public int waitFor() {
+            return 0;
+        }
+
+        @Override
+        public int exitValue() {
+            return 0;
+        }
+
+        @Override
+        public void destroy() {
+        }
+
+        @Override
+        public Process destroyForcibly() {
+            return this;
+        }
+
+        @Override
+        public java.io.OutputStream getOutputStream() {
+            return java.io.OutputStream.nullOutputStream();
+        }
+
+        @Override
+        public java.io.InputStream getInputStream() {
+            return java.io.InputStream.nullInputStream();
+        }
+
+        @Override
+        public java.io.InputStream getErrorStream() {
+            return java.io.InputStream.nullInputStream();
+        }
     }
 
     /**

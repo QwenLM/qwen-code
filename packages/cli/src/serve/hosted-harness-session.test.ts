@@ -5603,7 +5603,7 @@ describe('Hosted Harness no-tool session', () => {
     expect(wrongTenant.status).toBe(409);
     const wrongStore = await load({
       ...store(),
-      baseUrl: 'http://another-store.test',
+      baseUrl: 'https://another-store.test',
     });
     expect(wrongStore.status).toBe(409);
     expect(wrongStore.body.code).toBe('hosted_session_store_mismatch');

@@ -839,6 +839,8 @@ class RuntimeBrokerHttpServerTest {
         InMemoryToolExecutionRepository inner = new InMemoryToolExecutionRepository(Clock.systemUTC());
         AtomicBoolean failing = new AtomicBoolean(true);
         AtomicReference<String> failingMethod = new AtomicReference<>("findByIdempotencyKey");
+        AtomicReference<Throwable> outage = new AtomicReference<>(
+                JdbcRepositorySupport.failure(new java.sql.SQLException("simulated outage")));
         List<String> intercepted = java.util.Collections.synchronizedList(
                 new java.util.ArrayList<>());
         ToolExecutionRepository gate = (ToolExecutionRepository) Proxy.newProxyInstance(
@@ -847,7 +849,7 @@ class RuntimeBrokerHttpServerTest {
                 (proxy, method, args) -> {
                     if (failing.get() && failingMethod.get().equals(method.getName())) {
                         intercepted.add(method.getName());
-                        throw new IllegalStateException("Runtime Broker database operation failed");
+                        throw outage.get();
                     }
                     return method.invoke(inner, args);
                 });
@@ -909,12 +911,50 @@ class RuntimeBrokerHttpServerTest {
             var cancelError = JSON.parseObject(cancelled.body());
             assertEquals("runtime_broker_store_unavailable", cancelError.getString("code"));
             assertTrue(cancelError.getBooleanValue("retryable"));
+            // A permanent invariant violation is not a store outage: it keeps
+            // the non-retryable 500 the HTTP layer gives any other failure.
+            outage.set(new IllegalStateException("Tool idempotency hash is invalid"));
+            failingMethod.set("findByIdempotencyKey");
+            Map<String, Object> invariantBody = new HashMap<>(body);
+            invariantBody.put("requestId", "invariant");
+            invariantBody.put("idempotencyKey", "invariant-key");
+            HttpResponse<String> invariant = fixture.post("/executions:prepare", invariantBody);
+            assertEquals(500, invariant.statusCode(), invariant.body());
+            var invariantError = JSON.parseObject(invariant.body());
+            assertEquals("runtime_broker_internal_error", invariantError.getString("code"));
+            assertFalse(invariantError.getBooleanValue("retryable"));
             // Nothing landed or changed while the store was failing, and the
             // gate intercepted only the intended call on each route.
             assertSame(landed, inner.findByExecutionCallId(executionCallId));
             assertEquals(List.of("findByIdempotencyKey", "findByExecutionCallId",
-                    "findByExecutionCallId", "findByExecutionCallId", "findByExecutionCallId"),
+                    "findByExecutionCallId", "findByExecutionCallId", "findByExecutionCallId",
+                    "findByIdempotencyKey"),
                     intercepted);
+        }
+    }
+
+    @Test
+    void startWithAnUnencodablePayloadKeepsItsClientInputMapping() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            String payload = "{\"toolName\":\"write_file\",\"input\":{\"x\":1e309}}";
+            String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(StandardCharsets.UTF_8)));
+            HttpResponse<String> reserved = fixture.post("/executions:prepare", Map.of(
+                    "protocolVersion", 1, "requestId", "prepare", "idempotencyKey", "key",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime", "turnId", "turn",
+                    "toolCallId", "call", "requestDigest", digest,
+                    "reference", Map.of("sessionId", "runtime", "promptId", "turn",
+                            "callId", "call", "argsDigest", digest)));
+            assertEquals(200, reserved.statusCode(), reserved.body());
+            String executionCallId = JSON.parseObject(reserved.body()).getString("executionCallId");
+            HttpResponse<String> started = fixture.post("/executions/" + executionCallId + ":start", Map.of(
+                    "protocolVersion", 1, "requestId", "start", "harnessSessionId", "harness",
+                    "runtimeSessionId", "runtime", "payloadJson", payload));
+            assertEquals(400, started.statusCode(), started.body());
+            var error = JSON.parseObject(started.body());
+            assertEquals("runtime_broker_invalid_request", error.getString("code"));
+            assertFalse(error.getBooleanValue("retryable"));
         }
     }
 
