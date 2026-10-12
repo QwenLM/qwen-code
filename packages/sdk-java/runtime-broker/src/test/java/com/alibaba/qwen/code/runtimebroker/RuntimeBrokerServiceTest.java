@@ -50,6 +50,46 @@ class RuntimeBrokerServiceTest {
             "capability", "session");
 
     @Test
+    void cleanupBeforeAcquireTombstonesTheOriginalOwnerWithoutAcquiringALease() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeBindingRecord binding = join(fixture.service.warm("harness-a"));
+            assertTrue(join(fixture.service.releaseOriginal("harness-a", "runtime-a", binding.getBindingId(), binding.getGeneration())));
+            assertTrue(join(fixture.service.releaseOriginal("harness-a", "runtime-a", binding.getBindingId(), binding.getGeneration())));
+            assertEquals(RuntimeSessionRecord.State.RELEASED, fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a").getState());
+            assertEquals(0, fixture.transport.acquireCalls.get());
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals("runtime_session_not_acquirable", failure(fixture.service.acquire("harness-a", "runtime-a", "bootstrap")).getCode());
+            assertEquals(0, fixture.transport.acquireCalls.get());
+        }
+    }
+
+    @Test
+    void cleanupBeforeAcquireRemainsAvailableAfterAdmissionCloses() {
+        for (var state : List.of(RuntimeBindingRecord.State.READY, RuntimeBindingRecord.State.DRAINING)) {
+            try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+                RuntimeBindingRecord binding = join(fixture.service.warm("harness-a"));
+                binding = fixture.bindingRepository.findById(binding.getBindingId());
+                binding = fixture.bindingRepository.compareAndSet(binding,
+                        binding.withState(state, binding.getLease(), START).withDrainRequested(true, START));
+                assertTrue(join(fixture.service.releaseOriginal("harness-a", "runtime-a",
+                        binding.getBindingId(), binding.getGeneration())));
+                assertTrue(join(fixture.service.releaseOriginal("harness-a", "runtime-a",
+                        binding.getBindingId(), binding.getGeneration())));
+                assertEquals(RuntimeSessionRecord.State.RELEASED,
+                        fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a").getState());
+                assertEquals(0, fixture.transport.acquireCalls.get());
+                assertEquals(0, fixture.transport.releaseCalls.get());
+                fixture.bindingRepository.compareAndSet(binding,
+                        binding.withState(RuntimeBindingRecord.State.READY, binding.getLease(), START)
+                                .withDrainRequested(false, START));
+                assertEquals("runtime_session_not_acquirable",
+                        failure(fixture.service.acquire("harness-a", "runtime-a", "bootstrap")).getCode());
+                assertEquals(0, fixture.transport.acquireCalls.get());
+            }
+        }
+    }
+
+    @Test
     void coldReleaseRejectsHistoricalAmbiguityWithAStableConflict() {
         var target = new RuntimeScope("tenant", "workspace", "generation", "/target",
                 "capability", "workspace");
@@ -1727,6 +1767,15 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void monitorWatchHoldsItsRuntimeLikeABackgroundShell() throws Exception {
+        verifyMonitorHoldRelease(false);
+    }
+
+    @Test
+    void originalOwnerFencePreservesTheHoldAndAllowsOnlyExplicitDrain() throws Exception {
+        verifyMonitorHoldRelease(true);
+    }
+
+    private void verifyMonitorHoldRelease(boolean originalFence) throws Exception {
         // The Monitor family rides the same hold-row shape as the Shell: a
         // routine release answers held and stops nothing, the drain issues
         // the watch's stop through its own maintenance kinds (#13856).
@@ -1753,8 +1802,8 @@ class RuntimeBrokerServiceTest {
                                 "bindingGeneration", "1"));
             }
         };
-        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
-            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+        try (Fixture fixture = new Fixture(originalFence ? SESSION_SCOPE : WORKSPACE_SCOPE, verifier)) {
+            RuntimeSessionRecord owner = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
             Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
                     "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
             fixture.transport.executeV3Result = CompletableFuture.completedFuture(
@@ -1777,7 +1826,10 @@ class RuntimeBrokerServiceTest {
                     .completedFuture(Map.of("operationId", "call", "state", "running",
                             "unitName", "qwen-mon-call"));
             assertEquals("runtime_session_held",
-                    failure(fixture.service.release("harness", "runtime")).getCode());
+                    failure(originalFence
+                            ? fixture.service.releaseOriginal("harness", "runtime", owner.getBindingId(),
+                                    owner.getRuntimeGeneration(), null, false)
+                            : fixture.service.release("harness", "runtime")).getCode());
             assertEquals(java.util.List.of("monitor-status"),
                     fixture.transport.controls.stream()
                             .map(each -> (String) each.get("kind")).toList());
@@ -1796,7 +1848,15 @@ class RuntimeBrokerServiceTest {
                                     "evidence", Map.of("exitSignal", "SIGTERM"))
                             : Map.of("operationId", "call", "state", "running",
                                     "unitName", "qwen-mon-call"));
-            assertTrue(join(fixture.service.release("harness", "runtime", true)));
+            if (originalFence) {
+                assertEquals("runtime_session_conflict", failure(fixture.service.releaseOriginal(
+                        "harness", "runtime", owner.getBindingId(), owner.getRuntimeGeneration() + 1, null, true)).getCode());
+                assertEquals(0, fixture.transport.releaseCalls.get());
+            }
+            assertTrue(join(originalFence
+                    ? fixture.service.releaseOriginal("harness", "runtime", owner.getBindingId(),
+                            owner.getRuntimeGeneration(), null, true)
+                    : fixture.service.release("harness", "runtime", true)));
             assertEquals(java.util.List.of("monitor-status", "monitor-stop"),
                     fixture.transport.controls.stream()
                             .map(each -> (String) each.get("kind")).toList());

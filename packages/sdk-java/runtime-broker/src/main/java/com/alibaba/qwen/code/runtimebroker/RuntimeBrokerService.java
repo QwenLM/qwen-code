@@ -61,7 +61,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
     // inside this window; sequential observations share the one lookup.
     static final Duration UNKNOWN_LOOKUP_COOLDOWN =
             Duration.ofSeconds(1);
-    /** Floor for {@code v3ResultWindow}: rejects a duration bound as milliseconds. */
+    /**
+     * Floor for {@code v3ResultWindow}: refuses sub-second durations. The
+     * managed-agent-server property declares {@code @DurationUnit(SECONDS)},
+     * so a suffix-less override there binds as seconds and its startup
+     * sweep warns on the bare number — always write the suffix. A consumer
+     * binding its own {@code Duration} without that annotation gets Spring
+     * Boot's millisecond default instead; this module performs no config
+     * binding and runs no startup sweep, so such callers must validate
+     * their own window.
+     */
     public static final Duration MIN_V3_RESULT_WINDOW = Duration.ofSeconds(1);
     private static final Duration DEFAULT_V3_RESULT_WINDOW =
             Duration.ofMinutes(30);
@@ -260,10 +269,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
         this.v3ResultWindow = requireDuration(v3ResultWindow,
                 "v3ResultWindow");
         if (this.v3ResultWindow.compareTo(MIN_V3_RESULT_WINDOW) < 0) {
-            // A suffix-less duration config binds as milliseconds, so a
-            // window meant as "30" minutes arrives as 30ms and would
-            // silently degrade every v3 execution to UNKNOWN. Refuse values
-            // below a floor no intended configuration lands under.
+            // In managed-agent-server a suffix-less override binds as
+            // seconds, so the floor refuses only sub-second values; a
+            // stale milliseconds-style override passes as that many
+            // seconds. Refuse values below a floor no intended
+            // configuration lands under.
             throw new IllegalArgumentException(
                     "v3ResultWindow must be at least "
                             + MIN_V3_RESULT_WINDOW);
@@ -1685,6 +1695,41 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             context, parent, row))
                     .exceptionally(failure -> null);
         }
+    }
+
+    public CompletionStage<Boolean> releaseOriginal(String harnessSessionId, String runtimeSessionId,
+            String bindingId, long generation) {
+        return releaseOriginal(harnessSessionId, runtimeSessionId, bindingId, generation, null);
+    }
+
+    public CompletionStage<Boolean> releaseOriginal(String harnessSessionId, String runtimeSessionId,
+            String bindingId, long generation, RuntimeLifecycleAuthority authority) {
+        return releaseOriginal(harnessSessionId, runtimeSessionId, bindingId, generation, authority, false);
+    }
+
+    public CompletionStage<Boolean> releaseOriginal(String harnessSessionId, String runtimeSessionId,
+            String bindingId, long generation, RuntimeLifecycleAuthority authority, boolean drain) {
+        requireOpen();
+        RuntimeBindingRecord binding = bindingRepository.findById(bindingId);
+        if (binding == null || binding.getGeneration() != generation
+                || !harnessSessionId.equals(binding.getRequest().getIsolationKey())
+                || !"session".equals(binding.getRequest().getScope().getIsolationClass())) {
+            return failed(conflict("runtime_session_conflict", "Cleanup owner differs from original binding"));
+        }
+        RuntimeSessionRecord stored = sessionRepository.findById(binding.getRequest().getScope(), runtimeSessionId);
+        if (stored == null) {
+            // Admission and this tombstone serialize under the binding lock. A late
+            // acquire must observe RELEASED instead of creating a new owner.
+            stored = bindingRepository.createSessionTombstone(sessionRepository, new RuntimeSessionRecord(
+                    new RuntimeSession(harnessSessionId, runtimeSessionId, "bootstrap", binding.getRequest().getScope().withLifecycleAuthority(authority)),
+                    bindingId, generation, RuntimeSessionRecord.State.RELEASED, 0, clock.instant()));
+        }
+        if (!bindingId.equals(stored.getBindingId()) || stored.getRuntimeGeneration() != generation
+                || !harnessSessionId.equals(stored.getSession().getHarnessSessionId())) {
+            return failed(conflict("runtime_session_conflict", "Cleanup owner differs from original Session"));
+        }
+        return stored.getState() == RuntimeSessionRecord.State.RELEASED
+                ? CompletableFuture.completedFuture(true) : release(harnessSessionId, runtimeSessionId, drain);
     }
 
     /**
