@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -23,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -235,6 +237,40 @@ public final class JdbcRepositoryContract {
                 ResultSet result = query.executeQuery()) {
             assertTrue(result.next());
             assertEquals(1, result.getLong(1));
+        }
+        assertHarnessHoldIndex(dataSource);
+    }
+
+    /** The #13930 harness-scoped active-holds read pages by
+     * (harness_session_id, execution_call_id_hash) once per Session load over
+     * an append-only ledger: the fresh schema and every upgrade path must
+     * carry the composite index, with the equality column leading. */
+    private static void assertHarnessHoldIndex(DataSource dataSource)
+            throws SQLException {
+        try (Connection connection = dataSource.getConnection()) {
+            DatabaseMetaData metadata = connection.getMetaData();
+            String table = metadata.storesUpperCaseIdentifiers()
+                    ? "QWEN_TOOL_EXECUTION"
+                    : "qwen_tool_execution";
+            TreeMap<Short, String> columns = new TreeMap<>();
+            try (ResultSet indexes = metadata.getIndexInfo(
+                    connection.getCatalog(), null, table, false, false)) {
+                while (indexes.next()) {
+                    if ("idx_tool_execution_harness".equalsIgnoreCase(
+                            indexes.getString("INDEX_NAME"))) {
+                        columns.put(indexes.getShort("ORDINAL_POSITION"),
+                                indexes.getString("COLUMN_NAME"));
+                    }
+                }
+            }
+            assertEquals(
+                    List.of("HARNESS_SESSION_ID", "EXECUTION_CALL_ID_HASH"),
+                    columns.values().stream()
+                            .map(name -> name.toUpperCase(
+                                    java.util.Locale.ROOT))
+                            .toList(),
+                    "qwen_tool_execution lacks idx_tool_execution_harness"
+                            + " (harness_session_id, execution_call_id_hash)");
         }
     }
 

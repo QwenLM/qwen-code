@@ -169,7 +169,9 @@ CREATE TABLE IF NOT EXISTS qwen_tool_execution (
     INDEX idx_tool_execution_session
         (runtime_session_key, execution_state),
     INDEX idx_tool_execution_binding
-        (binding_id, runtime_generation, execution_state)
+        (binding_id, runtime_generation, execution_state),
+    INDEX idx_tool_execution_harness
+        (harness_session_id, execution_call_id_hash)
 );
 
 CREATE TABLE IF NOT EXISTS qwen_runtime_harness_drain (

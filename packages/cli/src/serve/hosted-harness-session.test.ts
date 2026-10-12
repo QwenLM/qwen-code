@@ -7633,6 +7633,165 @@ describe('Hosted Harness no-tool session', () => {
     expect(release.mock.calls[1]).toEqual([{ drain: true }]);
   });
 
+  it('restores the held-Runtime drain obligation on a replacement load (#13930 R1-2)', async () => {
+    // A restart empties the in-memory held set; the close's drain
+    // obligation survives only when the load restores it from the Broker's
+    // durable hold rows. The prewritten Session below belongs to a process
+    // that died before any close could drain; the Broker still lists the
+    // held Runtime Session, so the load must restore the obligation and
+    // this process's close must hand the Runtime back through the drain
+    // arm. Without the load-time restore the final assertions are red:
+    // the fresh process's set is empty and its close drains nothing.
+    await prewriteShellProfileSession();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockResolvedValue();
+    const activeHolds = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
+      .mockResolvedValue([PROMPT_ID]);
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store() })
+      .expect(200);
+    expect(activeHolds).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
+        )
+      ).status,
+    ).toBe(204);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release.mock.calls[0]).toEqual([{ drain: true }]);
+    expect(
+      (release.mock.contexts[0] as HostedWorkspaceBroker).runtimeSessionId,
+    ).toBe(PROMPT_ID);
+  });
+
+  it('loads without the drain obligation when the restore query fails (#13930 R1-2)', async () => {
+    // The declared degrade: a failed active-holds query logs and loads
+    // without the obligation — never a failed load in the restart window
+    // this slice serves. The close then drains nothing.
+    await prewriteShellProfileSession();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockResolvedValue();
+    const activeHolds = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
+      .mockRejectedValue(new Error('broker unreachable'));
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store() })
+      .expect(200);
+    expect(activeHolds).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
+        )
+      ).status,
+    ).toBe(204);
+    // No obligation was restored, so the close drains nothing.
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('never queries the held-Runtime inventory on a fresh create (#13930 R1-2)', async () => {
+    // A created Session has no hold rows: the restore read is load-only.
+    const activeHolds = vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'activeHoldRuntimeSessionIds',
+    );
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+      })
+      .expect(200);
+    expect(activeHolds).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
+    expect(activeHolds).not.toHaveBeenCalled();
+  });
+
+  /** A shell-profile Session whose process died before any close could
+   * drain: the durable definition exists and the writer is free again. */
+  async function prewriteShellProfileSession(): Promise<void> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    // The open above only mints the durable definition; closing here frees
+    // the writer so the replacement process may open the Session — the
+    // death itself is that no close ever drained.
+    await managed.close();
+  }
+
   type DetachedFamily = 'child_run' | 'monitor_run';
 
   async function prewriteDetachedOutput(

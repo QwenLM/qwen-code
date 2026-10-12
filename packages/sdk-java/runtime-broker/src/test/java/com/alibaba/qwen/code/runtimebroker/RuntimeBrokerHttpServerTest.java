@@ -55,6 +55,53 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void activeHoldsListsTheHarnessLiveHoldRuntimes() throws Exception {
+        // #13930 R1-2: the reloaded Harness restores the close's drain
+        // obligation through this read-only route.
+        try (Fixture fixture = new Fixture()) {
+            RuntimeSessionRecord sessionA = fixture.service
+                    .acquire("harness", "runtime-a", "bootstrap")
+                    .toCompletableFuture().join();
+            RuntimeSessionRecord sessionB = fixture.service
+                    .acquire("harness", "runtime-b", "bootstrap")
+                    .toCompletableFuture().join();
+            admitHold(fixture, sessionA, "call-a", "background_v3_process");
+            admitHold(fixture, sessionB, "call-b", "background_v3_monitor");
+            fixture.executions.settlePrepared(
+                    admitHold(fixture, sessionA, "call-exited",
+                            "background_v3_process"),
+                    Map.of("state", "exited", "executionStatus", "success"),
+                    java.time.Instant.now());
+
+            HttpResponse<String> response = fixture.post(
+                    "/tool-sessions:active-holds", Map.of("protocolVersion", 1,
+                            "requestId", "holds", "harnessSessionId", "harness"));
+            assertEquals(200, response.statusCode(), response.body());
+            var body = JSON.parseObject(response.body());
+            assertEquals(1, body.getIntValue("protocolVersion"));
+            assertEquals("harness", body.getString("harnessSessionId"));
+            assertEquals(Set.of("runtime-a", "runtime-b"),
+                    Set.copyOf(body.getJSONArray("heldRuntimeSessionIds")
+                            .toJavaList(String.class)));
+            assertEquals(400, fixture.post("/tool-sessions:active-holds",
+                    Map.of("protocolVersion", 1, "requestId", "bad"))
+                    .statusCode());
+        }
+    }
+
+    private static ToolExecutionRecord admitHold(Fixture fixture,
+            RuntimeSessionRecord session, String callId, String dispatchMode) {
+        return fixture.executions.findOrCreate(ToolExecutionRecord.prepared(
+                callId + ":process", callId + ":process", session.getBindingId(),
+                session.getRuntimeGeneration(),
+                session.getSession().getHarnessSessionId(),
+                session.getRuntimeSessionId(), "turn", callId, "digest",
+                Map.of("dispatchMode", dispatchMode, "sessionId",
+                        session.getRuntimeSessionId(), "promptId", "turn",
+                        "callId", callId, "argsDigest", "digest")));
+    }
+
+    @Test
     void providerPreparationIsDurableAndVoidControlsKeepTheirNullResult() throws Exception {
         try (Fixture fixture = new Fixture()) {
             String runtime = "550e8400-e29b-41d4-a716-446655440302";

@@ -8,6 +8,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 final class ExecutionTakeoverContract {
     private ExecutionTakeoverContract() {
@@ -73,6 +74,76 @@ final class ExecutionTakeoverContract {
         assertTrue(repository.findUnsettled(session, second.get(4).getExecutionCallId(), 100).isEmpty());
         assertFalse(repository.findUnsettled(session, null, 100).stream()
                 .anyMatch(record -> record.getExecutionCallId().equals(settled.getExecutionCallId())));
+
+        verifyActiveHolds(repository, prefix + "-holds");
+    }
+
+    /** The restart-recovery read (#13930 R1-2): the live hold rows of one
+     * Harness Session across all of its Runtime Sessions, and nothing else —
+     * terminal holds, plain executions and other Harness Sessions stay out. */
+    static void verifyActiveHolds(ToolExecutionRepository repository, String prefix) {
+        RuntimeScope scope = new RuntimeScope("tenant", "workspace", "generation",
+                "/workspace", "capability", "session");
+        String harness = prefix + "-harness";
+        RuntimeSessionRecord first = new RuntimeSessionRecord(
+                new RuntimeSession(harness, prefix + "-session-a", "bootstrap", scope),
+                prefix + "-binding-a", 1, RuntimeSessionRecord.State.READY, 0, Instant.now());
+        RuntimeSessionRecord second = new RuntimeSessionRecord(
+                new RuntimeSession(harness, prefix + "-session-b", "bootstrap", scope),
+                prefix + "-binding-b", 1, RuntimeSessionRecord.State.READY, 0, Instant.now());
+        RuntimeSessionRecord foreign = new RuntimeSessionRecord(
+                new RuntimeSession(prefix + "-foreign-harness", prefix + "-foreign-session",
+                        "bootstrap", scope),
+                prefix + "-binding-c", 1, RuntimeSessionRecord.State.READY, 0, Instant.now());
+
+        ToolExecutionRecord shell = repository.findOrCreate(
+                hold(first, prefix + "-shell", ManagedHoldFamily.SHELL));
+        ToolExecutionRecord monitor = repository.findOrCreate(
+                hold(second, prefix + "-monitor", ManagedHoldFamily.MONITOR));
+        ToolExecutionRecord exited = repository.findOrCreate(
+                hold(first, prefix + "-exited", ManagedHoldFamily.SHELL));
+        assertNotNull(repository.settlePrepared(exited,
+                Map.of("executionStatus", "success", "state", "exited"), Instant.now()));
+        repository.findOrCreate(prepared(first, prefix + "-plain"));
+        assertNotNull(repository.claimDispatch(
+                repository.findOrCreate(prepared(first, prefix + "-claimed"))
+                        .getExecutionCallId(),
+                "owner", Duration.ofMinutes(10)));
+        repository.findOrCreate(hold(foreign, prefix + "-foreign", ManagedHoldFamily.SHELL));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.findActiveHoldsByHarnessSession(harness, null, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.findActiveHoldsByHarnessSession(harness, null, 101));
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.findActiveHoldsByHarnessSession(null, null, 100));
+
+        List<ToolExecutionRecord> holds =
+                repository.findActiveHoldsByHarnessSession(harness, null, 100);
+        assertEquals(Set.of(shell.getExecutionCallId(), monitor.getExecutionCallId()),
+                holds.stream().map(ToolExecutionRecord::getExecutionCallId)
+                        .collect(Collectors.toSet()));
+        assertEquals(Set.of(first.getRuntimeSessionId(), second.getRuntimeSessionId()),
+                holds.stream().map(ToolExecutionRecord::getRuntimeSessionId)
+                        .collect(Collectors.toSet()));
+        assertEquals(List.of(prefix + "-foreign"),
+                repository.findActiveHoldsByHarnessSession(
+                        foreign.getSession().getHarnessSessionId(), null, 100)
+                        .stream().map(ToolExecutionRecord::getExecutionCallId)
+                        .toList());
+        assertTrue(repository.findActiveHoldsByHarnessSession(
+                prefix + "-unknown", null, 100).isEmpty());
+
+        List<ToolExecutionRecord> pageOne =
+                repository.findActiveHoldsByHarnessSession(harness, null, 1);
+        assertEquals(1, pageOne.size());
+        List<ToolExecutionRecord> pageTwo = repository.findActiveHoldsByHarnessSession(
+                harness, pageOne.get(0).getExecutionCallId(), 1);
+        assertEquals(1, pageTwo.size());
+        assertFalse(pageOne.get(0).getExecutionCallId()
+                .equals(pageTwo.get(0).getExecutionCallId()));
+        assertTrue(repository.findActiveHoldsByHarnessSession(
+                harness, pageTwo.get(0).getExecutionCallId(), 1).isEmpty());
     }
 
     private static ToolExecutionRecord executing(ToolExecutionRepository repository,
@@ -89,6 +160,16 @@ final class ExecutionTakeoverContract {
                 session.getRuntimeGeneration(), session.getSession().getHarnessSessionId(),
                 session.getRuntimeSessionId(), "turn", id, "digest",
                 Map.of("sessionId", session.getRuntimeSessionId(), "promptId", "turn", "callId", id,
+                        "argsDigest", "digest"));
+    }
+
+    private static ToolExecutionRecord hold(RuntimeSessionRecord session, String id,
+            ManagedHoldFamily family) {
+        return ToolExecutionRecord.prepared(id, id + "-key", session.getBindingId(),
+                session.getRuntimeGeneration(), session.getSession().getHarnessSessionId(),
+                session.getRuntimeSessionId(), "turn", id, "digest",
+                Map.of("dispatchMode", family.dispatchMode(), "sessionId",
+                        session.getRuntimeSessionId(), "promptId", "turn", "callId", id,
                         "argsDigest", "digest"));
     }
 }

@@ -938,6 +938,35 @@ public final class RuntimeBrokerService implements AutoCloseable {
         });
     }
 
+    /**
+     * The runtime Session ids of this Harness Session that a live hold row
+     * (a background Shell process or a Monitor watch) still pins. Read-only:
+     * a reloaded Harness asks this to restore the close's drain obligation
+     * after a restart — restore, never discharge (#13930 R1-2).
+     */
+    public CompletionStage<List<String>> listActiveHoldRuntimeSessionIds(
+            String harnessSessionId) {
+        requireOpen();
+        String id = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        return safeStage(() -> CompletableFuture.completedFuture(listActiveHoldIdsSync(id)));
+    }
+
+    private List<String> listActiveHoldIdsSync(String harnessSessionId) {
+        Set<String> ids = new LinkedHashSet<>();
+        String after = null;
+        for (;;) {
+            List<ToolExecutionRecord> batch = executionRepository
+                    .findActiveHoldsByHarnessSession(harnessSessionId, after, 100);
+            for (ToolExecutionRecord row : batch) {
+                ids.add(row.getRuntimeSessionId());
+            }
+            if (batch.size() < 100) {
+                return List.copyOf(ids);
+            }
+            after = batch.get(batch.size() - 1).getExecutionCallId();
+        }
+    }
+
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
             String runtimeSessionId, Map<String, Object> publisher) {
         requireOpen();

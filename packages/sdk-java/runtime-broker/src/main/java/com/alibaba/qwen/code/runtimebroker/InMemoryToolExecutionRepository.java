@@ -331,6 +331,31 @@ public final class InMemoryToolExecutionRepository
     }
 
     @Override
+    public synchronized List<ToolExecutionRecord> findActiveHoldsByHarnessSession(
+            String harnessSessionId, String afterExecutionCallId, int limit) {
+        if (harnessSessionId == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException(
+                    "harnessSessionId and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        TreeMap<String, ToolExecutionRecord> batch = new TreeMap<>();
+        for (ToolExecutionRecord record : recordsById.values()) {
+            if (harnessSessionId.equals(record.getHarnessSessionId()) && !record.isTerminal()
+                    && ManagedHoldFamily.of(record) != null) {
+                String key = JdbcRepositorySupport.valueKey(record.getExecutionCallId());
+                if (key.compareTo(after) > 0) {
+                    batch.put(key, record);
+                    if (batch.size() > limit) {
+                        batch.pollLastEntry();
+                    }
+                }
+            }
+        }
+        return List.copyOf(batch.values());
+    }
+
+    @Override
     public synchronized List<ToolExecutionRecord> findByBinding(
             String bindingId, long runtimeGeneration,
             String afterExecutionCallId, int limit) {

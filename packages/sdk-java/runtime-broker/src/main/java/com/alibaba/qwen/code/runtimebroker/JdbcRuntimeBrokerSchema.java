@@ -43,6 +43,9 @@ public final class JdbcRuntimeBrokerSchema {
             addColumn(statement, "qwen_tool_execution", "authorized_binding_version", "BIGINT");
             addIndex(statement, "qwen_runtime_binding", "qwen_runtime_storage_bindings_idx", "storage_id, binding_id");
             addIndex(statement, "qwen_runtime_session", "idx_runtime_session_id", "runtime_session_id");
+            // #13930: the harness-scoped active-holds read pages by
+            // (harness_session_id, execution_call_id_hash) once per load.
+            addIndex(statement, "qwen_tool_execution", "idx_tool_execution_harness", "harness_session_id, execution_call_id_hash");
         } catch (SQLException exception) {
             throw JdbcRepositorySupport.failure(exception);
         }

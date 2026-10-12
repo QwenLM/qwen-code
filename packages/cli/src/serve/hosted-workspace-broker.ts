@@ -610,6 +610,31 @@ export class HostedWorkspaceBroker {
     }
   }
 
+  /**
+   * #13930 R1-2: the read-only inventory of this Harness Session's Runtime
+   * Sessions that a live hold row still pins — the read a reloaded Harness
+   * makes to restore the close's drain obligation after a restart.
+   */
+  async activeHoldRuntimeSessionIds(): Promise<string[]> {
+    const response = await this.request('/tool-sessions:active-holds', {});
+    const ids = response['heldRuntimeSessionIds'];
+    if (
+      !Array.isArray(ids) ||
+      ids.some(
+        // The close's drain re-maps each entry through
+        // hostedRuntimeSessionId, so the answer must already sit in its
+        // idempotent path-safe shape; anything else would drain wrong.
+        (id) =>
+          typeof id !== 'string' ||
+          !/^[A-Za-z0-9._-]{1,512}$/u.test(id) ||
+          id === '.' ||
+          id.includes('..'),
+      )
+    )
+      throw new Error('Runtime Broker active-holds answer is invalid.');
+    return ids;
+  }
+
   async release(options?: { readonly drain?: boolean }): Promise<void> {
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release`,
@@ -688,7 +713,9 @@ export class HostedWorkspaceBroker {
     if (
       parsed['protocolVersion'] !== 1 ||
       parsed['harnessSessionId'] !== this.key.sessionId ||
+      // Harness-scoped routes answer no Runtime Session identity.
       (path !== '/runtimes:warm' &&
+        path !== '/tool-sessions:active-holds' &&
         parsed['runtimeSessionId'] !== this.identity.runtimeSessionId)
     )
       throw new Error('Runtime Broker response identity changed.');

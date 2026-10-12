@@ -19,10 +19,12 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -1934,6 +1936,82 @@ class RuntimeBrokerServiceTest {
             assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
             assertEquals("exited", settled.getResult().get("state"));
         }
+    }
+
+    @Test
+    void listActiveHoldRuntimeSessionIdsSpansEveryRuntimeOfTheHarness()
+            throws Exception {
+        // #13930 R1-2: a reloaded Harness restores the close's drain
+        // obligation from this read — the live hold rows across every
+        // Runtime Session the Harness ever opened, with terminal holds,
+        // plain executions and foreign Harness Sessions left out.
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            admitHold(fixture, "harness", "runtime-a", "call-a",
+                    "background_v3_process");
+            admitHold(fixture, "harness", "runtime-b", "call-b",
+                    "background_v3_monitor");
+            Map<String, Object> exited = new LinkedHashMap<>();
+            exited.put("state", "exited");
+            exited.put("executionStatus", "success");
+            fixture.executionRepository.settlePrepared(
+                    admitHold(fixture, "harness", "runtime-a", "call-exited",
+                            "background_v3_process"),
+                    exited, java.time.Instant.now());
+            RuntimeSessionRecord plain = join(fixture.service.acquire(
+                    "harness", "runtime-plain", "bootstrap"));
+            String digest = "sha256:" + "a".repeat(64);
+            fixture.executionRepository.findOrCreate(ToolExecutionRecord.prepared(
+                    "call-plain", "key-plain", plain.getBindingId(),
+                    plain.getRuntimeGeneration(), "harness", "runtime-plain",
+                    "prompt", "call-plain", digest,
+                    Map.of("sessionId", "runtime-plain", "promptId", "prompt",
+                            "callId", "call-plain", "argsDigest", digest)));
+            admitHold(fixture, "foreign-harness", "runtime-x", "call-x",
+                    "background_v3_process");
+
+            assertEquals(Set.of("runtime-a", "runtime-b"),
+                    Set.copyOf(join(fixture.service
+                            .listActiveHoldRuntimeSessionIds("harness"))));
+            assertTrue(join(fixture.service
+                    .listActiveHoldRuntimeSessionIds("unknown-harness"))
+                    .isEmpty());
+        }
+    }
+
+    @Test
+    void listActiveHoldRuntimeSessionIdsPagesPastAHundredHolds()
+            throws Exception {
+        // The answer must carry every live hold's Runtime Session, not just
+        // the first page: a cursor that stops at 100 silently drops the
+        // rest, and the restarted close never drains them.
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            Set<String> expected = new HashSet<>();
+            for (int i = 0; i < 101; i++) {
+                String runtime = String.format("runtime-%03d", i);
+                admitHold(fixture, "harness", runtime, "call-" + i,
+                        "background_v3_process");
+                expected.add(runtime);
+            }
+            assertEquals(expected, Set.copyOf(join(fixture.service
+                    .listActiveHoldRuntimeSessionIds("harness"))));
+        }
+    }
+
+    private static ToolExecutionRecord admitHold(Fixture fixture,
+            String harness, String runtime, String callId,
+            String dispatchMode) throws Exception {
+        RuntimeSessionRecord session = join(fixture.service.acquire(
+                harness, runtime, "bootstrap"));
+        String digest = "sha256:" + "a".repeat(64);
+        Map<String, Object> reference = Map.of("dispatchMode", dispatchMode,
+                "sessionId", runtime, "promptId", "prompt", "callId", callId,
+                "argsDigest", digest);
+        return fixture.bindingRepository.admitExecution(
+                fixture.sessionRepository, fixture.executionRepository,
+                ToolExecutionRecord.prepared(callId + ":process",
+                        callId + ":process", session.getBindingId(),
+                        session.getRuntimeGeneration(), harness, runtime,
+                        "prompt", callId, digest, reference));
     }
 
     @Test
@@ -6357,6 +6435,14 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
+        public List<ToolExecutionRecord> findActiveHoldsByHarnessSession(
+                String harnessSessionId, String afterExecutionCallId,
+                int limit) {
+            return delegate.findActiveHoldsByHarnessSession(harnessSessionId,
+                    afterExecutionCallId, limit);
+        }
+
+        @Override
         public boolean hasActiveByBinding(String bindingId,
                 long runtimeGeneration) {
             return delegate.hasActiveByBinding(bindingId,
@@ -6508,6 +6594,14 @@ class RuntimeBrokerServiceTest {
                 RuntimeSessionRecord session, String afterExecutionCallId,
                 int limit) {
             return delegate.findBackgroundProcesses(session,
+                    afterExecutionCallId, limit);
+        }
+
+        @Override
+        public List<ToolExecutionRecord> findActiveHoldsByHarnessSession(
+                String harnessSessionId, String afterExecutionCallId,
+                int limit) {
+            return delegate.findActiveHoldsByHarnessSession(harnessSessionId,
                     afterExecutionCallId, limit);
         }
 
