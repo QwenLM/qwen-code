@@ -547,6 +547,7 @@ function MermaidBlock({ code }: { code: string }) {
         <div
           className={`${styles.mermaidBlock} ${styles.mermaidLoading} ${styles.mermaidInline}`}
           data-selection-copy-ignore
+          data-selection-copy-gesture
         >
           <span>{t('mermaid.rendering')}</span>
         </div>
@@ -557,6 +558,7 @@ function MermaidBlock({ code }: { code: string }) {
           }`}
           ref={viewportRef}
           data-selection-copy-ignore
+          data-selection-copy-gesture
           style={diagramBox ? { height: diagramBox.canvasHeight } : undefined}
           onMouseDown={handleMouseDown}
           onDoubleClick={resetZoomAndPan}

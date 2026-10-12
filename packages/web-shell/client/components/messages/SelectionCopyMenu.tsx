@@ -104,7 +104,7 @@ export function SelectionCopyMenu({
         (node) =>
           node instanceof Element &&
           (node.hasAttribute('data-selection-copy-table') ||
-            node.hasAttribute('data-selection-copy-ignore')),
+            node.hasAttribute('data-selection-copy-gesture')),
       );
       selecting = path.includes(body) && !selectingControl;
     };

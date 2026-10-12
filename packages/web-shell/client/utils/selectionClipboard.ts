@@ -1,7 +1,7 @@
 import TurndownService from 'turndown';
 
 const IGNORED =
-  '[data-selection-copy-ignore], [data-footnote-backref], [data-markdown-chart-loading], .markdown-chart-error, [aria-hidden="true"]:not(.katex-html), .katex-mathml, button, select, input, textarea, svg, style, script';
+  '[data-selection-copy-ignore], [hidden], .markdown-chart-data-notice, [data-footnote-backref], [data-markdown-chart-loading], .markdown-chart-error, [aria-hidden="true"]:not(.katex-html), .katex-mathml, button, select, input, textarea, svg, style, script';
 const BLOCKS = /^(P|H[1-6]|DIV|SECTION|BLOCKQUOTE|UL|OL|LI|PRE|TR)$/;
 
 export function getReplySelectionRange(body: HTMLElement): Range | null {
@@ -73,10 +73,19 @@ function cloneSelected(node: Node, range: Range): Node | null {
       : null;
   }
   const clone = node.cloneNode(false);
+  const checkbox =
+    node instanceof HTMLLIElement
+      ? node.querySelector<HTMLInputElement>(
+          ':scope > input[type="checkbox"][disabled], :scope > p > input[type="checkbox"][disabled]:first-child',
+        )
+      : null;
+  let taskHost: Node | null = checkbox?.parentElement === node ? clone : null;
   let ordinal = node instanceof HTMLOListElement ? node.start : 0;
   for (const child of node.childNodes) {
     const selected = cloneSelected(child, range);
+    if (child === checkbox?.parentElement) taskHost = selected;
     if (clone instanceof HTMLOListElement && child instanceof HTMLLIElement) {
+      if (child.hasAttribute('value')) ordinal = child.value;
       if (selected instanceof HTMLLIElement)
         selected.dataset.selectionCopyOrdinal = String(ordinal);
       ordinal++;
@@ -92,20 +101,23 @@ function cloneSelected(node: Node, range: Range): Node | null {
         (child.nodeType === Node.TEXT_NODE && !child.textContent?.trim()),
     );
     if (onlyNestedLists) clone.dataset.selectionCopyListWrapper = '';
-    const checkbox = (node as Element).querySelector<HTMLInputElement>(
-      ':scope > input[type="checkbox"][disabled], :scope > p > input[type="checkbox"][disabled]:first-child',
-    );
-    if (checkbox && !onlyNestedLists) {
+    if (checkbox && taskHost && !onlyNestedLists) {
       const marker = clone.ownerDocument.createElement('span');
       marker.dataset.selectionCopyTask = checkbox.checked ? '[x] ' : '[ ] ';
       marker.textContent = marker.dataset.selectionCopyTask;
-      const host =
-        checkbox.parentElement === node
-          ? clone
-          : clone.querySelector(':scope > p');
-      host?.prepend(marker);
+      taskHost.insertBefore(marker, taskHost.firstChild);
     }
   }
+  if (
+    clone instanceof HTMLTableRowElement &&
+    !clone.textContent?.trim() &&
+    !clone.querySelector('img') &&
+    !(
+      range.comparePoint(node, 0) === 0 &&
+      range.comparePoint(node, node.childNodes.length) === 0
+    )
+  )
+    return null;
   if (clone instanceof HTMLTableCellElement) {
     clone.dataset.copyColumn = String((node as HTMLTableCellElement).cellIndex);
   }
@@ -170,7 +182,8 @@ markdown.addRule('orderedListItem', {
 });
 markdown.addRule('unselectedListAncestor', {
   filter: (node) => node.hasAttribute('data-selection-copy-list-wrapper'),
-  replacement: (content) => content,
+  replacement: (content, node) =>
+    content + (node.nextSibling && !content.endsWith('\n') ? '\n' : ''),
 });
 markdown.addRule('math', {
   filter: (node) => node.hasAttribute('data-selection-copy-math'),

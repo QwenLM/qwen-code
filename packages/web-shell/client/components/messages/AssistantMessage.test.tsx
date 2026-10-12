@@ -1106,6 +1106,30 @@ describe('AssistantMessage selection copy gate', () => {
 });
 
 describe('rendered code selection semantics', () => {
+  it('preserves real loose task states without transferring them to notes', () => {
+    const container = render(
+      <AssistantMessage
+        content={
+          '- [x] Done\n\n  Completed note.\n\n- [ ] Pending\n\n  Pending note.'
+        }
+      />,
+    );
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    const value = getSelectedReplyContent(container, range)!;
+    expect(value.markdown).toMatch(/-\s+\[x\][^\S\n]+Done/);
+    expect(value.markdown).toMatch(/-\s+\[ \][^\S\n]+Pending/);
+    const items = container.querySelectorAll('li.task-list-item');
+    expect(items).toHaveLength(2);
+    for (const item of items) {
+      const note = item.querySelectorAll('p')[1];
+      expect(note).toBeDefined();
+      range.selectNodeContents(note);
+      expect(getSelectedReplyContent(container, range)!.markdown).not.toMatch(
+        /\[[x ]\]/,
+      );
+    }
+  });
   it('preserves the actual code language and omits its rendered header', async () => {
     const container = render(
       <AssistantMessage content={'```typescript\nconst answer = 42;\n```'} />,

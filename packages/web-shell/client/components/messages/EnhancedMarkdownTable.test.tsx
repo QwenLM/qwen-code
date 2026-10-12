@@ -3704,6 +3704,34 @@ describe('EnhancedMarkdownTable', () => {
 });
 
 describe('rendered table selection semantics', () => {
+  it('preserves renderer-padded empty cells in copied rows', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Name</th>
+          <th>Value</th>
+          <th>Extra</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td></td>
+          <td>42</td>
+        </tr>
+        <tr>
+          <td>Beta</td>
+        </tr>
+      </tbody>,
+    ]);
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    expect(getSelectedReplyContent(container, range)).toEqual({
+      text: 'Name\tValue\tExtra\nAlpha\t\t42\nBeta\t\t',
+      markdown:
+        '| Name | Value | Extra |\n| --- | --- | --- |\n| Alpha |  | 42 |\n| Beta |  |  |',
+    });
+  });
   it('marks the real table interaction surface and omits toolbar/action chrome', () => {
     const container = renderTable();
     const range = document.createRange();

@@ -326,24 +326,32 @@ describe('SelectionCopyMenu', () => {
       expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
     },
   );
-  it('restores composer focus after a successful copy', async () => {
-    vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
-    mount();
-    const composer = document.createElement('textarea');
-    container.append(composer);
-    composer.focus();
-    await choose();
-    await act(async () =>
-      (portal.querySelector('button') as HTMLButtonElement).click(),
-    );
-    expect(document.activeElement).toBe(composer);
-  });
+  it.each([false, true])(
+    'restores composer focus after a successful copy (shadow=%s)',
+    async (shadow) => {
+      vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+      mount();
+      const composer = document.createElement('textarea');
+      const host = document.createElement('div');
+      container.append(host);
+      const parent = shadow ? host.attachShadow({ mode: 'open' }) : host;
+      parent.append(composer);
+      composer.focus();
+      await choose();
+      await act(async () =>
+        (portal.querySelector('button') as HTMLButtonElement).click(),
+      );
+      expect(document.activeElement).toBe(shadow ? host : composer);
+      if (shadow) expect((parent as ShadowRoot).activeElement).toBe(composer);
+    },
+  );
   it('leaves ignored diagram interactions alone with an existing selection', async () => {
     mount();
     await choose();
     act(() => window.dispatchEvent(new Event('resize')));
     const diagram = document.createElement('div');
     diagram.setAttribute('data-selection-copy-ignore', '');
+    diagram.setAttribute('data-selection-copy-gesture', '');
     container.querySelector('.reply-body')!.append(diagram);
     for (const type of ['pointerdown', 'pointerup']) {
       const event = new MouseEvent(type, { bubbles: true, button: 0 });
@@ -353,50 +361,106 @@ describe('SelectionCopyMenu', () => {
     expect(window.getSelection()?.toString()).toBe('bold');
     expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
   });
-  it('dismisses after async reply reflow but ignores the initial observer callback', async () => {
-    let resized: () => void = () => {};
-    const disconnect = vi.fn();
-    vi.stubGlobal(
-      'ResizeObserver',
-      class {
-        constructor(private callback: () => void) {}
-        observe(target: Element) {
-          if (target.matches('.reply-body')) resized = this.callback;
+  it.each([
+    [800, 100],
+    [400, 500],
+  ])(
+    'dismisses after reply reflow to %s x %s but ignores the initial observer callback',
+    async (width, height) => {
+      let resized: () => void = () => {};
+      let bodyObserver: { disconnect: ReturnType<typeof vi.fn> } | undefined;
+      vi.stubGlobal(
+        'ResizeObserver',
+        class {
+          constructor(private callback: () => void) {}
+          observe(target: Element) {
+            if (target.matches('.reply-body')) {
+              resized = this.callback;
+              bodyObserver = { disconnect: this.disconnect };
+            }
+          }
+          disconnect = vi.fn();
+        },
+      );
+      mount();
+      const body = container.querySelector('.reply-body')!;
+      const rect = vi
+        .spyOn(body, 'getBoundingClientRect')
+        .mockReturnValue(new DOMRect(0, 0, 400, 100));
+      await choose();
+      act(() => resized());
+      expect(
+        portal.querySelector('[data-slot="popover-content"]'),
+      ).not.toBeNull();
+      expect(bodyObserver).toBeDefined();
+      rect.mockReturnValue(new DOMRect(0, 0, width, height));
+      act(() => resized());
+      expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
+      expect(bodyObserver!.disconnect).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['', ' '])(
+    'offers Markdown without blank plain-text copy for an image (prefix=%j)',
+    async (prefix) => {
+      mount();
+      const paragraph = container.querySelector('p')!;
+      paragraph.innerHTML = `${prefix}<img src="https://example.com/image.png" alt="">`;
+      for (const type of ['pointerdown', 'pointerup']) {
+        if (type === 'pointerup') {
+          const range = document.createRange();
+          range.selectNodeContents(paragraph);
+          window.getSelection()!.addRange(range);
         }
-        disconnect = disconnect;
-      },
-    );
+        const event = new MouseEvent(type, { bubbles: true, button: 0 });
+        Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+        await act(async () => paragraph.dispatchEvent(event));
+      }
+      const buttons = portal.querySelectorAll('button');
+      expect(buttons[0].disabled).toBe(true);
+      expect(buttons[1].disabled).toBe(false);
+    },
+  );
+  it('closes when only the selection end changes', async () => {
+    mount();
+    await choose();
+    act(() => {
+      const text = container.querySelector('strong')!.firstChild!;
+      const range = document.createRange();
+      range.setStart(text, 0);
+      range.setEnd(text, 9);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
+  });
+  it('opens for code selected from an excluded header', async () => {
+    const write = vi
+      .spyOn(navigator.clipboard, 'writeText')
+      .mockResolvedValue();
     mount();
     const body = container.querySelector('.reply-body')!;
-    const rect = vi
-      .spyOn(body, 'getBoundingClientRect')
-      .mockReturnValue(new DOMRect(0, 0, 400, 100));
-    await choose();
-    act(() => resized());
-    expect(
-      portal.querySelector('[data-slot="popover-content"]'),
-    ).not.toBeNull();
-    rect.mockReturnValue(new DOMRect(0, 0, 400, 500));
-    act(() => resized());
-    expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
-    expect(disconnect).toHaveBeenCalled();
-  });
-  it('offers Markdown without an empty plain-text copy for an image with no alt', async () => {
-    mount();
-    const paragraph = container.querySelector('p')!;
-    paragraph.innerHTML = '<img src="https://example.com/image.png" alt="">';
+    body.querySelector('p')!.innerHTML =
+      '<div data-selection-code-language="python"><div data-selection-copy-ignore><span>python</span></div><pre><code>answer = 42</code></pre></div>';
     for (const type of ['pointerdown', 'pointerup']) {
-      if (type === 'pointerup') {
-        const range = document.createRange();
-        range.selectNode(paragraph.firstChild!);
-        window.getSelection()!.addRange(range);
-      }
       const event = new MouseEvent(type, { bubbles: true, button: 0 });
       Object.defineProperty(event, 'pointerType', { value: 'mouse' });
-      await act(async () => paragraph.dispatchEvent(event));
+      if (type === 'pointerup') {
+        const range = document.createRange();
+        range.selectNodeContents(body.querySelector('code')!);
+        window.getSelection()!.addRange(range);
+      }
+      await act(async () =>
+        body
+          .querySelector(type === 'pointerdown' ? 'span' : 'code')!
+          .dispatchEvent(event),
+      );
     }
-    const buttons = portal.querySelectorAll('button');
-    expect(buttons[0].disabled).toBe(true);
-    expect(buttons[1].disabled).toBe(false);
+    const button = [...portal.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Copy Markdown',
+    )!;
+    expect(button).toBeDefined();
+    await act(async () => button.click());
+    expect(write).toHaveBeenCalledWith('```python\nanswer = 42\n```');
   });
 });

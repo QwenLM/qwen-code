@@ -297,6 +297,131 @@ describe('nested selection boundaries', () => {
 });
 
 describe('review regressions', () => {
+  it.each(['checked', ''])('omits an unselected task state (%s)', (checked) => {
+    const body = fixture(
+      `<ul><li><p><input type="checkbox" ${checked} disabled> Task</p><p>Note</p></li></ul>`,
+    );
+    const note = body.querySelectorAll('p')[1].firstChild!;
+    const result = select(body, note, 0);
+    expect(result.text).toBe('Note');
+    expect(result.markdown).not.toMatch(/\[[x ]\]/);
+  });
+  it('omits task state when a drag starts at the end of its task line', () => {
+    const body = fixture(
+      '<ul><li><p><input type="checkbox" checked disabled> Task</p><p>Note</p></li></ul>',
+    );
+    const paragraphs = body.querySelectorAll('p');
+    const result = select(
+      body,
+      paragraphs[0].lastChild!,
+      5,
+      paragraphs[1].firstChild!,
+      4,
+    );
+    expect(result.text).toBe('Note');
+    expect(result.markdown).not.toMatch(/\[[x ]\]/);
+  });
+  it.each(['2', '0', '-2'])(
+    'honors explicit list value %s and subsequent ordinals',
+    (value) => {
+      const body = fixture(
+        `<ol><li value="${value}">First</li><li>Next</li></ol>`,
+      );
+      const range = document.createRange();
+      range.selectNodeContents(body);
+      expect(getSelectedReplyContent(body, range)!.markdown).toBe(
+        `${value}.  First\n${Number(value) + 1}.  Next`,
+      );
+    },
+  );
+  it.each([
+    [
+      '<ul><li>Parent<ul><li>Child</li></ul></li><li>Next</li></ul>',
+      '-   Child\n-   Next',
+    ],
+    [
+      '<ol><li>Parent<ol><li>Child</li></ol></li><li>Next</li></ol>',
+      '1.  Child\n2.  Next',
+    ],
+    [
+      '<ul><li>A<ul><li>B<ul><li>Child</li></ul></li></ul></li><li>Next</li></ul>',
+      '-   Child\n-   Next',
+    ],
+  ])(
+    'separates nested subsets from following siblings: %s',
+    (html, markdown) => {
+      const body = fixture(html);
+      const items = body.querySelectorAll('li');
+      const child = [...items].find((item) => item.textContent === 'Child')!;
+      const next = items[items.length - 1];
+      expect(select(body, child.firstChild!, 0, next.firstChild!, 4)).toEqual({
+        text: 'Child\nNext',
+        markdown,
+      });
+    },
+  );
+  it('retains ordered-list continuation indentation', () => {
+    const body = fixture(
+      '<ol start="3"><li>Parent<ol><li>Sub one</li><li>Sub two</li></ol></li></ol>',
+    );
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyContent(body, range)!.markdown).toBe(
+      '3.  Parent\n    1.  Sub one\n    2.  Sub two',
+    );
+  });
+  it('rejects a content-free selection touching a table boundary', () => {
+    const body = fixture('<p>Before</p><table><tr><td>Cell</td></tr></table>');
+    expect(
+      select(
+        body,
+        body.querySelector('p')!.firstChild!,
+        6,
+        body.querySelector('td')!.firstChild!,
+        0,
+      ),
+    ).toBeNull();
+  });
+  it('omits a body row touched only at its start boundary', () => {
+    const body = fixture(
+      '<p>Para</p><table><tr><th>A</th><th>B</th></tr><tr><td>Cell</td><td>Data</td></tr></table>',
+    );
+    expect(
+      select(
+        body,
+        body.querySelector('p')!.firstChild!,
+        0,
+        body.querySelector('td')!.firstChild!,
+        0,
+      ),
+    ).toEqual({
+      text: 'Para\nA\tB',
+      markdown: 'Para\n\n| A | B |\n| --- | --- |',
+    });
+  });
+  it('omits a preceding row touched only at its end boundary', () => {
+    const body = fixture(
+      '<table><tr><td>First</td></tr><tr><td>Next</td></tr></table><p>After</p>',
+    );
+    expect(
+      select(
+        body,
+        body.querySelector('td')!.firstChild!,
+        5,
+        body.querySelector('p')!.firstChild!,
+        5,
+      ),
+    ).toEqual({
+      text: 'Next\nAfter',
+      markdown: '|  |\n| --- |\n| Next |\n\nAfter',
+    });
+  });
+  it('rejects whitespace-only projections', () => {
+    const body = fixture('<p>Hello world</p>');
+    expect(
+      select(body, body.querySelector('p')!.firstChild!, 5, undefined, 6),
+    ).toBeNull();
+  });
   it('keeps loose task state on the same line as its selected text', () => {
     const body = fixture(
       '<ul><li><p><input type="checkbox" checked disabled> Done</p></li><li><p><input type="checkbox" disabled> Pending</p></li></ul>',
@@ -355,6 +480,8 @@ describe('review regressions', () => {
     '<span data-markdown-chart-loading="true">Rendering chart</span>',
     '<div class="markdown-chart-error">Chart render failed.</div>',
     '<a data-footnote-backref href="#internal">↩</a>',
+    '<div class="markdown-chart-data-view" hidden><div class="markdown-chart-data-notice">Showing 2 of 900 rows.</div><table><tr><th>region</th></tr><tr><td>EMEA</td></tr></table></div>',
+    '<div hidden>No data</div>',
   ])('excludes renderer chrome: %s', (html) => {
     const body = fixture(`<p>Before</p>${html}<p>After</p>`);
     const range = document.createRange();
@@ -369,6 +496,17 @@ describe('review regressions', () => {
     const range = document.createRange();
     range.selectNodeContents(body);
     expect(getSelectedReplyContent(body, range)!.text).toBe('one\ntwo');
+  });
+  it('keeps visible chart data without the truncation notice', () => {
+    const body = fixture(
+      '<div class="markdown-chart-data-view"><div class="markdown-chart-data-notice">Showing 2 of 900 rows.</div><table><tr><th>region</th></tr><tr><td>EMEA</td></tr></table></div>',
+    );
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyContent(body, range)).toEqual({
+      text: 'region\nEMEA',
+      markdown: '| region |\n| --- |\n| EMEA |',
+    });
   });
   it('rejects multiple disjoint ranges without affecting native selection', () => {
     const body = fixture('<p>First</p><p>Second</p>');
@@ -398,12 +536,14 @@ describe('review regressions', () => {
       endContainer: body.firstChild!,
       endOffset: 6,
     };
+    const composedRanges = vi.fn(() => [composed]);
     vi.spyOn(document, 'getSelection').mockReturnValue({
       isCollapsed: false,
       rangeCount: 1,
       getRangeAt: () => outer,
-      getComposedRanges: () => [composed],
+      getComposedRanges: composedRanges,
     } as unknown as Selection);
     expect(getReplySelectionRange(body)?.toString()).toBe('Shadow');
+    expect(composedRanges).toHaveBeenCalledWith({ shadowRoots: [shadow] });
   });
 });
