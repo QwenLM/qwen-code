@@ -340,14 +340,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                     return provisioner.reconcile(binding.getRequest(), binding.getProvisionSeed(),
                             binding.getResourceHandle(), binding.getLease()).thenCompose(observation -> {
-                        if (observation == null || observation.getOutcome() != RuntimeObservation.Outcome.NOT_FOUND
-                                || observation.getLossEvidence() == null || !observation.getLossEvidence().matches(
-                                        binding.getProvisionSeed(), binding.getResourceHandle(), binding.getLease())) {
-                            return failed(conflict("workspace_close_identity_unverified", "Original worker stop is not proven"));
-                        }
-                        bindingRepository.requireHarnessCleanup(binding.getRequest().getScope(), harnessSessionId, authority);
-                        return drainBinding(binding);
-                    });
+                                if (observation == null || observation.getOutcome() != RuntimeObservation.Outcome.NOT_FOUND
+                                        || observation.getLossEvidence() == null || !observation.getLossEvidence().matches(
+                                                binding.getProvisionSeed(), binding.getResourceHandle(), binding.getLease())) {
+                                    return failed(conflict("workspace_close_identity_unverified", "Original worker stop is not proven"));
+                                }
+                                bindingRepository.requireHarnessCleanup(binding.getRequest().getScope(), harnessSessionId, authority);
+                                return drainBinding(binding);
+                            });
                 }
                 return drainResourceSessions(binding, authority, null);
             });
@@ -361,7 +361,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
         var batch = sessionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
         CompletionStage<Void> work = CompletableFuture.completedFuture(null);
         for (var record : batch) {
-            if (!record.isActive()) continue;
+            if (!record.isActive()) {
+                continue;
+            }
             work = work.thenCompose(ignored -> {
                 bindingRepository.requireHarnessCleanup(binding.getRequest().getScope(), record.getSession().getHarnessSessionId(), authority);
                 return releaseSavedSession(binding, record, null);

@@ -485,7 +485,9 @@ public final class JdbcRuntimeBindingRepository
                 fence.setString(1, JdbcRepositorySupport.valueKey(scope.getTenantId()));
                 fence.setString(2, JdbcRepositorySupport.valueKey(harnessSessionId));
                 try (ResultSet row = fence.executeQuery()) {
-                    if (!row.next() || row.getString(1) == null) return false;
+                    if (!row.next() || row.getString(1) == null) {
+                        return false;
+                    }
                 }
             }
             try (PreparedStatement statement = connection.prepareStatement("SELECT o.lifecycle_protocol_version"

@@ -235,6 +235,9 @@ class WorkspaceProfileLifecycleTest {
     void rejectsUnsupportedProfilesBeforeWritingAnOperation(String profile) {
         var f = fixture();
         assertThatThrownBy(() -> admit(f, profile, OperationKind.CLOSE)).isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> f.store.beginWorkspaceLifecycle("tenant", f.session,
+                OperationKind.CLOSE, "owner", "a".repeat(64), "legacy", "digest", true, 0)))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         assertThat(f.jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation", Integer.class)).isZero();
     }
 }

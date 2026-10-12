@@ -1228,7 +1228,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
             OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean closeSupported) {
         // H4b child close is the only production caller. Public lifecycle uses
-        // the protocol overload and still refuses a Shell profile.
+        // the protocol overload and requires v2 for an active Shell or MCP Session.
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, key, digest, actorId, closeSupported, 0, false);
     }
 
@@ -1286,6 +1286,11 @@ public class ManagedAgentStore implements AgentStateStore {
         if ("DELETED".equals(session.status())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
         }
+        if (WorkspaceToolProfiles.isShellOrMcp(session.toolProfile())
+                && (WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) != 2
+                        || !List.of("CLOSED", "ARCHIVED").contains(session.status()))) {
+            throw workspaceExecutionUnavailable();
+        }
         String namespace = "UNARCHIVE_WORKSPACE_SESSION";
         Optional<CommandRecord> existing = findCommand(tenantId, namespace, scopedKey, true);
         if (existing.isPresent()) {
@@ -1325,7 +1330,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion,
-            boolean refuseShell) {
+            boolean publicLifecycle) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
@@ -1351,12 +1356,18 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new OperationAdmission(existing.get(), true);
         }
+        if ("DELETED".equals(session.status())) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
+                    "The Session was not found.");
+        }
         if (protocolVersion < 0 || protocolVersion > 2
                 || protocolVersion != 0 && protocolVersion != WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile())) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
         }
-        if (refuseShell && WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && protocolVersion != 2
-                && !hasCompletedWorkspaceClose(tenantId, sessionId)) {
+        if (publicLifecycle && WorkspaceToolProfiles.isShellOrMcp(session.toolProfile())
+                && (WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) != 2
+                        || protocolVersion != 2 && (!List.of("CLOSED", "ARCHIVED").contains(session.status())
+                                || !hasCompletedWorkspaceClose(tenantId, sessionId)))) {
             throw workspaceExecutionUnavailable();
         }
         if (hasPendingRenameDelivery(tenantId, sessionId)) {
@@ -1365,10 +1376,6 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
-        }
-        if ("DELETED".equals(session.status())) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
-                    "The Session was not found.");
         }
         if (kind == OperationKind.DELETE && List.of("CLOSED", "ARCHIVED").contains(session.status())) {
             protocolVersion = 0;

@@ -13,6 +13,11 @@ public final class WorkspaceToolProfiles {
         return SHELL.equals(profile) || "hosted-workspace-shell/2".equals(profile);
     }
 
+    public static boolean isShellOrMcp(String profile) {
+        return profile != null && (profile.startsWith("hosted-workspace-shell/")
+                || profile.startsWith("hosted-workspace-mcp/"));
+    }
+
     public static int lifecycleProtocol(String profile) {
         if (FILES.equals(profile)) {
             return 1;
