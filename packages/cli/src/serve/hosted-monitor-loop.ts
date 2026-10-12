@@ -39,7 +39,11 @@ export interface MonitorWatchExecutor {
      * promise carrying the exit's flush and settle in order; an owner
      * that awaits it never settles ahead of the last observation.
      */
-    onExit: (failed: boolean) => Promise<void> | void,
+    onExit: (
+      failed: boolean,
+      /** #13856 A8: the end followed a platform-requested stop. */
+      stopRequested?: boolean,
+    ) => Promise<void> | void,
     identity?: {
       readonly unitName: string;
       readonly cwd?: string;
@@ -60,7 +64,13 @@ export interface MonitorWatchHandle {
   readonly receipt: Readonly<Record<string, unknown>>;
   /** The supervised physical unit, exposed to the worker's own registry. */
   readonly process?: ManagedChildRunProcess;
-  terminate(): Promise<void>;
+  /**
+   * Ends the watch and reports whether that stop is proven. A handle whose
+   * watch runs in the worker answers `false` — only the Runtime's
+   * maintenance route can stop it — so the loop parks the record instead
+   * of claiming a settlement the physical side never confirmed (#13856).
+   */
+  terminate(): Promise<boolean>;
 }
 
 export interface MonitorLoopClock {
@@ -94,7 +104,14 @@ export class HostedMonitorLoop {
   private buffered: string[] = [];
   private window: ReturnType<typeof setTimeout> | undefined;
   private idle: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The loop stopped its own observing and time-keeping. A park sets this
+   * without {@link settled}, so the watch's later physical evidence still
+   * has a record to settle (#13856).
+   */
   private ended = false;
+  /** The record reached a terminal state; no later evidence revises it. */
+  private settled = false;
   private pending = 0;
   private readonly idleWaiters: Array<() => void> = [];
   private failure: unknown;
@@ -144,7 +161,7 @@ export class HostedMonitorLoop {
       handle = await this.executor.start(
         params.args,
         (line) => this.onLine(line),
-        (failed) => this.onExit(failed),
+        (failed, stopRequested) => this.onExit(failed, stopRequested),
       );
     } catch (error) {
       await this.monitors.settleFailed(this.monitorId, {
@@ -184,7 +201,7 @@ export class HostedMonitorLoop {
     this.handle = await this.executor.start(
       params.args,
       (line) => this.onLine(line),
-      (failed) => this.onExit(failed),
+      (failed, stopRequested) => this.onExit(failed, stopRequested),
       { unitName: this.monitorId },
     );
     this.armWindow();
@@ -196,14 +213,19 @@ export class HostedMonitorLoop {
    * flush and settle in order, so an owner that awaits it settles nothing
    * ahead of the last observation's commit — a caller that settles first
    * (and lets the successor rule reject the late observe) is exactly how
-   * a final window once died silently between two async hops.
+   * a final window once died silently between two async hops. A platform
+   * stop arrives with stopRequested set and projects as the requested
+   * stop, never as a bare exit (#13856 A8). A loop that parked on an
+   * unproven auto-stop is still open here: the watch kept running, so its
+   * physical end is the evidence that finally settles the record.
    */
-  private onExit(failed: boolean): Promise<void> {
-    if (this.ended && !failed) return Promise.resolve();
+  private onExit(failed: boolean, stopRequested = false): Promise<void> {
+    if (this.settled && !failed) return Promise.resolve();
     return this.enqueue(async () => {
       if (failed) {
-        if (this.ended) return;
+        if (this.settled) return;
         this.ended = true;
+        this.settled = true;
         this.disarm();
         await this.monitors.settleFailed(this.monitorId, {
           stopReason: 'watch_failed',
@@ -211,8 +233,19 @@ export class HostedMonitorLoop {
         });
         return;
       }
-      if (this.ended) return;
-      await this.flush();
+      if (this.settled) return;
+      // The watch's physical end supersedes its quota: this final window
+      // commits, but the quota must not park the record ahead of the exit's
+      // own settle (#13856 R1-30).
+      await this.flush(false);
+      if (this.settled) return;
+      if (stopRequested) {
+        this.ended = true;
+        this.settled = true;
+        this.disarm();
+        await this.monitors.settleStopRequested(this.monitorId);
+        return;
+      }
       await this.settle('exited', false);
     });
   }
@@ -246,12 +279,18 @@ export class HostedMonitorLoop {
    * mint a `stop_requested` settlement; it parks the record on the
    * runtime_lost line where a later open rebuilds it (read-only) or keeps
    * it accurately blocked instead of reporting a stopped task that never
-   * stopped.
+   * stopped. A loop that parked on an unproven auto-stop is still stoppable
+   * here, so the close's proven drain upgrades that parked record to the
+   * requested stop instead of leaving it blocked forever. The runtime_lost
+   * arm parks the same open way: the failed close that asks for it keeps the
+   * Session and its publisher alive for a retry, and that retry's proven
+   * drain — or the watch's own end — still owes the record its settlement
+   * (#13856).
    */
   async stop(
     settle: 'stop_requested' | 'runtime_lost' = 'stop_requested',
   ): Promise<void> {
-    if (this.ended) return;
+    if (this.settled) return;
     this.ended = true;
     this.disarm();
     await this.handle?.terminate();
@@ -259,6 +298,7 @@ export class HostedMonitorLoop {
       await this.monitors.blockedRuntimeLost(this.monitorId);
       return;
     }
+    this.settled = true;
     await this.monitors.settleStopRequested(this.monitorId);
   }
 
@@ -288,7 +328,7 @@ export class HostedMonitorLoop {
   }
 
   /** Commits whatever the window buffered as one observation revision. */
-  private async flush(): Promise<void> {
+  private async flush(settleQuota: boolean = true): Promise<void> {
     if (this.ended || this.buffered.length === 0) return;
     const lines = this.buffered;
     this.buffered = [];
@@ -301,6 +341,7 @@ export class HostedMonitorLoop {
     this.armIdle();
     const sequence = this.monitors.record(this.monitorId)?.observationSequence;
     if (
+      settleQuota &&
       this.params !== undefined &&
       sequence !== undefined &&
       sequence >= this.params.maxEvents
@@ -334,10 +375,21 @@ export class HostedMonitorLoop {
     stopReason: 'exited' | 'max_events' | 'idle_timeout',
     terminate: boolean,
   ): Promise<void> {
-    if (this.ended) return;
+    if (this.settled) return;
     this.ended = true;
     this.disarm();
-    if (terminate) await this.handle?.terminate();
+    if (terminate && this.handle !== undefined) {
+      // The quota or the idle window ended this loop's own observing; only
+      // a proven stop may settle the record at that reason. An unproven one
+      // parks on the same honest line `stop()` uses, so a watch that still
+      // runs never reports as a task that ended — and the park leaves the
+      // record open, because that watch's own end is still to come (#13856).
+      if (!(await this.handle.terminate())) {
+        await this.monitors.blockedRuntimeLost(this.monitorId);
+        return;
+      }
+    }
+    this.settled = true;
     await this.monitors.settleQuiet(this.monitorId, stopReason);
   }
 

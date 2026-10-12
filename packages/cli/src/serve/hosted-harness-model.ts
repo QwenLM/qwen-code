@@ -14,6 +14,11 @@ import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
+import {
+  HostedModelUnavailableError,
+  type HostedAgentDefinition,
+} from './hosted-agent-definition.js';
+
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import {
   HostedHookRecoveryRequiredError,
@@ -78,6 +83,8 @@ export async function runHostedHarnessTextTurn(input: {
       Pick<HostedWorkspaceToolTurn, 'resumeHookResults' | 'hookStopReason'>
     >;
   workspaceContext?: { read(): string | undefined };
+  agentDefinition?: HostedAgentDefinition;
+  agentInstructions?: string;
   textDeltas?: HostedHarnessTextDeltas;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
@@ -103,6 +110,43 @@ export async function runHostedHarnessTextTurn(input: {
     true,
     { toolInvocationGuard: () => ({ allowed: false }) },
   );
+  const contextWithInstructions = (context: string | undefined) =>
+    [
+      input.agentInstructions
+        ? `# Agent instructions\n\n${input.agentInstructions}`
+        : undefined,
+      context,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  const model = input.agentDefinition?.model;
+  if (model) {
+    try {
+      const matches = config
+        .getAllConfiguredModels()
+        .filter((entry) => !entry.isRuntimeModel && entry.id === model.id);
+      if (matches.length !== 1) throw new HostedModelUnavailableError();
+      const selected = matches[0]!;
+      await config.switchModel(selected.authType, selected.id, {
+        requireCachedCredentials: true,
+        ...(selected.registryBaseUrl
+          ? { baseUrl: selected.registryBaseUrl }
+          : {}),
+      });
+    } catch (cause) {
+      try {
+        await config.shutdown({
+          shutdownTelemetry: false,
+          strictResourceCleanup: true,
+        });
+      } catch (cleanupCause) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness model cleanup failed: ${String(cleanupCause)}`,
+        );
+      }
+      throw new HostedModelUnavailableError(cause);
+    }
+  }
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
   let historyReady = false;
@@ -206,6 +250,12 @@ export async function runHostedHarnessTextTurn(input: {
   };
   try {
     await input.hooks?.ensureReady(input.signal);
+    // Seed instructions when memory reload is skipped; restore them after
+    // initialize() when its hierarchical memory refresh replaces user memory.
+    if (input.agentInstructions)
+      config.setUserMemory(
+        contextWithInstructions(input.workspaceContext?.read()),
+      );
     await config.initialize({
       signal: input.signal,
       skipHooks: true,
@@ -218,7 +268,19 @@ export async function runHostedHarnessTextTurn(input: {
     const authType = config.getModelsConfig().getCurrentAuthType();
     if (!authType)
       throw new Error('Hosted Harness model authentication is unavailable.');
-    await config.refreshAuth(authType, true);
+    if (input.agentInstructions) {
+      config.setUserMemory(
+        contextWithInstructions(input.workspaceContext?.read()),
+      );
+    }
+    try {
+      await config.refreshAuth(authType, true);
+    } catch (cause) {
+      if (model) throw new HostedModelUnavailableError(cause);
+      throw cause;
+    }
+    if (input.agentInstructions)
+      await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
     runPromptHook = input.modelScope
       ? createHostedPromptHookRunner(config, input.modelScope)
@@ -350,7 +412,7 @@ export async function runHostedHarnessTextTurn(input: {
       if (contextAvailable && contextAvailable !== injectedContext) {
         // setUserMemory alone never reaches the wire: the system instruction
         // was assembled during initialize() and is cached on the chat.
-        config.setUserMemory(contextAvailable);
+        config.setUserMemory(contextWithInstructions(contextAvailable));
         await client.refreshSystemInstruction();
         injectedContext = contextAvailable;
       }

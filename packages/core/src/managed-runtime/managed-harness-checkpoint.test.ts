@@ -8,7 +8,9 @@ import { describe, expect, it } from 'vitest';
 import {
   authorizeParsedHarnessCheckpoint,
   createAwaitActionHarnessCheckpoint,
+  createAwaitAgentHarnessCheckpoint,
   createAwaitRuntimeHarnessCheckpoint,
+  createConsumedAgentWaitHarnessCheckpoint,
   createConsumedRuntimeResultsHarnessCheckpoint,
   createHookStoppedRuntimeHarnessCheckpoint,
   createInitialHarnessCheckpoint,
@@ -19,6 +21,7 @@ import {
   encodeHarnessCheckpointV1,
   parseHarnessCheckpointV1,
   tryParseHarnessCheckpointV1,
+  type HarnessAgentWaitGroup,
   type HarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
 import {
@@ -139,8 +142,20 @@ function inProgressRuntime() {
   };
 }
 
+function agentWaitOf(childRunIds: readonly string[]): HarnessAgentWaitGroup {
+  return {
+    runs: childRunIds.map((childRunId, index) => ({
+      childRunId,
+      functionCallId: `fc-${index + 1}`,
+      toolName: 'agent',
+      modelMessageId: 'msg-1',
+      consumed: false,
+    })),
+  };
+}
+
 describe('harness checkpoint v1', () => {
-  it('round-trips a before_model checkpoint with all nine groups', () => {
+  it('round-trips a before_model checkpoint with all groups', () => {
     const checkpoint = seed();
     expect(checkpoint.continuation.phase).toBe('before_model');
     expect(checkpoint.attempt).toBeNull();
@@ -626,5 +641,573 @@ describe('harness checkpoint v1', () => {
         outcomeRef: ref('managed-tool-outcome'),
       }),
     ).toThrow(/requires an await_runtime checkpoint/);
+  });
+
+  it('round-trips an await_agent checkpoint and its consumed advancement', () => {
+    const wait = createAwaitAgentHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      agentWait: agentWaitOf(['run-1', 'run-2']),
+    });
+    expect(wait.continuation.phase).toBe('await_agent');
+    expect(wait.approval).toBeNull();
+    expect(wait.agentWait?.runs).toHaveLength(2);
+    expect(parseHarnessCheckpointV1(bytesOf(wait))).toEqual(wait);
+
+    const partial = createConsumedAgentWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      childRunId: 'run-1',
+    });
+    expect(partial.continuation.phase).toBe('await_agent');
+    expect(partial.agentWait?.runs).toMatchObject([
+      { childRunId: 'run-1', consumed: true },
+      { childRunId: 'run-2', consumed: false },
+    ]);
+    expect(parseHarnessCheckpointV1(bytesOf(partial))).toEqual(partial);
+
+    const advanced = createConsumedAgentWaitHarnessCheckpoint({
+      previous: partial,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      childRunId: 'run-2',
+    });
+    expect(advanced.continuation.phase).toBe('model_output_committed');
+    expect(advanced.agentWait?.runs.every((run) => run.consumed)).toBe(true);
+    expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
+  });
+
+  it('treats a checkpoint without an agentWait key as carrying none', () => {
+    const bytes = mutate(seed(), (value) => {
+      delete value['agentWait'];
+    });
+    expect(parseHarnessCheckpointV1(bytes).agentWait).toBeNull();
+  });
+
+  it('rejects an await_agent checkpoint against the other wait families', () => {
+    expect(() =>
+      createAwaitAgentHarnessCheckpoint({
+        previous: createAwaitActionHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          approval: requestedUserApproval(),
+        }),
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: null,
+        agentWait: agentWaitOf(['run-1']),
+      }),
+    ).toThrow(/cannot keep a requested approval/);
+    expect(() =>
+      createAwaitAgentHarnessCheckpoint({
+        previous: createAwaitAgentHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          agentWait: agentWaitOf(['run-1']),
+        }),
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: null,
+        agentWait: agentWaitOf(['run-2']),
+      }),
+    ).toThrow(/cannot replace an unfinished agent wait/);
+    expect(() =>
+      createAwaitAgentHarnessCheckpoint({
+        previous: createAwaitRuntimeHarnessCheckpoint({
+          previous: seed(),
+          checkpointId: 'ckpt-5',
+          coveredSequence: 4,
+          previousCheckpointId: 'ckpt-4',
+          attempt: committedAttempt(),
+          ...inProgressRuntime(),
+        }),
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: null,
+        agentWait: agentWaitOf(['run-1']),
+      }),
+    ).toThrow(/cannot carry in-flight Runtime work/);
+    expect(() =>
+      createAwaitAgentHarnessCheckpoint({
+        previous: seed(),
+        checkpointId: 'ckpt-5',
+        coveredSequence: 4,
+        previousCheckpointId: 'ckpt-4',
+        attempt: null,
+        agentWait: agentWaitOf(['run-1']),
+      }),
+    ).toThrow(/requires the attempt/);
+  });
+
+  it('replaces an all-consumed carried group, never an unfinished wait', () => {
+    const first = createAwaitAgentHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      agentWait: agentWaitOf(['run-1']),
+    });
+    const consumedFirst = createConsumedAgentWaitHarnessCheckpoint({
+      previous: first,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      childRunId: 'run-1',
+    });
+    // The first wait folded: its group is history — the second foreground
+    // call of the same batch commits its own wait over it.
+    const second = createAwaitAgentHarnessCheckpoint({
+      previous: consumedFirst,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      attempt: null,
+      agentWait: agentWaitOf(['run-2']),
+    });
+    expect(second.continuation.phase).toBe('await_agent');
+    expect(second.agentWait?.runs).toMatchObject([{ childRunId: 'run-2' }]);
+    expect(parseHarnessCheckpointV1(bytesOf(second))).toEqual(second);
+    expect(() =>
+      createAwaitAgentHarnessCheckpoint({
+        previous: first,
+        checkpointId: 'ckpt-7',
+        coveredSequence: 6,
+        previousCheckpointId: 'ckpt-6',
+        attempt: null,
+        agentWait: agentWaitOf(['run-2']),
+      }),
+    ).toThrow(/cannot replace an unfinished agent wait/);
+  });
+
+  it('rejects agentWait runs that repeat an identity or carry unknown keys', () => {
+    const wait = createAwaitAgentHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      agentWait: agentWaitOf(['run-1']),
+    });
+    // A duplicated childRunId is one wait named twice.
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          const group = value['agentWait'] as { runs: unknown[] };
+          group.runs = [
+            group.runs[0],
+            { ...(group.runs[0] as object), functionCallId: 'fc-dup' },
+          ];
+        }),
+      ),
+    ).toThrow(/repeats "run-1"/);
+    // A duplicated functionCallId defeats the resume's exactly-once key.
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          const group = value['agentWait'] as { runs: unknown[] };
+          group.runs = [
+            group.runs[0],
+            { ...(group.runs[0] as object), childRunId: 'run-dup' },
+          ];
+        }),
+      ),
+    ).toThrow(/repeats "fc-1"/);
+    // A would-be third field family is not silently tolerated.
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          value['agentWait'] = { runs: [], extra: true };
+        }),
+      ),
+    ).toThrow(/unknown field/);
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          const group = value['agentWait'] as {
+            runs: Array<Record<string, unknown>>;
+          };
+          group.runs[0]!['ordinal'] = 0;
+        }),
+      ),
+    ).toThrow(/unknown field/);
+  });
+
+  it('carries the consumed group into the next model round', () => {
+    const wait = createAwaitAgentHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      agentWait: agentWaitOf(['run-1']),
+    });
+    const consumed = createConsumedAgentWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      childRunId: 'run-1',
+    });
+    const round = createModelOutputCommittedHarnessCheckpoint({
+      previous: consumed,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+    });
+    expect(round.agentWait?.runs).toMatchObject([
+      { childRunId: 'run-1', consumed: true },
+    ]);
+    // The carried advance is the exact shape §4's branch classifies: a
+    // crash here classifies the wait instead of declining model_start.
+    // (R1-58: this case pins the constructor's contract — production
+    // delivers the carry through createConsumedAgentWaitHarnessCheckpoint
+    // above; createModelOutputCommitted's sole production caller,
+    // resolveDurableWait, can never see a non-null group, and the guard's
+    // legal-carry side keeps exactly this case alive.)
+    expect(parseHarnessCheckpointV1(bytesOf(round))).toEqual(round);
+  });
+
+  it('rejects consumed agent waits without the matching wait', () => {
+    expect(() =>
+      createConsumedAgentWaitHarnessCheckpoint({
+        previous: seed(),
+        checkpointId: 'ckpt-5',
+        coveredSequence: 4,
+        previousCheckpointId: 'ckpt-4',
+        childRunId: 'run-1',
+      }),
+    ).toThrow(/requires an await_agent checkpoint/);
+    const wait = createAwaitAgentHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      agentWait: agentWaitOf(['run-1']),
+    });
+    expect(() =>
+      createConsumedAgentWaitHarnessCheckpoint({
+        previous: wait,
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        childRunId: 'run-other',
+      }),
+    ).toThrow(/has no run run-other/);
+    const consumed = createConsumedAgentWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      childRunId: 'run-1',
+    });
+    expect(() =>
+      createConsumedAgentWaitHarnessCheckpoint({
+        previous: consumed,
+        checkpointId: 'ckpt-7',
+        coveredSequence: 6,
+        previousCheckpointId: 'ckpt-6',
+        childRunId: 'run-1',
+      }),
+    ).toThrow(/requires an await_agent checkpoint/);
+  });
+
+  it('rejects phase shapes that misplace the agent wait', () => {
+    const wait = createAwaitAgentHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      agentWait: agentWaitOf(['run-1']),
+    });
+    // Empty run list cannot authorize the phase (read-path cardinality
+    // fires before the phase shape ever judges it, R3-3).
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          value['agentWait'] = { runs: [] };
+        }),
+      ),
+    ).toThrow(/requires at least one run/);
+    // In-flight Runtime work excludes the agent wait.
+    const runtime = inProgressRuntime();
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          value['tools'] = JSON.parse(JSON.stringify(runtime.tools));
+          value['runtime'] = JSON.parse(JSON.stringify(runtime.runtime));
+        }),
+      ),
+    ).toThrow(/cannot carry in-flight Runtime work/);
+    // The runtime wait cannot carry the agent group either.
+    const runtimeWait = createAwaitRuntimeHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      ...inProgressRuntime(),
+    });
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(runtimeWait, (value) => {
+          value['agentWait'] = JSON.parse(JSON.stringify(wait.agentWait));
+        }),
+      ),
+    ).toThrow(/cannot carry an agent wait/);
+    // model_output_committed carries the group only once fully consumed.
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(
+          createModelOutputCommittedHarnessCheckpoint({
+            previous: wait,
+            checkpointId: 'ckpt-6',
+            coveredSequence: 5,
+            previousCheckpointId: 'ckpt-5',
+          }),
+          (value) => {
+            value['agentWait'] = JSON.parse(JSON.stringify(wait.agentWait));
+          },
+        ),
+      ),
+    ).toThrow(/cannot carry an unconsumed agent wait/);
+  });
+
+  it('rejects the agent group at every other phase too (R1-13)', () => {
+    const group = agentWaitOf(['run-1']);
+    // before_model: author a shape instead of mutating one.
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(seed(), (value) => {
+          value['agentWait'] = JSON.parse(JSON.stringify(group));
+        }),
+      ),
+    ).toThrow(/cannot carry an agent wait/);
+    // await_action with a live approval.
+    const awaited = createAwaitActionHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      approval: requestedUserApproval(),
+    });
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(awaited, (value) => {
+          value['agentWait'] = JSON.parse(JSON.stringify(group));
+        }),
+      ),
+    ).toThrow(/cannot carry an agent wait/);
+    // await_agent carrying a requested approval is refused by both the
+    // constructor and the parser.
+    const wait = createAwaitAgentHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      agentWait: group,
+    });
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          value['approval'] = JSON.parse(
+            JSON.stringify(requestedUserApproval()),
+          );
+        }),
+      ),
+    ).toThrow(/cannot keep a requested approval/);
+    // results_ready never carries the group.
+    const runtimeWait = createAwaitRuntimeHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      ...inProgressRuntime(),
+    });
+    const results = createResultsReadyHarnessCheckpoint({
+      previous: runtimeWait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      executionCallId: 'ex-1',
+      outcomeRef: ref('managed-tool-outcome'),
+    });
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(results, (value) => {
+          value['agentWait'] = JSON.parse(JSON.stringify(group));
+        }),
+      ),
+    ).toThrow(/cannot carry an agent wait/);
+    // turn_settled never carries it either.
+    const consumedResults = createConsumedRuntimeResultsHarnessCheckpoint({
+      previous: results,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+    });
+    const settled = createTurnSettledHarnessCheckpoint({
+      previous: consumedResults,
+      checkpointId: 'ckpt-8',
+      coveredSequence: 7,
+      previousCheckpointId: 'ckpt-7',
+    });
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(settled, (value) => {
+          value['agentWait'] = JSON.parse(JSON.stringify(group));
+        }),
+      ),
+    ).toThrow(/turn_settled cannot carry/);
+  });
+
+  it('double-consume of the same run is refused while runs remain (R1-13)', async () => {
+    const wait = createAwaitAgentHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      agentWait: agentWaitOf(['run-1', 'run-2']),
+    });
+    const first = createConsumedAgentWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      childRunId: 'run-1',
+    });
+    // With run-2 outstanding the phase stays await_agent — so the second
+    // fold of run-1 reaches the consumed guard rather than the phase
+    // guard.
+    expect(first.continuation.phase).toBe('await_agent');
+    expect(() =>
+      createConsumedAgentWaitHarnessCheckpoint({
+        previous: first,
+        checkpointId: 'ckpt-7',
+        coveredSequence: 6,
+        previousCheckpointId: 'ckpt-6',
+        childRunId: 'run-1',
+      }),
+    ).toThrow(/is already consumed/);
+  });
+
+  it('write-side guards refuse the two rejected shapes (R1-6)', () => {
+    const wait = createAwaitAgentHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      agentWait: agentWaitOf(['run-1']),
+    });
+    // An empty group cannot mint an await_agent even directly.
+    expect(() =>
+      createAwaitAgentHarnessCheckpoint({
+        previous: seed(),
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+        attempt: committedAttempt(),
+        agentWait: { runs: [] },
+      }),
+    ).toThrow(/requires at least one run/);
+    // Forwarding an unconsumed group into model_output_committed is
+    // refused before the bytes could exist; this same module mints the
+    // carried all-consumed shape through createConsumedAgentWait.
+    expect(() =>
+      createModelOutputCommittedHarnessCheckpoint({
+        previous: wait,
+        checkpointId: 'ckpt-6',
+        coveredSequence: 5,
+        previousCheckpointId: 'ckpt-5',
+      }),
+    ).toThrow(/cannot carry an unconsumed agent wait/);
+    // The legal carry stays open: fully consumed forwards the group.
+    const consumed = createConsumedAgentWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      childRunId: 'run-1',
+    });
+    // The read path is fail-closed on cardinality too: no producer mints
+    // an empty group, at any phase (R3-3).
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(consumed, (value) => {
+          value['agentWait'] = { runs: [] };
+        }),
+      ),
+    ).toThrow(/requires at least one run/);
+    // And an all-consumed group read as still awaited fails closed: that
+    // shape only ever means the wait already advanced (R3-3).
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          value['agentWait'] = JSON.parse(
+            JSON.stringify({
+              runs: wait.agentWait!.runs.map((run) => ({
+                ...run,
+                consumed: true,
+              })),
+            }),
+          );
+        }),
+      ),
+    ).toThrow(/cannot keep an all-consumed agent wait/);
+    expect(
+      createModelOutputCommittedHarnessCheckpoint({
+        previous: consumed,
+        checkpointId: 'ckpt-7',
+        coveredSequence: 6,
+        previousCheckpointId: 'ckpt-6',
+      }).agentWait?.runs,
+    ).toMatchObject([{ childRunId: 'run-1', consumed: true }]);
+  });
+
+  it('omits the agentWait key whenever no group rides the checkpoint (R1-29)', () => {
+    // A pre-agentWait reader rejects unknown root keys; absent parses as
+    // null on both sides, so a checkpoint that carries no group must not
+    // name the key — an older daemon can still open these bytes.
+    const bytes = bytesOf(seed());
+    expect(Object.keys(JSON.parse(bytes.toString('utf8')))).not.toContain(
+      'agentWait',
+    );
+    expect(parseHarnessCheckpointV1(bytes).agentWait).toBeNull();
+    // And the group itself always writes the key.
+    const wait = createAwaitAgentHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      agentWait: agentWaitOf(['run-1']),
+    });
+    const waitBytes = bytesOf(wait);
+    expect(Object.keys(JSON.parse(waitBytes.toString('utf8')))).toContain(
+      'agentWait',
+    );
+    expect(parseHarnessCheckpointV1(waitBytes).agentWait?.runs).toHaveLength(1);
   });
 });

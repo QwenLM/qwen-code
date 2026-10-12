@@ -187,6 +187,7 @@ export class ManagedToolConflictError extends Error {
     readonly code:
       | 'managed_runtime_identity_conflict'
       | 'managed_runtime_provider_operation_failed'
+      | 'managed_runtime_owner_hold_pending'
       | 'managed_tool_result_conflict' = 'managed_runtime_identity_conflict',
   ) {
     super(message);
@@ -298,7 +299,14 @@ export interface ManagedWorkerDrainObservation {
 export type ManagedShellCaptureSink = Pick<
   LocalShellResultCapture,
   keyof LocalShellResultCapture
->;
+> & {
+  /**
+   * Marks the capture's end as a platform-requested stop (#13856 A8): the
+   * finalize then carries `stopRequested`, and the record projects
+   * `cancelled`/`stop_requested` instead of a bare exit.
+   */
+  setStopRequested(): void;
+};
 
 export interface ManagedShellCapturePublisher {
   readonly hasInstalledPublication?: boolean;
@@ -772,8 +780,12 @@ export class ManagedToolExecutor {
 
   closeSessionAdmission(sessionId: string): void {
     if (this.hasActiveSession(sessionId)) {
+      // The dedicated code names the one condition a Hook release may absorb
+      // as a fence — this Session still owns unfinished work of any kind;
+      // both class defaults stay catch-alls other refusals share.
       throw new ManagedToolConflictError(
         'Managed Runtime Session still owns unfinished work.',
+        'managed_runtime_owner_hold_pending',
       );
     }
     this.closedSessions.add(sessionId);
