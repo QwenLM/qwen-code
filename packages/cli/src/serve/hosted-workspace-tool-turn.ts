@@ -4520,11 +4520,34 @@ export class HostedWorkspaceToolTurn {
     if (this.commandTimedOut) return;
     const authorization =
       await this.session.authority.harnessRunAuthorization();
-    if (
-      authorization.status === 'runnable' &&
-      authorization.checkpoint.commandWait?.timedOut === true
-    )
+    if (authorization.status !== 'runnable') return;
+    if (authorization.checkpoint.commandWait?.timedOut === true) {
       this.commandTimedOut = true;
+      return;
+    }
+    // The lock's own evidence is the journaled timeout answer, committed
+    // before the fold that would carry the stamp into the group. A crash
+    // between the two leaves the group unstamped — the recovering owner
+    // re-arms from this prompt's journaled evidence instead of letting
+    // the next command mint a fresh outbound.
+    const texts = [
+      SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
+      sessionCommandEvidenceText('planned'),
+      sessionCommandEvidenceText('accepting'),
+    ];
+    const projected = await this.session.sink.project();
+    for (const entry of projected) {
+      if (entry.daemonPromptId !== this.promptId) continue;
+      if (entry.type !== 'tool_result') continue;
+      if (
+        texts.every(
+          (text) => !JSON.stringify(entry.message?.parts ?? []).includes(text),
+        )
+      )
+        continue;
+      this.commandTimedOut = true;
+      return;
+    }
   }
 
   private async acceptSessionCommand(
