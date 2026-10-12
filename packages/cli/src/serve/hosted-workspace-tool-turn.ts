@@ -5218,13 +5218,16 @@ export class HostedWorkspaceToolTurn {
             );
             if (!journaled.has(run.functionCallId))
               await this.commit('tool_result', locked, model);
-          } else {
+          } else if (!journaled.has(run.functionCallId)) {
             // The call whose own wait timed out: the dead owner stamped
             // the lock at detection and may have died before settling
             // it. Its journal answers it — a planned entry cancelled as
             // not sent, a handed-over one unknown — never the later
             // calls' refusal, or the entry stays live for the relay to
-            // deliver after the wait has ended.
+            // deliver after the wait has ended. A call already answered
+            // was settled first (the timeout arm settles, then answers),
+            // so a reply the relay copied in since is not what it read
+            // and is never consumed: it only folds.
             await this.answerCommandByJournal(
               commands,
               request,

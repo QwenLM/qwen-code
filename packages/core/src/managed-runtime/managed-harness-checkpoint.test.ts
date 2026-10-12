@@ -1315,8 +1315,8 @@ describe('command wait', () => {
 
   // The lock is the Turn's, not the wait group's: the Turn's next command
   // batch replaces the group and its Runtime work clears it, and neither
-  // may unlock the Turn. Only another Turn's checkpoint drops it.
-  it("keeps the timeout lock through the Turn's later checkpoints and drops it at the next Turn", () => {
+  // may unlock the Turn. The Turn's end drops it.
+  it("keeps the timeout lock through the Turn's later checkpoints and drops it when the Turn ends", () => {
     const wait = createAwaitCommandHarnessCheckpoint({
       previous: seed(),
       checkpointId: 'ckpt-5',
@@ -1368,7 +1368,9 @@ describe('command wait', () => {
         'turn-1',
       ),
     ).toBe(true);
-    const sameTurn = createNextTurnReadyHarnessCheckpoint({
+    // The ready checkpoint the settled Turn writes under its own id ends
+    // it too, so an idle Session carries no lock key.
+    const settled = createNextTurnReadyHarnessCheckpoint({
       previous: locked,
       checkpointId: 'ckpt-7',
       coveredSequence: 6,
@@ -1377,7 +1379,10 @@ describe('command wait', () => {
       turnId: 'turn-1',
       promptId: null,
     });
-    expect(harnessCommandLocked(sameTurn, 'turn-1')).toBe(true);
+    expect(settled.commandLock).toBeNull();
+    expect(
+      Object.keys(JSON.parse(bytesOf(settled).toString('utf8'))),
+    ).not.toContain('commandLock');
     const nextTurn = createNextTurnReadyHarnessCheckpoint({
       previous: locked,
       checkpointId: 'ckpt-7',

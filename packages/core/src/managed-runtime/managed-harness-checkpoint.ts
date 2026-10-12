@@ -1091,16 +1091,16 @@ function parseCommandLock(
 }
 
 /**
- * The lock `previous` hands to the next checkpoint of `turnId` (by default
- * its own Turn): kept within the Turn that stamped it, dropped by any
- * other Turn's checkpoint.
+ * The lock `previous` hands to its Turn's next checkpoint: kept within
+ * the Turn that stamped it, dropped by any other Turn's checkpoint.
  */
 function carriedCommandLock(
   previous: HarnessCheckpointV1,
-  turnId: string | null = previous.identity.turnId,
 ): HarnessCommandLockGroup | null {
-  return previous.commandLock !== null && previous.commandLock.turnId === turnId
-    ? previous.commandLock
+  // An in-memory checkpoint shaped before the key existed carries none.
+  const lock = previous.commandLock ?? null;
+  return lock !== null && lock.turnId === previous.identity.turnId
+    ? lock
     : null;
 }
 
@@ -1741,7 +1741,9 @@ export function createNextTurnReadyHarnessCheckpoint(input: {
     approval: null,
     agentWait: null,
     commandWait: null,
-    commandLock: carriedCommandLock(input.previous, input.turnId),
+    // The Turn that stamped decision 4's lock has finished, whichever Turn
+    // comes next.
+    commandLock: null,
     output: {
       llmContentRef: null,
       physicalStatus: null,

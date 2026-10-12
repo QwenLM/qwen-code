@@ -24,6 +24,7 @@ import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   HostedSessionCommandSession,
   SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
+  sessionCommandEvidenceText,
 } from './hosted-session-command-session.js';
 import {
   HostedSessionMessageSession,
@@ -847,6 +848,75 @@ it('on resume answers a timed-out call settled before its answer from the settle
   const answered = await journaledResults();
   expect(answered).toContain("The command's outcome is unknown");
   expect(answered).not.toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+});
+
+// The owner settled and answered the timed-out call, then died before the
+// fold; the relay's late reply moved the entry from unknown to accepted.
+// The call read the unknown answer, never the reply, so recovery only
+// folds it: a timed-out call is never consumed.
+it('on resume never consumes a timed-out call that was answered before a late reply', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const [run] = await parkCalls([
+    { callId: 'call-cut', toolName: 'task_create' },
+  ]);
+  await commands.runCommand({
+    commandId: run!.commandId,
+    kind: 'board_write',
+    args: { subject: 'x', description: 'y' },
+    executionCallId: 'call-cut',
+    closing: false,
+  });
+  await commands.handover(run!.commandId, PARENT);
+  await createManagedHarnessHandle(session).markCommandWaitTimeout();
+  await commands.settle(run!.commandId, 'unknown');
+  await session.sink.write({
+    uuid: randomUUID(),
+    parentUuid: null,
+    sessionId: sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    model: 'model',
+    type: 'tool_result',
+    cwd: rootDir,
+    version: 'test',
+    daemonPromptId: 'prompt',
+    message: {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-cut',
+            name: 'task_create',
+            response: { error: sessionCommandEvidenceText('accepting') },
+          },
+        },
+      ],
+    },
+  });
+  await commands.answered(run!.commandId, {
+    outcome: 'answered',
+    text: 'Task #1 created: "x".',
+  });
+  expect(commands.command(run!.commandId)?.run.delivery?.state).toBe(
+    'accepted',
+  );
+
+  await createTurn().resumeCommandWaitRuns(
+    [run!],
+    false,
+    'model',
+    new AbortController().signal,
+  );
+  expect(commands.command(run!.commandId)?.run.delivery?.state).toBe(
+    'accepted',
+  );
+  const answered = await journaledResults();
+  expect(answered).not.toContain('Task #1 created');
+  expect((await runnableCheckpoint()).continuation.phase).toBe(
+    'model_output_committed',
+  );
 });
 
 // In one batch the timed-out call answers by its journal while the call
