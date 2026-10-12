@@ -1,3 +1,4 @@
+/* global console */
 // Regenerates canonical-doubles.txt, the JSON.stringify oracle that
 // JsonSupportTest checks JsonSupport.encode against:
 //   node canonical-doubles.mjs > canonical-doubles.txt

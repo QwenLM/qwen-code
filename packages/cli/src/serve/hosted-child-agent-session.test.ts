@@ -1057,7 +1057,7 @@ describe('hosted workflow child session (#13803)', () => {
       const notified = JSON.parse(
         (
           await harness.store.read(
-            input!.payload['contentRef'] as Parameters<
+            input!.payload['contentRef'] as unknown as Parameters<
               typeof harness.store.read
             >[0],
           )
