@@ -2045,6 +2045,24 @@ jobs:
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
                 done || true
+            # A reused self-hosted .git keeps the shallow boundary of the
+            # PREVIOUS job. actions/checkout pins gc.auto=0, so no git process
+            # ever repairs or reclaims that boundary between jobs, and the next
+            # depth-1 fetch then negotiates a thin pack whose delta base the
+            # stale boundary claims is still local — "fatal: pack has N
+            # unresolved delta", byte-identical on every internal retry because
+            # the boundary never changes (#13951). Drop the boundary so the next
+            # fetch starts from a clean thin-pack root; .git/commondir is the
+            # file twin of GIT_COMMON_DIR and narrows the object graph the same
+            # way. Neither file exists on a normal actions/checkout, so this is
+            # a no-op on a clean workspace and on hosted runners — the same
+            # idempotent pair resanitize-git-config.sh already removes.
+            GIT_DIR_PATH="$("${GIT_SAFE[@]}" rev-parse --absolute-git-dir 2>/dev/null || echo "$GITHUB_WORKSPACE/.git")"
+            if [ -f "${GIT_DIR_PATH}/shallow" ]; then
+              echo "::notice::dropping stale ${GIT_DIR_PATH}/shallow before checkout (is-shallow-repository=$("${GIT_SAFE[@]}" rev-parse --is-shallow-repository 2>/dev/null || echo unknown))"
+              "${GIT_SAFE[@]}" count-objects -v 2>/dev/null || true
+            fi
+            rm -f -- "${GIT_DIR_PATH}/shallow" "${GIT_DIR_PATH}/commondir"
           fi
 
       - name: 'Checkout'
