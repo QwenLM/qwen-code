@@ -300,6 +300,15 @@ export function isTranscriptArtifactRecord(record: {
   );
 }
 
+export function isInternalCodeModeToolResult(record: {
+  readonly type?: unknown;
+  readonly subtype?: unknown;
+}): boolean {
+  return (
+    record.type === 'tool_result' && record.subtype === 'code_mode_tool_result'
+  );
+}
+
 export function validateTranscriptRecord(
   value: unknown,
   recordIndex?: number,

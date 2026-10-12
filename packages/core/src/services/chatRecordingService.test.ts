@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
+import { AuthType } from '../utils/auth-type.js';
 import {
   backgroundTurnContext,
   type BackgroundNotificationTurn,
@@ -193,6 +194,8 @@ describe('ChatRecordingService', () => {
         ),
       },
       getModel: returns('gemini-pro'),
+      getAuthType: returns(AuthType.USE_GEMINI),
+      getApprovalMode: returns(ApprovalMode.DEFAULT),
       getFastModel: returns(undefined),
       isInteractive: returns(false),
       getDebugMode: returns(false),
@@ -447,6 +450,68 @@ describe('ChatRecordingService', () => {
       expect(record.provenance).toBe('real_user');
       expect(record.promptId).toBe('prompt-1');
       expect(record.daemonPromptId).toBeUndefined();
+    });
+
+    it('snapshots each prompt before asynchronous writes and settings changes', async () => {
+      svc.recordUserMessage('first', undefined, undefined, 'prompt-1');
+      vi.mocked(mockConfig.getModel).mockReturnValue('qwen-plus');
+      vi.mocked(mockConfig.getAuthType).mockReturnValue(AuthType.USE_OPENAI);
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.YOLO);
+      svc.recordUserMessage('second', undefined, undefined, 'prompt-2');
+      vi.mocked(mockConfig.getModel).mockReturnValue('next-model');
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+
+      const records = await flushedAll();
+      expect(records.map((record) => record.executionContext)).toEqual([
+        {
+          modelId: 'gemini-pro',
+          authType: 'gemini',
+          approvalMode: 'default',
+        },
+        {
+          modelId: 'qwen-plus',
+          authType: 'openai',
+          approvalMode: 'yolo',
+        },
+      ]);
+      expect(records.map((record) => record.promptId)).toEqual([
+        'prompt-1',
+        'prompt-2',
+      ]);
+      expect(records.map((record) => record.message)).toEqual([
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+      ]);
+    });
+
+    it('snapshots mid-turn input when it reaches the recorder', async () => {
+      vi.mocked(mockConfig.getModel).mockReturnValue('mid-turn-model');
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+      svc.recordMidTurnUserMessage([{ text: 'follow-up' }], 'follow-up');
+      vi.mocked(mockConfig.getModel).mockReturnValue('later-model');
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+        ApprovalMode.DEFAULT,
+      );
+
+      const record = await flushed();
+      expect(record.subtype).toBe('mid_turn_user_message');
+      expect(record.executionContext).toEqual({
+        modelId: 'mid-turn-model',
+        authType: 'gemini',
+        approvalMode: 'auto-edit',
+      });
+    });
+
+    it('omits unavailable authentication from serialized command records', async () => {
+      vi.mocked(mockConfig.getAuthType).mockReturnValue(undefined);
+      svc.recordUserMessage('/help');
+      const record = JSON.parse(JSON.stringify(await flushed())) as ChatRecord;
+      expect(record.executionContext).toEqual({
+        modelId: 'gemini-pro',
+        approvalMode: 'default',
+      });
     });
 
     it('preserves prompt identities in compression checkpoints', async () => {

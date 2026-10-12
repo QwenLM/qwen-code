@@ -10,6 +10,13 @@ public interface RuntimeBindingRepository {
     RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
             RuntimeSessionRecord candidate);
 
+    /** Creates a RELEASED receipt under the same generation lock as admission. */
+    default RuntimeSessionRecord createSessionTombstone(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord candidate) {
+        throw new RuntimeBrokerException(501, "runtime_session_tombstone_unavailable",
+                "Runtime repository does not support atomic Session retirement", false);
+    }
+
     /** Existing idempotency receipts remain readable after admission closes. */
     ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate);
@@ -39,6 +46,13 @@ public interface RuntimeBindingRepository {
     /** Finalizes release under the parent generation lock; managed LOST requires generation recovery. */
     RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
             RuntimeSessionRecord expected);
+
+    /** Atomically releases one original Session and its holder under a live drain claim and persisted stop receipt. */
+    default RuntimeSessionRecord completeStoppedSessionRelease(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected, RuntimeBindingRecord claim) {
+        throw new RuntimeBrokerException(501, "runtime_stopped_release_unavailable",
+                "Runtime repository does not support stopped Session release", false);
+    }
 
     /**
      * Moves the Session to RELEASING in one decision with the no-active-

@@ -12,12 +12,64 @@ import {
 import { createServer, type Server } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { inspect } from 'node:util';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
 } from '../integration-tests/fake-openai-server.js';
+import { isDeepStrictEqual } from 'node:util';
 
 const root = process.cwd();
+const verificationMode = process.env['G3_VERIFY_MODE'];
+if (
+  verificationMode &&
+  !['allow', 'deny', 'cancel', 'expiry', 'continuation'].includes(
+    verificationMode,
+  )
+) {
+  throw new Error(
+    'G3_VERIFY_MODE must be allow, deny, cancel, expiry or continuation',
+  );
+}
+const approvalRecovery =
+  !!verificationMode && verificationMode !== 'continuation';
+const verificationDirectory = path.resolve(
+  root,
+  process.env['G3_VERIFY_REPORT_DIR'] ??
+    `.qwen/investigations/g3-step3-implementation/packaged-${verificationMode}-${Date.now()}`,
+);
+if (verificationMode) mkdirSync(verificationDirectory, { recursive: true });
+const reliefMarker = 'G3_STEP3_RELIEF_TURN';
+const reliefResponse = 'G3_STEP3_RELIEF_COMPLETED';
+let originalApprovalId: string | undefined;
+interface SavedApprovalOptions {
+  v: number;
+  policyRevision: string;
+  continuationRef: { resourceId: string };
+}
+interface SavedApprovalPlan {
+  calls: { prepareKey: string; requestDigest: string }[];
+  actionId: string;
+  stage: string;
+  batchId: string;
+  runtime: {
+    runtimeSessionId: string;
+    bindingId: string;
+    generation: string;
+    workspaceGeneration: string;
+  };
+}
+let originalApprovalOptions: SavedApprovalOptions | undefined;
+let originalApprovalPlan: SavedApprovalPlan | undefined;
+let verifiedOriginalTerminal: string | undefined;
+function saveEvidence(name: string, body: unknown): void {
+  if (!verificationMode) return;
+  writeFileSync(
+    path.join(verificationDirectory, name),
+    JSON.stringify(body, null, 2) + '\n',
+  );
+}
+
 const argumentsList = process.argv.slice(2);
 let model = 'moonshot/kimi-k3';
 let runtimeDelayMs = 0;
@@ -79,6 +131,12 @@ if (freeze && (!continuationFailover || harnessOnly)) {
   );
 }
 
+if (verificationMode && (!continuationFailover || !harnessOnly || freeze)) {
+  throw new Error(
+    'This isolated Step 3 probe requires --continuation-failover --harness-only',
+  );
+}
+
 const durableFailover =
   sessionFailover || inflightFailover || continuationFailover || bigOutput;
 const runtimeTakeover = inflightFailover || continuationFailover;
@@ -105,13 +163,33 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 }
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
-const springJar = path.join(
+const springModule = path.join(
   root,
   'packages',
   'sdk-java',
   'managed-agent-server',
-  'target',
-  'qwen-managed-agent-server-0.1.0-alpha.jar',
+);
+const springTarget = path.join(springModule, 'target');
+// The pom attaches classified repackage executions alongside the
+// unclassified server jar, so a wildcard over target/ matches several
+// artifacts. Read the project version from the
+// pom and name the unclassified jar exactly — version-independent without
+// assuming it is the only packaged artifact. The <version> immediately
+// following the module's own <artifactId> (not the <parent> block's). The
+// capture itself is whitespace-tolerant, so a formatter wrapping or
+// re-indenting the element cannot flow newlines into the jar path.
+const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
+const pomVersion = pomXml.match(
+  /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
+)?.[1];
+if (!pomVersion) {
+  throw new Error(
+    'Could not read the project <version> from managed-agent-server/pom.xml',
+  );
+}
+const springJar = path.join(
+  springTarget,
+  `qwen-managed-agent-server-${pomVersion}.jar`,
 );
 for (const required of [
   cliBundle,
@@ -336,10 +414,16 @@ function start(
   return registered;
 }
 
+// One spelling for "has this child exited": five independent phrasings
+// drifted into the pre-fix ESRCH that process.kill raised on a reaped pid.
+function childExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 function processTreeExists(child: ChildProcess): boolean {
   if (child.pid === undefined) return false;
   if (process.platform === 'win32') {
-    return child.exitCode === null && child.signalCode === null;
+    return !childExited(child);
   }
   try {
     process.kill(-child.pid, 0);
@@ -392,19 +476,17 @@ async function crashChild(child: ChildProcess, name: string): Promise<void> {
 }
 
 async function crashProcess(child: ChildProcess, name: string): Promise<void> {
-  if (child.pid === undefined || child.exitCode !== null) {
+  // A child killed BY signal has exitCode null but signalCode set; missing
+  // that branch kills a pid that no longer exists and throws raw ESRCH.
+  if (child.pid === undefined || childExited(child)) {
     throw new Error(`${name} exited before the crash was injected`);
   }
   process.kill(child.pid, 'SIGKILL');
   const deadline = Date.now() + 5_000;
-  while (
-    child.exitCode === null &&
-    child.signalCode === null &&
-    Date.now() < deadline
-  ) {
+  while (!childExited(child) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  if (child.exitCode === null && child.signalCode === null) {
+  if (!childExited(child)) {
     throw new Error(`${name} survived SIGKILL`);
   }
 }
@@ -542,33 +624,115 @@ async function startHeldExecutionStartProxy(
 
 async function waitUntil(
   name: string,
-  predicate: () => Promise<boolean> | boolean,
+  predicate: (remainingMs: number) => Promise<boolean> | boolean,
   timeoutMs: number,
   child?: Child,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  let lastErrorPredatesStall = false;
+  // Identity, not text: matching the rendered message would let a reworded
+  // sentinel silently invert the error precedence in the catch below.
+  const stall = new Error(`${name} predicate stalled`);
   while (Date.now() < deadline) {
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
-    if (
-      child &&
-      (child.child.exitCode !== null || child.child.signalCode !== null)
-    ) {
+    if (child && childExited(child.child)) {
       throw new Error(`${name} exited early\n${child.log()}`);
     }
     try {
-      if (await predicate()) return;
-    } catch {
-      // The dependency is still starting.
+      // Bound one iteration against the remaining deadline: a hung
+      // predicate must not outlive timeoutMs, and its last error must
+      // surface instead of vanishing into "did not become ready". unref the
+      // stall timer: a quick success must not keep the event loop (and this
+      // runner) alive until the discarded timeout fires. The race bounds
+      // only an asynchronous predicate — a synchronous one blocks the event
+      // loop, so the remaining budget is handed to the predicate for its
+      // own probe timeout.
+      const ready = await Promise.race([
+        Promise.resolve().then(() =>
+          predicate(Math.max(1, deadline - Date.now())),
+        ),
+        new Promise<boolean>((_, reject) => {
+          // Floor the bound: the final iteration can start with a sliver of
+          // budget left, and a poll that would answer just past the deadline
+          // must resolve the wait, not be discarded and misreported as a
+          // wedged predicate. The clamp re-admits up to ~500ms of overshoot
+          // on a genuinely wedged poll — the same trade runMysql's probe
+          // timeout floor makes for the synchronous path.
+          const stallTimer = setTimeout(
+            () => reject(stall),
+            Math.max(500, deadline - Date.now()),
+          );
+          stallTimer.unref();
+        }),
+      ]);
+      if (ready) return;
+      // The predicate answered; an error from an earlier phase no longer
+      // describes the state the deadline found.
+      lastError = undefined;
+    } catch (error) {
+      // Prefer the cause an undici fetch rejection carries (its own message
+      // is "fetch failed"). A real predicate error wins over the synthetic
+      // stall; when the stall is what the deadline found, the older error
+      // is reported as predating it instead of posing as the final state.
+      if (error instanceof Error && error.cause instanceof Error) {
+        lastError = error.cause;
+      } else if (error !== stall) {
+        lastError = error;
+      } else if (lastError === undefined) {
+        lastError = error;
+      } else {
+        lastErrorPredatesStall = true;
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`${name} did not become ready\n${child?.log() ?? ''}`);
+  // A non-Error rejection (a status string, a library object) is still
+  // the last thing the predicate said: inspect it so the content survives —
+  // String() renders a plain object as "[object Object]".
+  let cause = '';
+  if (lastError instanceof Error) {
+    cause = `: ${lastError.message}`;
+  } else if (lastError !== undefined) {
+    try {
+      cause = `: ${inspect(lastError)}`;
+    } catch {
+      cause = `: ${String(lastError)}`;
+    }
+  }
+  if (lastErrorPredatesStall) {
+    cause = `: predicate stalled; last error before the stall${cause}`;
+  }
+  throw new Error(
+    `${name} did not become ready${cause}\n${child?.log() ?? ''}`,
+  );
 }
 
-function runMysql(port: number, sql: string): string {
+// MySQL reads $HOME/.mylogin.cnf even when option files are disabled,
+// so a mysql_config_editor credential on a developer's machine would
+// silently auth-connect to the scratch empty-password server — and an
+// exported MYSQL_PWD (read as the password) or MYSQL_TEST_LOGIN_FILE
+// (relocates .mylogin.cnf ahead of $HOME, past --no-defaults) does the
+// same. Client invocations run against an isolated environment instead of
+// inheriting the real one: an empty HOME under the runner's one scratch
+// root, so the finally reclaims it and QWEN_MANAGED_E2E_KEEP_TMP=1 keeps
+// it for inspection, with both credential variables stripped.
+const mysqlClientHome = path.join(temporary, 'mysql-client-home');
+mkdirSync(mysqlClientHome, { recursive: true });
+const mysqlClientEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  HOME: mysqlClientHome,
+};
+delete mysqlClientEnv['MYSQL_PWD'];
+delete mysqlClientEnv['MYSQL_TEST_LOGIN_FILE'];
+
+function runMysql(port: number, sql: string, timeoutMs = 10_000): string {
   const result = spawnSync(
     mysql,
     [
+      // First argument, honored only there: a developer's ~/.my.cnf client
+      // options must not auth-fail a scratch empty-password server.
+      '--no-defaults',
       '--protocol=tcp',
       '--host=127.0.0.1',
       `--port=${port}`,
@@ -578,8 +742,24 @@ function runMysql(port: number, sql: string): string {
       '--execute',
       sql,
     ],
-    { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
+    {
+      encoding: 'utf8',
+      env: mysqlClientEnv,
+      // waitUntil hands the lease polls its remaining budget, and the final
+      // iteration can shrink it below one client round trip; floor the probe
+      // timeout so the last poll is never handed less than it can cost. The
+      // clamp re-admits up to ~2s of overshoot per wedged poll, against the
+      // ~10s the budget threading set out to remove.
+      timeout: Math.max(2_000, timeoutMs),
+      maxBuffer: 16 * 1024 * 1024,
+    },
   );
+  // A timed-out spawn sets error and leaves status null with empty stderr:
+  // surface the spawn-level reason, or a wedge reads as a bare
+  // "MySQL command failed: ".
+  if (result.error) {
+    throw new Error(`MySQL command failed: ${result.error.message}`);
+  }
   if (result.status !== 0) {
     throw new Error(`MySQL command failed: ${result.stderr}`);
   }
@@ -801,6 +981,15 @@ let heldStartProxy: HeldExecutionStartProxy | undefined;
 let replacementBrokerProxy: HeldExecutionStartProxy | undefined;
 let failure: unknown;
 let dumpPort: number | undefined;
+// The success JSON, assembled inside the try and printed only after
+// the post-finally throws, so an interrupt can never put a clean pass
+// on stdout for a run the operator explicitly stopped.
+let resultJson: string | undefined;
+let approvalResultJson: string | undefined;
+let g3SummaryJson: string | undefined;
+// The freeze arm's wake record reads as a pass line too, so it defers the
+// same way and prints after the main result, as in the base's ordering.
+let fencedWriterJson: string | undefined;
 try {
   const harnessToken = randomBytes(24).toString('base64url');
   const brokerToken = randomBytes(24).toString('base64url');
@@ -826,6 +1015,9 @@ try {
     fake = await startFakeOpenAIServer(({ body }) => {
       const messages = Array.isArray(body['messages']) ? body['messages'] : [];
       const serialized = JSON.stringify(messages);
+      // Match the new current input before any marker from restored history.
+      if (serialized.includes(reliefMarker)) return { content: reliefResponse };
+
       if (continuationFailover && serialized.includes(continuationMarker)) {
         if (!serialized.includes('"role":"tool"')) {
           return {
@@ -841,6 +1033,7 @@ try {
             ],
           };
         }
+        if (approvalRecovery) return { content: continuationResponse };
         if (!acceptReplacementContinuation) {
           return {
             contentChunks: [continuationPartial],
@@ -929,17 +1122,24 @@ try {
   );
   await waitUntil(
     'MySQL',
+    // spawnSync blocks the event loop, so the race deadline cannot fire
+    // inside one iteration: the probe carries its own timeout.
     () =>
       spawnSync(
         mysqladmin,
         [
+          '--no-defaults',
           '--protocol=tcp',
           '--host=127.0.0.1',
           `--port=${mysqlPort}`,
           '--user=root',
           'ping',
         ],
-        { stdio: 'ignore' },
+        {
+          stdio: 'ignore',
+          env: mysqlClientEnv,
+          timeout: 10_000,
+        },
       ).status === 0,
     60_000,
     mysqlServer,
@@ -966,7 +1166,9 @@ try {
         SPRING_DATASOURCE_PASSWORD: '',
         SPRING_DATASOURCE_URL: `jdbc:mysql://127.0.0.1:${mysqlPort}/qwen_managed_agent?useSSL=false&allowPublicKeyRetrieval=true`,
         SPRING_DATASOURCE_USERNAME: 'root',
-        QWEN_MANAGED_AGENT_APPROVAL_MODE: 'yolo',
+        QWEN_MANAGED_AGENT_APPROVAL_MODE: approvalRecovery ? 'default' : 'yolo',
+        QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT:
+          verificationMode === 'expiry' ? '30s' : '5m',
         QWEN_MANAGED_AGENT_CAPABILITY_DIGEST: capabilityDigest,
         QWEN_MANAGED_AGENT_HARNESS_BASE_URL: `http://127.0.0.1:${harnessPort}`,
         QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
@@ -981,7 +1183,8 @@ try {
         QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
         ...(runtimeTakeover
           ? {
-              QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
+              QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:
+                process.platform === 'linux' ? 'true' : 'false',
             }
           : {
               QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
@@ -1003,7 +1206,6 @@ try {
               QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
               QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_NODE_EXECUTABLE: process.execPath,
-              QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
             }
           : {
@@ -1020,7 +1222,6 @@ try {
               QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
               QWEN_MANAGED_AGENT_NODE_EXECUTABLE:
                 runtimeDelayMs === 0 ? process.execPath : delayedNode,
-              QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
               QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
             }),
       },
@@ -1043,7 +1244,7 @@ try {
   );
   runMysql(
     mysqlPort,
-    `INSERT INTO qwen_managed_agent.managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create) VALUES (${sqlString(tenant)}, ${sqlString(boundWorkspaceId)}, ${sqlString(trustedActor)}, TRUE, TRUE)`,
+    `INSERT INTO qwen_managed_agent.managed_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (${sqlString(tenant)}, ${sqlString(boundWorkspaceId)}, ${sqlString(trustedActor)}, 'OPERATOR')`,
   );
   if (inflightFailover) {
     heldStartProxy = await startHeldExecutionStartProxy(
@@ -1205,6 +1406,132 @@ try {
           `Runtime execution start boundary failed; proxy=${heldStartProxy.observations().join(' | ') || 'no requests'}`,
         );
       }
+    } else if (approvalRecovery) {
+      await waitUntil(
+        'Original requested approval',
+        async () => {
+          const page = await fetchJson<PublicList<Record<string, unknown>>>(
+            `${springUrl}/v1/agents/sessions/${session.id}/actions?limit=100`,
+            { headers: tenantHeaders(tenant) },
+          );
+          const requested = page.data.filter(
+            (action) => action.state === 'requested',
+          );
+          if (requested.length !== 1) return false;
+          originalApprovalId = String(requested[0].id);
+          return originalApprovalId.startsWith('tool_approval_');
+        },
+        120_000,
+        harness,
+      );
+      const actionFilter = `tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND action_id=${sqlString(originalApprovalId!)}`;
+      originalApprovalOptions = JSON.parse(
+        runMysql(
+          mysqlPort,
+          `SELECT options_json FROM qwen_managed_agent.managed_agent_action WHERE ${actionFilter}`,
+        ),
+      );
+      if (
+        originalApprovalOptions?.v !== 3 ||
+        !originalApprovalOptions.continuationRef
+      ) {
+        throw new Error(
+          `New approval omitted the recovery continuation: version=${originalApprovalOptions?.v}`,
+        );
+      }
+      originalApprovalPlan = JSON.parse(
+        runMysql(
+          mysqlPort,
+          `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.qwen_managed_session_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(originalApprovalOptions.continuationRef.resourceId)}`,
+        ),
+      );
+      if (
+        !originalApprovalPlan ||
+        originalApprovalPlan.calls?.length !== 1 ||
+        originalApprovalPlan.actionId !== originalApprovalId ||
+        originalApprovalPlan.stage !== 'approval'
+      ) {
+        throw new Error(
+          'Original saved approval plan does not identify exactly one original call',
+        );
+      }
+      originalRuntimeSessionId = originalApprovalPlan.runtime.runtimeSessionId;
+      const runtime = runMysql(
+        mysqlPort,
+        `SELECT binding_id, runtime_generation, workspace_generation, session_state FROM qwen_managed_agent.qwen_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+      ).split('\t');
+      if (
+        runtime[0] !== originalApprovalPlan.runtime.bindingId ||
+        runtime[1] !== originalApprovalPlan.runtime.generation ||
+        runtime[2] !== originalApprovalPlan.runtime.workspaceGeneration ||
+        runtime[3] !== 'READY'
+      ) {
+        throw new Error(
+          `Saved approval Runtime binding differs from the real Broker: ${runtime.join(',')}`,
+        );
+      }
+      firstRuntimeHeartbeat = runtimeSessionHeartbeat(
+        originalRuntimeSessionId!,
+      );
+      await waitUntil(
+        'Original durable await_action checkpoint',
+        () => {
+          const id = runMysql(
+            mysqlPort,
+            `SELECT latest_checkpoint_resource_id FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+          );
+          if (!id) return false;
+          const bytes = runMysql(
+            mysqlPort,
+            `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.qwen_managed_session_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(id)}`,
+          );
+          if (!bytes) return false;
+          const checkpoint = JSON.parse(bytes);
+          return (
+            checkpoint.continuation?.phase === 'await_action' &&
+            checkpoint.approval?.requestId === originalApprovalId
+          );
+        },
+        10_000,
+        harness,
+      );
+      const privateHead = runMysql(
+        mysqlPort,
+        `SELECT storage_version, latest_checkpoint_resource_id FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+      ).split('\t');
+      const checkpoint = JSON.parse(
+        runMysql(
+          mysqlPort,
+          `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.qwen_managed_session_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(privateHead[1])}`,
+        ),
+      );
+      if (
+        privateHead[0] !== '2' ||
+        checkpoint.continuation?.phase !== 'await_action' ||
+        checkpoint.approval?.requestId !== originalApprovalId
+      ) {
+        throw new Error(
+          'Approval snapshot was not committed before the crash barrier',
+        );
+      }
+      const executionCount = Number(
+        runMysql(
+          mysqlPort,
+          'SELECT COUNT(*) FROM qwen_managed_agent.qwen_tool_execution',
+        ),
+      );
+      if (executionCount !== 0 || existsSync(inflightSideEffect))
+        throw new Error('Tool ran before the original approval');
+      saveEvidence('original-approval.json', {
+        actionId: originalApprovalId,
+        options: originalApprovalOptions,
+        plan: originalApprovalPlan,
+        originalRuntime: runtime,
+        storageVersion: Number(privateHead[0]),
+        checkpointPhase: checkpoint.continuation.phase,
+        executionCount,
+        physicalFileExists: existsSync(inflightSideEffect),
+      });
     } else if (continuationFailover) {
       await waitUntil(
         'Continuation partial text',
@@ -1379,20 +1706,22 @@ try {
     }
     await waitUntil(
       'Managed Session writer lease expiry',
-      () =>
+      (remainingMs) =>
         runMysql(
           mysqlPort,
           `SELECT IF(writer_lease_until IS NULL OR writer_lease_until < CURRENT_TIMESTAMP(6), 1, 0) FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+          remainingMs,
         ) === '1',
       10_000,
     );
     if (inflightFailover || continuationFailover) {
       await waitUntil(
         'Managed Turn dispatch lease expiry',
-        () =>
+        (remainingMs) =>
           runMysql(
             mysqlPort,
             `SELECT IF(dispatch_lease_until IS NULL OR dispatch_lease_until < UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000, 1, 0) FROM qwen_managed_agent.managed_agent_turn WHERE ${sessionFilter}`,
+            remainingMs,
           ) === '1',
         10_000,
       );
@@ -1438,7 +1767,11 @@ try {
             SPRING_DATASOURCE_PASSWORD: '',
             SPRING_DATASOURCE_URL: `jdbc:mysql://127.0.0.1:${mysqlPort}/qwen_managed_agent?useSSL=false&allowPublicKeyRetrieval=true`,
             SPRING_DATASOURCE_USERNAME: 'root',
-            QWEN_MANAGED_AGENT_APPROVAL_MODE: 'yolo',
+            QWEN_MANAGED_AGENT_APPROVAL_MODE: approvalRecovery
+              ? 'default'
+              : 'yolo',
+            QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT:
+              verificationMode === 'expiry' ? '30s' : '5m',
             QWEN_MANAGED_AGENT_CAPABILITY_DIGEST: capabilityDigest,
             QWEN_MANAGED_AGENT_HARNESS_BASE_URL: `http://127.0.0.1:${replacementHarnessPort}`,
             QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
@@ -1449,7 +1782,8 @@ try {
             QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
             ...(runtimeTakeover
               ? {
-                  QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
+                  QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:
+                    process.platform === 'linux' ? 'true' : 'false',
                 }
               : {
                   QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
@@ -1471,7 +1805,6 @@ try {
             QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
             QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
             QWEN_MANAGED_AGENT_NODE_EXECUTABLE: process.execPath,
-            QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
             QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
           },
         },
@@ -1556,7 +1889,256 @@ try {
       replacementHarness,
     );
 
-    if (inflightFailover) {
+    if (approvalRecovery) {
+      await waitUntil(
+        'Original approval attached to replacement Harness',
+        () => {
+          const boot = runMysql(
+            mysqlPort,
+            `SELECT harness_boot_id FROM qwen_managed_agent.managed_agent_session WHERE ${sessionFilter}`,
+          );
+          return boot.length > 0 && boot !== firstBootId;
+        },
+        120_000,
+        replacementHarness,
+      );
+      const actionBeforeResponse = await fetchJson<Record<string, unknown>>(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}`,
+        { headers: tenantHeaders(tenant) },
+      );
+      if (
+        actionBeforeResponse.id !== originalApprovalId ||
+        (verificationMode !== 'expiry' &&
+          actionBeforeResponse.state !== 'requested')
+      ) {
+        throw new Error(
+          'Replacement did not preserve the original requested Action',
+        );
+      }
+      let responseOperation: Record<string, unknown> | undefined;
+      if (verificationMode === 'allow' || verificationMode === 'deny') {
+        const response = await fetch(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}/responses`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'idempotency-key': `g3-answer-${originalApprovalId}`,
+              ...tenantHeaders(tenant),
+            },
+            body: JSON.stringify({
+              kind: 'permission',
+              input_revision: 1,
+              policy_revision: originalApprovalOptions!.policyRevision,
+              option_id: verificationMode,
+            }),
+          },
+        );
+        if (response.status !== 202)
+          throw new Error(
+            `Original Action response returned ${response.status}: ${await response.text()}`,
+          );
+        responseOperation = await response.json();
+      } else if (verificationMode === 'cancel') {
+        const response = await fetch(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'idempotency-key': `g3-cancel-${originalApprovalId}`,
+              ...tenantHeaders(tenant),
+            },
+            body: JSON.stringify({
+              type: 'agent.session.cancel',
+              turn_id: actionBeforeResponse.turn_id,
+            }),
+          },
+        );
+        if (response.status !== 202)
+          throw new Error(
+            `Original Turn cancel returned ${response.status}: ${await response.text()}`,
+          );
+      }
+      const recovered = await waitForTerminal(
+        replacementSpringUrl,
+        tenant,
+        session.id,
+        0,
+        replacementSpring,
+        120_000,
+      );
+      const terminals = recovered.events.filter((event) => event.terminal);
+      const expectedTerminal = ['allow', 'deny'].includes(verificationMode)
+        ? 'turn.completed'
+        : 'turn.cancelled';
+      if (terminals.length !== 1 || terminals[0].type !== expectedTerminal) {
+        throw new Error(
+          `Original approval terminal differs: expected=${expectedTerminal} actual=${JSON.stringify(terminals)}`,
+        );
+      }
+      verifiedOriginalTerminal = terminals[0].type;
+      const rows = runMysql(
+        mysqlPort,
+        `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest FROM qwen_managed_agent.qwen_tool_execution ORDER BY execution_call_id`,
+      );
+      const executions = rows
+        ? rows.split('\n').map((row) => row.split('\t'))
+        : [];
+      const expectedExecutions = verificationMode === 'allow' ? 1 : 0;
+      if (executions.length !== expectedExecutions)
+        throw new Error(
+          `Approval execution count ${executions.length} differs from ${expectedExecutions}`,
+        );
+      if (executions.length === 1) {
+        const execution = executions[0];
+        const plan = originalApprovalPlan!;
+        if (
+          execution[1] !== plan.calls[0].prepareKey ||
+          execution[2] !== plan.runtime.bindingId ||
+          execution[3] !== plan.runtime.generation ||
+          execution[4] !== plan.runtime.runtimeSessionId ||
+          execution[5] !== 'SETTLED' ||
+          execution[6] !== '1' ||
+          execution[7] !== plan.calls[0].requestDigest
+        ) {
+          throw new Error(
+            `Replacement changed the original prepared execution identity: ${execution.join(',')}`,
+          );
+        }
+      }
+      const bytes = existsSync(inflightSideEffect)
+        ? readFileSync(inflightSideEffect, 'utf8')
+        : '';
+      if (
+        verificationMode === 'allow'
+          ? bytes !== inflightSideEffectContent
+          : existsSync(inflightSideEffect)
+      ) {
+        throw new Error(
+          `Approval physical file assertion failed for ${verificationMode}`,
+        );
+      }
+      const actionRows = runMysql(
+        mysqlPort,
+        `SELECT action_id, state FROM qwen_managed_agent.managed_agent_action WHERE ${sessionFilter}`,
+      );
+      const expectedActionState =
+        verificationMode === 'expiry'
+          ? 'expired'
+          : verificationMode === 'cancel'
+            ? 'cancelled'
+            : 'decided';
+      if (actionRows !== `${originalApprovalId}\t${expectedActionState}`)
+        throw new Error(
+          `Original approval identity/state differs: ${actionRows}`,
+        );
+      const requestBodies = (fake?.requests ?? []).filter((request) =>
+        JSON.stringify(request.body.messages).includes(continuationMarker),
+      );
+      const initialRequests = requestBodies.filter(
+        (request) =>
+          !JSON.stringify(request.body.messages).includes('"role":"tool"'),
+      );
+      const modelAfterResults = requestBodies.filter((request) =>
+        JSON.stringify(request.body.messages).includes('"role":"tool"'),
+      );
+      const expectedModelsAfterResults = ['allow', 'deny'].includes(
+        verificationMode,
+      )
+        ? 1
+        : 0;
+      if (
+        initialRequests.length !== 1 ||
+        modelAfterResults.length !== expectedModelsAfterResults
+      )
+        throw new Error(
+          `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
+        );
+      if (responseOperation) {
+        await waitUntil(
+          'Approval response command completion',
+          async () => {
+            const operation = await fetchJson<Record<string, unknown>>(
+              `${replacementSpringUrl}/v1/agents/sessions/${session.id}/operations/${responseOperation!.id}`,
+              { headers: tenantHeaders(tenant) },
+            );
+            if (operation.status === 'failed')
+              throw new Error(
+                `Approval response operation failed: ${JSON.stringify(operation)}`,
+              );
+            return operation.status === 'completed';
+          },
+          30_000,
+          replacementSpring,
+        );
+      }
+      await waitUntil(
+        'Original Runtime cleanup confirmed',
+        () => {
+          const state = runMysql(
+            mysqlPort,
+            `SELECT session_state FROM qwen_managed_agent.qwen_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+          );
+          const confirmed = runMysql(
+            mysqlPort,
+            `SELECT COUNT(*) FROM qwen_managed_agent.qwen_managed_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+          );
+          return state === 'RELEASED' && confirmed === '1';
+        },
+        30_000,
+        replacementHarness,
+      );
+      const runtimeAfter = runMysql(
+        mysqlPort,
+        `SELECT binding_id, runtime_generation, workspace_generation, session_state FROM qwen_managed_agent.qwen_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+      ).split('\t');
+      const cleanupConfirmed = Number(
+        runMysql(
+          mysqlPort,
+          `SELECT COUNT(*) FROM qwen_managed_agent.qwen_managed_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+        ),
+      );
+      if (
+        runtimeAfter[0] !== originalApprovalPlan!.runtime.bindingId ||
+        runtimeAfter[1] !== originalApprovalPlan!.runtime.generation ||
+        runtimeAfter[2] !== originalApprovalPlan!.runtime.workspaceGeneration ||
+        runtimeAfter[3] !== 'RELEASED' ||
+        cleanupConfirmed !== 1
+      )
+        throw new Error(
+          `Original cleanup did not release the original Runtime: state=${runtimeAfter.join(',')} confirmed=${cleanupConfirmed}`,
+        );
+      saveEvidence('approval-result.json', {
+        mode: verificationMode,
+        sessionId: session.id,
+        actionId: originalApprovalId,
+        replacementActionBeforeResponse: actionBeforeResponse,
+        expectedTerminal,
+        terminalCount: terminals.length,
+        executions,
+        physicalFileExists: existsSync(inflightSideEffect),
+        physicalFileBytes: bytes,
+        modelRequests: initialRequests.length + modelAfterResults.length,
+        initialRequests: initialRequests.length,
+        modelAfterResults: modelAfterResults.length,
+        runtimeAfter,
+        cleanupConfirmed,
+      });
+      approvalResultJson = JSON.stringify(
+        {
+          mode: verificationMode,
+          originalAction: originalApprovalId,
+          originalBatch: originalApprovalPlan!.batchId,
+          originalBinding: originalApprovalPlan!.runtime.bindingId,
+          executions: executions.length,
+          terminal: expectedTerminal,
+          cleanupConfirmed,
+        },
+        null,
+        2,
+      );
+    } else if (inflightFailover) {
       const recoveredTurn = await waitForTerminal(
         replacementSpringUrl,
         tenant,
@@ -1649,26 +2231,24 @@ try {
         );
       }
 
-      console.log(
-        JSON.stringify(
-          {
-            sessionId: session.id,
-            executionCallId: originalExecutionCallId,
-            executionState: recoveredExecution[1],
-            dispatchGeneration: Number(recoveredExecution[2]),
-            firstHarnessBootId: firstBootId,
-            replacementHarnessBootId: replacementBootId,
-            writerGeneration: `${firstHead[0]} -> ${replacementHead[0]}`,
-            journalRevision: `${firstHead[1]} -> ${replacementHead[1]}`,
-            committedSequence: `${firstHead[2]} -> ${replacementHead[2]}`,
-            promptReplayed: false,
-            physicalToolExecutions: 1,
-            terminalTurns: terminalCount,
-            oldHarnessDiskDeleted: !existsSync(harnessHome),
-          },
-          null,
-          2,
-        ),
+      resultJson = JSON.stringify(
+        {
+          sessionId: session.id,
+          executionCallId: originalExecutionCallId,
+          executionState: recoveredExecution[1],
+          dispatchGeneration: Number(recoveredExecution[2]),
+          firstHarnessBootId: firstBootId,
+          replacementHarnessBootId: replacementBootId,
+          writerGeneration: `${firstHead[0]} -> ${replacementHead[0]}`,
+          journalRevision: `${firstHead[1]} -> ${replacementHead[1]}`,
+          committedSequence: `${firstHead[2]} -> ${replacementHead[2]}`,
+          promptReplayed: false,
+          physicalToolExecutions: 1,
+          terminalTurns: terminalCount,
+          oldHarnessDiskDeleted: !existsSync(harnessHome),
+        },
+        null,
+        2,
       );
     } else if (continuationFailover) {
       await waitForTerminal(
@@ -1713,6 +2293,30 @@ try {
       const requests = (fake?.requests ?? []).filter(({ body }) =>
         JSON.stringify(body['messages']).includes(continuationMarker),
       );
+      const originalAndReplacementRequests = requests.filter(({ body }) =>
+        JSON.stringify(body['messages']).includes('"role":"tool"'),
+      );
+      if (
+        originalAndReplacementRequests.length === 2 &&
+        !isDeepStrictEqual(
+          originalAndReplacementRequests[0].body,
+          originalAndReplacementRequests[1].body,
+        )
+      ) {
+        throw new Error(
+          'The replacement model request does not equal the original effective request',
+        );
+      }
+      saveEvidence('model-request-parity.json', {
+        requests: originalAndReplacementRequests.map((request) => request.body),
+        equal:
+          originalAndReplacementRequests.length === 2 &&
+          isDeepStrictEqual(
+            originalAndReplacementRequests[0].body,
+            originalAndReplacementRequests[1].body,
+          ),
+      });
+
       const initialModelRequests = requests.filter(
         ({ body }) =>
           !JSON.stringify(body['messages']).includes('"role":"tool"'),
@@ -1758,26 +2362,24 @@ try {
           `Continuation failover audit failed: terminal=${recoveredTerminal?.type ?? 'missing'} text=${JSON.stringify(visibleText)} deltas=${JSON.stringify(textDeltas)} execution=${recoveredExecution.join(',')} rows=${executionCount} boot=${firstBootId}->${replacementBootId} terminals=${terminalCount} model=${initialModelRequests.length}+${continuationRequests.length} sideEffect=${JSON.stringify(sideEffectBytes)}`,
         );
       }
-      console.log(
-        JSON.stringify(
-          {
-            sessionId: session.id,
-            executionCallId: originalExecutionCallId,
-            firstHarnessBootId: firstBootId,
-            replacementHarnessBootId: replacementBootId,
-            promptReplayed: initialModelRequests.length !== 1,
-            physicalToolExecutions: executionCount,
-            continuationModelRequests: continuationRequests.length,
-            visibleText,
-            terminalTurns: terminalCount,
-            // The frozen-owner arm keeps the home on purpose (the wake
-            // needs it), so one key cannot mean both arms' intent.
-            oldHarnessDiskDeleted: !freeze && !existsSync(harnessHome),
-            harnessHomeRetainedForWake: freeze && existsSync(harnessHome),
-          },
-          null,
-          2,
-        ),
+      resultJson = JSON.stringify(
+        {
+          sessionId: session.id,
+          executionCallId: originalExecutionCallId,
+          firstHarnessBootId: firstBootId,
+          replacementHarnessBootId: replacementBootId,
+          promptReplayed: initialModelRequests.length !== 1,
+          physicalToolExecutions: executionCount,
+          continuationModelRequests: continuationRequests.length,
+          visibleText,
+          terminalTurns: terminalCount,
+          // The frozen-owner arm keeps the home on purpose (the wake
+          // needs it), so one key cannot mean both arms' intent.
+          oldHarnessDiskDeleted: !freeze && !existsSync(harnessHome),
+          harnessHomeRetainedForWake: freeze && existsSync(harnessHome),
+        },
+        null,
+        2,
       );
 
       if (freeze) {
@@ -1892,18 +2494,16 @@ try {
             `Frozen former Harness mutated the takeover after waking: head=${headBeforeWake}->${headAfterWake} oldWriterTx=${oldGenerationTxBeforeWake}->${oldGenerationTxAfterWake} boot=${replacementBootId}->${bootAfterWake} text=${JSON.stringify(visibleText)}->${JSON.stringify(awakeText)} terminals=${terminalCount}->${awakeTerminalCount}`,
           );
         }
-        console.log(
-          JSON.stringify(
-            {
-              fencedFormerWriter: true,
-              journalHead: headAfterWake,
-              oldGenerationTx: oldGenerationTxAfterWake,
-              harnessBootId: bootAfterWake,
-              visibleText: awakeText,
-            },
-            null,
-            2,
-          ),
+        fencedWriterJson = JSON.stringify(
+          {
+            fencedFormerWriter: true,
+            journalHead: headAfterWake,
+            oldGenerationTx: oldGenerationTxAfterWake,
+            harnessBootId: bootAfterWake,
+            visibleText: awakeText,
+          },
+          null,
+          2,
         );
       }
     } else {
@@ -2010,31 +2610,184 @@ try {
         );
       }
 
-      console.log(
-        JSON.stringify(
-          {
-            sessionId: session.id,
-            firstHarnessBootId: firstBootId,
-            replacementHarnessBootId: secondBootId,
-            writerGeneration: `${firstHead[0]} -> ${secondHead[0]}`,
-            journalRevision: `${firstHead[1]} -> ${secondHead[1]}`,
-            committedSequence: `${firstHead[2]} -> ${secondHead[2]}`,
-            terminalTurns: terminalCount,
-            ...(bigOutput
-              ? {
-                  expectedCharacters: failoverFirstResponse.length,
-                  expectedUtf8Bytes: Buffer.byteLength(failoverFirstResponse),
-                  shortControlCharacters: failoverSecondResponse.length,
-                  fullTextPreserved: true,
-                }
-              : {}),
-            restoredFirstTurnContext: true,
-            oldHarnessDiskDeleted: !existsSync(harnessHome),
+      resultJson = JSON.stringify(
+        {
+          sessionId: session.id,
+          firstHarnessBootId: firstBootId,
+          replacementHarnessBootId: secondBootId,
+          writerGeneration: `${firstHead[0]} -> ${secondHead[0]}`,
+          journalRevision: `${firstHead[1]} -> ${secondHead[1]}`,
+          committedSequence: `${firstHead[2]} -> ${secondHead[2]}`,
+          terminalTurns: terminalCount,
+          ...(bigOutput
+            ? {
+                expectedCharacters: failoverFirstResponse.length,
+                expectedUtf8Bytes: Buffer.byteLength(failoverFirstResponse),
+                shortControlCharacters: failoverSecondResponse.length,
+                fullTextPreserved: true,
+              }
+            : {}),
+          restoredFirstTurnContext: true,
+          oldHarnessDiskDeleted: !existsSync(harnessHome),
+        },
+        null,
+        2,
+      );
+    }
+    if (verificationMode) {
+      // These assertions run after every A/B primary gate, never in place of it.
+      await waitUntil(
+        'Runtime cleanup before next Turn',
+        () => {
+          const state = runMysql(
+            mysqlPort,
+            `SELECT session_state FROM qwen_managed_agent.qwen_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+          );
+          const confirmed = runMysql(
+            mysqlPort,
+            `SELECT COUNT(*) FROM qwen_managed_agent.qwen_managed_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+          );
+          return state === 'RELEASED' && confirmed === '1';
+        },
+        30_000,
+        replacementHarness,
+      );
+      const originalPage = await fetchJson<PublicList<PublicEvent>>(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
+        { headers: tenantHeaders(tenant) },
+      );
+      if (originalPage.data.filter((event) => event.terminal).length !== 1)
+        throw new Error(
+          'Original Turn must have exactly one public terminal before relief',
+        );
+      const originalCursor = Math.max(
+        0,
+        ...originalPage.data.map((event) => event.sequence),
+      );
+      const relief = await fetch(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'idempotency-key': `g3-relief-${session.id}`,
+            ...tenantHeaders(tenant),
           },
-          null,
-          2,
+          body: JSON.stringify({
+            type: 'agent.session.input.message',
+            input: [
+              {
+                type: 'text',
+                text: `${reliefMarker}. Reply exactly ${reliefResponse}. Use no tools.`,
+              },
+            ],
+          }),
+        },
+      );
+      if (relief.status !== 202)
+        throw new Error(
+          `Relief Turn admission returned ${relief.status}: ${await relief.text()}`,
+        );
+      const reliefTurn = await waitForTerminal(
+        replacementSpringUrl,
+        tenant,
+        session.id,
+        originalCursor,
+        replacementSpring,
+        60_000,
+      );
+      const reliefTerminals = reliefTurn.events.filter(
+        (event) => event.terminal,
+      );
+      const reliefText = reliefTurn.events
+        .filter((event) => event.type === 'item.output_text.delta')
+        .map(eventText)
+        .join('');
+      if (
+        reliefTerminals.length !== 1 ||
+        reliefTerminals[0].type !== 'turn.completed' ||
+        reliefText !== reliefResponse
+      )
+        throw new Error(
+          `Relief Turn did not finish: terminals=${JSON.stringify(reliefTerminals)} text=${JSON.stringify(reliefText)}`,
+        );
+      const reliefRequests = (fake?.requests ?? []).filter((request) =>
+        JSON.stringify(request.body.messages).includes(reliefMarker),
+      );
+      if (reliefRequests.length !== 1)
+        throw new Error(
+          `Relief Turn inference count differs: ${reliefRequests.length}`,
+        );
+      const finalTerminalCount = Number(
+        runMysql(
+          mysqlPort,
+          `SELECT COUNT(*) FROM qwen_managed_agent.managed_agent_event WHERE ${sessionFilter} AND terminal=TRUE`,
         ),
       );
+      if (finalTerminalCount !== 2)
+        throw new Error(
+          `Expected one terminal per original/relief Turn, observed ${finalTerminalCount}`,
+        );
+      saveEvidence('post-turn-events.json', {
+        cursorBeforeRelief: originalCursor,
+        original: originalPage.data,
+        relief: reliefTurn.events,
+        sqlTerminalCount: finalTerminalCount,
+      });
+      const close = await fetch(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}/close`,
+        {
+          method: 'POST',
+          headers: {
+            'idempotency-key': `g3-close-${session.id}`,
+            ...tenantHeaders(tenant),
+          },
+        },
+      );
+      if (close.status !== 202)
+        throw new Error(
+          `Close admission returned ${close.status}: ${await close.text()}`,
+        );
+      const closeOperation = (await close.json()) as Record<string, unknown>;
+      await waitUntil(
+        'Reliable close operation completion',
+        async () => {
+          const operation = await fetchJson<Record<string, unknown>>(
+            `${replacementSpringUrl}/v1/agents/sessions/${session.id}/operations/${closeOperation.id}`,
+            { headers: tenantHeaders(tenant) },
+          );
+          if (operation.status === 'failed')
+            throw new Error(
+              `Close operation failed: ${JSON.stringify(operation)}`,
+            );
+          return operation.status === 'completed';
+        },
+        60_000,
+        replacementSpring,
+      );
+      const closedSession = await fetchJson<Record<string, unknown>>(
+        `${replacementSpringUrl}/v1/agents/sessions/${session.id}`,
+        { headers: tenantHeaders(tenant) },
+      );
+      if (closedSession.status !== 'closed')
+        throw new Error(
+          `Reliable close completed with Session status ${closedSession.status}`,
+        );
+      const summary = {
+        mode: verificationMode,
+        sessionId: session.id,
+        originalRuntimeSessionId,
+        originalActionId: originalApprovalId,
+        originalTerminal: verifiedOriginalTerminal ?? 'turn.completed',
+        nextTurnCompleted: true,
+        nextTurnRequests: reliefRequests.length,
+        terminalCount: finalTerminalCount,
+        closeAdmission: close.status,
+        closeCompleted: true,
+        oldHarnessHomeDeleted: !existsSync(harnessHome),
+      };
+      saveEvidence('summary.json', summary);
+      g3SummaryJson = JSON.stringify(summary, null, 2);
     }
   } else {
     const idempotencyKey = `create-${Date.now()}`;
@@ -2192,25 +2945,23 @@ try {
       throw new Error(`Durable event audit failed: ${durable.join(',')}`);
     }
 
-    console.log(
-      JSON.stringify(
-        {
-          model,
-          sessionId: session.id,
-          createAdmissionMs: createdAt - requestStartedAt,
-          firstModelEventMs: firstModel.observedAt - requestStartedAt,
-          runtimeReadyMs: runtimeReady.observedAt - requestStartedAt,
-          terminalMs: terminal.observedAt - requestStartedAt,
-          modelBeforeRuntimeReady:
-            firstModel.event.sequence < runtimeReady.event.sequence,
-          toolSideEffect: true,
-          idempotentReplay: true,
-          crossTenantStatus: crossTenant.status,
-          durableEventCount: Number(durable[0]),
-        },
-        null,
-        2,
-      ),
+    resultJson = JSON.stringify(
+      {
+        model,
+        sessionId: session.id,
+        createAdmissionMs: createdAt - requestStartedAt,
+        firstModelEventMs: firstModel.observedAt - requestStartedAt,
+        runtimeReadyMs: runtimeReady.observedAt - requestStartedAt,
+        terminalMs: terminal.observedAt - requestStartedAt,
+        modelBeforeRuntimeReady:
+          firstModel.event.sequence < runtimeReady.event.sequence,
+        toolSideEffect: true,
+        idempotentReplay: true,
+        crossTenantStatus: crossTenant.status,
+        durableEventCount: Number(durable[0]),
+      },
+      null,
+      2,
     );
   }
 } catch (error) {
@@ -2265,7 +3016,13 @@ try {
   await replacementBrokerProxy?.close();
   releaseContinuationHold();
   await fake?.close();
-  if (failure && process.env['QWEN_MANAGED_E2E_KEEP_TMP'] === '1') {
+  // An interrupt during teardown is a non-pass: the keep switch must still
+  // hold, or a stopped run deletes its own evidence before the post-finally
+  // throw reports it.
+  if (
+    (failure || receivedSignal) &&
+    process.env['QWEN_MANAGED_E2E_KEEP_TMP'] === '1'
+  ) {
     console.error(`Keeping temporary directory: ${temporary}`);
   } else {
     rmSync(temporary, { recursive: true, force: true });
@@ -2275,3 +3032,15 @@ try {
 }
 
 if (failure) throw failure;
+// An interrupt after the last poll — or during the finally's teardown —
+// must not print the success JSON and exit 0: a supervising script would
+// record a clean pass for a run the operator explicitly stopped. The
+// payload stays a variable until both guards have run, so the decision
+// precedes the record.
+if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
+if (approvalResultJson !== undefined) console.log(approvalResultJson);
+if (g3SummaryJson !== undefined) console.log(g3SummaryJson);
+if (resultJson !== undefined) {
+  console.log(resultJson);
+  if (fencedWriterJson !== undefined) console.log(fencedWriterJson);
+}

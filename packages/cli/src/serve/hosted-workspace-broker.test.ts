@@ -57,6 +57,28 @@ async function fixture(
   );
 }
 
+it.each([false, true])(
+  'carries the original cleanup fence with drain=%s',
+  async (drain) => {
+    const requests: Array<Record<string, unknown>> = [];
+    const broker = await fixture((_path, body) => {
+      requests.push(body);
+      return { body: { ...identity, released: true } };
+    });
+    await broker.release({
+      bindingId: 'original-binding',
+      generation: '7',
+      ...(drain ? { drain: true } : {}),
+    });
+    expect(requests[0]).toMatchObject({
+      runtimeSessionId: 'turn',
+      cleanupBindingId: 'original-binding',
+      cleanupGeneration: '7',
+    });
+    expect(requests[0]['drain']).toBe(drain ? true : undefined);
+  },
+);
+
 it.each(['tenantId', 'workspaceId', 'capabilityDigest'])(
   'rejects a mismatched %s at acquisition',
   async (field) => {
@@ -112,6 +134,48 @@ it('preserves payload identity separately from the explicitly selected v3 input 
       argsDigest: `sha256:${'a'.repeat(64)}`,
       runtimeProtocol: 3,
       inputDigest: 'b'.repeat(64),
+    },
+  });
+});
+
+it('reserves a Tool v3 original under the logical turn id and the mapped Runtime Session', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, body) => {
+    requests.push(body);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        runtimeBindingId: 'binding',
+        bindingGeneration: '7',
+        status: { state: 'prepared' },
+      },
+    };
+  });
+  await broker.prepareV3(
+    'runtime-call',
+    `sha256:${'b'.repeat(64)}`,
+    `sha256:${'a'.repeat(64)}`,
+    'publication',
+    'arun_x:input',
+  );
+  expect(requests).toHaveLength(1);
+  // The publication store compares the persisted execution's turn id
+  // against the reserve reference's promptId (`Broker execution
+  // identity conflicts` when they split), while the Runtime identity
+  // stays the mapped one — one pair, two axes.
+  expect(requests[0]).toMatchObject({
+    idempotencyKey: 'turn:runtime-call',
+    turnId: 'arun_x:input',
+    toolCallId: 'runtime-call',
+    requestDigest: `sha256:${'a'.repeat(64)}`,
+    toolProtocol: 'v3',
+    publicationId: 'publication',
+    reference: {
+      sessionId: 'turn',
+      promptId: 'arun_x:input',
+      callId: 'runtime-call',
+      argsDigest: `sha256:${'b'.repeat(64)}`,
     },
   });
 });
@@ -765,6 +829,45 @@ it('refuses a status answer for a different execution', async () => {
     },
   }));
   await expect(broker.status('execution')).rejects.toThrow(
+    'Runtime execution identity changed.',
+  );
+});
+
+it('owns the :process ledger key behind a plain execution id', async () => {
+  const paths: string[] = [];
+  const found = await fixture((path) => {
+    paths.push(path);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'call-1:process',
+        status: { state: 'executing' },
+      },
+    };
+  });
+  await expect(found.backgroundProcessStatus('call-1')).resolves.toEqual({
+    state: 'executing',
+  });
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/call-1%3Aprocess',
+  ]);
+
+  const missing = await fixture(() => ({
+    code: 404,
+    body: { code: 'runtime_execution_not_found' },
+  }));
+  await expect(
+    missing.backgroundProcessStatus('call-1'),
+  ).resolves.toBeUndefined();
+
+  const unsuffixed = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'call-1',
+      status: { state: 'executing' },
+    },
+  }));
+  await expect(unsuffixed.backgroundProcessStatus('call-1')).rejects.toThrow(
     'Runtime execution identity changed.',
   );
 });

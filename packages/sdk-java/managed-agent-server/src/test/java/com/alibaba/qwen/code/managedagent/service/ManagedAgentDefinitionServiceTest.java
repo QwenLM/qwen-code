@@ -20,6 +20,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpStatus;
 
 /**
@@ -35,6 +37,13 @@ class ManagedAgentDefinitionServiceTest {
                     null, null, Map.of("mode", "default"), null, null);
     private static final DefinitionRevision WINNER = new DefinitionRevision(
             AGENT_ID, 1, "a".repeat(64), "{\"metadata\":{\"team\":\"x\"}}", 7);
+    private static final Map<String, Object> CONTENT = Map.of(
+            "model", REQUEST.model(), "instructions", REQUEST.instructions(),
+            "tools", REQUEST.tools(), "permission_policy", REQUEST.permissionPolicy());
+    private static final String CREATE_DIGEST = new RequestDigests().digest(
+            Map.of("operation", "create", "definition", CONTENT));
+    private static final String UPDATE_DIGEST = new RequestDigests().digest(
+            Map.of("operation", "update", "agentId", AGENT_ID, "definition", CONTENT));
 
     private final ManagedAgentDefinitionStore store =
             mock(ManagedAgentDefinitionStore.class);
@@ -44,11 +53,11 @@ class ManagedAgentDefinitionServiceTest {
 
     @Test
     void replaysTheCommittedResultOfAConcurrentIdenticalCreate() {
-        when(store.create(eq("tenant"), eq("key"), anyString(), anyString(),
+        when(store.create(eq("tenant"), eq("key"), eq(CREATE_DIGEST), anyString(),
                 anyString(), anyString(), anyLong()))
                 .thenThrow(new ConcurrentWriteException("idempotency_conflict",
                         "The Idempotency-Key was used by a concurrent request."));
-        when(store.replayCommitted(eq("tenant"), eq("key"), anyString()))
+        when(store.replayCommitted("tenant", "key", CREATE_DIGEST))
                 .thenReturn(Optional.of(new Admission(WINNER, true)));
 
         Result result = service.create("tenant", "key", REQUEST);
@@ -61,11 +70,11 @@ class ManagedAgentDefinitionServiceTest {
 
     @Test
     void replaysAConcurrentIdenticalUpdate() {
-        when(store.update(eq("tenant"), eq("key"), anyString(), eq(AGENT_ID),
+        when(store.update(eq("tenant"), eq("key"), eq(UPDATE_DIGEST), eq(AGENT_ID),
                 anyString(), anyString(), anyLong()))
                 .thenThrow(new ConcurrentWriteException(
                         "agent_revision_conflict", "changed"));
-        when(store.replayCommitted(eq("tenant"), eq("key"), anyString()))
+        when(store.replayCommitted("tenant", "key", UPDATE_DIGEST))
                 .thenReturn(Optional.of(new Admission(WINNER, true)));
 
         assertThat(service.update("tenant", AGENT_ID, "key", REQUEST)
@@ -74,11 +83,11 @@ class ManagedAgentDefinitionServiceTest {
 
     @Test
     void keepsTheConflictWhenNoCommandWasCommittedUnderTheKey() {
-        when(store.update(eq("tenant"), eq("key"), anyString(), eq(AGENT_ID),
+        when(store.update(eq("tenant"), eq("key"), eq(UPDATE_DIGEST), eq(AGENT_ID),
                 anyString(), anyString(), anyLong()))
                 .thenThrow(new ConcurrentWriteException(
                         "agent_revision_conflict", "changed"));
-        when(store.replayCommitted(eq("tenant"), eq("key"), anyString()))
+        when(store.replayCommitted("tenant", "key", UPDATE_DIGEST))
                 .thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.update("tenant", AGENT_ID, "key",
@@ -90,19 +99,34 @@ class ManagedAgentDefinitionServiceTest {
                 });
     }
 
-    @Test
-    void conflictsWhenTheCommittedRequestDiffers() {
-        when(store.create(eq("tenant"), eq("key"), anyString(), anyString(),
-                anyString(), anyString(), anyLong()))
-                .thenThrow(new ConcurrentWriteException("idempotency_conflict",
-                        "The Idempotency-Key was used by a concurrent request."));
-        when(store.replayCommitted(eq("tenant"), eq("key"), anyString()))
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void conflictsWhenTheCommittedRequestDiffers(boolean update) {
+        if (update) {
+            when(store.update(eq("tenant"), eq("key"), eq(UPDATE_DIGEST), eq(AGENT_ID),
+                    anyString(), anyString(), anyLong()))
+                    .thenThrow(new ConcurrentWriteException("agent_revision_conflict", "changed"));
+        } else {
+            when(store.create(eq("tenant"), eq("key"), eq(CREATE_DIGEST), anyString(),
+                    anyString(), anyString(), anyLong()))
+                    .thenThrow(new ConcurrentWriteException("idempotency_conflict",
+                            "The Idempotency-Key was used by a concurrent request."));
+        }
+        when(store.replayCommitted("tenant", "key", update ? UPDATE_DIGEST : CREATE_DIGEST))
                 .thenThrow(new ApiException(HttpStatus.CONFLICT,
                         "idempotency_conflict", "different request"));
 
-        assertThatThrownBy(() -> service.create("tenant", "key", REQUEST))
-                .isInstanceOfSatisfying(ApiException.class, error ->
-                        assertThat(error.getCode())
-                                .isEqualTo("idempotency_conflict"));
+        assertThatThrownBy(() -> {
+            if (update) {
+                service.update("tenant", AGENT_ID, "key", REQUEST);
+            } else {
+                service.create("tenant", "key", REQUEST);
+            }
+        })
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("idempotency_conflict");
+                });
     }
 }

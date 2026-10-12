@@ -101,6 +101,16 @@ export class HostedMcpSession {
   private readonly configuring = new Set<string>();
   private acquired = false;
   private ownerReady = false;
+
+  /**
+   * Whether this Session's MCP owner currently holds the Workspace
+   * mount — the tool turn must not mistake that hold for its own
+   * acquisition-free state when a foreground child would need the mount.
+   */
+  get mountHeld(): boolean {
+    return this.acquired;
+  }
+
   private grantsRenewed = false;
   private readonly bindings = new Map<
     string,

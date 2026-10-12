@@ -13,6 +13,39 @@ import type {
 } from './java-managed-agent-client';
 
 describe('java managed agent event projector', () => {
+  it('projects a context change without creating or settling a chat message', () => {
+    const context = projectJavaAgentEvent({
+      sequence: 2,
+      eventId: 'e2',
+      sessionId: 's1',
+      type: 'session.context.changed',
+      createdAt: 2,
+      terminal: false,
+      data: {
+        workspaceId: 'ws',
+        cwdRelative: 'B',
+        contextRevision: 2,
+        operationId: 'op',
+      },
+    });
+    expect(context).toMatchObject({ type: 'context_changed', turnId: '' });
+    const delta = {
+      id: 1,
+      at: 1,
+      sessionId: 's1',
+      turnId: 't1',
+      type: 'assistant_delta' as const,
+      data: { text: 'hello' },
+    };
+    expect(
+      managedEventsToMessages(
+        [delta, context!, { ...delta, id: 3, data: { text: ' world' } }],
+        '',
+      ),
+    ).toMatchObject([
+      { role: 'assistant', content: 'hello world', isStreaming: true },
+    ]);
+  });
   it('recovers the same tool from real Java publication, snapshot and event responses', () => {
     // Exported by ManagedArtifactApiIntegrationTest after publication/receipt and SQL projection.
     const live = javaFixture.events.flatMap((event) => {

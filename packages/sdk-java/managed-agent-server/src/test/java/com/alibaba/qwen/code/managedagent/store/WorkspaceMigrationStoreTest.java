@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.mock;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -21,6 +22,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
@@ -192,6 +194,106 @@ class WorkspaceMigrationStoreTest {
     }
 
     @Test
+    void collectedSourceBytesInvalidateTheMigration() {
+        var operation = store(true);
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRING");
+        operation.failed("resource_collected");
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(operation.inspect().path("lastErrorCode").asText()).isEqualTo("resource_collected");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,recovery_read_failed", "true,recovery_read_failed",
+            "false,migration_not_writable", "true,migration_not_writable"})
+    void clearsCompetingAttemptErrorsOnSuccessfulVerification(boolean promote, String code) throws Exception {
+        Process node = new ProcessBuilder("node", "-p", "process.execPath").start();
+        try {
+            assertThat(node.waitFor(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(node.exitValue()).isZero();
+            request.put("nodeExecutable", Path.of(new String(node.getInputStream().readAllBytes(), StandardCharsets.UTF_8)
+                    .trim()).toRealPath().toString());
+        } finally {
+            if (node.isAlive()) {
+                node.destroyForcibly();
+            }
+        }
+        Path ready = temp.resolve("worker-ready");
+        Path release = temp.resolve("worker-release");
+        Path worker = temp.resolve("successful-worker.cjs");
+        request.put("cliEntry", worker.toString());
+        var operation = store(true);
+        operation.retire(mock(RuntimeBrokerService.class));
+        guard.fence("tenant", "storage", 1, request.path("fenceOperationId").asText());
+        Files.copy(source.resolve(".qwen-managed-storage.json"), target.resolve(".qwen-managed-storage.json"));
+        var captureRequest = request.deepCopy();
+        captureRequest.remove(List.of("migrationOperationId", "targetRoot", "stateDirectory"));
+        captureRequest.put("operationId", request.path("captureOperationId").asText());
+        var capture = new WorkspaceRecoveryStore(jdbc, manager, guard, null, "capture",
+                captureRequest.toString().getBytes(StandardCharsets.UTF_8));
+        var context = capture.call("context", WorkspaceRecoveryStore.JSON.createObjectNode());
+        var manifest = WorkspaceRecoveryStore.JSON.createObjectNode().put("version", 1)
+                .put("provider", "local-workspace-bundle/1").put("tenantId", "tenant").put("storageId", "storage")
+                .put("captureOperationId", request.path("captureOperationId").asText()).put("activation", false);
+        for (String name : List.of("fenceOperationId", "mountRevision")) manifest.set(name, request.path(name));
+        for (String name : List.of("registration", "sourceDigest", "sessionCount")) manifest.set(name, context.path(name));
+        for (String name : List.of("sessions", "assets")) manifest.putObject(name)
+                .put("path", ".w1-recovery/" + name + ".ndjson").put("count", 0).put("byteLength", 0)
+                .put("digest", WorkspaceRecoveryStore.hash(new byte[0]));
+        Path metadata = Files.createDirectories(temp.resolve("bundle/.w1-recovery"));
+        byte[] bytes = manifest.toString().getBytes(StandardCharsets.UTF_8);
+        Files.write(metadata.resolve("manifest.json"), bytes);
+        var finish = WorkspaceRecoveryStore.JSON.createObjectNode().put("manifestDigest", WorkspaceRecoveryStore.hash(bytes));
+        finish.putObject("result").put("contentVerified", true).put("activation", false);
+        capture.call("finish", finish);
+        // Protocol fixture for the success boundary, not file-content verification.
+        Files.writeString(worker, "const fs = require('node:fs');\n"
+                + "const rl = require('node:readline').createInterface({input: process.stdin});\n"
+                + "rl.once('line', line => {\n"
+                + "  if (JSON.parse(line).error) process.exit(1);\n"
+                + "  fs.writeFileSync(" + WorkspaceRecoveryStore.JSON.valueToTree(ready.toString()) + ", 'ready');\n"
+                + "  const deadline = Date.now() + 10000;\n"
+                + "  setInterval(() => {\n"
+                + "    if (fs.existsSync(" + WorkspaceRecoveryStore.JSON.valueToTree(release.toString()) + ")) process.exit(0);\n"
+                + "    if (Date.now() > deadline) process.exit(2);\n"
+                + "  }, 10);\n"
+                + "});\n"
+                + "process.stdout.write(JSON.stringify({id: 1, method: 'finish', params: " + finish + "}) + '\\n');\n");
+        if (promote) {
+            Files.writeString(release, "release");
+            operation.verify(false);
+            Files.delete(release);
+            Files.delete(ready);
+        }
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var verified = executor.submit(() -> {
+                operation.verify(promote);
+                return operation.inspect();
+            });
+            try {
+                await().atMost(10, TimeUnit.SECONDS).until(() -> Files.exists(ready));
+                store(false).failed(code);
+                assertThat(operation.inspect().path("lastErrorCode").asText()).isEqualTo(code);
+                Files.writeString(release, "release");
+                var receipt = verified.get(15, TimeUnit.SECONDS);
+                assertThat(receipt.path("state").asText()).isEqualTo(promote ? "COMPLETED" : "PREPARED");
+                assertThat(receipt.path("lastErrorCode").isNull()).isTrue();
+                assertThat(receipt.path("result_json").path("contentVerified").asBoolean()).isTrue();
+                assertThat(receipt.path("result_json").path("activation").asBoolean()).isFalse();
+                assertThat(jdbc.queryForObject("SELECT mount_revision FROM managed_workspace_execution_lease", Long.class))
+                        .isEqualTo(promote ? 2 : 1);
+                operation.verify(promote);
+                assertThat(operation.inspect()).isEqualTo(receipt);
+                if (!promote) operation.abort();
+                var terminal = operation.inspect();
+                operation.failed("source_drift");
+                assertThat(operation.inspect()).isEqualTo(terminal);
+            } finally {
+                Files.writeString(release, "release");
+            }
+        }
+    }
+
+    @Test
     void sharesFenceOwnershipWithTheJdbcBrokerAndClearsBothReaders() {
         var bindings = new JdbcRuntimeBindingRepository(jdbc.getDataSource(),
                 new AesGcmSecretProtector("test", new byte[32]));
@@ -225,6 +327,28 @@ class WorkspaceMigrationStoreTest {
         assertThatThrownBy(() -> store(true)).hasMessageContaining("invalid_request");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PENDING", "RUNNING"})
+    void refusesUnfinishedTitleDeliveryEvenWithAFailedPublicReceipt(String state) {
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+                + " workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref,"
+                + " context_revision, workspace_config_ref, workspace_policy_ref)"
+                + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_agent_command (tenant_id, operation, idempotency_key, request_digest,"
+                + " session_id, created_at, updated_at, command_status)"
+                + " VALUES ('tenant', 'RENAME_SESSION', 'rename', 'digest', 'session', 1, 1, 'FAILED')");
+        jdbc.update("INSERT INTO managed_session_rename_delivery (tenant_id, session_id, revision, idempotency_key, title,"
+                + " delivery_state, available_at, lease_owner, lease_until)"
+                + " VALUES ('tenant', 'session', 1, 'rename', 'new title', ?, 0, 'lost-owner', 0)", state);
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT command_status FROM managed_agent_command", String.class)).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT delivery_state FROM managed_session_rename_delivery", String.class)).isEqualTo(state);
     }
 
     @Test
@@ -269,6 +393,22 @@ class WorkspaceMigrationStoreTest {
         assertThat(operation.inspect().path("state").asText()).isEqualTo("ABORTED");
         assertThat(guard.inspect("tenant", "storage")).contains("state=fenced revision=1");
         guard.restoreOriginal("tenant", "storage", 1, request.path("fenceOperationId").asText());
+    }
+
+    @Test
+    void refusesAStorageWhoseChildWorkspaceIsStillOpen() {
+        jdbc.update("INSERT INTO qwen_managed_child_workspace (tenant_id, parent_session_id, child_run_id,"
+                + " child_workspace_id, workspace_id, workspace_generation, storage_id, parent_cwd_relative,"
+                + " state, created_at, updated_at) VALUES ('tenant', 'parent', 'run', ?, 'workspace', 1,"
+                + " 'storage', '.', 'ready', 0, 0)", "0".repeat(32));
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
+        // A landed merge still owes its cleanup.
+        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'applied' WHERE child_workspace_id = ?",
+                "0".repeat(32));
+        assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
+        jdbc.update("UPDATE qwen_managed_child_workspace SET state = 'conflicted' WHERE child_workspace_id = ?",
+                "0".repeat(32));
+        assertThat(store(true).inspect().path("state").asText()).isEqualTo("RETIRING");
     }
 
     @Test

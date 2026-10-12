@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -51,6 +52,14 @@ class HostedWorkspaceToolTurnIT {
     void packagedHarnessUsesSavedWorkspacesThroughRealBrokerWorkerAndSqlStore() throws Exception {
         runDriver(List.of("alpha", "beta", "shell", "storage-failure", "raw-reply-loss", "cancel"),
                 "workspace-tool-turn");
+    }
+
+    @Test
+    @Timeout(240)
+    void operatorRecoveryReleasesOnlyTheOriginalQuiescentShellOnMySql() throws Exception {
+        assertThat(System.getProperty("os.name")).isEqualTo("Linux");
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        runDriver(List.of("compound", "detached", "independent"), "operator-recovery");
     }
 
     @Test
@@ -151,7 +160,8 @@ class HostedWorkspaceToolTurnIT {
 
     private void runDriver(List<String> cases, String driverName) throws Exception {
         boolean latency = driverName.equals("latency");
-        boolean faults = !driverName.equals("workspace-tool-turn") && !latency;
+        boolean operatorRecovery = driverName.equals("operator-recovery");
+        boolean faults = !driverName.equals("workspace-tool-turn") && !latency && !operatorRecovery;
         boolean storeFaults = driverName.equals("store-failure");
         boolean cancellations = driverName.equals("cancellation");
         boolean sseGaps = driverName.equals("sse-gap");
@@ -163,6 +173,12 @@ class HostedWorkspaceToolTurnIT {
         assertThat(node).as("Pass -Dnode.executable with an absolute Node.js 22+ path").isNotBlank();
         temporary = temporary.toRealPath();
         Files.createDirectory(temporary.resolve("runtime"));
+        if (operatorRecovery) {
+            Files.setPosixFilePermissions(temporary.resolve("runtime"),
+                    PosixFilePermissions.fromString("rwx------"));
+        }
+        Path fallbackWorkspace = operatorRecovery
+                ? Files.createDirectory(temporary.resolve("legacy-workspace")) : temporary;
         Path root = cli.getParent().getParent();
         Path worker = cli;
         int runtimeProvisioningDelayMs = 15_000;
@@ -194,15 +210,14 @@ class HostedWorkspaceToolTurnIT {
                 "--qwen.managed-agent.runtime-broker.enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
-                "--qwen.managed-agent.runtime-broker.durable-local-process=false",
+                "--qwen.managed-agent.runtime-broker.durable-local-process=" + operatorRecovery,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
-                "--qwen.managed-agent.runtime-broker.workspace-cwd=" + temporary,
+                "--qwen.managed-agent.runtime-broker.workspace-cwd=" + fallbackWorkspace,
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("runtime"),
                 "--qwen.managed-agent.runtime-broker.credential-key-id=test",
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
-                "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
-                "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
+                "--qwen.managed-agent.runtime-broker.worker-entry=" + worker));
         for (int index = 0; index < workspaces.size(); index++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + index + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -212,7 +227,7 @@ class HostedWorkspaceToolTurnIT {
             // Give initialized roots an unambiguous birth time without a timing-dependent sleep.
             Files.setLastModifiedTime(workspaces.get(index), FileTime.fromMillis(1));
         }
-        boolean verifiedRecovery = !faults && !latency && "Linux".equals(System.getProperty("os.name"));
+        boolean verifiedRecovery = !faults && !latency && !operatorRecovery && "Linux".equals(System.getProperty("os.name"));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=" + verifiedRecovery);
         var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
         if (sseGaps) {
@@ -237,13 +252,18 @@ class HostedWorkspaceToolTurnIT {
                         + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, ?, 1, ?,"
                         + " 'Workspace', ?, ?, 'ACTIVE')", tenant, workspaceId, "storage-" + index,
                         WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-                jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, TRUE)", tenant, workspaceId, "actor".getBytes(StandardCharsets.UTF_8));
+                jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'OPERATOR')", tenant, workspaceId, "actor".getBytes(StandardCharsets.UTF_8));
                 var created = store.insertWorkspaceSessionCommand(tenant, "actor", "create-" + index,
                         "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
                         new WorkspaceSelection(workspaceId, "child"));
+                String profile = operatorRecovery ? (index < 2 ? "hosted-workspace-shell/1" : "hosted-workspace-files/1")
+                        : !shellOutput && (faults || index < 2) ? "hosted-workspace-files/1" : "hosted-workspace-shell/1";
+                String secondary = operatorRecovery ? store.insertWorkspaceSessionCommand(tenant, "actor", "secondary-" + index,
+                        "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
+                        new WorkspaceSelection(workspaceId, "child")).sessionId() : "";
                 sessions.add(Map.of("sessionId", created.sessionId(), "workspaceId", workspaceId,
-                        "toolProfile", !shellOutput && (faults || index < 2) ? "hosted-workspace-files/1" : "hosted-workspace-shell/1",
+                        "toolProfile", profile, "secondarySessionId", secondary,
                         "directory", workspaces.get(index).resolve("child").toString(), "fault", cases.get(index)));
                 if (faults) Files.writeString(workspaces.get(index).resolve("child/proof.txt"), "x");
             }
@@ -292,9 +312,11 @@ class HostedWorkspaceToolTurnIT {
                     ? new HostedProviderControlProbe(jdbc, tenant, sessions, broker, gateServer) : null;
             HostedWorkspaceColdLoadProbe coldLoadProbe = new HostedWorkspaceColdLoadProbe(jdbc, tenant, sessions,
                     "http://127.0.0.1:" + spring.getWebServer().getPort(), gateServer);
+            HostedOperatorRecoveryProbe operatorProbe = operatorRecovery
+                    ? new HostedOperatorRecoveryProbe(spring, sessions, temporary.resolve("runtime"), gateServer) : null;
             gateServer.start();
             List<String> triggers = new ArrayList<>();
-            try (shellProbe; providerProbe; coldLoadProbe) {
+            try (shellProbe; providerProbe; coldLoadProbe; operatorProbe) {
                 if (storeFaults || shellOutput) {
                     for (Map<String, Object> session : sessions) {
                         if (shellOutput ? session.get("fault").equals("receipt-failure")
@@ -326,7 +348,7 @@ class HostedWorkspaceToolTurnIT {
                     assertThat(driver.waitFor(faults || latency ? 130 : 270, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
                     assertThat(driver.exitValue()).as("Driver output: %s", Files.readString(log)).isZero();
                     System.out.println(Files.readString(log));
-                    assertThat(Files.readString(log)).contains(latency ? "HOSTED_LATENCY_OK"
+                    assertThat(Files.readString(log)).contains(operatorRecovery ? "HOSTED_OPERATOR_RECOVERY_OK" : latency ? "HOSTED_LATENCY_OK"
                             : providerControl ? "HOSTED_PROVIDER_FAULTS_OK"
                             : shellOutput ? "HOSTED_SHELL_OUTPUT_FAULTS_OK"
                             : sseGaps ? "HOSTED_SSE_GAP_OK"
@@ -338,6 +360,9 @@ class HostedWorkspaceToolTurnIT {
                     if (faults && cases.contains("status")) assertThat(statusGate.isDone()).isTrue();
                     for (int index = 0; index < workspaces.size(); index++) {
                         Path workspace = workspaces.get(index);
+                        if (operatorRecovery) {
+                            continue;
+                        }
                         if (providerControl) providerProbe.assertReport(sessions.get(index), reports.get(index));
                         else if (latency) {
                             boolean tool = cases.get(index).equals("tool");
@@ -373,7 +398,7 @@ class HostedWorkspaceToolTurnIT {
                     driver.descendants().forEach(process -> process.destroyForcibly());
                     if (driver.isAlive()) driver.destroyForcibly();
                 }
-                if (!faults && !latency) {
+                if (!faults && !latency && !operatorRecovery) {
                     List<ProcessHandle> producers = ProcessHandle.current().descendants().toList();
                     assertThat(producers).as("Runtime producers before Broker shutdown").isNotEmpty();
                     broker.close();
@@ -425,7 +450,7 @@ class HostedWorkspaceToolTurnIT {
         List<Map<String, Object>> executions = jdbc.queryForList("SELECT execution_call_id, idempotency_key,"
                 + " runtime_session_id, dispatch_generation, execution_state, execution_status"
                 + " FROM qwen_tool_execution WHERE harness_session_id = ?", session.get("sessionId"));
-        assertThat(executions).as(fault + " reservations").hasSize(fault.equals("acquire") ? 0 : 1);
+        assertThat(executions).as(fault + " reservations").hasSize(List.of("acquire", "arguments").contains(fault) ? 0 : 1);
         for (Map<String, Object> execution : executions) {
             assertThat(execution.get("execution_call_id")).isEqualTo(report.path("executionCallId").asText());
             assertThat(execution.get("idempotency_key")).isEqualTo(report.path("idempotencyKey").asText());

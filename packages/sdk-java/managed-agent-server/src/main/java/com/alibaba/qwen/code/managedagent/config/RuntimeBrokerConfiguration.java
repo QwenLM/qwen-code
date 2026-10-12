@@ -79,6 +79,18 @@ public class RuntimeBrokerConfiguration {
                 publicationData.getIfAvailable());
     }
 
+    // The child result relay and the close cascade probe bindings across
+    // this Broker: it must be a bean, but its lifecycle stays with the
+    // owning EmbeddedRuntimeBroker — destroyMethod "" keeps Spring from
+    // closing the same service a second time.
+    @Bean(destroyMethod = "")
+    @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
+            name = "enabled", havingValue = "true")
+    public com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService runtimeBrokerService(
+            EmbeddedRuntimeBroker broker) {
+        return broker.service();
+    }
+
     @Bean
     @ConditionalOnMissingBean(RuntimeWarmer.class)
     public RuntimeWarmer runtimeWarmer() {

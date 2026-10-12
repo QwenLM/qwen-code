@@ -10,6 +10,183 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('reads tasks without identity scope but only exposes cancellation with a product scope', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse({ data: [], hasMore: false }));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    expect(provider.tasks).toBeDefined();
+    expect(provider.tasks!.cancel).toBeUndefined();
+    expect(
+      createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        productScope: '  ',
+      }).tasks!.cancel,
+    ).toBeUndefined();
+    const abort = new AbortController();
+    await provider.tasks!.list('s1', {
+      clientId: 'client',
+      cursor: 'opaque',
+      limit: 50,
+      signal: abort.signal,
+    });
+    expect(String(fetchImpl.mock.calls[0][0])).toContain('/tasks/query');
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
+      sessionId: 's1',
+      cursor: 'opaque',
+      limit: 50,
+    });
+    expect(fetchImpl.mock.calls[0][1]?.signal).toBe(abort.signal);
+  });
+
+  it('preserves the task cancel key and validates operation identity and type', async () => {
+    const operation = {
+      operationId: 'op1',
+      sessionId: 's1',
+      taskId: 'task1',
+      type: 'task_cancel',
+      status: 'pending',
+      replayed: false,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(operation));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.tasks!.cancel!.submit('s1', 'task1', {
+        clientId: 'client',
+        idempotencyKey: 'original',
+      }),
+    ).toEqual(operation);
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual(
+      expect.objectContaining({
+        sessionId: 's1',
+        taskId: 'task1',
+        idempotencyKey: 'original',
+      }),
+    );
+    expect(
+      await provider.tasks!.cancel!.query('s1', 'task1', 'op1', {
+        clientId: 'client',
+      }),
+    ).toEqual(operation);
+    fetchImpl.mockImplementation(async () =>
+      jsonResponse({ ...operation, taskId: 'different' }),
+    );
+    await expect(
+      provider.tasks!.cancel!.query('s1', 'task1', 'op1', {
+        clientId: 'client',
+      }),
+    ).rejects.toThrow('identity mismatch');
+    fetchImpl.mockImplementation(async () =>
+      jsonResponse({ ...operation, type: 'cancel' }),
+    );
+    await expect(
+      provider.tasks!.cancel!.query('s1', 'task1', 'op1', {
+        clientId: 'client',
+      }),
+    ).rejects.toThrow('identity mismatch');
+  });
+  it('uses the exact cwd request and key and queries its accepted operation', async () => {
+    const operation = {
+      operationId: 'op-cwd',
+      sessionId: 's1',
+      type: 'cwd_change',
+      status: 'pending',
+      expectedContextRevision: 7,
+      targetCwdRelative: ' 空格 dir ',
+      replayed: false,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(operation));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.cwdChange!.submit(
+        's1',
+        { cwdRelative: ' 空格 dir ', expectedContextRevision: 7 },
+        { clientId: 'client', idempotencyKey: 'original-key' },
+      ),
+    ).toEqual(operation);
+    expect(String(fetchImpl.mock.calls[0][0])).toContain(
+      '/sessions/cwd/change',
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual(
+      expect.objectContaining({
+        sessionId: 's1',
+        cwdRelative: ' 空格 dir ',
+        expectedContextRevision: 7,
+        idempotencyKey: 'original-key',
+      }),
+    );
+    expect(
+      await provider.cwdChange!.query('s1', 'op-cwd', { clientId: 'client' }),
+    ).toEqual(operation);
+    expect(String(fetchImpl.mock.calls[1][0])).toContain('/operations/query');
+  });
+
+  it('requires explicit identity scope for cwd recovery and maps its capability independently', async () => {
+    const options = {
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          sessionId: 's1',
+          status: 'active',
+          createdAt: 1,
+          updatedAt: 1,
+          workspace: {
+            workspaceId: 'ws',
+            cwdRelative: '.',
+            contextRevision: 3,
+            state: 'ready',
+          },
+          capabilities: { cwdChange: true, workspaceTurns: false },
+        }),
+      ),
+    };
+    expect(createJavaManagedAgentProvider(options).cwdChange).toBeUndefined();
+    expect(
+      createJavaManagedAgentProvider({ ...options, productScope: '  ' })
+        .cwdChange,
+    ).toBeUndefined();
+    const provider = createJavaManagedAgentProvider({
+      ...options,
+      productScope: 'tenant:actor',
+    });
+    expect(
+      (await provider.getSession('s1', { clientId: 'client' })).capabilities
+        .cwdChange,
+    ).toBe(true);
+  });
+
+  it('rejects an unrelated operation returned by the query endpoint', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          sessionId: 'other',
+          operationId: 'op',
+          type: 'action_response',
+          status: 'completed',
+        }),
+      ),
+    });
+    await expect(
+      provider.cwdChange!.query('s1', 'op', { clientId: 'client' }),
+    ).rejects.toThrow();
+  });
   it('keeps an empty bound session idle and disables execution', async () => {
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
@@ -401,6 +578,33 @@ describe('createJavaManagedAgentProvider', () => {
       events.push(event);
     }
     expect(onEstablished).toHaveBeenCalledOnce();
+    expect(events).toEqual([
+      expect.objectContaining({ id: 9, type: 'completed' }),
+    ]);
+  });
+
+  it('forwards stream keep-alives to the subscribe caller', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            ': keepalive\r\n\r\nid: 9\nevent: turn.completed\ndata: {"sequence":9,"eventId":"evt_9","sessionId":"session-1","turnId":"turn-1","type":"turn.completed","createdAt":9,"data":{},"terminal":true}\n\n: keepalive\n\n',
+            { status: 200 },
+          ),
+        ),
+    });
+    const onAlive = vi.fn();
+    const events = [];
+    for await (const event of provider.subscribeEvents('session-1', {
+      clientId: 'client-1',
+      lastEventId: 8,
+      onAlive,
+    })) {
+      events.push(event);
+    }
+    expect(onAlive).toHaveBeenCalledTimes(2);
     expect(events).toEqual([
       expect.objectContaining({ id: 9, type: 'completed' }),
     ]);
@@ -887,37 +1091,105 @@ describe('createJavaManagedAgentProvider', () => {
 
     expect(
       (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
-    ).toEqual({ canSend: true, canCancel: false, workspaceTurns: true });
-    expect(
-      (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
-    ).toEqual({ canSend: false, canCancel: false });
-  });
-
-  it('lets the allowed caller cancel a running Turn of a bound Session', async () => {
-    const provider = createJavaManagedAgentProvider({
-      baseUrl: 'https://product.example',
-      fetch: vi.fn<typeof fetch>().mockResolvedValue(
-        jsonResponse({
-          sessionId: 'bound-1',
-          status: 'ACTIVE',
-          createdAt: 1,
-          updatedAt: 2,
-          lastSequence: 5,
-          workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
-          activeTurn: {
-            turnId: 'turn-2',
-            sessionId: 'bound-1',
-            status: 'RUNNING',
-            submittedAt: 2,
-          },
-          capabilities: { tasks: true, workspaceTurns: true },
-        }),
-      ),
+    ).toEqual({
+      canSend: true,
+      canCancel: false,
+      workspaceTurns: true,
+      tasks: true,
     });
     expect(
       (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
-    ).toEqual({ canSend: false, canCancel: true, workspaceTurns: true });
+    ).toEqual({ canSend: false, canCancel: false, tasks: true });
   });
+
+  it.each([true, false])(
+    'offers cancel for a running bound Turn when workspaceTurns is %s',
+    async (workspaceTurns) => {
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: vi.fn<typeof fetch>().mockResolvedValue(
+          jsonResponse({
+            sessionId: 'bound-1',
+            status: 'ACTIVE',
+            createdAt: 1,
+            updatedAt: 2,
+            lastSequence: 5,
+            workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+            activeTurn: {
+              turnId: 'turn-2',
+              sessionId: 'bound-1',
+              status: 'RUNNING',
+              submittedAt: 2,
+            },
+            capabilities: { tasks: true, workspaceTurns },
+          }),
+        ),
+      });
+      // The creator may still cancel after the Workspace stops admitting
+      // new work, so cancel does not follow workspaceTurns; the server
+      // refuses anyone else.
+      expect(
+        (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
+      ).toEqual({
+        canSend: false,
+        canCancel: true,
+        tasks: true,
+        ...(workspaceTurns ? { workspaceTurns: true } : {}),
+      });
+    },
+  );
+
+  it.each([true, false])(
+    'gates fresh Shell sending with foregroundShell=%s while retaining cancellation',
+    async (enabled) => {
+      const base = {
+        sessionId: 'shell-1',
+        status: 'ACTIVE',
+        createdAt: 1,
+        updatedAt: 2,
+        lastSequence: 5,
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+        capabilities: {
+          tasks: true,
+          workspaceTurns: true,
+          foregroundShell: enabled,
+        },
+      };
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: vi
+          .fn<typeof fetch>()
+          .mockResolvedValueOnce(jsonResponse(base))
+          .mockResolvedValueOnce(
+            jsonResponse({
+              ...base,
+              activeTurn: {
+                turnId: 'turn-1',
+                sessionId: 'shell-1',
+                status: 'RUNNING',
+                submittedAt: 2,
+              },
+            }),
+          ),
+      });
+      expect(
+        (await provider.getSession('shell-1', { clientId: 'c' })).capabilities,
+      ).toEqual({
+        canSend: enabled,
+        canCancel: false,
+        workspaceTurns: true,
+        tasks: true,
+      });
+      expect(
+        (await provider.getSession('shell-1', { clientId: 'c' })).capabilities,
+      ).toEqual({
+        canSend: false,
+        canCancel: true,
+        workspaceTurns: true,
+        tasks: true,
+      });
+    },
+  );
 
   it('passes download cancellation through the host sink to the content fetch', async () => {
     const abort = new AbortController();
