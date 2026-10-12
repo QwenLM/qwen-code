@@ -326,6 +326,7 @@ async function hostedModelFixture(
           records.push(...batch);
         },
         seal: async () => {},
+        writerSealed: false,
         abort: async () => {},
       }),
     },

@@ -8219,14 +8219,13 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_turn_active');
     session.mcpBusy = true;
     session.mcpClosing = true;
-    // The deregistration is safe only once the close was attempted:
-    // close()'s own finally either sealed the writer (a rejection after
-    // that point — e.g. the boundary release — leaves a durably sealed
-    // journal that every later write would hit, R11-3) or failed the seal
-    // itself (nothing is usable either way). A failure before that — a
-    // hook or admission rejection — left the writer open and the Session
-    // usable, so the entry stays.
-    let closeAttempted = false;
+    // The deregistration is keyed on the writer seal, not the close call:
+    // once close() settled, or its seal landed before a rejection (R11-3),
+    // the journal is durably closed and the entry is dead weight. A
+    // rejection whose seal never ran — a pre-seal failure (R13-1) or a
+    // pre-close hook/admission refusal — left the writer open, so the
+    // Session stays for a retry.
+    let closeSettled = false;
     try {
       if (session.lifecycle || authority) {
         if (req.method === 'DELETE')
@@ -8389,10 +8388,10 @@ export function registerHostedHarnessSessionRoutes(
             ),
           );
       }
-      closeAttempted = true;
       await session.managed.close(
         session.lifecycle ? { releaseActivation: false } : undefined,
       );
+      closeSettled = true;
       res.sendStatus(204);
     } catch (cause) {
       writeStderrLineSafe(
@@ -8406,13 +8405,13 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 503, 'hosted_hook_recovery_required');
       else error(res, 503, 'managed_session_close_failed');
     } finally {
-      // A rejection after close() ran must not strand the Session in
-      // memory: the writer may be durably sealed while the caller was told
-      // the close failed (review round 11, R11-3), and leaving the entry
-      // re-arms a session whose every later journal write fails. A
-      // rejection before close() ran — a hook or admission refusal — left
-      // the writer open, so the entry stays usable.
-      if (closeAttempted) {
+      // Deregister only once the writer is durably closed: close() settled,
+      // or it rejected after the seal landed (R11-3) — every later journal
+      // write fails, so the entry is dead weight. A rejection whose seal
+      // never ran (a pre-seal failure, R13-1) or before close() ran (a hook
+      // or admission refusal) left the writer open, so the Session stays
+      // usable for a retry.
+      if (closeSettled || session.managed.authority.writerSealed) {
         for (const stop of session.streams) stop();
         sessions.delete(req.params['id']);
       }

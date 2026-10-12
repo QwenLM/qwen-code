@@ -9989,6 +9989,36 @@ describe('Hosted Harness no-tool session', () => {
     expect(followUp.body.code).toBe('hosted_session_not_found');
   });
 
+  it('keeps the Session when the close rejected before the writer seal landed', async () => {
+    // A pre-seal seal() rejection leaves the writer open: the Session must
+    // stay registered so a retry can reach it (review round 13, R13-1).
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+    vi.spyOn(
+      LocalJsonlManagedSessionJournalHandle.prototype,
+      'seal',
+    ).mockRejectedValue(new Error('seal candidate already exists'));
+    const failed = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(failed.status).toBe(503);
+    expect(failed.body.code).toBe('managed_session_close_failed');
+    // The pre-seal rejection keeps the Session: a follow-up DELETE reaches
+    // the same entry and fails the same way instead of answering 404.
+    const followUp = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(followUp.status).toBe(503);
+    expect(followUp.body.code).toBe('managed_session_close_failed');
+  });
+
   it('names a retained Hook hold when DELETE cannot release its owner', async () => {
     const { server, authorize, release } = await hookApp();
     release.mockImplementation(async () => {
