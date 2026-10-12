@@ -42,6 +42,17 @@ class ManagedEventEnvelopesTest {
     }
 
     @Test
+    void canonicalJsonRendersALargeIntegerFromItsNearestDouble()
+            throws Exception {
+        // An integer above 2^53 has no exact double: JSON.stringify renders
+        // the nearest double, never the exact digits. The mirror must match
+        // or the digest diverges (wenshao's witness 1000000000000000128).
+        JsonNode node = JSON.readTree("{\"x\":1000000000000000128}");
+        assertEquals("{\"x\":1000000000000000100}",
+                ManagedEventEnvelopes.canonicalJson(node));
+    }
+
+    @Test
     void canonicalJsonEscapesAnUnpairedSurrogateLikeJsonStringify() {
         // A lone high surrogate: JSON.stringify escapes it as a lowercase
         // escape (backslash, u, four hex digits) so the canonical bytes match

@@ -203,17 +203,13 @@ public final class ManagedEventEnvelopes {
             return node.booleanValue() ? "true" : "false";
         }
         if (node.isNumber()) {
-            return numberJson(node);
+            // JSON.stringify has only doubles: an integer above 2^53 renders
+            // from its nearest double (rounding), never as exact digits, so
+            // the canonical bytes match the TypeScript side.
+            return jsNumberToString(node.doubleValue());
         }
         throw new IllegalArgumentException(
                 "unsupported JSON node type: " + node.getNodeType());
-    }
-
-    private static String numberJson(JsonNode node) {
-        if (node.isIntegralNumber()) {
-            return node.bigIntegerValue().toString();
-        }
-        return jsNumberToString(node.doubleValue());
     }
 
     /**
