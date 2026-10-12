@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Issue #13533 finding A2 reproduction driver: drive session α through the
-// A1 chain (background Shell start -> publication reserve 400 -> cancel ->
-// close_not_started 400 -> turn recovery-blocked) against a real managed
-// agent server + MariaDB, then start session β's first turn on the SAME
+// Issue #13533 finding A2 reproduction driver: replay the shape the A1
+// chain left against a real managed agent server + MariaDB. Session α's
+// admitted background Shell start reaches the server; the driver's relay
+// then injects the reserve 400 once — that reserve never reaches the
+// server — while cancel, close_not_started and the recovery-blocked turn
+// all run production code. Then start session β's first turn on the SAME
 // hosted harness daemon and record whether it wedges after the
 // `hostedModelAttempt` journal commit with the model never called. The Java
 // side (HostedRecoveryWedgeGate) owns server/DB evidence and clears
@@ -176,6 +178,7 @@ class WedgeDaemon {
           QWEN_MODEL: 'hosted-wedge',
           QWEN_SANDBOX: 'false',
           NO_COLOR: '1',
+          QWEN_MANAGED_SESSION_TEST_DOMAINS: 'child_run,monitor_run',
         },
       },
     );
@@ -1004,6 +1007,7 @@ try {
       entry: (typeof config.sessions)[number],
       index: number,
       label: string,
+      forge?: { family: string; argsDigest: string; requestDigest: string },
     ) => {
       await promptFor(entry, index);
       await waitUntil(async () => {
@@ -1014,6 +1018,36 @@ try {
             (row.responseSnippet ?? '').includes('"OPEN"'),
         );
       }, 120_000);
+      if (forge) {
+        // Arm 3 (refusal-edges-live) fires here: the turn's own reserve is
+        // captured OPEN and not yet settled, so replaying the very same
+        // publicationId with only its digests forged reaches the
+        // digest-consistency refusal — and its 400 reason must say so.
+        const source = reserveBodies.get(entry.sessionId);
+        const headers = reserveHeaders.get(entry.sessionId);
+        if (!source || !headers)
+          throw new Error(`No captured reserve for ${forge.family} forging`);
+        const body = JSON.parse(source);
+        body.binding.reference.argsDigest = forge.argsDigest;
+        body.binding.requestDigest = forge.requestDigest;
+        const response = await fetch(
+          `${storeProxyUrl}/internal/managed-tool-publications/v1/sessions/${entry.sessionId}/grants?workspaceId=${entry.workspaceId}`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(30_000),
+          },
+        );
+        const text = await response.text();
+        evidence.push(
+          `edge ${forge.family} forged-digest replay on captured reserve -> ${response.status} ${text.slice(0, 240)}`,
+        );
+        if (response.status !== 400 || !/digest/i.test(text))
+          throw new Error(
+            `${forge.family} forged-digest replay must refuse with 400 naming the digest, got ${response.status}: ${text.slice(0, 240)}`,
+          );
+      }
       const status = await waitTurnEndsBlocked(entry, 120_000);
       const reserves = await reservesFor(entry.sessionId);
       const closes = await closesFor(entry.sessionId);
@@ -1055,7 +1089,11 @@ try {
     // completion stays the unlanded B1 arm — this arm pins OPEN + close +
     // the blocked state and names that dependency.
     const alpha = config.sessions[0];
-    await detachedArmOf(alpha, 0, 'background');
+    await detachedArmOf(alpha, 0, 'background', {
+      family: 'shell',
+      argsDigest: `sha256:${'f'.repeat(64)}`,
+      requestDigest: `sha256:${'e'.repeat(64)}`,
+    });
     evidence.push(
       'background settlement target after turn completion is the unlanded B1 arm; intermediate state pinned (OPEN + close NOT_STARTED + turn recovery-blocked, blockCause recorded above)',
     );
@@ -1065,62 +1103,20 @@ try {
     // Monitor reserve is a regression of the admission layers this witness
     // exists to pin, never a passing outcome the witness may journal green.
     const mu = config.sessions[1];
-    await detachedArmOf(mu, 1, 'monitor');
+    await detachedArmOf(mu, 1, 'monitor', {
+      family: 'monitor',
+      argsDigest: `sha256:${'d'.repeat(64)}`,
+      requestDigest: `sha256:${'c'.repeat(64)}`,
+    });
 
-    // Arm 3 — refusal-edges-live: per-family raw negatives against the
-    // running endpoint. Pure shape-level negatives can't be emitted by the
-    // turn (it normalizes them away), and the digest-bound protocol refuses
-    // forged bytes at identification, so replaying the real reserves of the
-    // admitted families with forged digests is the honest wire-level
-    // negative each family admits: fresh publicationId, forged
-    // requestDigest/argsDigest — the endpoint must answer 400 with a live
-    // refusal diagnostic (unit fixtures cover the field-shape refusals).
-    const forgeArms: Array<{
-      family: string;
-      sourceId: string;
-      argsDigest: string;
-      requestDigest: string;
-    }> = [
-      {
-        family: 'shell',
-        sourceId: alpha.sessionId,
-        argsDigest: `sha256:${'f'.repeat(64)}`,
-        requestDigest: `sha256:${'e'.repeat(64)}`,
-      },
-      {
-        family: 'monitor',
-        sourceId: mu.sessionId,
-        argsDigest: `sha256:${'d'.repeat(64)}`,
-        requestDigest: `sha256:${'c'.repeat(64)}`,
-      },
-    ];
-    for (const arm of forgeArms) {
-      const source = reserveBodies.get(arm.sourceId);
-      const headers = reserveHeaders.get(arm.sourceId);
-      if (!source || !headers)
-        throw new Error(`No captured reserve for ${arm.family} forging`);
-      const body = JSON.parse(source);
-      body.binding.publicationId = randomUUID();
-      body.binding.reference.argsDigest = arm.argsDigest;
-      body.binding.requestDigest = arm.requestDigest;
-      const response = await fetch(
-        `${storeProxyUrl}/internal/managed-tool-publications/v1/sessions/${arm.sourceId}/grants?workspaceId=${config.sessions.find((session) => session.sessionId === arm.sourceId)!.workspaceId}`,
-        {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(30_000),
-        },
-      );
-      const text = await response.text();
-      evidence.push(
-        `edge ${arm.family} forged-digest reserve -> ${response.status} ${text.slice(0, 240)}`,
-      );
-      if (response.status !== 400)
-        throw new Error(
-          `${arm.family} edge reserve must refuse with 400, got ${response.status}: ${text.slice(0, 240)}`,
-        );
-    }
+    // Arm 3 — refusal-edges-live: folded into the two detached arms above.
+    // Pure shape-level negatives can't be emitted by the turn (it
+    // normalizes them away) and the digest-bound protocol refuses forged
+    // bytes at identification, so each family replays its captured OPEN
+    // reserve with the same publicationId and only its
+    // requestDigest/argsDigest forged, fired before the blocked settlement;
+    // the 400 refusal reason must name the digest (unit fixtures cover the
+    // field-shape refusals).
 
     // Arm 4 — foreground reserve on the same v3 lane: off-Linux the worker
     // declines it just like the detached families (no cgroup root, no

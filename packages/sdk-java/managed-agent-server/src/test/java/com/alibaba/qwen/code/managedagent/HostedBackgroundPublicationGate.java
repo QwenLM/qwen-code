@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.managedprobes.ProbeAdvice;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
@@ -26,17 +27,18 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * Post-A1-fix end-to-end witness (#13533, finding A1, per
- * {@code docs/design/2026-10-09-managed-tool-publication-background-arm.md}):
- * the background Shell and Monitor payload families were admitted into the
- * publication contract, so a hosted turn's background {@code run_shell_command}
- * and {@code monitor} calls now reach a reserve instead of the removed 400.
+ * Post-A1-fix end-to-end witness (#13533, finding A1; the fix landed with
+ * PR #13815): the background Shell and Monitor payload families were
+ * admitted into the publication contract, so a hosted turn's background
+ * {@code run_shell_command} and {@code monitor} calls now reach a reserve
+ * instead of the removed 400.
  *
  * <p>Arms (production binaries in-process: MariaDB + embedded broker + real
- * hosted-harness daemon running the bundled CLI with the declared test
- * switch that admits {@code child_run} (kind {@code shell}) and
- * {@code monitor_run}; fake model; no cgroup v2 on this host, so the
- * ephemeral lane declines every shell-typed start {@code not_started}):
+ * hosted-harness daemon running the bundled CLI with the test-only switch
+ * {@code QWEN_MANAGED_SESSION_TEST_DOMAINS=child_run,monitor_run}, honored
+ * only by the two turn-admission checks; fake model; no cgroup v2 on this
+ * host, so the ephemeral lane declines every shell-typed start
+ * {@code not_started}):
  *
  * <ul>
  * <li>background-reserve: admitted background start reserves and the grant
@@ -45,20 +47,19 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * the grant closes NOT_STARTED (200), and the turn goes recovery-blocked;
  * full detached-handle settlement after turn completion remains the unlanded
  * B1 arm — pinned and named.
- * <li>monitor-reserve: after the three-layer admission chain was lifted
- * (contract payload arm; store checkpoint toolName via
- * {@code ToolPublicationContract.PUBLISHABLE_TOOL_NAMES}; turn checkpoint
- * {@code inputDigest} recording the canonical-input digest for the monitor
- * family as well), the admitted Monitor reserve answers <b>OPEN</b> like
- * the background arm, then declines {@code not_started} on the ephemeral
- * lane (no cgroup v2 root), closes NOT_STARTED (200), and the turn blocks;
- * the earlier checkpoint-refusal findings are closed by that chain.
+ * <li>monitor-reserve: on the merged contract arms, this PR extracted the
+ * publishable list into
+ * {@code ToolPublicationContract.PUBLISHABLE_TOOL_NAMES} and widened the
+ * integral-valued numerics with {@code boundedIntField}; the admitted
+ * Monitor reserve answers <b>OPEN</b> like the background arm, then
+ * declines {@code not_started} on the ephemeral lane (no cgroup v2 root),
+ * closes NOT_STARTED (200), and the turn blocks; the earlier
+ * checkpoint-refusal findings are closed by that chain.
  * <li>refusal-edges-live: per-family raw negatives replayed against the
- * running endpoint as forged-digest reserves (fresh publicationId, forged
- * requestDigest/argsDigest) — shape-level negatives can't be emitted by the
- * turn and the digest-bound protocol admits no spoofing; each replay
- * answers 400 with a live diagnostic, mirrored by the unit fixture corpus
- * for the field-shape refusals.
+ * captured OPEN grant with only its digests forged — shape-level negatives
+ * can't be emitted by the turn and the digest-bound protocol admits no
+ * spoofing; each replay answers 400 whose refusal reason names the digest,
+ * mirrored by the unit fixture corpus for the field-shape refusals.
  * <li>foreground (v3 lane): reserve OPEN + close NOT_STARTED +
  * recovery-blocked — off-Linux the ephemeral lane declines all shell-typed
  * executions alike; byte-level foreground regression is held by
@@ -66,11 +67,14 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * the same verification pass.
  * </ul>
  *
- * <p>Gated behind -Dqwen.wedge.probe=true so the hosted-harness-mysql CI
- * lane is unaffected without the probe flag. The wiring registers a
- * probe-only exception advice that surfaces the contract/store refusal
- * reasons in the 400 envelope and the test log (production's handler is
- * deliberately generic).
+ * <p>Collector-less: run through the {@code hosted-harness-gates} profile
+ * ({@code mvn -Phosted-harness-gates -Dmysql.url=... -Dnode.executable=...}),
+ * which includes the {@code Hosted*Gate} test classes and sets the probe
+ * flag, so the hosted-harness-mysql CI lane and both roster checks stay
+ * untouched. The explicit source list registers {@link ProbeAdvice} so the
+ * refusal-diagnosis advice surfaces the contract/store refusal reasons in
+ * the 400 envelope and the test log (production's handler is deliberately
+ * generic; the wedge witness observes it as-is).
  */
 class HostedBackgroundPublicationGate {
 
@@ -78,7 +82,7 @@ class HostedBackgroundPublicationGate {
     private Path temporary;
 
     @Test
-    @Timeout(600)
+    @Timeout(1800)
     void backgroundAndMonitorReservesAnswerOpen() throws Exception {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 "true".equals(System.getProperty("qwen.wedge.probe")),
@@ -95,9 +99,9 @@ class HostedBackgroundPublicationGate {
         Path repoRoot = moduleDir.resolve("../../..").normalize();
         assertThat(repoRoot.resolve("integration-tests/helpers/hosted-recovery-blocked-wedge-driver.ts"))
                 .isRegularFile();
-        Path evidence = System.getProperty("qwen.wedge.evidence") != null
+        Path evidence = (System.getProperty("qwen.wedge.evidence") != null
                 ? Path.of(System.getProperty("qwen.wedge.evidence")).toAbsolutePath()
-                : moduleDir.resolve("target/wedge-evidence");
+                : moduleDir.resolve("target/wedge-evidence")).resolve("publication");
         Files.createDirectories(evidence);
         Path reportsDir = evidence.resolve("node-reports");
         Files.createDirectories(reportsDir);
@@ -119,9 +123,13 @@ class HostedBackgroundPublicationGate {
             workspaces.add(dir);
         }
         Path wrapper = temporary.resolve("node-report-wrapper.sh");
-        Files.writeString(wrapper, "#!/bin/sh\nexec " + node
-                + " --report-on-signal --report-signal=SIGUSR2 --report-directory="
-                + reportsDir + " \"$@\"\n");
+        for (String path : List.of(node, reportsDir.toString())) {
+            assertThat(path).as("wrapper paths must not contain a quote or newline")
+                    .doesNotContain("\"").doesNotContain("\n");
+        }
+        Files.writeString(wrapper, "#!/bin/sh\nexec \"" + node
+                + "\" --report-on-signal --report-signal=SIGUSR2 --report-directory=\""
+                + reportsDir + "\" \"$@\"\n");
         wrapper.toFile().setExecutable(true);
 
         var arguments = new ArrayList<>(List.of(
@@ -214,44 +222,25 @@ class HostedBackgroundPublicationGate {
                     config.toString())
                     .directory(repoRoot.toFile())
                     .redirectErrorStream(true).redirectOutput(driverLog.toFile()).start();
-            assertThat(driver.waitFor(480, TimeUnit.SECONDS))
-                    .as("Driver timeout:\n%s", Files.readString(driverLog)).isTrue();
-            if (Files.exists(temporary.resolve("wire.jsonl"))) {
-                Files.copy(temporary.resolve("wire.jsonl"), evidence.resolve("wire.jsonl"),
+            try {
+                assertThat(driver.waitFor(1500, TimeUnit.SECONDS))
+                        .as("Driver timeout:\n%s", Files.readString(driverLog)).isTrue();
+                if (Files.exists(temporary.resolve("wire.jsonl"))) {
+                    Files.copy(temporary.resolve("wire.jsonl"), evidence.resolve("wire.jsonl"),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+                Files.copy(driverLog, evidence.resolve("driver-final.log"),
                         java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                String log = Files.readString(driverLog);
+                System.out.println(log);
+                assertThat(driver.exitValue()).as("Driver output:\n%s", log).isZero();
+                assertThat(log).contains("HOSTED_BACKGROUND_PUBLICATION_OK");
+            } finally {
+                driver.descendants().forEach(ProcessHandle::destroyForcibly);
+                if (driver.isAlive()) {
+                    driver.destroyForcibly();
+                }
             }
-            Files.copy(driverLog, evidence.resolve("driver-final.log"),
-                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            String log = Files.readString(driverLog);
-            System.out.println(log);
-            assertThat(driver.exitValue()).as("Driver output:\n%s", log).isZero();
-            assertThat(log).contains("HOSTED_BACKGROUND_PUBLICATION_OK");
-        }
-    }
-
-    /**
-     * Probe-lane diagnosis: the production 400 handler answers with a
-     * deliberately generic envelope and no log, so contract refusals are
-     * unreadable on the wire. This advice — registered only by this IT's
-     * wiring — logs the full cause and embeds it in the envelope.
-     */
-    @org.springframework.web.bind.annotation.RestControllerAdvice
-    @org.springframework.core.annotation.Order(
-            org.springframework.core.Ordered.HIGHEST_PRECEDENCE)
-    static final class ProbeAdvice {
-        @org.springframework.web.bind.annotation.ExceptionHandler(
-                IllegalArgumentException.class)
-        org.springframework.http.ResponseEntity<Map<String, Object>> probeInvalid(
-                IllegalArgumentException error, jakarta.servlet.http.HttpServletRequest request) {
-            System.out.println("PROBE_CONTRACT_REFUSAL " + request.getMethod() + " "
-                    + request.getRequestURI() + " query=" + request.getQueryString());
-            error.printStackTrace(System.out);
-            return org.springframework.http.ResponseEntity.status(
-                    org.springframework.http.HttpStatus.BAD_REQUEST).body(Map.of(
-                    "error", Map.of(
-                            "code", "invalid_request",
-                            "message", "The request body is invalid.",
-                            "diagnostic", String.valueOf(error.getMessage()))));
         }
     }
 }

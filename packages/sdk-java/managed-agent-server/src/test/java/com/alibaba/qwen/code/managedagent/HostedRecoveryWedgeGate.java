@@ -52,8 +52,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * transaction/lock state and the session rows, deletes session α's store
  * rows, asserts the probe recovers, and then fails as the A2 regression.
  *
- * <p>Run with the pristine bundle and -Dqwen.wedge.control=true for the
- * no-fault control run.
+ * <p>Collector-less: run through the {@code hosted-harness-gates} profile
+ * ({@code mvn -Phosted-harness-gates -Dmysql.url=... -Dnode.executable=...}),
+ * which includes the {@code Hosted*Gate} test classes and sets the probe
+ * flag. The daemon admits the H3 domains only because the driver passes the
+ * test-only {@code QWEN_MANAGED_SESSION_TEST_DOMAINS=child_run,monitor_run}
+ * switch to it; no bundle patch is needed. Run with
+ * -Dqwen.wedge.control=true for the no-fault control run.
  */
 class HostedRecoveryWedgeGate {
 
@@ -61,7 +66,7 @@ class HostedRecoveryWedgeGate {
     private Path temporary;
 
     @Test
-    @Timeout(600)
+    @Timeout(1800)
     void recoveryBlockedSessionMustNotWedgeOtherSessionTurns() throws Exception {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 "true".equals(System.getProperty("qwen.wedge.probe")),
@@ -79,9 +84,9 @@ class HostedRecoveryWedgeGate {
         Path repoRoot = moduleDir.resolve("../../..").normalize();
         assertThat(repoRoot.resolve("integration-tests/helpers/hosted-recovery-blocked-wedge-driver.ts"))
                 .isRegularFile();
-        Path evidence = System.getProperty("qwen.wedge.evidence") != null
+        Path evidence = (System.getProperty("qwen.wedge.evidence") != null
                 ? Path.of(System.getProperty("qwen.wedge.evidence")).toAbsolutePath()
-                : moduleDir.resolve("target/wedge-evidence");
+                : moduleDir.resolve("target/wedge-evidence")).resolve("wedge");
         Files.createDirectories(evidence);
         Path reportsDir = evidence.resolve("node-reports");
         Files.createDirectories(reportsDir);
@@ -98,9 +103,13 @@ class HostedRecoveryWedgeGate {
             workspaces.add(dir);
         }
         Path wrapper = temporary.resolve("node-report-wrapper.sh");
-        Files.writeString(wrapper, "#!/bin/sh\nexec " + node
-                + " --report-on-signal --report-signal=SIGUSR2 --report-directory="
-                + reportsDir + " \"$@\"\n");
+        for (String path : List.of(node, reportsDir.toString())) {
+            assertThat(path).as("wrapper paths must not contain a quote or newline")
+                    .doesNotContain("\"").doesNotContain("\n");
+        }
+        Files.writeString(wrapper, "#!/bin/sh\nexec \"" + node
+                + "\" --report-on-signal --report-signal=SIGUSR2 --report-directory=\""
+                + reportsDir + "\" \"$@\"\n");
         wrapper.toFile().setExecutable(true);
 
         var arguments = new ArrayList<>(List.of(
@@ -208,76 +217,86 @@ class HostedRecoveryWedgeGate {
                     "tenant=" + tenant + "\nalpha=" + sessions.get(0).get("sessionId")
                             + "\nbeta=" + sessions.get(1).get("sessionId")
                             + "\ngamma=" + sessions.get(2).get("sessionId") + "\n");
-            if (control) {
+            try {
+                if (control) {
+                    assertThat(driver.waitFor(300, TimeUnit.SECONDS))
+                            .as("Control driver timeout:\n%s", Files.readString(driverLog)).isTrue();
+                    Files.copy(driverLog, evidence.resolve("driver-final.log"),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    String controlLog = Files.readString(driverLog);
+                    System.out.println(controlLog);
+                    assertThat(driver.exitValue())
+                            .as("Control driver output:\n%s", controlLog).isZero();
+                    assertThat(controlLog).contains("HOSTED_WEDGE_CONTROL_OK");
+                    return;
+                }
+                boolean wedged = false;
+                long watchDeadline = System.currentTimeMillis() + 900_000;
+                while (System.currentTimeMillis() < watchDeadline) {
+                    if (Files.exists(phaseFile)
+                            && Files.readString(phaseFile).trim().equals("B_WEDGED_CONFIRMED")) {
+                        wedged = true;
+                        break;
+                    }
+                    if (!driver.isAlive()) break;
+                    Thread.sleep(400);
+                }
+                Files.copy(driverLog, evidence.resolve("driver.log"),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                if (!wedged) {
+                    String log = Files.readString(driverLog);
+                    if (!driver.isAlive()) {
+                        assertThat(driver.waitFor(60, TimeUnit.SECONDS))
+                                .as("Driver exit wait:\n%s", log).isTrue();
+                        if (log.contains("HOSTED_WEDGE_ABSENT") && driver.exitValue() == 0) {
+                            // Regression expectation: with α recovery-blocked, the
+                            // probes' turns complete. Anything else is the A2
+                            // wedge returning.
+                            dumpAll(jdbc, evidence, sessions, tenant, "not-wedged");
+                            return;
+                        }
+                        if (log.contains("HOSTED_RECOVERY_WEDGE_OK")) {
+                            dumpAll(jdbc, evidence, sessions, tenant, "wedge-regression");
+                            throw new AssertionError(
+                                    "A2 REGRESSION: a probe turn wedged with α recovery-blocked"
+                                            + " and only completed after α's rows were cleared."
+                                            + " See " + evidence + " and driver log:\n" + log);
+                        }
+                        throw new AssertionError("Driver exited unexpectedly (wedged=" + wedged
+                                + "). Log:\n" + log);
+                    }
+                    throw new AssertionError("Watch deadline expired with the driver still"
+                            + " running (wedged=" + wedged + "). Log:\n" + log);
+                }
+
+                // --- A2 reproduced: capture the full park-point evidence --------
+                Files.writeString(evidence.resolve("java-threads.txt"), threadDump());
+                dumpAll(jdbc, evidence, sessions, tenant, "before-clear");
+
+                // --- Clear session α's store rows, like the rig operator did ---
+                String alpha = sessions.get(0).get("sessionId").toString();
+                String clearReport = clearSessionRows(jdbc, alpha);
+                Files.writeString(evidence.resolve("clear-alpha.txt"), clearReport);
+                Files.writeString(clearedFile, clearReport);
+                dumpAll(jdbc, evidence, sessions, tenant, "after-clear");
+
                 assertThat(driver.waitFor(300, TimeUnit.SECONDS))
-                        .as("Control driver timeout:\n%s", Files.readString(driverLog)).isTrue();
+                        .as("Driver timeout:\n%s", Files.readString(driverLog)).isTrue();
                 Files.copy(driverLog, evidence.resolve("driver-final.log"),
                         java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                String controlLog = Files.readString(driverLog);
-                System.out.println(controlLog);
-                assertThat(driver.exitValue()).as("Control driver output:\n%s", controlLog).isZero();
-                assertThat(controlLog).contains("HOSTED_WEDGE_CONTROL_OK");
-                return;
-            }
-            boolean wedged = false;
-            long watchDeadline = System.currentTimeMillis() + 420_000;
-            while (System.currentTimeMillis() < watchDeadline) {
-                if (Files.exists(phaseFile)
-                        && Files.readString(phaseFile).trim().equals("B_WEDGED_CONFIRMED")) {
-                    wedged = true;
-                    break;
-                }
-                if (!driver.isAlive()) break;
-                Thread.sleep(400);
-            }
-            Files.copy(driverLog, evidence.resolve("driver.log"),
-                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            if (!wedged) {
                 String log = Files.readString(driverLog);
-                if (!driver.isAlive()) {
-                    assertThat(driver.waitFor(60, TimeUnit.SECONDS))
-                            .as("Driver exit wait:\n%s", log).isTrue();
-                    if (log.contains("HOSTED_WEDGE_ABSENT") && driver.exitValue() == 0) {
-                        // Regression expectation: with α recovery-blocked, the
-                        // probes' turns complete. Anything else is the A2
-                        // wedge returning.
-                        dumpAll(jdbc, evidence, sessions, tenant, "not-wedged");
-                        return;
-                    }
-                    if (log.contains("HOSTED_RECOVERY_WEDGE_OK")) {
-                        dumpAll(jdbc, evidence, sessions, tenant, "wedge-regression");
-                        throw new AssertionError(
-                                "A2 REGRESSION: a probe turn wedged with α recovery-blocked"
-                                        + " and only completed after α's rows were cleared."
-                                        + " See " + evidence + " and driver log:\n" + log);
-                    }
+                System.out.println(log);
+                assertThat(driver.exitValue()).as("Driver output:\n%s", log).isZero();
+                throw new AssertionError(
+                        "A2 REGRESSION: a probe turn wedged with α recovery-blocked and only"
+                                + " completed after α's rows were cleared. See " + evidence
+                                + " and driver log:\n" + log);
+            } finally {
+                driver.descendants().forEach(ProcessHandle::destroyForcibly);
+                if (driver.isAlive()) {
+                    driver.destroyForcibly();
                 }
-                throw new AssertionError("Driver exited unexpectedly (wedged=" + wedged
-                        + ", alive=" + driver.isAlive() + "). Log:\n" + log);
             }
-
-            // --- A2 reproduced: capture the full park-point evidence --------
-            Files.writeString(evidence.resolve("java-threads.txt"), threadDump());
-            dumpAll(jdbc, evidence, sessions, tenant, "before-clear");
-
-            // --- Clear session α's store rows, like the rig operator did ---
-            String alpha = sessions.get(0).get("sessionId").toString();
-            String clearReport = clearSessionRows(jdbc, alpha);
-            Files.writeString(evidence.resolve("clear-alpha.txt"), clearReport);
-            Files.writeString(clearedFile, clearReport);
-            dumpAll(jdbc, evidence, sessions, tenant, "after-clear");
-
-            assertThat(driver.waitFor(300, TimeUnit.SECONDS))
-                    .as("Driver timeout:\n%s", Files.readString(driverLog)).isTrue();
-            Files.copy(driverLog, evidence.resolve("driver-final.log"),
-                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            String log = Files.readString(driverLog);
-            System.out.println(log);
-            assertThat(driver.exitValue()).as("Driver output:\n%s", log).isZero();
-            throw new AssertionError(
-                    "A2 REGRESSION: a probe turn wedged with α recovery-blocked and only"
-                            + " completed after α's rows were cleared. See " + evidence
-                            + " and driver log:\n" + log);
         }
     }
 
@@ -365,20 +384,25 @@ class HostedRecoveryWedgeGate {
         }
     }
 
-    /** Every table row keyed by either session id, through any session-ish column. */
+    /** Every table row keyed by any probe session id, through any session-ish column. */
     private static void dumpSessionRows(JdbcTemplate jdbc, StringBuilder out,
             List<Map<String, Object>> sessions) throws Exception {
-        String alpha = sessions.get(0).get("sessionId").toString();
-        String beta = sessions.get(1).get("sessionId").toString();
+        List<String> ids = sessions.stream()
+                .map(session -> session.get("sessionId").toString()).toList();
+        String placeholders = String.join(", ", java.util.Collections.nCopies(ids.size(), "?"));
         for (String table : sessionTables(jdbc)) {
             for (String column : sessionColumns(jdbc, table)) {
                 out.append("=== rows ").append(table).append('.').append(column).append(" ===\n");
                 try {
                     List<Map<String, Object>> rows = jdbc.queryForList(
-                            "SELECT * FROM " + table + " WHERE " + column + " IN (?, ?) LIMIT 40",
-                            alpha, beta);
+                            "SELECT * FROM " + table + " WHERE " + column + " IN ("
+                                    + placeholders + ") LIMIT 40", ids.toArray());
                     for (Map<String, Object> row : rows) out.append(row).append('\n');
-                    out.append("(count=").append(rows.size()).append(")\n");
+                    out.append("(count=").append(rows.size());
+                    if (rows.size() == 40) {
+                        out.append(", sample capped at 40");
+                    }
+                    out.append(")\n");
                 } catch (Exception error) {
                     out.append("query failed: ").append(error.getMessage()).append('\n');
                 }
