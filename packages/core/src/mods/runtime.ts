@@ -13,13 +13,13 @@ import { resolveBundleDir } from '../utils/bundlePaths.js';
 import {
   MOD_END_TIMEOUT_MS,
   MOD_MAX_BYTES,
-  MOD_TIMEOUT_MS,
   type ModCommand,
   type ModLog,
   type ModReply,
   type ModRequest,
   type ModSource,
   type ModOptions,
+  type ModPlugin,
 } from './types.js';
 
 function workerEntry(): URL | string {
@@ -40,17 +40,24 @@ export class ModRuntime {
   private readonly worker: Worker;
   private failure?: Error;
   private pending?: (reply: ModReply) => void;
-  private commands: ModCommand[] = [];
+  private commands: Array<ModCommand & { plugin: string }> = [];
+  private readonly cancelled = new Int32Array(new SharedArrayBuffer(4));
 
-  private constructor(private readonly log: (entry: ModLog) => void) {
-    this.worker = new Worker(workerEntry(), { stdout: true, stderr: true });
+  private constructor(
+    private readonly log: (entry: ModLog, plugin: string) => void,
+  ) {
+    this.worker = new Worker(workerEntry(), {
+      stdout: true,
+      stderr: true,
+      workerData: this.cancelled.buffer,
+    });
     this.worker.stdout.resume();
     this.worker.stderr.resume();
     this.worker.on('message', (reply: ModReply) => {
       if (reply.type === 'log') {
         if (this.failure) return;
         try {
-          this.log({ text: reply.text, to: reply.to });
+          this.log({ text: reply.text, to: reply.to }, reply.plugin);
         } catch (error) {
           this.fail(error instanceof Error ? error : new Error(String(error)));
           void this.worker.terminate();
@@ -70,12 +77,31 @@ export class ModRuntime {
     signal: AbortSignal,
     options: ModOptions = {},
   ): Promise<ModRuntime> {
+    return ModRuntime.createGroup(
+      [{ id: 'mod', name: 'mod', source, options }],
+      cwd,
+      log,
+      signal,
+    );
+  }
+
+  static async createGroup(
+    plugins: ModPlugin[],
+    cwd: string,
+    log: (entry: ModLog, plugin: string) => void,
+    signal: AbortSignal,
+  ): Promise<ModRuntime> {
+    if (
+      plugins.length > 32 ||
+      new Set(plugins.map((p) => p.id)).size !== plugins.length
+    )
+      throw new Error('Invalid Mod plugin group.');
     const runtime = new ModRuntime(log);
     try {
       const result = await runtime.request(
-        { type: 'load', source, cwd, options },
+        { type: 'load', plugins, cwd },
         signal,
-        30_000,
+        60_000,
       );
       if (
         !Array.isArray(result) ||
@@ -83,6 +109,7 @@ export class ModRuntime {
         result.some(
           (command) =>
             !command ||
+            !plugins.some((plugin) => plugin.id === command.plugin) ||
             typeof command.name !== 'string' ||
             !/^[a-zA-Z0-9_-]{1,64}$/.test(command.name) ||
             typeof command.description !== 'string' ||
@@ -91,7 +118,7 @@ export class ModRuntime {
         )
       )
         throw new Error('Invalid Mod command declarations.');
-      runtime.commands = result as ModCommand[];
+      runtime.commands = result as Array<ModCommand & { plugin: string }>;
       return runtime;
     } catch (error) {
       await runtime.dispose();
@@ -99,8 +126,10 @@ export class ModRuntime {
     }
   }
 
-  getCommands(): readonly ModCommand[] {
-    return this.commands;
+  getCommands(plugin = 'mod'): readonly ModCommand[] {
+    return this.commands
+      .filter((command) => command.plugin === plugin)
+      .map(({ plugin: _plugin, ...command }) => command);
   }
 
   async runCommand(
@@ -151,19 +180,29 @@ export class ModRuntime {
   private async request(
     request: ModRequest,
     signal: AbortSignal,
-    timeoutMs = MOD_TIMEOUT_MS,
+    timeoutMs = 60_000,
   ): Promise<unknown> {
     signal.throwIfAborted();
     if (this.failure) throw this.failure;
     if (this.pending) throw new Error('A Mod dispatch is already running.');
-    if (Buffer.byteLength(JSON.stringify(request)) > MOD_MAX_BYTES + 8192)
+    if (
+      Buffer.byteLength(JSON.stringify(request)) >
+      (request.type === 'load' ? 32 : 1) * MOD_MAX_BYTES + 8192
+    )
       throw new Error('Mod request is too large.');
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const onAbort = () => this.fail(new Error('Mod dispatch cancelled.'));
+    const cleanup = new AbortController();
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      Atomics.store(this.cancelled, 0, 1);
+    };
+    Atomics.store(this.cancelled, 0, 0);
     try {
       return await new Promise<unknown>((resolve, reject) => {
         this.pending = (reply) => {
-          if (reply.type === 'error') reject(new Error(reply.message));
+          if (aborted) reject(new Error('Mod dispatch cancelled.'));
+          else if (reply.type === 'error') reject(new Error(reply.message));
           else if (reply.type === 'result') {
             try {
               if (Buffer.byteLength(reply.json) > MOD_MAX_BYTES)
@@ -175,17 +214,29 @@ export class ModRuntime {
           }
         };
         signal.addEventListener('abort', onAbort, { once: true });
-        timer = setTimeout(
-          () => this.fail(new Error('Mod dispatch timed out.')),
-          timeoutMs,
+        timer = setTimeout(() => {
+          this.fail(
+            new Error(
+              aborted ? 'Mod dispatch cancelled.' : 'Mod dispatch timed out.',
+            ),
+          );
+          void this.worker.terminate();
+        }, timeoutMs + 250);
+        signal.addEventListener(
+          'abort',
+          () => {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => {
+              this.fail(new Error('Mod dispatch cancelled.'));
+              void this.worker.terminate();
+            }, 250);
+          },
+          { once: true, signal: cleanup.signal },
         );
         this.worker.postMessage(request);
       });
-    } catch (error) {
-      this.fail(error instanceof Error ? error : new Error(String(error)));
-      void this.worker.terminate();
-      throw error;
     } finally {
+      cleanup.abort();
       if (timer) clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
       this.pending = undefined;
