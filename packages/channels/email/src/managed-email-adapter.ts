@@ -196,8 +196,8 @@ export class ManagedEmailAdapter {
    * the first still drops as the poison message it may be (R3-1), and
    * past the limit the claim is held and the poll stalls instead of
    * destroying every inbound message behind one routine log line (R5-1).
-   * A successful admission is the one proof the binding answers again,
-   * and it resets the streak.
+   * A fresh, non-replayed admission is the one proof the binding
+   * answers again, and it resets the streak.
    */
   private instanceRefusalStreak = 0;
   /** Set when the streak passes the limit; gates the search in poll(). */
@@ -259,6 +259,20 @@ export class ManagedEmailAdapter {
     }
     try {
       this.state = this.store.load();
+      // The streak and the stall flag are in-memory, so a restart zeroes
+      // them: derive the stall from a persisted held claim, or the search
+      // re-opens behind it and the next instance-scoped refusal drops a
+      // fresh message as a first occurrence — the destruction the marker
+      // exists to prevent. Keyed on a claim still pending, never a
+      // persisted flag, so an epoch change that emptied pending starts
+      // the new generation's streak clean.
+      if (this.state?.pending.some((entry) => entry.held)) {
+        this.instanceStalled = true;
+        this.instanceRefusalStreak = INSTANCE_REFUSAL_DROP_LIMIT + 1;
+        this.log(
+          `Managed email stopped admitting for ${this.settings.address}: the instance's workspace binding is broken. Held mail is kept; check the instance's --workspace and --actor flags.`,
+        );
+      }
       this.parse = await this.deps.parse();
       this.smtp = await this.deps.createSmtp(this.settings);
       this.abort = new AbortController();
@@ -683,15 +697,20 @@ export class ManagedEmailAdapter {
       const admitted = await this.controlPlane.submitInbound(event);
       state.pending = state.pending.filter((entry) => entry.uid !== uid);
       this.persist();
-      // A successful admission is the one proof the instance's workspace
+      // A fresh admission is the one proof the instance's workspace
       // binding answers again: the drop streak resets and the stall
-      // lifts, so the next poll's search resumes above lastUid.
-      this.instanceRefusalStreak = 0;
-      if (this.instanceStalled) {
-        this.instanceStalled = false;
-        this.log(
-          `Managed email admission for ${this.settings.address} resumed; the instance's workspace answers again.`,
-        );
+      // lifts, so the next poll's search resumes above lastUid. A
+      // replayed answer is the idempotent echo of an earlier admission —
+      // the server resolves no workspace for it — so it proves nothing
+      // and resets nothing.
+      if (!admitted.replayed) {
+        this.instanceRefusalStreak = 0;
+        if (this.instanceStalled) {
+          this.instanceStalled = false;
+          this.log(
+            `Managed email admission for ${this.settings.address} resumed; the instance's workspace answers again.`,
+          );
+        }
       }
       if (admitted.replayed) {
         this.log(
