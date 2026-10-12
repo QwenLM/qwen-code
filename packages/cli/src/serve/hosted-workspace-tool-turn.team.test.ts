@@ -132,6 +132,8 @@ function createTurn(
     messages?: boolean;
     /** H4e-b2: another Turn of the same Session. */
     promptId?: string;
+    /** H4e-b3a: this run's first input carried a plan-mode preamble. */
+    memberPlanMode?: boolean;
   } = {},
 ): HostedWorkspaceToolTurn {
   const hookEvents = options.hookEvents;
@@ -173,6 +175,7 @@ function createTurn(
         queueConsumption: () => undefined,
       },
       teams: options.funnel ?? teams,
+      memberPlanMode: options.memberPlanMode === true,
       ...(options.messages
         ? {
             messages: new HostedSessionMessageSession(
@@ -280,12 +283,39 @@ beforeEach(async () => {
   });
   const store = { authority: session.authority, resources: session.resources };
   children = new HostedChildAgentSession(store, sessionKey);
-  teams = new HostedTeamSession(store, sessionKey);
+  teams = new HostedTeamSession(store, sessionKey, children);
 });
 
 afterEach(async () => {
   await session?.close();
   await rm(root, { recursive: true, force: true });
+});
+
+// H4e-b3a (decisions 5 and 9): a run whose first input carried the
+// plan-mode attribute admits reads only; this build's refusal never names
+// exit_plan_mode.
+it('admits reads only in a plan-mode run, without naming exit_plan_mode', async () => {
+  // messages: the arm needs send_message declared, alongside its reads.
+  const planTurn = createTurn({ memberPlanMode: true, messages: true });
+  const refusal = 'This run is in plan mode until the leader approves its plan';
+  for (const denied of [
+    call('write_file', { file_path: 'notes.md', content: 'x' }, 'call-1'),
+    call('run_shell_command', { command: 'ls' }, 'call-2'),
+    call('agent', { description: 'a', prompt: 'b' }, 'call-3'),
+    call('team_create', { team_name: 'review' }, 'call-4'),
+  ]) {
+    const answer = await execute(planTurn, [denied]);
+    expect(answer).toContain(refusal);
+    expect(answer).not.toContain('exit_plan_mode');
+  }
+  // The reads stay admitted: their own answers never name plan mode.
+  // (glob rides the same allowance, and only the search profiles declare
+  // it — this profile's surface cannot exercise it either way.)
+  for (const allowed of [
+    call('send_message', {}, 'call-5'),
+    call('read_file', {}, 'call-7'),
+  ])
+    expect(await execute(planTurn, [allowed])).not.toContain('plan mode');
 });
 
 it('declares the team tools only beside the root Agent tool, behind both gates', async () => {
@@ -295,6 +325,7 @@ it('declares the team tools only beside the root Agent tool, behind both gates',
   const team = [
     'team_create',
     'team_delete',
+    'request_shutdown',
     'task_create',
     'task_update',
     'task_list',
@@ -517,6 +548,7 @@ it('a re-driven named launch completes a join its first run lost', async () => {
       }),
     },
     sessionKey,
+    children,
   );
   await expect(
     execute(createTurn({ funnel: crashing }), [member('alice', 'call-alice')]),
@@ -577,6 +609,7 @@ it.each(['failed', 'finished'] as const)(
         }),
       },
       sessionKey,
+      children,
     );
     const answer = await execute(createTurn({ funnel: endFirst }), [
       member('alice', 'call-alice'),

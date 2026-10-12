@@ -153,6 +153,7 @@ import {
   monitorWakeNeedsRecovery,
   withChildAgentConsumption,
 } from './hosted-monitor-wake-turn.js';
+import { hasPlanModeBlock, inputBodyText } from './hosted-member-chain.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import {
@@ -309,6 +310,9 @@ interface HostedSession {
   messagesStopped?: boolean;
   /** H4e-b1: the lead's team funnel, beside its child orchestrator. */
   teams?: HostedTeamSession;
+  /** H4e-b3 decisions 5/9: this run's first input carried an unescaped
+   * plan-mode preamble, so its tool calls admit reads only. */
+  memberPlanMode?: boolean;
   /**
    * #13753 I2: the control plane serves child Workspaces, so the Agent
    * tool admits `isolation: "worktree"`. It describes the host, not the
@@ -348,6 +352,51 @@ interface HostedSession {
    * re-acquired idempotently. The continuation route keeps its #13083
    * handback discipline (a recorded follow-up). */
   runtimeLeaseHeld?: string;
+}
+
+/**
+ * H4e-b3 decisions 5/9: whether this run's first committed input carried
+ * an unescaped `plan-mode="required"` preamble. Only a Session with a
+ * lineage has a composed first input to read; a root Session's user
+ * prompt never makes one. The body's route shape is the `/prompt`
+ * array-of-parts, while funnel-written inputs carry a bare `{text}`.
+ */
+async function hostedFirstInputPlanMode(
+  managed: ManagedSession,
+): Promise<boolean> {
+  const first = managed.authority
+    .readEvents({ afterSequence: 0 })
+    .find((event) => event.kind === 'input.accepted');
+  if (first === undefined) return false;
+  const ref = assertManagedSessionDurableRef(
+    first.payload['contentRef'],
+    'member first input',
+  );
+  const body = JSON.parse(
+    (await managed.resources.read(ref)).toString('utf8'),
+  ) as unknown;
+  const text = inputBodyText(body);
+  return text !== undefined && hasPlanModeBlock(text);
+}
+
+/**
+ * H4e-b3a review finding: a member Session's plan mode settles only once
+ * its first input is durable — at Session create it has none committed
+ * yet, so the flag is answered lazily on every turn construction until a
+ * positive answer is cached. A root prompt never arms it.
+ */
+async function ensureMemberPlanMode(session: HostedSession): Promise<boolean> {
+  if (session.memberPlanMode === true || session.toolProfile === undefined)
+    return session.memberPlanMode === true;
+  const lineage = object(session.definition?.['lineage']);
+  if (
+    typeof lineage?.['parentSessionId'] !== 'string' ||
+    typeof lineage['parentChildRunId'] !== 'string'
+  )
+    return false;
+  const planMode = await hostedFirstInputPlanMode(session.managed);
+  if (planMode) session.memberPlanMode = true;
+  return planMode;
 }
 
 async function runHostedLifecycleHook(
@@ -2505,6 +2554,7 @@ async function executeHostedTurn(
                   childAgents: childAgentsOf(session),
                   messages: session.messages,
                   teams: session.teams,
+                  memberPlanMode: await ensureMemberPlanMode(session),
                 },
               )
             : undefined;
@@ -3508,6 +3558,9 @@ export function registerHostedHarnessSessionRoutes(
               resources: session.managed.resources,
             },
             session.managed.authority.sessionHeader.sessionKey,
+            // H4e-b3 decision 10: request_shutdown commits the stop an
+            // H4f cancel would, through the child funnel's own chain.
+            session.childAgents,
           );
           // H4d-b: messages share the child orchestrator's write chain, so
           // a Shell lane that suppressed the agent tool has no funnel.
@@ -3531,6 +3584,9 @@ export function registerHostedHarnessSessionRoutes(
           }
         }
       }
+      // H4e-b3 decisions 5/9: a member run's plan mode is decided lazily by
+      // ensureMemberPlanMode at tool-turn construction — the first committed
+      // input may not exist yet while the Session assembles on create.
       if (
         session.toolProfile &&
         brokerOptions &&
@@ -6481,6 +6537,7 @@ export function registerHostedHarnessSessionRoutes(
             childAgents: childAgentsOf(session),
             messages: session.messages,
             teams: session.teams,
+            memberPlanMode: await ensureMemberPlanMode(session),
           },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
