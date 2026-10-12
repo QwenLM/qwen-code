@@ -3159,6 +3159,23 @@ export function useComposerCore(
       return true;
     };
 
+    const removeLastAttachment = (view: EditorView): boolean => {
+      if (view.state.doc.length > 0) return false;
+      if (pastedFilesRef.current.length > 0) {
+        const next = pastedFilesRef.current.slice(0, -1);
+        pastedFilesRef.current = next;
+        setPastedFiles(next);
+        return true;
+      }
+      if (pastedImagesRef.current.length > 0) {
+        const next = pastedImagesRef.current.slice(0, -1);
+        pastedImagesRef.current = next;
+        setPastedImages(next);
+        return true;
+      }
+      return false;
+    };
+
     const submitKeymap = keymap.of([
       {
         key: 'Backspace',
@@ -3177,7 +3194,7 @@ export function useComposerCore(
               break;
             }
           }
-          if (removableIndex < 0) return false;
+          if (removableIndex < 0) return removeLastAttachment(view);
           setComposerTags((current) =>
             current.filter((_, index) => index !== removableIndex),
           );
@@ -3197,7 +3214,7 @@ export function useComposerCore(
           const removableIndex = composerTagsRef.current.findIndex(
             (tag) => tag.removable !== false,
           );
-          if (removableIndex < 0) return false;
+          if (removableIndex < 0) return removeLastAttachment(view);
           setComposerTags((current) =>
             current.filter((_, index) => index !== removableIndex),
           );
