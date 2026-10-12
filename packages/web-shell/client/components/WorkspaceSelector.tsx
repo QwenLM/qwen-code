@@ -1,8 +1,9 @@
-import { useRef, useState } from 'react';
+import { Fragment, useRef, useState } from 'react';
 import {
   CircleDashedIcon,
   FolderClosedIcon,
   FolderPlusIcon,
+  Globe2Icon,
   LockIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
@@ -10,6 +11,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
@@ -24,6 +26,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from './ui/tooltip';
+import { HostLabel } from './workspaces/HostLabel';
 
 export interface WorkspaceSelectorOption {
   id: string;
@@ -31,6 +34,8 @@ export interface WorkspaceSelectorOption {
   label: string;
   primary: boolean;
   trusted: boolean;
+  /** Daemon host this workspace lives on; defaults to the page origin. */
+  hostOrigin?: string;
 }
 
 interface WorkspaceSelectorProps {
@@ -45,6 +50,15 @@ interface WorkspaceSelectorProps {
   selectedStandalone?: boolean;
   className?: string;
   onSelectWorkspace: (cwd: string | undefined) => void;
+  /**
+   * Host-aware selection for multi-daemon pages. When provided it fires
+   * INSTEAD of `onSelectWorkspace`, with the option's host (page origin when
+   * unset); `undefined` cwd keeps marking the host's primary workspace.
+   */
+  onSelectHostedWorkspace?: (
+    hostOrigin: string,
+    cwd: string | undefined,
+  ) => void;
   onSelectStandalone?: () => void;
   onCreateScratch: () => void;
   onOpenExistingFolder: () => void;
@@ -68,6 +82,7 @@ export function WorkspaceSelector({
   selectedStandalone,
   className,
   onSelectWorkspace,
+  onSelectHostedWorkspace,
   onSelectStandalone,
   onCreateScratch,
   onOpenExistingFolder,
@@ -90,6 +105,21 @@ export function WorkspaceSelector({
   if (workspaces.length <= 1 && !canCreate && !standaloneSelectable) {
     return null;
   }
+  // Group by host in first-appearance order; a single-host list keeps the
+  // historic flat rendering (no group headers).
+  const pageOrigin =
+    typeof window === 'undefined' ? '' : window.location.origin;
+  const groups: { hostOrigin: string; items: WorkspaceSelectorOption[] }[] = [];
+  for (const workspace of workspaces) {
+    const hostOrigin = workspace.hostOrigin ?? pageOrigin;
+    const group = groups.find((entry) => entry.hostOrigin === hostOrigin);
+    if (group) {
+      group.items.push(workspace);
+    } else {
+      groups.push({ hostOrigin, items: [workspace] });
+    }
+  }
+  const groupedByHost = groups.length > 1;
   const triggerLabel = selectedStandalone
     ? t('sidebar.noWorkspace')
     : (selected?.label ?? '');
@@ -174,26 +204,75 @@ export function WorkspaceSelector({
               }
               const next = workspaces.find((workspace) => workspace.id === id);
               if (!next?.trusted) return;
-              onSelectWorkspace(next.primary ? undefined : next.cwd);
+              const cwd = next.primary ? undefined : next.cwd;
+              if (onSelectHostedWorkspace) {
+                onSelectHostedWorkspace(next.hostOrigin ?? pageOrigin, cwd);
+              } else {
+                onSelectWorkspace(cwd);
+              }
             }}
           >
-            {workspaces.map((workspace) => (
-              <DropdownMenuRadioItem
-                key={workspace.id}
-                value={workspace.id}
-                disabled={!workspace.trusted}
-                title={workspace.cwd}
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  {workspace.label}
-                </span>
-                {!workspace.trusted && (
-                  <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <LockIcon />
-                    {t('sidebar.workspaceUntrusted')}
-                  </span>
+            {groups.map((group) => (
+              <Fragment key={group.hostOrigin}>
+                {groupedByHost && (
+                  <DropdownMenuLabel
+                    className="flex items-center gap-1.5 text-[11px]"
+                    title={group.hostOrigin}
+                  >
+                    <HostLabel origin={group.hostOrigin} />
+                  </DropdownMenuLabel>
                 )}
-              </DropdownMenuRadioItem>
+                {group.items.map((workspace) => {
+                  const remoteHost =
+                    workspace.hostOrigin && workspace.hostOrigin !== pageOrigin
+                      ? workspace.hostOrigin
+                      : undefined;
+                  return (
+                    <DropdownMenuRadioItem
+                      key={workspace.id}
+                      value={workspace.id}
+                      disabled={!workspace.trusted}
+                      title={
+                        remoteHost
+                          ? `${remoteHost} — ${workspace.cwd}`
+                          : workspace.cwd
+                      }
+                    >
+                      <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate">
+                        {remoteHost && (
+                          <span
+                            className="relative inline-flex size-3.5 shrink-0 items-center justify-center"
+                            data-testid="remote-workspace-folder-icon"
+                          >
+                            <FolderClosedIcon
+                              className="size-3.5"
+                              strokeWidth={1.4}
+                              aria-hidden="true"
+                            />
+                            <Globe2Icon
+                              className="absolute -right-0.5 -bottom-0.5 size-2 rounded-full bg-popover text-[var(--agent-blue-500)]"
+                              strokeWidth={2}
+                              aria-hidden="true"
+                            />
+                          </span>
+                        )}
+                        {workspace.label}
+                      </span>
+                      {remoteHost && (
+                        <span className="max-w-[45%] truncate text-xs text-muted-foreground">
+                          {new URL(remoteHost).host}
+                        </span>
+                      )}
+                      {!workspace.trusted && (
+                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <LockIcon />
+                          {t('sidebar.workspaceUntrusted')}
+                        </span>
+                      )}
+                    </DropdownMenuRadioItem>
+                  );
+                })}
+              </Fragment>
             ))}
             {standaloneSelectable && (
               <DropdownMenuRadioItem value={STANDALONE_OPTION_ID}>

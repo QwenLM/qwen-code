@@ -17,6 +17,7 @@ import {
   assertManagedSessionKey,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  managedSessionEventRefs,
   managedSessionKeysEqual,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
@@ -28,6 +29,10 @@ import {
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
+import {
+  MANAGED_TOOL_RESULT_KINDS,
+  parseToolResultManifestBytes,
+} from './managed-tool-result.js';
 import {
   MANAGED_MESSAGE_CHUNKS_KIND,
   managedMessageChunkParts,
@@ -846,7 +851,11 @@ class ManagedSessionStoreHttpClient {
               // The verdict/mint gate's refusal is a rollbackable
               // non-commit: the corrected retry must reach the backend
               // without the authority latching a write failure behind it.
-              error.remoteCode === 'child_run_lineage_minted')) ||
+              error.remoteCode === 'child_run_lineage_minted' ||
+              // So is a session message the lineage refuses: only the
+              // store holds a child's lineage, so the authority could not
+              // refuse it first, and the Session's log stays writable.
+              error.remoteCode === 'session_message_lineage_refused')) ||
             (this.lifecycleAuthority &&
               (error.status === 403 ||
                 (error.status === 409 &&
@@ -1220,6 +1229,17 @@ class ManagedSessionStoreHttpClient {
     ) {
       throw corrupt('restore head is not readable by this v1 writer.');
     }
+    // A head below this writer's committed position is a server-side
+    // regression; re-baselining onto it would silently forget our own
+    // commits, so only an equal-or-ahead head may replace the grant.
+    if (
+      head.journalRevision < grant.journalRevision ||
+      head.committedSequence < grant.committedSequence
+    ) {
+      throw corrupt(
+        `restore head regressed below this writer's committed position (head ${head.journalRevision}/${head.committedSequence} < grant ${grant.journalRevision}/${grant.committedSequence}).`,
+      );
+    }
   }
 
   private requireGrant(): WriterGrant {
@@ -1421,7 +1441,13 @@ export function describeTransaction(
       commitDigest: null,
       activationEpoch: currentActivationEpoch,
       latestCheckpointResourceId: null,
-      refs: collectRefs(records),
+      refs: dedupeRefs([
+        header.definitionRef,
+        header.rootSnapshotRef,
+        ...(header.baseTranscriptProof === undefined
+          ? []
+          : [header.baseTranscriptProof]),
+      ]),
     };
   }
   if (records.length < 2) {
@@ -1493,8 +1519,22 @@ export function describeTransaction(
     ),
     activationEpoch,
     latestCheckpointResourceId,
-    refs: collectRefs(records),
+    refs: dedupeRefs(
+      eventRecords.flatMap((event) => managedSessionEventRefs(event)),
+    ),
   };
+}
+
+function dedupeRefs(
+  found: Iterable<ManagedSessionDurableRef>,
+): ManagedSessionDurableRef[] {
+  const refs = new Map<string, ManagedSessionDurableRef>();
+  for (const ref of found) {
+    const existing = refs.get(ref.resourceId);
+    if (existing !== undefined) requireSameRef(existing, ref);
+    else refs.set(ref.resourceId, ref);
+  }
+  return [...refs.values()];
 }
 
 function collectRefs(records: readonly unknown[]): ManagedSessionDurableRef[] {
@@ -1712,6 +1752,7 @@ export function collectNestedResourceRefs(
   }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
@@ -1725,6 +1766,18 @@ export function collectNestedResourceRefs(
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
     return collectRefs([record]);
+  }
+  // A result manifest names its page envelopes: they are Session resources
+  // too, staged exactly like the manifest, and a commit that closes over
+  // the manifest but not its pages would leave the Artifact's read chain
+  // 404ing on the page hop (#13856). A body this parse cannot represent
+  // has no pages to close over, exactly like the input branch below.
+  if (ref.kind === MANAGED_TOOL_RESULT_KINDS.manifest) {
+    try {
+      return collectRefs([parseToolResultManifestBytes(bytes)]);
+    } catch {
+      return [];
+    }
   }
   // An input's envelope embeds what it admits — a channel attachment's ref
   // among them. The commit closes over those bytes exactly like an

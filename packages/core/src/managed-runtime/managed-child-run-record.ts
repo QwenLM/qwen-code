@@ -141,6 +141,30 @@ export type ChildSessionRun = ChildAgentRun | WorkflowRun;
  */
 export type AnyChildRun = ChildRun | ChildSessionRun;
 
+/**
+ * Whether a child Session of its own executes `record`. Every rule that
+ * holds for both child Session kinds asks this rather than "not a Shell":
+ * the switch names each kind, so a kind added to `AnyChildRun` fails to
+ * compile here until it is classified, and none joins the child Session
+ * rules by default.
+ */
+export function isChildSessionRun(
+  record: AnyChildRun,
+): record is ChildSessionRun {
+  switch (record.kind) {
+    case 'child_agent':
+    case 'workflow':
+      return true;
+    case 'shell':
+      return false;
+    default: {
+      const unclassified: never = record;
+      void unclassified;
+      return false;
+    }
+  }
+}
+
 const SHELL_KEYS = [
   'commandRef',
   'exitCode',
@@ -709,6 +733,7 @@ export function isChildRunStart(value: unknown): boolean {
     if (!isExtensionRunStart(record.run) || record.stopRequested) return false;
     if (record.kind === 'shell') return record.outputRef === null;
     return (
+      isChildSessionRun(record) &&
       record.run.delivery !== null &&
       record.run.delivery.state === 'planned' &&
       record.childSessionId === null &&
@@ -749,7 +774,7 @@ export function isChildRunSuccessor(previous: unknown, next: unknown): boolean {
       }
       return true;
     }
-    if (before.kind === 'shell' || after.kind === 'shell') return false;
+    if (!isChildSessionRun(before) || !isChildSessionRun(after)) return false;
     // Once the run is terminal the record changes only its delivery line:
     // the run's own freeze confines movement to the delivery, and nothing
     // outside the run may change at all.

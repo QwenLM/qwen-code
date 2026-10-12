@@ -256,6 +256,7 @@ export class HostedWorkspaceBroker {
     argsDigest: string,
     requestDigest: string,
     publicationId: string,
+    turnId: string,
   ): Promise<{
     executionCallId: string;
     runtimeBindingId: string;
@@ -263,14 +264,19 @@ export class HostedWorkspaceBroker {
   }> {
     const response = await this.request('/executions:prepare', {
       idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
-      turnId: this.identity.runtimeSessionId,
+      // One pair, two axes, same as the publisher registration: the
+      // logical turn id on the checkpoint axis (the reserve's reference
+      // and the persisted execution must both carry it, or the
+      // publication store's `execution.turnId == reference.promptId`
+      // refuses), the mapped Runtime Session on the execution axis.
+      turnId,
       toolCallId: callId,
       requestDigest,
       toolProtocol: 'v3',
       publicationId,
       reference: {
         sessionId: this.identity.runtimeSessionId,
-        promptId: this.identity.runtimeSessionId,
+        promptId: turnId,
         callId,
         argsDigest,
       },
@@ -570,6 +576,20 @@ export class HostedWorkspaceBroker {
     return { state };
   }
 
+  /**
+   * Read-only never-started proof for one background dispatch: the Broker
+   * admits the `<executionCallId>:process` ledger row only at the
+   * execute-admission of an `is_background` dispatch, so this probe's
+   * definitive not-found is the absence read that proves the dispatch
+   * never began. The ledger-key suffix lives here, with every other
+   * Broker identity, so a key change cannot drift a caller's proof open.
+   */
+  async backgroundProcessStatus(
+    executionCallId: string,
+  ): Promise<{ state: string } | undefined> {
+    return this.status(`${executionCallId}:process`);
+  }
+
   async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
     const path = `/executions/${encodeURIComponent(id)}:acknowledge`;
     const body = {
@@ -604,10 +624,13 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async release(): Promise<void> {
+  async release(options?: { readonly drain?: boolean }): Promise<void> {
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release`,
-      {},
+      // #13856: the drain arm stops the Session's live background holds
+      // before releasing; a routine release is refused
+      // `runtime_session_held` while a run is provably live.
+      options?.drain === true ? { drain: true } : {},
     );
     if (response['released'] !== true)
       throw new Error('Runtime Session release is unconfirmed.');

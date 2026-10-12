@@ -71,12 +71,15 @@ reads add a deployment policy gate (`403 artifact_content_forbidden`);
 workspace discovery lists only `can_read` rows (401 without actor); legacy
 (unbound) Sessions and agent definitions are **tenant-wide** — any actor in the
 tenant may mutate them today; internal store/publication routes admit a writer
-HMAC credential, not an actor. The public surface is `/v1/agents/**` plus
-`/api/agent/web-shell/v1/**` (`PublicSurface`), realised by ten Spring
-controllers — the section-10 matrix enumerates the current 32 public + 24
-WebShell + 24 internal routes (80 in total, including the two L3
-authorization routes, counted by the slice-A gate; this body previously said
-77/21 before #13088's `receipts/verify` handler, 78 before L3).
+<<<<<<< HEAD
+HMAC credential, not an actor. The public surface is `/v1/agents/**`, `/v1/agent-automations` and
+`/api/agent/web-shell/v1/**` (`PublicSurface`), realised by eleven Spring
+controllers — the section-10 matrix enumerates the current 39 public + 24
+WebShell + 24 internal routes (87 in total, including the two L3
+authorization routes, counted by the gate; the body previously said 77/21
+before #13088's `receipts/verify` handler and 78 before L3, and the H6b
+automation runtime adds the seven public routes of the eleventh
+controller).
 
 There is no production provisioning of workspace registry/access rows —
 today only tests and fixture entry points write them, and a deployment writes
@@ -417,13 +420,17 @@ controllers, including the two L3 authorization routes. (The 21-internal
 figure section 2 previously carried is stale: #13088 added the
 `receipts/verify` handler to ToolPublicationController, and L3 added its
 two authorization routes; the gate derives everything from scanning, so the
-count is information, not an asserted constant.)
+count is information, not an asserted constant.) The H6b automation
+runtime adds the seven public `/v1/agent-automations` routes of an
+eleventh controller, so the registry now carries 87 constants: 39 public +
+24 WebShell + 24 internal.
 
 Rule classes name the implemented admission. After slice C (contract
-v1.37): `WORKSPACE_CREATE` (2), `READER` (24), `READER_ACTOR` (6),
-`READER_ACTOR_POLICY` (1), `OPERATOR` — the submitter family plus cwd
-change and Action respond — (8), `OWNER` — the lifecycle family alone —
-(8), `WORKSPACE_DISCOVERY` (4), `TENANT_SCOPED` (3), `INTERNAL_WRITER`
+v1.37): `WORKSPACE_CREATE` (2), `READER` (27 — the automation routes add
+three), `READER_ACTOR` (6), `READER_ACTOR_POLICY` (1), `OPERATOR` — the
+submitter family plus cwd change and Action respond — (8), `OWNER` — the
+lifecycle family, plus the four automation mutations — (12),
+`WORKSPACE_DISCOVERY` (4), `TENANT_SCOPED` (3), `INTERNAL_WRITER`
 (24). The design's `legacy_create` and `legacy_tenant` names are kept in
 the class documentation as the names of the legacy arms: a route carries
 exactly one rule class and, per the separation rule, it is the
@@ -464,6 +471,13 @@ the pre-C values it replaced are D4's "Rule today" column.
 | `POST /v1/agents`                                                                                                                | PUBLIC   | AGENT_DEFINITION_CREATE   | TENANT_SCOPED       |
 | `GET /v1/agents/{agentId}`                                                                                                       | PUBLIC   | AGENT_DEFINITION_GET      | TENANT_SCOPED       |
 | `POST /v1/agents/{agentId}`                                                                                                      | PUBLIC   | AGENT_DEFINITION_UPDATE   | TENANT_SCOPED       |
+| `POST /v1/agent-automations`                                                                                                     | PUBLIC   | AUTOMATION_CREATE         | OWNER               |
+| `GET /v1/agent-automations`                                                                                                      | PUBLIC   | AUTOMATION_LIST           | READER              |
+| `GET /v1/agent-automations/{automationId}`                                                                                       | PUBLIC   | AUTOMATION_GET            | READER              |
+| `POST /v1/agent-automations/{automationId}`                                                                                      | PUBLIC   | AUTOMATION_UPDATE         | OWNER               |
+| `DELETE /v1/agent-automations/{automationId}`                                                                                    | PUBLIC   | AUTOMATION_RETIRE         | OWNER               |
+| `POST /v1/agent-automations/{automationId}/runs`                                                                                 | PUBLIC   | AUTOMATION_RUN            | OWNER               |
+| `GET /v1/agent-automations/{automationId}/runs`                                                                                  | PUBLIC   | AUTOMATION_RUN_LIST       | READER              |
 | `POST /api/agent/web-shell/v1/tasks/query`                                                                                       | WEBSHELL | TASK_LIST                 | READER              |
 | `POST /api/agent/web-shell/v1/tasks/get`                                                                                         | WEBSHELL | TASK_GET                  | READER              |
 | `POST /api/agent/web-shell/v1/tasks/events/query`                                                                                | WEBSHELL | TASK_EVENT_LIST           | READER              |

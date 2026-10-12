@@ -48,6 +48,9 @@ Issue #13743 在 H4c 名下提出三件事:`workflow` child kind(C1)、Workspace
    - 第一层 run 的 `rootSessionId` 必须是持有该日志的 Session。
    - `child_acceptance` 可以指名任一 kind 的 run。拒绝文本改为 "Child acceptance must name a child Session run of this Session."
    - H4b 决策 7 的反向 acceptance 检查。
+
+   这些规则,以及后继与起始规则、restore 跳过和 launch 配额,都通过同一个点名两种 kind 的分类函数判断,而不是写成"不是 Shell":`managed-child-run-record.ts` 中的 `isChildSessionRun`,以及 Java 的 `ManagedExtensionRecords.isChildSessionRun`。TypeScript 的分类函数与任务 kind 投影对 `AnyChildRun` 的每个 kind 穷举 switch,所以以后新增的 kind 在被分类之前无法通过编译。Java 中未列出的 kind 不算 child Session,`childRunTaskKind` 会拒绝它,而不是把它投影成 child agent。
+
 5. **`workflow` 保持禁用。** `MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS` 仍为 `['child_agent']`。authority 在发布任何内容之前,以 "domain child_run kind workflow is registered but not enabled for submission." 拒绝 `workflow` 提交。Java store 先于任何写入方校验并物化 `workflow` 记录体(H1–H4b 一直保持的 server-first 顺序),并投影其任务 kind。
 6. **Java 运行时路径仍只处理 `child_agent`。** relay 的发现页与关闭级联的 live-scope 查询现在都额外要求 `task_kind = 'child_agent'`。relay 创建的是运行提示词的 child Session,级联则经由 child agent 漏斗取消。如果二者处理 `workflow` 行,relay 会从一次 workflow launch 创建出由提示词驱动的 child,级联会卡在一个漏斗拒绝的取消上,让关闭无法完成。放宽二者属于 workflow 运行时切片。因此启用 `workflow` 不只是加一条门禁条目:它需要 Workflow 工具的 Managed 准入、launch envelope 以及这两处放宽,全部在那个切片中完成。
 7. **读取方容忍新 kind。** workspace restore 枚举跳过所有 child Session kind,因为二者都不拥有输出 manifest。child agent 漏斗仍只读取 `child_agent` 记录,所以它的记录查找永远不会把 `workflow` run 当作 child agent 返回。

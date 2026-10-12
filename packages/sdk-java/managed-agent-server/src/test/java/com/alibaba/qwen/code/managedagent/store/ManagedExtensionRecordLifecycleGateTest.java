@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -72,6 +73,25 @@ class ManagedExtensionRecordLifecycleGateTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertThat(error.getCode())
                                 .isEqualTo("workspace_lifecycle_admission_closed"));
+    }
+
+    /**
+     * H4e-b1: a lead's close writes no team record — the member runs are
+     * cancelled through the child cleanup families above, and the team
+     * records stay as the lead last committed them — so the gate keeps
+     * every team domain closed under a claim.
+     */
+    @Test
+    void keepsTeamRecordsAdmissionClosed() {
+        for (String domain : List.of("team_state", "team_task",
+                "team_message", "team_plan")) {
+            byte[] team = domainEvent(domain).getBytes(StandardCharsets.UTF_8);
+            assertThatThrownBy(() -> records.hasNewLifecycleDispatch(TENANT,
+                    "session", team, resourceId -> null))
+                    .isInstanceOfSatisfying(ApiException.class,
+                            error -> assertThat(error.getCode())
+                                    .isEqualTo("workspace_lifecycle_admission_closed"));
+        }
     }
 
     /** Hook domains never lose their chain analysis at the same gate. */

@@ -336,4 +336,7 @@ the `workflow` task kind; team domains and mailbox; cross-workspace children.
    task view may be required before H4c enables cancel at scale.
 4. **Detached-child ownership.** What durable owner a detached child takes
    (a tenant-level retention policy, or the root Session authority) is left
-   to H4c; the close path only enforces that one exists.
+   to the Detach follow-up of the [H4a map](2026-10-06-managed-child-agent-runtime.md),
+   since H4c was re-scoped (see Scope settled above) and the
+   [H4e-a design](2026-10-10-managed-agent-teams.md) keeps detach out of H4e;
+   the close path only enforces that one exists.

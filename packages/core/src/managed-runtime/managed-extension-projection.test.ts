@@ -24,6 +24,7 @@ import {
   extensionExecutionOf,
   isExtensionDeliveryPending,
   managedExtensionRecordKey,
+  managedChildTaskId,
   managedTaskId,
   projectManagedTask,
   type ManagedRuntimeExecutionView,
@@ -235,6 +236,11 @@ describe('managed-extension-projection/1 fixtures', () => {
     );
     expect(key).toBe(each.recordKey);
     expect(managedTaskId(key)).toBe(each.taskId);
+    if (each.domain === 'child_run') {
+      expect(managedChildTaskId(each.sessionId, each.recordId)).toBe(
+        each.taskId,
+      );
+    }
   });
 
   it.each(fixtures.runStartCases)('judges a run start: $id', (each) => {
