@@ -948,10 +948,28 @@ export async function settleCrashedWakeTurnAftermath(params: {
             }
             await broker.release();
           } catch (cause) {
-            if (!(cause instanceof RecoveryDeclined)) throw cause;
-            writeStderrLineSafe(
-              `qwen serve: Hosted wake turn ${turnId} could not derive its wake session's Broker identity; its lease stays the system's re-admitted kind: ${String(cause)}`,
-            );
+            // A wake turn that started a background run leaves that Runtime
+            // held by design, so the routine release refuses
+            // `runtime_session_held`. That is the designed hold, not an
+            // aftermath failure: the run outlives the wake turn it started
+            // on, and the Session's close owes the drain. Register the
+            // obligation and go on settling the crashed wake's input. The
+            // routine recovery is deliberately not turned into a drain, which
+            // would stop a background run the user meant to keep (#13856
+            // R1-28).
+            if (
+              cause instanceof HostedWorkspaceBrokerRejection &&
+              cause.status === 409 &&
+              cause.code === 'runtime_session_held'
+            ) {
+              session.heldRuntimeTurns.add(turnId);
+            } else if (cause instanceof RecoveryDeclined) {
+              writeStderrLineSafe(
+                `qwen serve: Hosted wake turn ${turnId} could not derive its wake session's Broker identity; its lease stays the system's re-admitted kind: ${String(cause)}`,
+              );
+            } else {
+              throw cause;
+            }
           }
         }
       }
