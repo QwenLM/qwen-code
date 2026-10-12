@@ -22,6 +22,7 @@ import type {
   ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './ui/utils/formatters.js';
+import { waitForPendingMemoryTasks } from './nonInteractive/memory-tasks.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -609,37 +610,8 @@ export async function runNonInteractive(
       })();
       return chatRecordingSettlement;
     };
-    const drainPendingMemoryTasks = async (): Promise<void> => {
-      const memoryTaskPromises = config
-        .getLlmClient()
-        .consumePendingMemoryTaskPromises();
-      if (memoryTaskPromises.length > 0) {
-        const settled = Promise.allSettled(memoryTaskPromises);
-        const signal = abortController.signal;
-        let stopWaiting!: () => void;
-        const aborted = new Promise<void>((resolve) => {
-          stopWaiting = resolve;
-        });
-        signal.addEventListener('abort', stopWaiting, { once: true });
-        try {
-          if (!signal.aborted) {
-            debugLogger.debug(
-              `[runNonInteractive] Waiting for ${memoryTaskPromises.length} tracked memory task(s)`,
-            );
-            await Promise.race([settled, aborted]);
-          }
-        } finally {
-          signal.removeEventListener('abort', stopWaiting);
-        }
-        if (signal.aborted) {
-          debugLogger.debug(
-            '[runNonInteractive] Abandoned memory wait after abort; tasks may still be running',
-          );
-          signal.throwIfAborted();
-        }
-        debugLogger.debug('[runNonInteractive] Tracked memory tasks settled');
-      }
-    };
+    const drainPendingMemoryTasks = (): Promise<void> =>
+      waitForPendingMemoryTasks(config.getLlmClient(), abortController.signal);
     let resultEmitted = false;
     const emitResult = async (
       result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],

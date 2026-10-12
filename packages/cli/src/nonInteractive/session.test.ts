@@ -94,6 +94,10 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
     getMonitorRegistry: () => mockMonitorRegistry,
     getBackgroundShellRegistry: () => mockBackgroundShellRegistry,
     getBackgroundTaskRegistry: () => mockBackgroundTaskRegistry,
+    getLlmClient: () => ({
+      getPendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
+      removePendingMemoryTaskPromises: vi.fn(),
+    }),
   };
   return { ...base, ...overrides } as unknown as Config;
 }
@@ -353,12 +357,75 @@ describe('runNonInteractiveStreamJson', () => {
     const llmClient = {
       isInitialized: vi.fn().mockReturnValue(true),
       getChat: vi.fn().mockReturnValue({ getHistoryTail }),
+      getPendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
+      removePendingMemoryTaskPromises: vi.fn(),
     };
     config = createConfig({
       getLlmClient: vi.fn().mockReturnValue(llmClient),
     });
     return { llmClient, getHistoryTail };
   }
+
+  it.each(['settlement', 'SIGINT'] as const)(
+    'waits for retained memory at EOF and finishes on %s',
+    async (completion) => {
+      let finishMemory!: (count: number) => void;
+      let rejectMemory!: (error: Error) => void;
+      const memory = new Promise<number>((resolve, reject) => {
+        finishMemory = resolve;
+        rejectMemory = reject;
+      });
+      let tasks = [memory];
+      config = createConfig({
+        getLlmClient: () => ({
+          getPendingMemoryTaskPromises: () => [...tasks],
+          removePendingMemoryTaskPromises: (
+            completed: ReadonlyArray<Promise<number>>,
+          ) => {
+            tasks = tasks.filter((task) => !completed.includes(task));
+          },
+        }),
+      });
+      runNonInteractiveMock.mockResolvedValueOnce(130);
+      mockInputReader.read = async function* () {
+        yield createControlRequest('initialize');
+        yield createUserMessage('interrupted turn');
+      };
+      const signalListeners = process.listeners('SIGINT');
+      let finished = false;
+      const run = runNonInteractiveStreamJson(config, '').finally(() => {
+        finished = true;
+      });
+      try {
+        await vi.waitFor(() =>
+          expect(mockDispatcher.markInputClosed).toHaveBeenCalledOnce(),
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(runNonInteractiveMock).toHaveBeenCalledOnce();
+        expect(finished).toBe(false);
+        expect(process.listeners('SIGINT')).toHaveLength(
+          signalListeners.length + 1,
+        );
+        if (completion === 'SIGINT') {
+          process.emit('SIGINT');
+        } else {
+          finishMemory(1);
+        }
+        await run;
+        expect(finished).toBe(true);
+        expect(tasks).toEqual(completion === 'SIGINT' ? [memory] : []);
+        expect(process.listeners('SIGINT')).toEqual(signalListeners);
+        expect(mockDispatcher.shutdown).toHaveBeenCalledOnce();
+        if (completion === 'SIGINT') {
+          rejectMemory(new Error('Memory rejected after EOF cancellation'));
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      } finally {
+        finishMemory(0);
+        await run;
+      }
+    },
+  );
 
   it('initializes session and processes initialize control request', async () => {
     const initRequest = createControlRequest('initialize');

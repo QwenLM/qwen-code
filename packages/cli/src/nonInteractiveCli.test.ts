@@ -51,6 +51,7 @@ import {
   goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
+  LlmClient,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { EventEmitter, getEventListeners } from 'node:events';
@@ -269,6 +270,8 @@ describe('runNonInteractive', () => {
     stripOrphanedUserEntriesFromHistory: Mock;
     getHistoryToolCallFingerprints: Mock;
     consumePendingMemoryTaskPromises: Mock;
+    getPendingMemoryTaskPromises: Mock;
+    removePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
     addHistory: Mock;
   };
@@ -336,6 +339,8 @@ describe('runNonInteractive', () => {
     mockLlmClient = {
       sendMessageStream: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
+      getPendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
+      removePendingMemoryTaskPromises: vi.fn(),
       recordCompletedToolCall: vi.fn(),
       addHistory: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn(),
@@ -3567,7 +3572,7 @@ describe('runNonInteractive', () => {
         finishDream = resolve;
         rejectDream = reject;
       });
-      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValueOnce([
+      mockLlmClient.getPendingMemoryTaskPromises.mockReturnValueOnce([
         extraction,
         dream,
       ]);
@@ -3592,9 +3597,7 @@ describe('runNonInteractive', () => {
 
       try {
         await vi.waitFor(() =>
-          expect(
-            mockLlmClient.consumePendingMemoryTaskPromises,
-          ).toHaveBeenCalled(),
+          expect(mockLlmClient.getPendingMemoryTaskPromises).toHaveBeenCalled(),
         );
         expect(messages()).toContainEqual(
           expect.objectContaining({ type: 'assistant' }),
@@ -3666,17 +3669,161 @@ describe('runNonInteractive', () => {
   describe('managed memory settlement on terminal paths', () => {
     let finishMemory: (count: number) => void;
     let rejectMemory: (error: Error) => void;
+    let memoryTask: Promise<number>;
 
     beforeEach(() => {
       setupMetricsMock();
-      const memoryTask = new Promise<number>((resolve, reject) => {
+      memoryTask = new Promise<number>((resolve, reject) => {
         finishMemory = resolve;
         rejectMemory = reject;
       });
-      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValueOnce([
+      mockLlmClient.getPendingMemoryTaskPromises.mockReturnValueOnce([
         memoryTask,
       ]);
     });
+
+    it.each([
+      { interruption: 'during memory drain', mixed: false },
+      { interruption: 'before catch drain', mixed: false },
+      { interruption: 'during memory drain with mixed tasks', mixed: true },
+    ])(
+      'keeps interrupted memory tracked for the next invocation after interruption $interruption',
+      async ({ interruption, mixed }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        const rejectedTask = Promise.reject(new Error('Memory write failed'));
+        void rejectedTask.catch(() => undefined);
+        const queueOwner = {
+          pendingMemoryTaskPromises: mixed
+            ? [Promise.resolve(2), rejectedTask, memoryTask]
+            : [memoryTask],
+        };
+        const clientOwner = queueOwner as unknown as LlmClient;
+        mockLlmClient.getPendingMemoryTaskPromises
+          .mockReset()
+          .mockImplementation(() =>
+            LlmClient.prototype.getPendingMemoryTaskPromises.call(clientOwner),
+          );
+        mockLlmClient.removePendingMemoryTaskPromises.mockImplementation(
+          (tasks: ReadonlyArray<Promise<number>>) =>
+            LlmClient.prototype.removePendingMemoryTaskPromises.call(
+              clientOwner,
+              tasks,
+            ),
+        );
+        mockLlmClient.consumePendingMemoryTaskPromises.mockImplementation(() =>
+          LlmClient.prototype.consumePendingMemoryTaskPromises.call(
+            clientOwner,
+          ),
+        );
+        let finishNewTask!: (count: number) => void;
+        const newTask = new Promise<number>((resolve) => {
+          finishNewTask = resolve;
+        });
+        const abortController = new AbortController();
+        const signalListeners = process.listeners('SIGINT');
+        const firstResult = vi.fn();
+        mockLlmClient.sendMessageStream.mockImplementation(() => {
+          if (interruption === 'before catch drain') {
+            abortController.abort(new TurnInterruptedError());
+            throw abortController.signal.reason;
+          }
+          return createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'First answer' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]);
+        });
+        let firstSettled = false;
+        const firstRun = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'First input',
+          'prompt-interrupted-memory-first',
+          {
+            abortController,
+            recoverableCancellation: true,
+            onResultEmitted: firstResult,
+          },
+        ).finally(() => {
+          firstSettled = true;
+        });
+        let secondRun: Promise<number> | undefined;
+        let secondSettled = false;
+        const secondResult = vi.fn();
+
+        try {
+          await vi.waitFor(() => expect(firstResult).toHaveBeenCalledOnce());
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.getPendingMemoryTaskPromises,
+            ).toHaveBeenCalled(),
+          );
+          if (interruption !== 'before catch drain') {
+            expect(firstSettled).toBe(false);
+            if (mixed) queueOwner.pendingMemoryTaskPromises.push(newTask);
+            abortController.abort(new TurnInterruptedError());
+          }
+          await expect(firstRun).resolves.toBe(130);
+          expect(process.exit).not.toHaveBeenCalled();
+          expect(process.listeners('SIGINT')).toEqual(signalListeners);
+          expect(getEventListeners(abortController.signal, 'abort')).toEqual(
+            [],
+          );
+          expect(queueOwner.pendingMemoryTaskPromises).toHaveLength(
+            mixed ? 2 : 1,
+          );
+          expect(queueOwner.pendingMemoryTaskPromises[0]).toBe(memoryTask);
+          if (mixed) {
+            expect(queueOwner.pendingMemoryTaskPromises[1]).toBe(newTask);
+          }
+
+          mockLlmClient.sendMessageStream.mockImplementation(() =>
+            createStreamFromEvents([
+              { type: LlmEventType.Content, value: 'Second answer' },
+              {
+                type: LlmEventType.Finished,
+                value: {
+                  reason: undefined,
+                  usageMetadata: { totalTokenCount: 1 },
+                },
+              },
+            ]),
+          );
+          secondRun = runNonInteractive(
+            mockConfig,
+            mockSettings,
+            'Second input',
+            'prompt-interrupted-memory-second',
+            { recoverableCancellation: true, onResultEmitted: secondResult },
+          ).finally(() => {
+            secondSettled = true;
+          });
+          await vi.waitFor(() => expect(secondResult).toHaveBeenCalledOnce());
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(secondSettled).toBe(false);
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+        } finally {
+          finishMemory(1);
+          finishNewTask(3);
+          await firstRun;
+          if (secondRun) await secondRun;
+        }
+        await expect(secondRun).resolves.toBe(0);
+        expect(process.exit).not.toHaveBeenCalled();
+        expect(queueOwner.pendingMemoryTaskPromises).toEqual([]);
+        expect(
+          mockLlmClient.consumePendingMemoryTaskPromises,
+        ).not.toHaveBeenCalled();
+        expect(process.listeners('SIGINT')).toEqual(signalListeners);
+      },
+    );
 
     it.each([
       { cancellation: 'SIGINT before catch', beforeCatch: true },
@@ -3747,7 +3894,7 @@ describe('runNonInteractive', () => {
           if (!beforeCatch) {
             await vi.waitFor(() =>
               expect(
-                mockLlmClient.consumePendingMemoryTaskPromises,
+                mockLlmClient.getPendingMemoryTaskPromises,
               ).toHaveBeenCalledOnce(),
             );
             expect(settled).toBe(false);
@@ -3925,7 +4072,7 @@ describe('runNonInteractive', () => {
         try {
           await vi.waitFor(() =>
             expect(
-              mockLlmClient.consumePendingMemoryTaskPromises,
+              mockLlmClient.getPendingMemoryTaskPromises,
             ).toHaveBeenCalledOnce(),
           );
           expect(settled).toBe(false);
@@ -4049,7 +4196,7 @@ describe('runNonInteractive', () => {
       try {
         await vi.waitFor(() =>
           expect(
-            mockLlmClient.consumePendingMemoryTaskPromises,
+            mockLlmClient.getPendingMemoryTaskPromises,
           ).toHaveBeenCalledOnce(),
         );
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -4185,7 +4332,7 @@ describe('runNonInteractive', () => {
             ),
           ]);
           expect(
-            mockLlmClient.consumePendingMemoryTaskPromises,
+            mockLlmClient.getPendingMemoryTaskPromises,
           ).toHaveBeenCalledOnce();
           expect(settled).toBe(false);
           finishMemory(1);
@@ -4239,7 +4386,7 @@ describe('runNonInteractive', () => {
         try {
           await vi.waitFor(() =>
             expect(
-              mockLlmClient.consumePendingMemoryTaskPromises,
+              mockLlmClient.getPendingMemoryTaskPromises,
             ).toHaveBeenCalledOnce(),
           );
           expect(settled).toBe(false);
@@ -4310,7 +4457,7 @@ describe('runNonInteractive', () => {
         try {
           await vi.waitFor(() =>
             expect(
-              mockLlmClient.consumePendingMemoryTaskPromises,
+              mockLlmClient.getPendingMemoryTaskPromises,
             ).toHaveBeenCalledOnce(),
           );
           expect(emitResult).toHaveBeenCalledOnce();
@@ -4406,8 +4553,8 @@ describe('runNonInteractive', () => {
       'testTool',
       { arg1: 'value1' },
     );
-    // Verify consumePendingMemoryTaskPromises is called at the end of the session.
-    expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
+    // Verify getPendingMemoryTaskPromises is called at the end of the session.
+    expect(mockLlmClient.getPendingMemoryTaskPromises).toHaveBeenCalled();
   });
 
   it('uses a tool-selected full-turn model for the next request', async () => {

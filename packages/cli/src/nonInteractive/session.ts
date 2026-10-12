@@ -16,6 +16,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.j
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ModSession } from './mod-session.js';
+import { waitForPendingMemoryTasks } from './memory-tasks.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlDispatcher } from './control/ControlDispatcher.js';
 import { ControlService } from './control/ControlService.js';
@@ -914,9 +915,25 @@ class Session {
     this.abortTaskRegistries();
     this.stopMonitorCallbacks();
     await this.waitForAllPendingWork();
-    this.abortTaskRegistries();
-
-    this.finishShutdown();
+    try {
+      if (
+        this.configInitialized &&
+        !this.sessionAbortController.signal.aborted
+      ) {
+        const client = this.config.getLlmClient();
+        if (client) {
+          await waitForPendingMemoryTasks(
+            client,
+            this.sessionAbortController.signal,
+          );
+        }
+      }
+    } catch (error) {
+      if (!this.sessionAbortController.signal.aborted) throw error;
+    } finally {
+      this.abortTaskRegistries();
+      this.finishShutdown();
+    }
   }
 
   private abortTaskRegistries(): void {
