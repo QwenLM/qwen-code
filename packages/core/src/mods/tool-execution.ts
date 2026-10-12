@@ -213,8 +213,13 @@ export async function executeModTool(
     isDeepStrictEqual(answer.result, referenced.value.result)
   ) {
     return {
-      response: referenced.completed.response,
-      completed: referenced.completed,
+      response: {
+        ...referenced.completed.response,
+        executionStatus:
+          executed?.response.executionStatus ??
+          referenced.completed.response.executionStatus,
+      },
+      completed: executed ?? referenced.completed,
     };
   }
   const message =
@@ -266,5 +271,5 @@ export async function executeModTool(
     errorType:
       native?.errorType ?? (error ? ToolErrorType.EXECUTION_DENIED : undefined),
   };
-  return { response, completed: selected };
+  return { response, completed: executed ?? selected };
 }

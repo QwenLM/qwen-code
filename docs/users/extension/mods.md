@@ -166,8 +166,10 @@ Return `{deny: reason}` to block, or `{result: value}` to supply a JSON result
 without executing. Native next returns `{ref, result, text, isError?}`.
 `result` is the native function response record, commonly `{output: ...}` or
 `{error: ...}`. A returned ref with an unchanged result retains the original
-response, including images and host metadata; changing text or error flags
-beside that reference does not alter it. To change output, return a new result:
+output, including images and output metadata; changing text or error flags
+beside that reference does not alter it. Host execution facts are retained
+across all attempts even when an earlier result is selected. To change output,
+return a new result:
 `{result: {output: 'Replacement text'}}`. Records containing only string
 `output`/`error` fields retain that shape; other JSON is serialized in full into
 an `output` string so native output budgets still apply. The host owns the

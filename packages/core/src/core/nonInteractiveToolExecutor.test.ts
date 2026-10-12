@@ -549,10 +549,15 @@ describe('executeToolCall', () => {
       prompt_id: 'prompt',
     };
     vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-    executeFn.mockResolvedValue({
-      llmContent: [{ inlineData: { mimeType: 'image/png', data: 'abc' } }],
-      returnDisplay: 'image',
-    });
+    executeFn
+      .mockResolvedValueOnce({
+        llmContent: [{ inlineData: { mimeType: 'image/png', data: 'abc' } }],
+        returnDisplay: 'first image',
+      })
+      .mockResolvedValueOnce({
+        llmContent: [{ inlineData: { mimeType: 'image/png', data: 'def' } }],
+        returnDisplay: 'second image',
+      });
     const completed = vi.fn();
     const recordToolResult = vi.fn();
     mockConfig.getChatRecordingService = () =>
@@ -567,7 +572,7 @@ describe('executeToolCall', () => {
         onAllToolCallsComplete: completed,
         modToolCall: async (e, next, signal) => {
           const one = await next(e, signal, async (_e, v) => v);
-          await next(e, signal, async (_e, v) => v);
+          await next({ ...e, param1: 'second' }, signal, async (_e, v) => v);
           return { ...one, text: 'cannot forge native text', isError: true };
         },
       },
@@ -579,7 +584,103 @@ describe('executeToolCall', () => {
     ]);
     expect(recordToolResult).toHaveBeenCalledTimes(1);
     expect(completed).toHaveBeenCalledTimes(1);
+    expect(response.resultDisplay).toBe('first image');
+    expect(completed.mock.calls[0][0][0].request.args).toEqual({
+      param1: 'second',
+    });
   });
+
+  it.each([
+    ['validation', false],
+    ['validation', true],
+    ['permission', false],
+    ['permission', true],
+    ['execution', false],
+    ['execution', true],
+  ] as const)(
+    'retains later execution facts when returning an earlier %s failure (rewritten: %s)',
+    async (failure, rewritten) => {
+      const request: ToolCallRequestInfo = {
+        callId: 'mod',
+        name: 'testTool',
+        args: { param1: 'original' },
+        isClientInitiated: false,
+        prompt_id: 'prompt',
+      };
+      mockTool = new MockTool({
+        name: 'testTool',
+        params: {
+          type: 'object',
+          properties: { param1: { type: 'string' } },
+          required: ['param1'],
+        },
+        execute: executeFn,
+      });
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+      executeFn.mockResolvedValue({
+        llmContent: 'executed',
+        returnDisplay: 'executed',
+      });
+      if (failure === 'execution')
+        executeFn.mockRejectedValueOnce(new Error('first attempt failed'));
+      const completed = vi.fn();
+      const recordToolResult = vi.fn();
+      mockConfig.getChatRecordingService = () =>
+        ({ recordToolResult }) as unknown as ReturnType<
+          Config['getChatRecordingService']
+        >;
+      const response = await executeToolCall(
+        mockConfig,
+        request,
+        abortController.signal,
+        {
+          onAllToolCallsComplete: completed,
+          modToolCall: async (e, next, signal) => {
+            const { param1: _param1, ...invalid } = e;
+            const first = await next(
+              failure === 'validation' ? invalid : e,
+              signal,
+              async (_e, verdict) =>
+                failure === 'permission' ? { decision: 'deny' } : verdict,
+            );
+            expect(first).toMatchObject({ isError: true });
+            await next(
+              { ...e, param1: 'executed' },
+              signal,
+              async (_e, v) => v,
+            );
+            return rewritten
+              ? { ...first, result: { output: 'rewritten first result' } }
+              : first;
+          },
+        },
+      );
+
+      expect(executeFn).toHaveBeenCalledTimes(failure === 'execution' ? 2 : 1);
+      expect(executeFn).toHaveBeenLastCalledWith({ param1: 'executed' });
+      expect(response.error).toBeDefined();
+      expect(response.responseParts[0].functionResponse?.response).toEqual(
+        rewritten
+          ? { output: 'rewritten first result' }
+          : { error: expect.any(String) },
+      );
+      expect(response.executionStatus).toBe('success');
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(completed.mock.calls[0][0][0]).toMatchObject({
+        status: 'success',
+        request: { ...request, args: { param1: 'executed' } },
+        response,
+      });
+      expect(recordToolResult).toHaveBeenCalledTimes(1);
+      expect(recordToolResult).toHaveBeenCalledWith(
+        response.responseParts,
+        expect.objectContaining({
+          executionStatus: 'success',
+          status: 'success',
+        }),
+      );
+    },
+  );
 
   it('restores reserved argument collisions and ignores forged result identity fields', async () => {
     const request: ToolCallRequestInfo = {
