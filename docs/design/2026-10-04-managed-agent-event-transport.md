@@ -325,13 +325,16 @@ dive](https://www.cnblogs.com/alisystemsoftware/p/20189542); 5.5.0 source tag
    is per-client (ClientID), not group-locked: consumers in one group may
    subscribe to different LiteTopic sets and can add/remove at runtime
    (thousands per consumer). Dispatch, however, is **shared within a group**:
-   exactly one client per group receives each LiteTopic message — the 5.5.0
+   one dispatch attempt selects exactly one client per group — the 5.5.0
    `LiteEventDispatcher` buckets subscribers by group and stops after the
    first successful client, and locks, FIFO state and the offset all key on
-   `(group, LiteTopic, 0)`, so after one node ACKs no other group member sees
-   the message. Cross-node wake fan-out therefore needs one consumer group
-   per node (the dispatcher iterates every group); this feeds the §11 routing
-   decision. Offsets are broker-side — memory snapshot plus incremental
+   `(group, LiteTopic, 0)`. On a lost ACK or client inactivity the in-doubt
+   message is re-dispatched, possibly to a different member (the 5.5.0
+   inactivity path re-dispatches while avoiding the previous client), so
+   there are no per-node copies; consumer idempotence (invariant 5) and the
+   activation fence absorb that. Cross-node wake fan-out therefore needs one
+   consumer group per node (the dispatcher iterates every group); this feeds
+   the §11 routing decision. Offsets are broker-side — memory snapshot plus incremental
    persistence on RocksDB. LiteTopics auto-create on first send/subscribe and
    auto-delete when their TTL lapses without writes, releasing the LiteTopic
    count — but a subscription relation still occupies the subscription quota
@@ -376,7 +379,7 @@ verified guarantees for any particular Redis deployment.
 | At-least-once delivery                                | Yes — at-least-once with retry + DLQ; the fixed-interval retry on ordered lanes is commercial-doc evidence only, OSS pages silent (verified 2026-10-12, §5.1)                                                                                                              | Yes via consumer groups + PEL re-delivery                         |
 | Per-key ordering                                      | Yes — one ordered queue and one consumer thread per LiteTopic (verified 2026-10-12, §5.1); still not required by design (§2)                                                                                                                                               | Yes, per-stream FIFO                                              |
 | Re-delivery / crash recovery of consumers             | Yes — broker-persisted offsets (memory snapshot + incremental RocksDB) resume from the committed watermark (verified 2026-10-12, §5.1)                                                                                                                                     | Yes via `XAUTOCLAIM`/`XCLAIM` after a timeout                     |
-| Consumer groups (multi-node workers, wake fan-in)     | Shared within a group — exactly one client per group receives each LiteTopic message (5.5.0 source-verified, §5.1); cross-node fan-out needs one consumer group per node (§11)                                                                                             | First-class                                                       |
+| Consumer groups (multi-node workers, wake fan-in)     | Shared within a group — one dispatch attempt goes to exactly one client per group, and a redelivery after a lost ACK or client inactivity can land on a different member (5.5.0 source-verified, §5.1); cross-node fan-out needs one consumer group per node (§11)         | First-class                                                       |
 | Suspend/Resume per Session (backpressure, quarantine) | Documented (per-topic consumer-level)                                                                                                                                                                                                                                      | Manual (stop reading the group key)                               |
 | Retention & lifecycle of millions of queues           | Auto-create on first use; TTL auto-delete releases the LiteTopic count (a subscription still counts until unsubscribe); OSS numeric caps unpublished — Aliyun publishes 2,000 subscriptions per consumer and 200 consumption TPS per LiteTopic (verified 2026-10-12, §5.1) | Operator-managed (`XTRIM`, key expiry); risk of unbounded growth  |
 | Broker as Session truth risk                          | Same architectural risk both ways; invariants 1–3 forbid it regardless                                                                                                                                                                                                     | Same                                                              |
@@ -504,8 +507,9 @@ This slice's validation is documentation-only:
    MQ2 consumer wiring.) Dispatch evidence from the 2026-10-12 verification
    (§5.1): LiteTopic dispatch is shared within a group — one client per group
    per LiteTopic — so fan-out to every node requires one consumer group per
-   node, while a single shared group wakes exactly one node per message and
-   leans on the SQL-scan fallback otherwise.
+   node, while a single shared group wakes one node per dispatch (a lost ACK
+   or client inactivity can move the redelivery to another member) and leans
+   on the SQL-scan fallback otherwise.
 3. LiteTopic §5.1 items: the broker-docs verification ran 2026-10-12 and its
    results are pinned in §5.1's resolution block; what remains is the
    MQ2-start staging re-check against a real 5.5.0+ cluster.
