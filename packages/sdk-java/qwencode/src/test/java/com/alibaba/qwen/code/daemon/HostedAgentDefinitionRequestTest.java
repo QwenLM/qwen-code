@@ -2,12 +2,36 @@ package com.alibaba.qwen.code.daemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class HostedAgentDefinitionRequestTest {
     private static final String SESSION = "22222222-2222-4222-8222-222222222222";
+
+    @Test
+    void shellLoadsRetainTheDefinitionAndSuppressionThroughEveryCopy() {
+        Map<String, Object> identity = Map.of("agentId", "agent_" + "a".repeat(32),
+                "revision", "1", "digest", "b".repeat(64));
+        LoadHarnessSession original = new LoadHarnessSession(SESSION, null,
+                true, "hosted-workspace-shell/1", true, true, true)
+                .withAgentDefinition(identity);
+        for (LoadHarnessSession load : java.util.List.of(
+                original.withChildWorkspaces(true),
+                original.forLifecycle("close-1", 2),
+                original.withStoppedMessages(),
+                original.withChildWorkspaces(true).forLifecycle("close-1", 2)
+                        .withStoppedMessages())) {
+            Map<String, Object> wire = load.toJson();
+            assertEquals(identity, wire.get("agentDefinition"));
+            assertEquals("hosted-workspace-shell/1", wire.get("toolProfile"));
+            assertTrue((Boolean) wire.get("suppressChildAgents"));
+            assertTrue((Boolean) wire.get("passiveManagedRuntimeRecovery"));
+            assertTrue((Boolean) wire.get("driveRuntimeRecovery"));
+            assertTrue((Boolean) wire.get("cancellationTakeover"));
+        }
+    }
 
     @Test
     void createDeliversTheFullPinAndLifecycleLoadRetainsOnlyTheIdentity() {
