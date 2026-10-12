@@ -58,7 +58,7 @@ Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact c
 
 - Forks never execute `ask_user_question`; when user input is required, they report the blocker to their parent agent.
 - Omitting `fork_tools` allows every other inherited tool.
-- An empty array rejects every tool call (under a code mode, `exec` — and `tool_search` in `code_mode_only` — remains admitted anyway; see above).
+- An empty array rejects every tool call.
 - `*` is not accepted; omit `fork_tools` to allow every otherwise-executable inherited tool.
 - Tool names cannot have surrounding whitespace. Wildcards are accepted only as `mcp__*` or as a trailing MCP tool-prefix pattern such as `mcp__github__read_*`.
 - `mcp__*` intentionally allows every MCP tool while still denying unlisted built-in tools.
