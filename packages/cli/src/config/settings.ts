@@ -562,6 +562,20 @@ export type TightenOnlyVerdict =
   | { kept: false; reason: 'same' };
 
 /**
+ * Verdict for a workspace-scope write. Adds the one refusal the merge alone
+ * cannot see: a write that ranks below the workspace file's own value would
+ * destroy a tightening the merge was keeping in force, even when the written
+ * value itself ranks `same` against the operator scopes.
+ */
+export type WorkspaceTightenOnlyWriteVerdict =
+  | TightenOnlyVerdict
+  | {
+      kept: false;
+      reason: 'loosens-workspace-value';
+      workspaceValue: unknown;
+    };
+
+/**
  * Decide one tighten-only key for a workspace, or `undefined` when the
  * workspace does not set it.
  *
@@ -617,12 +631,19 @@ function tightenOnlyVerdict(
  * value a write would leave there, not the one currently on disk. `kept` and
  * `same` writes stay acceptable: `same` merely repeats the value already in
  * force and loses nothing.
+ *
+ * Pass the workspace file's current settings as `workspaceSettings` so the
+ * route also refuses a write that ranks below the file's own value. Without
+ * it, overwriting a committed tightening ranks `same` against the operator
+ * scopes, is dropped silently at load, and the tightening it replaced is
+ * gone.
  */
 export function workspaceTightenOnlyWriteVerdict(
   key: string,
   value: unknown,
   scopes: { system: Settings; systemDefaults: Settings; user: Settings },
-): TightenOnlyVerdict | undefined {
+  workspaceSettings?: Settings,
+): WorkspaceTightenOnlyWriteVerdict | undefined {
   const entry = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
     (candidate) => `${candidate.section}.${candidate.key}` === key,
   );
@@ -630,7 +651,27 @@ export function workspaceTightenOnlyWriteVerdict(
   const workspaceCandidate = {
     [entry.section]: { [entry.key]: value },
   } as unknown as Settings;
-  return tightenOnlyVerdict(entry, workspaceCandidate, scopes);
+  const verdict = tightenOnlyVerdict(entry, workspaceCandidate, scopes);
+  if (
+    verdict === undefined ||
+    (verdict.kept === false && verdict.reason === 'system-sets')
+  ) {
+    return verdict;
+  }
+  const current = (
+    workspaceSettings?.[entry.section] as Record<string, unknown> | undefined
+  )?.[entry.key];
+  if (
+    current !== undefined &&
+    entry.strictness(value) < entry.strictness(current)
+  ) {
+    return {
+      kept: false,
+      reason: 'loosens-workspace-value',
+      workspaceValue: current,
+    };
+  }
+  return verdict;
 }
 
 /**

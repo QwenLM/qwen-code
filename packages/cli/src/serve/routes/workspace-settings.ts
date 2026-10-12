@@ -174,9 +174,13 @@ function rejectWorkspaceRestrictedWrite(
  * `requiresRestart: false` while the merge dropped it at every load.
  *
  * The refusal is on the verdict, never on the key: a write is refused only
- * when it would loosen an operator scope or when System scope sets the key.
- * `kept` (the tightening direction) and `same` (repeats what is in force)
- * writes proceed.
+ * when it would loosen an operator scope, when System scope sets the key, or
+ * when it would overwrite a strictly stricter value the workspace file
+ * already carries.
+ *
+ * When the bound workspace is the home directory the loader marks the
+ * workspace scope inactive and the write lands in the user settings file,
+ * where it is honored on the next load — the guard stays out of its way.
  *
  * Returns true when the request was answered and the caller must stop.
  */
@@ -192,21 +196,28 @@ function rejectWorkspaceTightenOnlyWrite(
   if (value === undefined || value === null) return false;
   const loaded = loadSettings(workspace, {
     skipLoadEnvironment: true,
-    skipWorkspaceSettings: true,
     workspaceTrusted: true,
   });
-  const verdict = workspaceTightenOnlyWriteVerdict(key, value, {
-    system: loaded.system.settings,
-    systemDefaults: loaded.systemDefaults.settings,
-    user: loaded.user.settings,
-  });
+  if (!loaded.workspaceSettingsActive) return false;
+  const verdict = workspaceTightenOnlyWriteVerdict(
+    key,
+    value,
+    {
+      system: loaded.system.settings,
+      systemDefaults: loaded.systemDefaults.settings,
+      user: loaded.user.settings,
+    },
+    loaded.workspace.settings,
+  );
   if (verdict === undefined || verdict.kept || verdict.reason === 'same') {
     return false;
   }
   const reason =
     verdict.reason === 'system-sets'
       ? 'System scope settings also set it'
-      : `it would loosen the ${verdict.against} value`;
+      : verdict.reason === 'loosens-workspace-value'
+        ? `it would replace the workspace value ${JSON.stringify(verdict.workspaceValue)} with a looser one`
+        : `it would loosen the ${verdict.against} value`;
   res.status(400).json({
     error: `Setting "${key}" is not honored from workspace scope because ${reason}; a workspace may only make this setting stricter`,
     code: 'workspace_tighten_only_setting',

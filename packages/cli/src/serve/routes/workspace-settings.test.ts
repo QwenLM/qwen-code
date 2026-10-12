@@ -742,13 +742,16 @@ describe('POST /workspace/settings', () => {
       user?: Record<string, unknown>;
       system?: Record<string, unknown>;
       systemDefaults?: Record<string, unknown>;
+      workspace?: Record<string, unknown>;
+      workspaceSettingsActive?: boolean;
     }) => {
       vi.mocked(loadSettings).mockReturnValue({
         merged: {},
         user: { settings: scopes.user ?? {} },
         system: { settings: scopes.system ?? {} },
         systemDefaults: { settings: scopes.systemDefaults ?? {} },
-        workspace: { settings: {} },
+        workspace: { settings: scopes.workspace ?? {} },
+        workspaceSettingsActive: scopes.workspaceSettingsActive ?? true,
         forScope: vi.fn().mockReturnValue({ settings: {} }),
       } as never);
     };
@@ -814,6 +817,65 @@ describe('POST /workspace/settings', () => {
     it('accepts a workspace write that repeats the effective value', async () => {
       const { app, persistSetting } = makeApp();
       mockScopes({});
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalled();
+    });
+
+    it("rejects a workspace write that would destroy the file's own stricter value", async () => {
+      // R3-1: with the operator scopes silent, the merge keeps the
+      // workspace's committed `false` in force. Writing `true` over it ranks
+      // `same` against the operator scopes — but it erases the in-force
+      // tightening and silently reopens unattended updates.
+      const { app, persistSetting } = makeApp();
+      mockScopes({ workspace: { general: { enableAutoUpdate: false } } });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: true,
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_tighten_only_setting',
+      });
+      expect(res.body.error).toContain('false');
+      expect(persistSetting).not.toHaveBeenCalled();
+    });
+
+    it('accepts a workspace write that repeats the file value', async () => {
+      // A genuinely repeated value ranks equal, not lower.
+      const { app, persistSetting } = makeApp();
+      mockScopes({ workspace: { general: { enableAutoUpdate: false } } });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: false,
+      });
+
+      expect(res.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalled();
+    });
+
+    it('accepts a workspace write when the bound workspace is the home directory', async () => {
+      // R3-2: the loader marks the workspace scope inactive when the
+      // workspace IS the home directory; the write lands in the user file
+      // and is honored on the next load. Refusing it (with a false reason)
+      // would lock the operator out of re-enabling auto-update through the
+      // API.
+      const { app, persistSetting } = makeApp();
+      mockScopes({
+        user: { general: { enableAutoUpdate: false } },
+        workspaceSettingsActive: false,
+      });
 
       const res = await request(app).post('/workspace/settings').send({
         scope: 'workspace',
