@@ -75,7 +75,7 @@ test('the runner configuration decides which lane runs what', () => {
 
 test('the manifests change what each lane executes', () => {
   assert.equal(classifyChangedFiles(['package.json']), PLATFORM_SENSITIVE);
-  assert.equal(classifyChangedFiles(['package-lock.json']), PLATFORM_SENSITIVE);
+  assert.equal(classifyChangedFiles(['pnpm-lock.yaml']), PLATFORM_SENSITIVE);
   // A workspace manifest is not the root one; it reaches the lanes through
   // the subsystem rules or not at all.
   assert.equal(

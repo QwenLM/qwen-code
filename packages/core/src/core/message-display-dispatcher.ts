@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookExecutionOwner } from '../hooks/hook-execution-context.js';
+
 import { randomUUID } from 'node:crypto';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
@@ -93,6 +95,7 @@ export class MessageDisplayDispatcher {
     private readonly signal: AbortSignal,
     private readonly warn: (message: string) => void,
     nowMs: number = Date.now(),
+    private readonly owner?: HookExecutionOwner,
   ) {
     this.state = createInitialMessageDisplayState(nowMs);
   }
@@ -165,6 +168,7 @@ export class MessageDisplayDispatcher {
       .request<HookExecutionRequest, HookExecutionResponse>(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: this.owner,
           eventName: 'MessageDisplay',
           input: {
             message_id: this.messageId,

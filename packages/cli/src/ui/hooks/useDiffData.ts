@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useState } from 'react';
+import { ConfigContext } from '../contexts/ConfigContext.js';
+import { useContext, useEffect, useState } from 'react';
 import type { Hunk } from 'diff';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
@@ -41,13 +42,15 @@ export interface CurrentDiffData {
  * files, or other git failures.
  */
 export function useDiffData(cwd: string | undefined): CurrentDiffData {
+  const config = useContext(ConfigContext);
+  const sandboxed = Boolean(config?.getShellExecutionSandbox?.());
   const [result, setResult] = useState<GitDiffResult | null>(null);
   const [hunks, setHunks] = useState<Map<string, Hunk[]>>(new Map());
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
-    if (!cwd) {
+    if (!cwd || sandboxed) {
       setResult(null);
       setHunks(new Map());
       setLoading(false);
@@ -81,7 +84,7 @@ export function useDiffData(cwd: string | undefined): CurrentDiffData {
     return () => {
       cancelled = true;
     };
-  }, [cwd]);
+  }, [cwd, sandboxed]);
 
   return { result, hunks, loading };
 }

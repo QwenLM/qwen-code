@@ -24,12 +24,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
     VIRTUAL_KEY,
 };
+use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, GetClassNameW, GetGUIThreadInfo, GetParent, GetWindowThreadProcessId,
     IsChild, PostMessageW, GUITHREADINFO, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 
 // ── XAML / UWP host detection ────────────────────────────────────────────────
 //
@@ -581,19 +581,22 @@ fn wait_for_exact_foreground(target: HWND, timeout: Duration) -> bool {
 /// external Win32/UIA state instead of inferred from API return values or a
 /// fixed settle delay. The prior foreground is restored on every body/focus
 /// result after activation succeeds.
-fn with_confirmed_foreground<T>(
+pub(crate) fn with_confirmed_foreground<T>(
     target: HWND,
     operation: &str,
     focus: impl FnOnce() -> Result<()>,
     body: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let previous = unsafe { GetForegroundWindow() };
+    let foreground_target = crate::win32::capture_foreground_target(target.0 as usize as u64)
+        .ok_or_else(|| {
+            anyhow::anyhow!("foreground_unavailable: target disappeared; no input was sent")
+        })?;
     let _ = unsafe { crate::input::force_foreground_assisted(target) };
     if !wait_for_exact_foreground(target, Duration::from_millis(500)) {
         let actual = unsafe { GetForegroundWindow() };
-        if !previous.0.is_null() && previous != target {
-            let _ = unsafe { SetForegroundWindow(previous) };
-        }
+        let _ =
+            crate::win32::restore_input_foreground(previous.0 as usize as u64, foreground_target);
         bail!(
             "foreground_unavailable: Windows did not confirm exact target HWND {:?} for {operation} \
              within 500 ms (actual foreground HWND {:?}). Route the request through the \
@@ -602,18 +605,6 @@ fn with_confirmed_foreground<T>(
             actual.0
         );
     }
-
-    let Some(foreground_target) = crate::win32::capture_foreground_target(target.0 as usize as u64)
-    else {
-        if !previous.0.is_null() && previous != target {
-            let _ = unsafe { SetForegroundWindow(previous) };
-        }
-        bail!(
-            "foreground_unavailable: exact target HWND {:?} disappeared before {operation}; \
-             no input was sent",
-            target.0
-        );
-    };
 
     let result = (|| {
         focus()?;
@@ -651,10 +642,9 @@ fn with_confirmed_foreground<T>(
     if result.is_ok() {
         sleep(Duration::from_millis(40));
     }
-    if !previous.0.is_null() && previous != target {
-        let _ = unsafe { SetForegroundWindow(previous) };
-    }
-    result
+    let restored =
+        crate::win32::restore_input_foreground(previous.0 as usize as u64, foreground_target);
+    result.and_then(|value| restored.map(|()| value))
 }
 
 /// Build a single Unicode keyboard INPUT struct for one UTF-16 code unit,

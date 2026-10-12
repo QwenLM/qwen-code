@@ -15,11 +15,23 @@ import {
   StopHookOutput,
   PermissionRequestHookOutput,
   isToolArtifactLike,
+  toUpdatedToolInput,
 } from './types.js';
 import type { HookOutput, HookExecutionResult } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('HOOK_AGGREGATOR');
+
+/**
+ * Ranking for PreToolUse `hookSpecificOutput.permissionDecision` values.
+ * Higher rank wins when multiple hooks match the same tool call, so a
+ * `deny` can never be silently overridden by another hook's `allow`.
+ */
+const PERMISSION_DECISION_RANK: Record<'allow' | 'ask' | 'deny', number> = {
+  allow: 1,
+  ask: 2,
+  deny: 3,
+};
 
 /**
  * Aggregated result from multiple hook executions
@@ -141,7 +153,7 @@ export class HookAggregator {
    */
   private mergeWithOrLogic(
     outputs: HookOutput[],
-    _eventName?: HookEventName,
+    eventName?: HookEventName,
   ): HookOutput {
     const merged: HookOutput = {};
     const reasons: string[] = [];
@@ -151,6 +163,11 @@ export class HookAggregator {
     let hasContinueFalse = false;
     let stopReason: string | undefined;
     const otherHookSpecificFields: Record<string, unknown> = {};
+    const isPreToolUse = eventName === HookEventName.PreToolUse;
+    let winningPermissionDecision: 'allow' | 'ask' | 'deny' | undefined;
+    let winningPermissionRank = 0;
+    const winningPermissionReasons: string[] = [];
+    let updatedInputInvalid = false;
 
     for (const output of outputs) {
       // Check for blocking decisions
@@ -176,6 +193,30 @@ export class HookAggregator {
 
       // Collect other hookSpecificOutput fields (later values win)
       if (output.hookSpecificOutput) {
+        // PreToolUse permission decisions aggregate most-restrictive-first
+        // (deny > ask > allow), independent of hook completion/config order.
+        if (isPreToolUse) {
+          const decision = output.hookSpecificOutput['permissionDecision'];
+          if (
+            decision === 'allow' ||
+            decision === 'ask' ||
+            decision === 'deny'
+          ) {
+            const rank = PERMISSION_DECISION_RANK[decision];
+            if (rank > winningPermissionRank) {
+              winningPermissionRank = rank;
+              winningPermissionDecision = decision;
+              winningPermissionReasons.length = 0;
+            }
+            if (rank === winningPermissionRank) {
+              const reason =
+                output.hookSpecificOutput['permissionDecisionReason'];
+              if (typeof reason === 'string' && reason.length > 0) {
+                winningPermissionReasons.push(reason);
+              }
+            }
+          }
+        }
         for (const [key, value] of Object.entries(output.hookSpecificOutput)) {
           if (key === 'artifacts' && Array.isArray(value)) {
             const validArtifacts = value.filter(isToolArtifactLike);
@@ -189,6 +230,18 @@ export class HookAggregator {
             debugLogger.warn(
               'Dropped malformed hookSpecificOutput.artifacts; expected array',
             );
+          } else if (
+            isPreToolUse &&
+            (key === 'permissionDecision' || key === 'permissionDecisionReason')
+          ) {
+            // Handled by the ranking logic above, not last-wins.
+          } else if (isPreToolUse && key === 'updatedInput') {
+            // Last replacement in hook order wins, but never over an invalid
+            // one, which must still reject the call.
+            if (value !== undefined && !updatedInputInvalid) {
+              otherHookSpecificFields[key] = value;
+              updatedInputInvalid = toUpdatedToolInput(value) === null;
+            }
           } else if (key !== 'additionalContext' && key !== 'artifacts') {
             otherHookSpecificFields[key] = value;
           }
@@ -231,6 +284,13 @@ export class HookAggregator {
     const hookSpecificOutput: Record<string, unknown> = {
       ...otherHookSpecificFields,
     };
+    if (winningPermissionDecision !== undefined) {
+      hookSpecificOutput['permissionDecision'] = winningPermissionDecision;
+      if (winningPermissionReasons.length > 0) {
+        hookSpecificOutput['permissionDecisionReason'] =
+          winningPermissionReasons.join('\n');
+      }
+    }
     if (additionalContexts.length > 0) {
       hookSpecificOutput['additionalContext'] = additionalContexts.join('\n');
     }
@@ -251,7 +311,7 @@ export class HookAggregator {
    * Rules:
    * - behavior: deny wins over allow (security priority)
    * - message: concatenated with newlines
-   * - updatedInput: later values win
+   * - updatedInput: later values win, except over an invalid one
    * - updatedPermissions: concatenated
    * - interrupt: true wins over false
    */
@@ -261,7 +321,8 @@ export class HookAggregator {
     let hasDeny = false;
     let hasAllow = false;
     let interrupt = false;
-    let updatedInput: Record<string, unknown> | undefined;
+    let updatedInput: unknown;
+    let updatedInputInvalid = false;
     const allUpdatedPermissions: Array<{ type: string; tool?: string }> = [];
 
     for (const output of outputs) {
@@ -297,9 +358,11 @@ export class HookAggregator {
         interrupt = true;
       }
 
-      // Collect updatedInput - use last non-empty
-      if (decision['updatedInput']) {
-        updatedInput = decision['updatedInput'] as Record<string, unknown>;
+      // Collect updatedInput - the last one wins, but never over an invalid
+      // one, which must still reject the call.
+      if (decision['updatedInput'] !== undefined && !updatedInputInvalid) {
+        updatedInput = decision['updatedInput'];
+        updatedInputInvalid = toUpdatedToolInput(updatedInput) === null;
       }
 
       // Collect updatedPermissions
@@ -338,7 +401,7 @@ export class HookAggregator {
       mergedDecision['interrupt'] = true;
     }
 
-    if (updatedInput) {
+    if (updatedInput !== undefined) {
       mergedDecision['updatedInput'] = updatedInput;
     }
 

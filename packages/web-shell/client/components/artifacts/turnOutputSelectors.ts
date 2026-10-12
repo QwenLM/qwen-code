@@ -39,6 +39,14 @@ export function getArtifactsByTurn(
       continue;
     }
     if (!currentTurnId) currentTurnId = message.id;
+    if (message.role === 'assistant') {
+      for (const artifact of message.reportedArtifacts ?? []) {
+        recordArtifactReferences.push({
+          turnId: currentTurnId,
+          workspacePath: artifact.workspacePath,
+        });
+      }
+    }
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
       for (const id of getToolCallIds(tool)) {
@@ -306,7 +314,7 @@ function getFileChange(
   };
 }
 
-function getToolFilePath(tool: ACPToolCall): string | undefined {
+export function getToolFilePath(tool: ACPToolCall): string | undefined {
   const fromArgs = getStringContentField(
     tool.args,
     'file_path',

@@ -35,6 +35,10 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
   const [session, setSession] = useState<WorktreeSession | null>(null);
 
   useEffect(() => {
+    if (config.getShellExecutionSandbox?.()) {
+      setSession(null);
+      return;
+    }
     let cancelled = false;
 
     const safeLoad = async () => {

@@ -39,6 +39,71 @@ describe('contextLengthError', () => {
     expect(isContextLengthExceededError(new Error(message))).toBe(false);
   });
 
+  it('parses the DashScope input-range upper bound as the limit', () => {
+    const info = getContextLengthExceededInfo(
+      new Error(
+        '<400> InternalError.Algo.InvalidParameter: Range of input length should be [1, 196608]',
+      ),
+    );
+    expect(info.isExceeded).toBe(true);
+    expect(info.limitTokens).toBe(196608);
+    expect(info.actualTokens).toBeUndefined();
+    // The range bounds the prompt, not the window: `prompt + max_tokens` may
+    // exceed it, so a consumer sizing an output budget against a window must
+    // not use it (#13876).
+    expect(info.limitKind).toBe('input');
+  });
+
+  // #13415: a local llama.cpp server names its REAL context ceiling in wording
+  // none of the patterns above covered, so the reactive compaction path in
+  // llm-chat never fired and the session looped on the same 400 forever.
+  describe('llama.cpp context overflow wording (#13415)', () => {
+    const LLAMA_CPP_OVERFLOW =
+      'request (279935 tokens) exceeds the available context size (262144 tokens), try increasing it';
+
+    it.each([
+      // The raw server message.
+      LLAMA_CPP_OVERFLOW,
+      // The form the reporter actually saw: the CLI renders a caught request
+      // failure as `[API Error: <status> <message>]`.
+      `[API Error: 400 ${LLAMA_CPP_OVERFLOW}]`,
+      // Same wording without the surrounding brackets.
+      `API Error: 400 ${LLAMA_CPP_OVERFLOW}`,
+    ])('detects overflow and parses both token counts: %s', (message) => {
+      const info = getContextLengthExceededInfo(new Error(message));
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(279935);
+      expect(info.limitTokens).toBe(262144);
+      // "available context size" is the window itself, so the number may size
+      // an output budget against it (#13432).
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('detects the wording nested in an SDK-style error object', () => {
+      const info = getContextLengthExceededInfo({
+        status: 400,
+        error: { message: LLAMA_CPP_OVERFLOW },
+      });
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(279935);
+      expect(info.limitTokens).toBe(262144);
+    });
+
+    it('detects the wording through a wrapping cause chain', () => {
+      const error = new Error('request failed', {
+        cause: new Error(LLAMA_CPP_OVERFLOW),
+      });
+
+      const info = getContextLengthExceededInfo(error);
+
+      expect(info.isExceeded).toBe(true);
+      expect(info.actualTokens).toBe(279935);
+      expect(info.limitTokens).toBe(262144);
+    });
+  });
+
   it('parses prompt-too-long actual and limit token counts', () => {
     const info = getContextLengthExceededInfo(
       new Error('prompt is too long: 137500 tokens > 135000 maximum'),
@@ -47,6 +112,10 @@ describe('contextLengthError', () => {
     expect(info.isExceeded).toBe(true);
     expect(info.actualTokens).toBe(137500);
     expect(info.limitTokens).toBe(135000);
+    // A bare `X tokens > M` does not say which quantity M bounds, so the kind
+    // stays unset: consumers keep their previous behavior rather than treating
+    // an unattested number as a window.
+    expect(info.limitKind).toBeUndefined();
   });
 
   it('parses OpenAI-style maximum context length token counts', () => {
@@ -59,6 +128,20 @@ describe('contextLengthError', () => {
     expect(info.isExceeded).toBe(true);
     expect(info.actualTokens).toBe(135000);
     expect(info.limitTokens).toBe(128000);
+    expect(info.limitKind).toBe('total');
+  });
+
+  it('marks an input token-count maximum as an input bound', () => {
+    const info = getContextLengthExceededInfo(
+      new Error(
+        'The input token length (127234) exceeds the maximum number of tokens allowed (100000).',
+      ),
+    );
+
+    expect(info.isExceeded).toBe(true);
+    expect(info.actualTokens).toBe(127234);
+    expect(info.limitTokens).toBe(100000);
+    expect(info.limitKind).toBe('input');
   });
 
   it('parses maximum context length limits without actual token counts', () => {

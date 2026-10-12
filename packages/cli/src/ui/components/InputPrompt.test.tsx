@@ -50,6 +50,7 @@ import {
   useBackgroundTaskViewActions,
   useBackgroundTaskViewState,
 } from '../contexts/BackgroundTaskViewContext.js';
+import { ScrollContext } from '../contexts/ScrollContext.js';
 import {
   clearPromptStash,
   savePromptStash,
@@ -1805,12 +1806,72 @@ describe('InputPrompt', () => {
       expect(addItem).toHaveBeenCalledWith(
         {
           type: 'error',
-          text: 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+          text:
+            process.platform === 'linux'
+              ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+              : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
         },
         expect.any(Number),
       );
       second.unmount();
     });
+
+    // Issue #12504. PASTE_CLIPBOARD_IMAGE is computed once at module-import
+    // time from the real host platform, so `process.platform` cannot be
+    // stubbed late. Only run on a real Linux runner; skip on Windows
+    // (where the Ctrl+V byte would never trigger the keybinding) and
+    // macOS (where the Linux message branch wouldn't fire anyway).
+    const linuxOnly = process.platform === 'linux' ? describe : describe.skip;
+    linuxOnly(
+      'uses a Linux-specific unavailable message on Linux (#12504)',
+      () => {
+        it('emits the wl-clipboard/xclip message under stubbed process.platform', async () => {
+          const originalPlatform = process.platform;
+          Object.defineProperty(process, 'platform', { value: 'linux' });
+          try {
+            const addItem = vi.fn();
+            const clipboardUnavailableShownRef = { current: false };
+            mockedUseUIState.mockReturnValue({
+              isFeedbackDialogOpen: false,
+              messageQueue: [],
+              pendingLlmHistoryItems: [],
+              historyManager: { addItem },
+            } as unknown as ReturnType<typeof useUIState>);
+            vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+              async (onUnavailable) => {
+                onUnavailable?.();
+                return false;
+              },
+            );
+
+            const view = renderWithProviders(
+              <InputPrompt
+                {...props}
+                clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+              />,
+            );
+            await wait();
+
+            view.stdin.write('\x16');
+            await wait();
+
+            expect(addItem).toHaveBeenCalledTimes(1);
+            expect(addItem).toHaveBeenCalledWith(
+              {
+                type: 'error',
+                text: 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
+              },
+              expect.any(Number),
+            );
+            view.unmount();
+          } finally {
+            Object.defineProperty(process, 'platform', {
+              value: originalPlatform,
+            });
+          }
+        });
+      },
+    );
 
     it('should handle image save failure gracefully', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
@@ -3210,6 +3271,38 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
     expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should submit on Enter when completion suggestions are still loading', async () => {
+    // The dropdown shows "Loading suggestions..." with an empty list
+    // (showSuggestions true, no suggestions yet) — there is nothing to
+    // accept, so Enter must submit the buffer rather than be swallowed.
+    // Regression for render-derived completion state lagging a fast
+    // `@file` + Enter burst (#13015).
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [],
+      isLoadingSuggestions: true,
+      completionMode: CompletionMode.AT,
+    });
+    props.buffer.setText('@context.txt Inspect this context.');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      '@context.txt Inspect this context.',
+      {
+        deferUntilIdle: false,
+        submittedPrompt: '@context.txt Inspect this context.',
+      },
+    );
     unmount();
   });
 
@@ -6190,6 +6283,163 @@ describe('InputPrompt', () => {
       await wait(50);
       // Second ESC within the timeout: clear typed input.
       expect(props.buffer.text).toBe('');
+      unmount();
+    });
+  });
+
+  describe('VP-mode bare Up/Down scrolls the conversation (#10749)', () => {
+    // Terminals without SGR mouse reporting turn wheel events into bare ↑/↓.
+    // In VP mode (ui.useTerminalBuffer, on by default) those keys have to
+    // scroll the transcript while the composer is empty instead of rewriting
+    // the input with an old prompt.
+    const vpSettings = {
+      merged: { ui: { useTerminalBuffer: true } },
+    } as LoadedSettings;
+
+    const renderVp = (
+      scrollBy: (delta: number) => void,
+      hasScrollableTranscript: () => boolean = () => true,
+    ) =>
+      renderWithProviders(
+        <ScrollContext.Provider value={{ scrollBy, hasScrollableTranscript }}>
+          <InputPrompt {...props} />
+        </ScrollContext.Provider>,
+        { settings: vpSettings },
+      );
+
+    it('Up from an empty composer scrolls up instead of navigating history', async () => {
+      const scrollBy = vi.fn();
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).toHaveBeenCalledWith(-1);
+      expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down from an empty composer scrolls down instead of navigating history', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(scrollBy).toHaveBeenCalledWith(1);
+      expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('keeps history navigation when the composer has text', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('draft');
+      // Pre-position at col 0 so the two-step edge transition goes straight to
+      // history instead of consuming the first press to snap the cursor home.
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('keeps history navigation when VP mode is off', async () => {
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderWithProviders(
+        <ScrollContext.Provider
+          value={{ scrollBy, hasScrollableTranscript: () => true }}
+        >
+          <InputPrompt {...props} />
+        </ScrollContext.Provider>,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Down still descends to the background-tasks pill instead of scrolling', async () => {
+      // ↓ from an empty composer is the only keyboard route into the pill, so
+      // the scroll fallback has to yield whenever a descend target is on
+      // screen — otherwise a workflow-only session could never open it.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseBackgroundTaskViewState.mockReturnValue({
+        entries: [{ kind: 'workflow', runId: 'wf-1', status: 'running' }],
+        selectedIndex: 0,
+        dialogMode: 'closed',
+        dialogOpen: false,
+        pillFocused: false,
+        livePanelFocused: false,
+        livePanelSelectedIndex: 0,
+      } as unknown as ReturnType<typeof useBackgroundTaskViewState>);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockViewActions.setBgPillFocused).toHaveBeenCalledWith(true);
+      expect(scrollBy).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Up still recalls history when the transcript does not overflow', async () => {
+      // A short conversation has nothing to scroll. Consuming ↑ there would
+      // leave it dead — no scroll and no history — so it falls through.
+      const scrollBy = vi.fn();
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy, () => false);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Up at the top of a scrollable transcript does not replay history', async () => {
+      // The other half of the tradeoff: once the transcript overflows, ↑ stays
+      // owned by scrolling even at the top edge. A wheel spun past the top
+      // emits a burst of ↑ presses, and letting the first dead one fall through
+      // to history would reintroduce exactly the bug being fixed.
+      const scrollBy = vi.fn();
+      mockBuffer.setText('');
+      mockBuffer.visualCursor = [0, 0];
+      const { stdin, unmount } = renderVp(scrollBy);
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(scrollBy).toHaveBeenCalledWith(-1);
+      expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
       unmount();
     });
   });

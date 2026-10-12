@@ -8,7 +8,7 @@
 /**
  * Development entry point for Qwen Code CLI.
  *
- * Runs the CLI directly from TypeScript source files without requiring a build step.
+ * Runs the CLI from TypeScript source with prebuilt workspace dependencies.
  * Changes to packages/core or packages/cli are reflected immediately.
  *
  * Usage: npm run dev -- [args]
@@ -26,8 +26,10 @@ import {
   symlinkSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
 } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
+import { copyBrowserUseAssets } from './copy-browser-use-assets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -55,6 +57,31 @@ if (existsSync(userDocsTarget) && !existsSync(qcHelperDocsLink)) {
     symlinkSync(userDocsTarget, qcHelperDocsLink);
   } catch {
     // Symlink may fail on some systems; non-critical for dev
+  }
+}
+
+// Stage the Browser Use skill runtime next to its SKILL.md for dev mode. The
+// bundle step does the same into dist/bundled; only dev mode reads the skill
+// from the source tree, so this copy exists nowhere else (it is git-ignored,
+// and no build step writes it). It needs the built browser-use package. The
+// informational passthrough flags never reach a skill, so they skip the copy
+// and stay a fast path.
+const passthroughArgs = process.argv.slice(2);
+const informationalOnly = passthroughArgs.some((argument) =>
+  ['--version', '-v', '--help', '-h'].includes(argument),
+);
+if (!informationalOnly) {
+  try {
+    copyBrowserUseAssets(
+      root,
+      join(root, 'packages', 'core', 'src', 'skills', 'bundled', 'browser-use'),
+    );
+  } catch (error) {
+    console.warn(
+      `Browser Use skill runtime not staged for dev mode: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 }
 
@@ -89,6 +116,42 @@ for (const [subpath, conditions] of Object.entries(coreExports ?? {})) {
     coreSubpathSourceUrls[`${coreSpecifier}/${subpath.slice(2)}`] =
       pathToFileURL(sourcePath).href;
   }
+}
+
+// Shared node_modules may resolve the bridge from another checkout. Keep the
+// daemon and its ACP children on this checkout's protocol without a build.
+const bridgeDir = join(root, 'packages', 'acp-bridge');
+// `?? {}` rather than a bare read: a manifest without an `exports` map means
+// there is nothing to remap, and `Object.entries(undefined)` would throw at
+// module load — taking the launcher down for every caller, not just this
+// remapping.
+const bridgeExports =
+  JSON.parse(readFileSync(join(bridgeDir, 'package.json'), 'utf-8')).exports ??
+  {};
+for (const [subpath, conditions] of Object.entries(bridgeExports)) {
+  const entry = conditions?.import;
+  if (typeof entry !== 'string' || !entry.startsWith('./dist/')) continue;
+  const sourcePath = join(
+    bridgeDir,
+    'src',
+    entry.slice('./dist/'.length).replace(/\.js$/, '.ts'),
+  );
+  if (!existsSync(sourcePath)) continue;
+  const specifier =
+    subpath === '.'
+      ? '@qwen-code/acp-bridge'
+      : `@qwen-code/acp-bridge/${subpath.slice(2)}`;
+  coreSubpathSourceUrls[specifier] = pathToFileURL(sourcePath).href;
+}
+
+// Keep shared worktree installs from mixing another checkout's channel build.
+for (const name of readdirSync(join(root, 'packages', 'channels'))) {
+  const directory = join(root, 'packages', 'channels', name);
+  const manifest = join(directory, 'package.json');
+  const entry = join(directory, 'src', 'index.ts');
+  if (!existsSync(manifest) || !existsSync(entry)) continue;
+  const channel = JSON.parse(readFileSync(manifest, 'utf8'));
+  coreSubpathSourceUrls[channel.name] = pathToFileURL(entry).href;
 }
 
 const loaderCode = `

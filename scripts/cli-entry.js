@@ -9,14 +9,13 @@
 /**
  * Production bin entry wrapper.
  *
- * For most commands: launches the bundled CLI with --expose-gc so that
- * global.gc() is available for the memory-pressure monitor's critical-tier
- * cleanup.
+ * For most commands, global.gc() must be available for the memory-pressure
+ * monitor's critical-tier cleanup. On POSIX under Node the entry exposes gc at
+ * runtime and imports cli.js in this process; on Windows and under Bun it
+ * launches the bundled CLI as a child with --expose-gc.
  *
  * For bootstrap fast paths: imports cli.js directly in-process, skipping the
- * spawnSync overhead. These paths do not need global.gc(); the normal
- * interactive path still relaunches with --expose-gc for the memory-pressure
- * monitor.
+ * spawnSync overhead. These paths do not need global.gc().
  */
 
 const relaunchArgs = process.env['QWEN_CODE_RELAUNCH_ARGS'];
@@ -308,18 +307,27 @@ if (isInProcessFastPath()) {
 } else {
   const { spawnSync } = await import('node:child_process');
   const UPDATE_COMPLETE_EXIT_CODE = 44;
-  const launcherNames =
-    process.platform === 'win32' ? ['qwen.cmd', 'qwen.exe', 'qwen'] : ['qwen'];
+  // cmd.exe metacharacters. Mirrors UNSAFE_CMD_CHARS in
+  // packages/cli/src/ui/standalone-update.ts — kept local because this
+  // plain-ESM entry ships in the standalone package and cannot import the
+  // TypeScript sources.
+  const UNSAFE_CMD_CHARS = /[&|<>^%!"`\n\r]/;
   const entryPath = resolve(process.argv[1]);
-  const entryRootLength = parse(entryPath).root.length;
-  const launcherFromEnv = standaloneShim;
   delete process.env['QWEN_CODE_LAUNCHER_PID'];
-  const launcherCandidates = process.env['PATH']
-    ?.split(delimiter)
-    .flatMap((dir) => launcherNames.map((name) => join(dir, name)))
-    .filter((candidate) => existsSync(candidate));
-  const launcher =
-    launcherFromEnv && existsSync(launcherFromEnv)
+  const launchEnv = { ...process.env };
+
+  const findLauncher = () => {
+    const launcherNames =
+      process.platform === 'win32'
+        ? ['qwen.cmd', 'qwen.exe', 'qwen']
+        : ['qwen'];
+    const entryRootLength = parse(entryPath).root.length;
+    const launcherFromEnv = standaloneShim;
+    const launcherCandidates = process.env['PATH']
+      ?.split(delimiter)
+      .flatMap((dir) => launcherNames.map((name) => join(dir, name)))
+      .filter((candidate) => existsSync(candidate));
+    return launcherFromEnv && existsSync(launcherFromEnv)
       ? launcherFromEnv
       : launcherCandidates
           ?.map((candidate) => {
@@ -347,21 +355,10 @@ if (isInProcessFastPath()) {
           })
           .filter(({ score }) => score > entryRootLength)
           .sort((a, b) => b.score - a.score)[0]?.candidate;
-  const env = {
-    ...process.env,
-    QWEN_CODE_LAUNCHER_PID: String(process.pid),
   };
-  const result = spawnSync(
-    process.execPath,
-    ['--expose-gc', cliPath, ...cliArgs],
-    { stdio: 'inherit', env },
-  );
 
-  if (result.signal) {
-    process.kill(process.pid, result.signal);
-  } else if (result.status !== UPDATE_COMPLETE_EXIT_CODE) {
-    process.exit(result.status ?? 1);
-  } else {
+  const relaunchAfterUpdate = () => {
+    const launcher = findLauncher();
     if (!launcher) {
       process.stderr.write(
         'Update successful! The new version will be used on your next run.\n',
@@ -369,7 +366,7 @@ if (isInProcessFastPath()) {
       process.exit(0);
     }
     const relaunchEnv = {
-      ...process.env,
+      ...launchEnv,
       QWEN_CODE_RELAUNCH_ARGS: JSON.stringify(cliArgs),
       QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
     };
@@ -377,12 +374,38 @@ if (isInProcessFastPath()) {
     // its own version instead of inheriting the old process's session version.
     delete relaunchEnv['QWEN_CODE_STARTUP_VERSION'];
     delete relaunchEnv['QWEN_CODE_MANAGED_NPM_PIN'];
+    if (
+      process.platform === 'win32' &&
+      launcher.endsWith('.cmd') &&
+      UNSAFE_CMD_CHARS.test(launcher)
+    ) {
+      // The cmd.exe relaunch below hands its command line over verbatim
+      // (windowsVerbatimArguments), which drops Node's escaping safety net:
+      // a launcher path with cmd metacharacters would be re-tokenized into
+      // extra commands. The update itself already landed, so skip the
+      // relaunch instead of spawning a malformed command line.
+      process.stderr.write(
+        'Update successful! The new version will be used on your next run.\n',
+      );
+      process.exit(0);
+      // Unreachable in production; keeps tests with a mocked exit honest.
+      return;
+    }
     const relaunchResult =
       process.platform === 'win32' && launcher.endsWith('.cmd')
         ? spawnSync(
             process.env['ComSpec'] ?? 'cmd.exe',
             ['/d', '/s', '/c', `""${launcher}""`],
-            { stdio: 'inherit', env: relaunchEnv },
+            // cmd.exe does not understand Node's MSVCRT argv escaping: it
+            // rewrites every embedded quote of the ""…"" idiom as \", and
+            // cmd /s rule 2 then strips the line down to a literal
+            // \"\"path\"\" program name (#12687). Hand the line over
+            // verbatim, as shellExecutionService already does for cmd.
+            {
+              stdio: 'inherit',
+              env: relaunchEnv,
+              windowsVerbatimArguments: true,
+            },
           )
         : spawnSync(launcher, [], {
             stdio: 'inherit',
@@ -392,6 +415,59 @@ if (isInProcessFastPath()) {
       process.kill(process.pid, relaunchResult.signal);
     } else {
       process.exit(relaunchResult.status ?? 1);
+    }
+  };
+
+  // A fresh Node image (the spawned or relaunched CLI) reaches the cache only
+  // through NODE_COMPILE_CACHE; enabling it here also resolves the default
+  // directory and honours NODE_DISABLE_COMPILE_CACHE. Like the serve fast
+  // path, the value then reaches tool subprocesses too.
+  const { default: module } = await import('node:module');
+  const compileCache = module.enableCompileCache?.();
+  const compileCacheEnv =
+    !process.env['NODE_COMPILE_CACHE'] &&
+    compileCache?.status === module.constants?.compileCacheStatus?.ENABLED &&
+    compileCache?.directory
+      ? { NODE_COMPILE_CACHE: compileCache.directory }
+      : {};
+
+  // Bun cannot expose gc at runtime (no v8.setFlagsFromString), so it keeps
+  // the child with --expose-gc in argv, as Windows does.
+  if (process.platform !== 'win32' && !process.versions.bun) {
+    // Running the CLI in this process instead of a child saves a Node boot and
+    // the idle launcher's memory for the whole session. The memory-pressure
+    // monitor's global.gc() comes from the runtime flag instead of argv.
+    const [{ setFlagsFromString }, { runInNewContext }] = await Promise.all([
+      import('node:v8'),
+      import('node:vm'),
+    ]);
+    setFlagsFromString('--expose-gc');
+    globalThis.gc ??= runInNewContext('gc');
+    process.on('exit', (code) => {
+      if (code === UPDATE_COMPLETE_EXIT_CODE) relaunchAfterUpdate();
+    });
+    Object.assign(process.env, compileCacheEnv);
+    process.argv.splice(1, Infinity, cliPath, ...cliArgs);
+    await import(pathToFileURL(cliPath).href);
+  } else {
+    const result = spawnSync(
+      process.execPath,
+      ['--expose-gc', cliPath, ...cliArgs],
+      {
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          ...compileCacheEnv,
+          QWEN_CODE_LAUNCHER_PID: String(process.pid),
+        },
+      },
+    );
+    if (result.signal) {
+      process.kill(process.pid, result.signal);
+    } else if (result.status !== UPDATE_COMPLETE_EXIT_CODE) {
+      process.exit(result.status ?? 1);
+    } else {
+      relaunchAfterUpdate();
     }
   }
 }

@@ -28,6 +28,7 @@ import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { isComposerTask } from '../../utils/composerTasks';
 import { BranchPickerPopover } from '../BranchPickerPopover';
+import { artifactDisplayName } from '../artifacts/artifactUtils';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { Skeleton } from '../ui/skeleton';
 import styles from './EnvironmentPanel.module.css';
@@ -43,6 +44,7 @@ interface EnvironmentPanelProps {
   workspaceCwd?: string;
   gitWorkspaceCwd?: string;
   gitCwd?: string;
+  gitSessionId?: string;
   branch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
   tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
@@ -56,6 +58,8 @@ interface EnvironmentPanelProps {
   items?: readonly WebShellEnvironmentPanelItem[];
   onOpenGitDiff?: () => void;
   onOpenGitCommit?: () => void;
+  onOpenGitWorktrees?: () => void;
+  onOpenGitLog?: () => void;
   onOpenAgent?: (task: DaemonSessionAgentTaskStatus) => void;
   onOpenAgentWorkflow?: () => void;
   onOpenTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
@@ -149,6 +153,7 @@ export function EnvironmentPanel({
   workspaceCwd,
   gitWorkspaceCwd,
   gitCwd,
+  gitSessionId,
   branch,
   gitStatus,
   tasks,
@@ -162,6 +167,8 @@ export function EnvironmentPanel({
   items = DEFAULT_ENVIRONMENT_PANEL_ITEMS,
   onOpenGitDiff,
   onOpenGitCommit,
+  onOpenGitWorktrees,
+  onOpenGitLog,
   onOpenAgent,
   onOpenAgentWorkflow,
   onOpenTask,
@@ -309,10 +316,13 @@ export function EnvironmentPanel({
                   onOpenChange={setBranchPickerOpen}
                   workspaceCwd={gitWorkspaceCwd}
                   gitCwd={gitCwd}
+                  gitSessionId={gitSessionId}
                   side="left"
                   status={gitStatus}
                   onOpenDiff={onOpenGitDiff}
                   onOpenCommit={onOpenGitCommit}
+                  onOpenWorktrees={onOpenGitWorktrees}
+                  onOpenLog={onOpenGitLog}
                 >
                   <button
                     type="button"
@@ -488,28 +498,31 @@ export function EnvironmentPanel({
                 <FileListSkeleton label={t('common.loading')} />
               ) : artifacts?.length ? (
                 <ul className={styles.attachmentFiles}>
-                  {artifacts.map((artifact) => (
-                    <li key={artifact.id}>
-                      <button
-                        type="button"
-                        className={styles.attachmentFile}
-                        title={artifact.title}
-                        onClick={() => onOpenArtifact?.(artifact.id)}
-                      >
-                        <FileTypeIcon
-                          name={artifact.workspacePath ?? artifact.title}
-                          mimeType={artifact.mimeType}
-                          size={16}
-                          strokeWidth={1.7}
-                          className={styles.attachmentFileIcon}
-                          aria-hidden="true"
-                        />
-                        <span className={styles.attachmentFileName}>
-                          {artifact.title}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
+                  {artifacts.map((artifact) => {
+                    const displayName = artifactDisplayName(artifact);
+                    return (
+                      <li key={artifact.id}>
+                        <button
+                          type="button"
+                          className={styles.attachmentFile}
+                          title={displayName}
+                          onClick={() => onOpenArtifact?.(artifact.id)}
+                        >
+                          <FileTypeIcon
+                            name={artifact.workspacePath ?? artifact.title}
+                            mimeType={artifact.mimeType}
+                            size={16}
+                            strokeWidth={1.7}
+                            className={styles.attachmentFileIcon}
+                            aria-hidden="true"
+                          />
+                          <span className={styles.attachmentFileName}>
+                            {displayName}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               ) : (
                 <p className={styles.emptyDescription}>

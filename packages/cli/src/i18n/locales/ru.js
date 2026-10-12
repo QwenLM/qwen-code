@@ -194,6 +194,8 @@ export default {
     'Откат не затрагивает файлы, отредактированные вручную или с помощью shell-команд.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Не удаётся откатиться к сжатому ходу. Попробуйте более недавний ход.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Не удаётся откатить диалог к этому ходу: он больше не соответствует истории модели (например, после повторной попытки). Попробуйте более недавний ход.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'Восстановление файлов недоступно для этого хода (нет записанных изменений или ход был до текущей сессии).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -745,6 +747,12 @@ export default {
   '{{count}} hooks configured': '{{count}} хуков настроено',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Это меню только для чтения. Чтобы добавить или изменить хуки, отредактируйте settings.json напрямую или спросите Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Откройте это меню повторно, чтобы перезагрузить определения хуков.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Изменения параметров управления хуками и настроек безопасности HTTP требуют перезапуска.',
+  'Failed to reload hook definitions: {{error}}':
+    'Не удалось перезагрузить определения хуков: {{error}}',
   'Enter to select · Esc to cancel': 'Enter для выбора · Esc для отмены',
   // Hooks - Detail Step
   'Exit codes:': 'Коды выхода:',
@@ -1122,6 +1130,11 @@ export default {
   'Clear Authentication': 'Очистить аутентификацию',
   disabled: 'отключен',
   enabled: 'включен',
+  'disabled (bare mode)': 'отключен (минимальный режим)',
+  'disabled (safe mode)': 'отключен (безопасный режим)',
+  'disabled (disableAllHooks)': 'отключен (disableAllHooks)',
+  'disabled (folder not trusted)': 'отключен (папка не доверенная)',
+  'disabled (turned off for this session)': 'отключен (выключен в этой сессии)',
   'Server:': 'Сервер:',
   Reconnect: 'Переподключить',
   'View tools': 'Просмотреть инструменты',
@@ -1792,6 +1805,10 @@ export default {
     'Контекст превышает лимит! Используйте /compress или /clear для уменьшения.',
   'No API response yet. Send a message to see actual usage.':
     'Пока нет ответа от API. Отправьте сообщение, чтобы увидеть фактическое использование.',
+  'Estimated usage, including the conversation':
+    'Оценка использования с учётом беседы',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Данных об использовании от провайдера пока нет. Это локальные оценки с учётом беседы.',
   'Estimated pre-conversation overhead':
     'Оценочные накладные расходы перед беседой',
   'Context window': 'Контекстное окно',
@@ -1806,6 +1823,9 @@ export default {
   'Memory files': 'Файлы памяти',
   Skills: 'Навыки',
   Messages: 'Сообщения',
+  'Startup context': 'Стартовый контекст',
+  Unattributed: 'Не распределено',
+  'Cached prefix': 'Кэшированный префикс',
   'Run /context detail for per-item breakdown.':
     'Выполните /context detail для детализации по элементам.',
   active: 'активно',

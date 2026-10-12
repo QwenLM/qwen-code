@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as os from 'node:os';
 import {
   findModelConfiguration,
   findModelConfigurationForDeletion,
@@ -13,15 +14,26 @@ import {
 } from '../model-configuration.js';
 import type { Application, Request, Response } from 'express';
 import {
+  AuthType,
   resolveModelId,
-  resolveProviderProtocol,
+  tryResolveModelProtocol,
 } from '@qwen-code/qwen-code-core';
-import { loadSettings, SettingScope } from '../../config/settings.js';
+import {
+  LoadedSettings,
+  loadSettings,
+  SettingScope,
+} from '../../config/settings.js';
+import { buildRuntimeEnvironment } from '../../config/environment.js';
 import {
   getOwnKeyScope,
   getWritableScopes,
 } from '../../config/modelProvidersScope.js';
 import { getSettingDefinition } from '../../config/settingsUtils.js';
+import {
+  getAuthTypeFromEnv,
+  resolveCliGenerationConfig,
+} from '../../utils/modelConfigUtils.js';
+import { sanitizeProviderBaseUrl } from '../../utils/acpModelUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isActiveModelSelection,
@@ -52,6 +64,8 @@ function scopeToWire(scope: SettingScope): string {
 
 export interface WorkspaceModelsRouteDeps {
   boundWorkspace: string;
+  env?: Readonly<Record<string, string | undefined>>;
+  baseEnv?: Readonly<Record<string, string | undefined>>;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
@@ -281,6 +295,7 @@ export function registerWorkspaceModelsRoutes(
         'Model settings changed. Reload and try again.',
       );
       let writes: WorkspaceSettingsWrite[];
+      let clearedActiveModel = false;
       try {
         const workspaceTrusted = deps.isWorkspaceTrusted?.();
         const loaded = loadSettings(boundWorkspace, {
@@ -327,57 +342,134 @@ export function registerWorkspaceModelsRoutes(
         const seenRoutes = new Set<string>();
         const remaining = Object.entries(remainingProviders).flatMap(
           ([provider, models]) => {
-            const authType = resolveProviderProtocol(
-              provider,
-              loaded.merged.providerProtocol,
-            );
-            if (
-              !authType ||
-              authType === 'qwen-oauth' ||
-              !Array.isArray(models)
-            )
-              return [];
-            return models
-              .filter((model) => model?.id === removedModelId)
-              .filter((model) => {
-                const route = JSON.stringify([authType, model.baseUrl ?? '']);
-                if (seenRoutes.has(route)) return false;
-                seenRoutes.add(route);
-                return true;
-              })
-              .map((model) => ({ model, authType }));
+            if (!Array.isArray(models)) return [];
+            return models.flatMap((model) => {
+              if (model?.id !== removedModelId) return [];
+              const authType = tryResolveModelProtocol(
+                provider,
+                model,
+                loaded.merged.providerProtocol,
+              );
+              if (!authType || authType === 'qwen-oauth') return [];
+              const route = JSON.stringify([authType, model.baseUrl ?? '']);
+              if (seenRoutes.has(route)) return [];
+              seenRoutes.add(route);
+              return [{ model, authType }];
+            });
           },
         );
 
         writes = [{ scope, key: 'modelProviders', value: next }];
 
-        // `model.name`/`model.baseUrl` are scoped independently of
-        // `modelProviders`, so clear the active selection in EVERY writable
-        // scope whose own selection points at the removed model — a tombstone
-        // written only to the providers-owner scope wouldn't override a
-        // higher-precedence scope that still names the deleted model. Compare
-        // against the removed entry's stored (unsanitized) baseUrl, since the
-        // request's baseUrl is sanitized and would miss a credential-bearing
-        // stored URL.
         const activeTarget: RemoveModelTarget = {
           authType: parsed.authType,
           modelId: removedModelId,
           ...(removedBaseUrl ? { baseUrl: removedBaseUrl } : {}),
         };
-        const remainingRoute = remaining.find(
-          ({ model, authType }) =>
-            authType === parsed.authType &&
-            (model.baseUrl ?? '') === (removedBaseUrl ?? ''),
-        )?.model;
+        const isOpenAiFamily = (authType: string | undefined): boolean =>
+          authType === AuthType.USE_OPENAI ||
+          authType === AuthType.USE_OPENAI_RESPONSES;
+        // A User selection must also work outside this workspace. Resolve it
+        // without Workspace overrides, using the same settings merge policies.
+        const userSettings = new LoadedSettings(
+          loaded.system,
+          loaded.systemDefaults,
+          loaded.user,
+          { ...loaded.workspace, settings: {}, originalSettings: {} },
+          false,
+          new Set(),
+        ).merged;
+        let workspaceSelectionSurvives = false;
         for (const activeScope of getWritableScopes(loaded)) {
+          const settings =
+            activeScope === SettingScope.User ? userSettings : loaded.merged;
           const scopeModel = loaded.forScope(activeScope).settings.model;
+          const validProviders = Object.fromEntries(
+            Object.entries(settings.modelProviders ?? {}).map(
+              ([providerId, models]) => [
+                providerId,
+                Array.isArray(models)
+                  ? models.filter(
+                      (model) =>
+                        tryResolveModelProtocol(
+                          providerId,
+                          model,
+                          settings.providerProtocol,
+                        ) !== undefined,
+                    )
+                  : models,
+              ],
+            ),
+          );
+          const selectionEnv =
+            activeScope === SettingScope.User
+              ? buildRuntimeEnvironment(
+                  userSettings,
+                  os.homedir(),
+                  deps.baseEnv ?? {},
+                  false,
+                ).effectiveEnv
+              : (deps.env ?? {});
+          const selectedAuthType =
+            settings.security?.auth?.selectedType ??
+            getAuthTypeFromEnv(selectionEnv);
+          const activeSelection = selectedAuthType
+            ? resolveCliGenerationConfig({
+                argv: {},
+                settings: { ...settings, modelProviders: validProviders },
+                selectedAuthType,
+                env: selectionEnv,
+              })
+            : undefined;
+          const activeAuthType = activeSelection?.authType;
+          const providersAfterRemoval = { ...settings.modelProviders };
+          if (scope === SettingScope.User || activeScope === scope) {
+            providersAfterRemoval[configuration.provider] =
+              remainingProviders[configuration.provider];
+          }
+          // Match the registry's first-wins route before checking its purpose.
+          // A later conversation alias cannot override an earlier service model.
+          const survivor = Object.entries(providersAfterRemoval)
+            .flatMap(([providerId, models]) =>
+              Array.isArray(models)
+                ? models.map((model) => ({ providerId, model }))
+                : [],
+            )
+            .find(
+              ({ providerId, model }) =>
+                model?.id === settings.model?.name &&
+                tryResolveModelProtocol(
+                  providerId,
+                  model,
+                  settings.providerProtocol,
+                ) === (activeAuthType ?? parsed.authType) &&
+                (model.baseUrl ?? null) ===
+                  (activeSelection
+                    ? activeSelection.registryBaseUrl
+                    : (removedBaseUrl ?? null)),
+            )?.model;
+          const selectionAffected =
+            !survivor || !isConversationModelConfiguration(survivor);
+          const selectionMatches = isActiveModelSelection(
+            settings.model?.name,
+            settings.model?.baseUrl,
+            activeTarget,
+            isOpenAiFamily(activeAuthType) ? undefined : activeAuthType,
+          );
+          if (activeScope === SettingScope.Workspace) {
+            workspaceSelectionSurvives =
+              !selectionAffected || !selectionMatches;
+            clearedActiveModel = !workspaceSelectionSurvives;
+          } else if (!loaded.isTrusted) {
+            clearedActiveModel = selectionAffected && selectionMatches;
+          }
           if (
-            (!remainingRoute ||
-              !isConversationModelConfiguration(remainingRoute)) &&
+            selectionAffected &&
             isActiveModelSelection(
               scopeModel?.name,
               scopeModel?.baseUrl,
               activeTarget,
+              isOpenAiFamily(activeAuthType) ? undefined : activeAuthType,
             )
           ) {
             writes.push({ scope: activeScope, key: 'model.name', value: '' });
@@ -385,6 +477,64 @@ export function registerWorkspaceModelsRoutes(
               scope: activeScope,
               key: 'model.baseUrl',
               value: '',
+            });
+          }
+        }
+
+        // Decide the Workspace `model` pair once, after both scope views are
+        // known. `model` deep-merges field-wise, so a per-field decision could
+        // pair a copied field with one the workspace already owns; only touch
+        // the pair when the workspace owns neither half, and always write both
+        // keys together (an omitted key cannot override a lower scope on merge).
+        const workspaceModel = loaded.workspace.settings.model;
+        if (
+          loaded.isTrusted &&
+          workspaceModel?.name === undefined &&
+          workspaceModel?.baseUrl === undefined
+        ) {
+          const nameCleared = writes.some(
+            (write) => write.key === 'model.name',
+          );
+          const userCleared = writes.some(
+            (write) =>
+              write.scope === SettingScope.User && write.key === 'model.name',
+          );
+          if (!workspaceSelectionSurvives && !nameCleared) {
+            // The workspace's inherited selection lost its route here (e.g. the
+            // workspace-owned provider list replaced the User's on merge) while
+            // the User view still resolves, so no scope tombstoned it above.
+            // Tombstone it in Workspace scope; an ordinary User-only delete
+            // never reaches this branch because its User tombstone counts.
+            writes.push({
+              scope: SettingScope.Workspace,
+              key: 'model.name',
+              value: '',
+            });
+            writes.push({
+              scope: SettingScope.Workspace,
+              key: 'model.baseUrl',
+              value: '',
+            });
+          } else if (workspaceSelectionSurvives && userCleared) {
+            // Pin inherited fields before clearing their User source; the
+            // Workspace auth override may still have a valid route for them.
+            // Never copy a credential-bearing URL out of the user's private
+            // settings into the shareable workspace file — a '' tombstone only
+            // costs the endpoint disambiguator. A public URL must stay
+            // byte-identical: the runtime disambiguates by exact compare.
+            const inheritedBaseUrl = loaded.merged.model?.baseUrl ?? '';
+            writes.push({
+              scope: SettingScope.Workspace,
+              key: 'model.name',
+              value: loaded.merged.model?.name ?? '',
+            });
+            writes.push({
+              scope: SettingScope.Workspace,
+              key: 'model.baseUrl',
+              value:
+                sanitizeProviderBaseUrl(inheritedBaseUrl) === inheritedBaseUrl
+                  ? inheritedBaseUrl
+                  : '',
             });
           }
         }
@@ -444,10 +594,12 @@ export function registerWorkspaceModelsRoutes(
                     : key === 'fastModel'
                       ? !model.imageOnly &&
                         !model.voiceOnly &&
+                        !model.realtimeOnly &&
                         !model.visionOnly
                       : key === 'visionModel'
                         ? !model.imageOnly &&
                           !model.voiceOnly &&
+                          !model.realtimeOnly &&
                           !model.fastOnly
                         : isConversationModelConfiguration(model)),
               )
@@ -605,7 +757,6 @@ export function registerWorkspaceModelsRoutes(
         }
       }
 
-      const clearedActiveModel = writes.some((w) => w.key === 'model.name');
       // Surface restart-required so the UI can prompt (e.g. modelFallbacks).
       const requiresRestart = writes.some(
         (w) => getSettingDefinition(w.key)?.requiresRestart === true,

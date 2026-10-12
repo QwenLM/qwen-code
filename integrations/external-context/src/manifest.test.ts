@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { loadConfig } from './config.js';
+import { createProvider } from './providers.js';
 
 describe('extension manifest', () => {
   it('exposes only the retrieval tool', async () => {
@@ -232,6 +236,125 @@ describe('extension manifest', () => {
         appId: 'repository-memory',
       },
     });
+  });
+  it('keeps the PolarDB Mem0 example loadable after placeholder substitution', async () => {
+    const config = await readJson('../examples/polardb-mem0.json');
+
+    expect(config).toEqual({
+      version: 1,
+      timeoutMs: 5000,
+      provider: {
+        type: 'mem0',
+        preset: 'aliyun-polardb-mysql-2026-08',
+        endpoint: {
+          origin: 'https://<your-polardb-mem0-endpoint>',
+          basePath: '',
+        },
+        credentialEnv: 'MEM0_API_KEY',
+        scope: {
+          userId: '<your-user-id>',
+          agentId: 'qwen-code',
+        },
+      },
+    });
+
+    const substituted = JSON.parse(
+      JSON.stringify(config)
+        .replaceAll('<your-polardb-mem0-endpoint>', 'mem0.example.internal')
+        .replaceAll('<your-user-id>', 'example-user'),
+    );
+    const directory = await mkdtemp(
+      join(tmpdir(), 'external-context-example-'),
+    );
+    try {
+      const configPath = join(directory, 'config.json');
+      await writeFile(configPath, JSON.stringify(substituted));
+
+      const loaded = await loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+        MEM0_API_KEY: 'example-key',
+      });
+      expect(loaded.provider).toMatchObject({
+        type: 'mem0',
+        preset: 'aliyun-polardb-mysql-2026-08',
+        scope: { userId: 'example-user', agentId: 'qwen-code' },
+      });
+      expect(() => createProvider(loaded.provider)).not.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // The console hands out a plain-HTTP address and port, which the URL policy
+  // rejects. This example is the one path that needs no policy opt-in: the
+  // relay carries the credential and the memories, and loopback HTTP loads
+  // without enabling non-loopback insecure HTTP.
+  it('keeps the PolarDB loopback example loadable with no policy opt-in', async () => {
+    const config = await readJson('../examples/polardb-mem0-loopback.json');
+
+    expect(config).toEqual({
+      version: 1,
+      timeoutMs: 5000,
+      provider: {
+        type: 'mem0',
+        preset: 'aliyun-polardb-mysql-2026-08',
+        endpoint: { origin: 'http://127.0.0.1:8080', basePath: '' },
+        credentialEnv: 'MEM0_API_KEY',
+        scope: { userId: '<your-user-id>', agentId: 'qwen-code' },
+      },
+    });
+
+    const substituted = JSON.parse(
+      JSON.stringify(config).replaceAll('<your-user-id>', 'example-user'),
+    );
+    const directory = await mkdtemp(
+      join(tmpdir(), 'external-context-example-'),
+    );
+    try {
+      const configPath = join(directory, 'config.json');
+      await writeFile(configPath, JSON.stringify(substituted));
+
+      const loaded = await loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+        MEM0_API_KEY: 'example-key',
+      });
+      expect(loaded.provider).toMatchObject({
+        type: 'mem0',
+        endpoint: { origin: 'http://127.0.0.1:8080' },
+        scope: { userId: 'example-user', agentId: 'qwen-code' },
+      });
+      expect(() => createProvider(loaded.provider)).not.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the stock Mem0 REST example loadable', async () => {
+    const config = await readJson('../examples/mem0-oss.json');
+    const substituted = JSON.parse(
+      JSON.stringify(config)
+        .replaceAll('<your-mem0-endpoint>', 'mem0.example.internal')
+        .replaceAll('<your-user-id>', 'example-user'),
+    );
+    const directory = await mkdtemp(
+      join(tmpdir(), 'external-context-example-'),
+    );
+    try {
+      const configPath = join(directory, 'config.json');
+      await writeFile(configPath, JSON.stringify(substituted));
+
+      const loaded = await loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+        MEM0_API_KEY: 'example-key',
+      });
+      expect(loaded.provider).toMatchObject({
+        type: 'mem0',
+        preset: 'mem0-oss-rest-2026-08',
+      });
+      expect(() => createProvider(loaded.provider)).not.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('pins write confirmation and disables local persistence', async () => {

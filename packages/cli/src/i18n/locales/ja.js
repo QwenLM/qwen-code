@@ -148,6 +148,8 @@ export default {
     '巻き戻しは、手動で編集されたファイルや shell コマンドで変更されたファイルには影響しません。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '圧縮されたターンへは巻き戻せません。より最近のターンをお試しください。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'このターンまで会話を巻き戻せません。モデル履歴と対応しなくなっています（再試行後など）。より最近のターンをお試しください。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'このターンではファイル復元できません（捕捉されたファイル変更がないか、現在のセッションより前のターンです）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -512,6 +514,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 件のフックが設定されています',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'このメニューは読み取り専用です。フックを追加または変更するには、settings.json を直接編集するか、Qwen Code に尋ねてください。',
+  'Reopen this menu to reload hook definitions.':
+    'このメニューを再度開くと、フック定義を再読み込みできます。',
+  'Hook controls and HTTP security settings require a restart.':
+    'フックの制御設定と HTTP セキュリティ設定の変更には再起動が必要です。',
+  'Failed to reload hook definitions: {{error}}':
+    'フック定義の再読み込みに失敗しました: {{error}}',
   'Enter to select · Esc to cancel': 'Enter で選択 · Esc でキャンセル',
   // Hooks - Detail Step
   'Exit codes:': '終了コード：',
@@ -877,6 +885,11 @@ export default {
   'Clear Authentication': '認証をクリア',
   disabled: '無効',
   enabled: '有効',
+  'disabled (bare mode)': '無効（ベアモード）',
+  'disabled (safe mode)': '無効（セーフモード）',
+  'disabled (disableAllHooks)': '無効（disableAllHooks）',
+  'disabled (folder not trusted)': '無効（フォルダーが信頼されていません）',
+  'disabled (turned off for this session)': '無効（このセッションでオフ）',
   'Server:': 'サーバー:',
   Reconnect: '再接続',
   'View tools': 'ツールを表示',
@@ -1377,6 +1390,9 @@ export default {
     'コンテキストが制限を超えています！/compress または /clear を使用して減らしてください。',
   'No API response yet. Send a message to see actual usage.':
     'API応答はありません。メッセージを送信して実際の使用量を確認してください。',
+  'Estimated usage, including the conversation': '推定使用量（会話を含む）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'プロバイダーの使用量はまだありません。以下は会話を含むローカル推定値です。',
   'Estimated pre-conversation overhead': '推定事前会話オーバーヘッド',
   'Context window': 'コンテキストウィンドウ',
   tokens: 'トークン',
@@ -1390,6 +1406,9 @@ export default {
   'Memory files': 'メモリファイル',
   Skills: 'スキル',
   Messages: 'メッセージ',
+  'Startup context': '起動時コンテキスト',
+  Unattributed: '未分類',
+  'Cached prefix': 'プレフィックスキャッシュ',
   'Run /context detail for per-item breakdown.':
     '/context detail を実行すると項目ごとの内訳を表示します。',
   active: '有効',

@@ -22,7 +22,15 @@ import { QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import { mountWorkspaceAgentsRoutes } from './workspace-agents.js';
+import {
+  mountWorkspaceAgentsRoutes,
+  mountWorkspaceQualifiedAgentsRoutes,
+  type WorkspaceAgentsRouteDeps,
+} from './workspace-agents.js';
+import {
+  createSingleWorkspaceRegistry,
+  type WorkspaceRuntime,
+} from './workspace-registry.js';
 
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
 
@@ -111,6 +119,8 @@ function buildApp(opts: {
   boundWorkspace: string;
   strictNoToken?: boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+  qualified?: boolean;
+  trusted?: boolean;
 }) {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
@@ -118,7 +128,7 @@ function buildApp(opts: {
     tokenConfigured: opts.strictNoToken !== true,
     requireAuth: false,
   });
-  mountWorkspaceAgentsRoutes(app, {
+  const deps: WorkspaceAgentsRouteDeps = {
     bridge: opts.bridge,
     boundWorkspace: opts.boundWorkspace,
     mutate,
@@ -148,10 +158,25 @@ function buildApp(opts: {
       }
       return out;
     },
+    isWorkspaceTrusted: () => opts.trusted !== false,
     ...(opts.captureGenerationAssertion
       ? { captureGenerationAssertion: opts.captureGenerationAssertion }
       : {}),
-  });
+  };
+  if (opts.qualified) {
+    mountWorkspaceQualifiedAgentsRoutes(app, {
+      ...deps,
+      workspaceRegistry: createSingleWorkspaceRegistry({
+        workspaceId: 'selected',
+        workspaceCwd: opts.boundWorkspace,
+        primary: true,
+        trusted: opts.trusted !== false,
+        bridge: opts.bridge,
+      } as WorkspaceRuntime),
+    });
+  } else {
+    mountWorkspaceAgentsRoutes(app, deps);
+  }
   return app;
 }
 
@@ -180,6 +205,93 @@ describe('workspace agents routes', () => {
   function missingAgentName(prefix = 'missing-agent') {
     return `${prefix}-${path.basename(tmp)}`;
   }
+
+  describe.each([false, true])(
+    'backend rejection (qualified=%s)',
+    (qualified) => {
+      const prefix = qualified
+        ? '/workspaces/selected/agents'
+        : '/workspace/agents';
+
+      it.each(['container', 'local', null])(
+        'rejects create and mixed update with executionBackend=%j without writes or events',
+        async (executionBackend) => {
+          const bridge = buildBridgeStub();
+          const app = buildApp({
+            bridge,
+            boundWorkspace: workspace,
+            qualified,
+          });
+          const agentDir = path.join(workspace, QWEN_DIR, 'agents');
+          await fs.mkdir(agentDir, { recursive: true });
+          const original =
+            '---\nname: policy-agent\ndescription: Original\n---\nComplete the requested task.\n';
+          const file = path.join(agentDir, 'policy-agent.md');
+          await fs.writeFile(file, original);
+
+          const create = await request(app).post(prefix).send({
+            name: 'new-policy-agent',
+            description: 'New agent',
+            systemPrompt: 'Complete the requested task.',
+            scope: 'workspace',
+            executionBackend,
+          });
+          expect(create.status).toBe(422);
+          expect(create.body.error).toBe(
+            'Daemon agents do not support executionBackend.',
+          );
+          const update = await request(app)
+            .post(`${prefix}/policy-agent`)
+            .send({
+              description: 'Changed',
+              executionBackend,
+            });
+          expect(update.status).toBe(422);
+          expect(update.body.error).toBe(
+            'Daemon agents do not support executionBackend.',
+          );
+          expect(await fs.readdir(agentDir)).toEqual(['policy-agent.md']);
+          expect(await fs.readFile(file, 'utf8')).toBe(original);
+          expect(bridge.events).toEqual([]);
+        },
+      );
+
+      it('retains a manually authored backend during unrelated edits', async () => {
+        const bridge = buildBridgeStub();
+        const app = buildApp({ bridge, boundWorkspace: workspace, qualified });
+        const agentDir = path.join(workspace, QWEN_DIR, 'agents');
+        await fs.mkdir(agentDir, { recursive: true });
+        const file = path.join(agentDir, 'policy-agent.md');
+        await fs.writeFile(
+          file,
+          '---\nname: policy-agent\ndescription: Original\nexecutionBackend: container\n---\nComplete the requested task.\n',
+        );
+        const update = await request(app)
+          .post(`${prefix}/policy-agent`)
+          .send({ description: 'Changed' });
+        expect(update.status).toBe(200);
+        expect(await fs.readFile(file, 'utf8')).toContain(
+          'executionBackend: container',
+        );
+      });
+
+      it('retains the workspace trust refusal before processing the backend field', async () => {
+        const bridge = buildBridgeStub();
+        const app = buildApp({
+          bridge,
+          boundWorkspace: workspace,
+          qualified,
+          trusted: false,
+        });
+        const response = await request(app)
+          .post(prefix)
+          .send({ scope: 'workspace', executionBackend: 'container' });
+        expect(response.status).toBe(403);
+        expect(response.body.code).toBe('untrusted_workspace');
+        expect(bridge.events).toEqual([]);
+      });
+    },
+  );
 
   it('lists built-in agents alongside on-disk project agents', async () => {
     const projectAgentsDir = path.join(workspace, QWEN_DIR, 'agents');

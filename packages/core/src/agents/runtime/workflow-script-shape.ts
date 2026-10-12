@@ -123,10 +123,21 @@ function maskNonCode(source: string): string {
     const ch = source[i];
     const next = source[i + 1];
     if (ch === '/' && next === '/') {
-      const newline = source.indexOf('\n', i);
-      const end = newline === -1 ? n : newline;
-      blank(i, end);
-      i = end;
+      // ECMAScript ends a single-line comment at any LineTerminator, not
+      // just \n — a script whose comment ends in CR/LS/PS with no later
+      // \n would otherwise be blanked to end-of-source.
+      let j = i + 2;
+      while (
+        j < n &&
+        source[j] !== '\n' &&
+        source[j] !== '\r' &&
+        source[j] !== '\u2028' &&
+        source[j] !== '\u2029'
+      ) {
+        j++;
+      }
+      blank(i, j);
+      i = j;
       continue;
     }
     if (ch === '/' && next === '*') {

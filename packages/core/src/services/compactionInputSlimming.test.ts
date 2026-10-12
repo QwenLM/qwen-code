@@ -6,6 +6,7 @@
 
 import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ToolNames } from '../tools/tool-names.js';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   DEFAULT_MAX_RECENT_FILES,
@@ -773,6 +774,51 @@ describe('compactionInputSlimming', () => {
         file_path: '/tmp/x.txt',
         content: bigText,
       });
+    });
+
+    it('truncates oversized args nested in a tool_call bridge envelope', () => {
+      const bridgedContent = 'B'.repeat(300_000);
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: ToolNames.TOOL_CALL,
+                args: {
+                  name: 'write_file',
+                  arguments: {
+                    file_path: '/tmp/bridged.txt',
+                    content: bridgedContent,
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ];
+
+      const { slimmedHistory, stats } = slimCompactionInput(
+        history,
+        undefined,
+        { maxTextChars: 500 },
+      );
+
+      expect(stats.textPartsTruncated).toBe(1);
+      expect(
+        slimmedHistory[0]!.parts![0]!.functionCall!.args!['arguments'],
+      ).toEqual({
+        file_path: '/tmp/bridged.txt',
+        content: 'B'.repeat(500) + SLIM_TEXT_TRUNCATION_MARKER,
+      });
+      expect(
+        (
+          history[0]!.parts![0]!.functionCall!.args!['arguments'] as Record<
+            string,
+            unknown
+          >
+        )['content'],
+      ).toBe(bridgedContent);
     });
 
     it('does not split surrogate pairs when truncating text', () => {

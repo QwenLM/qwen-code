@@ -19,6 +19,7 @@ export { buildHooksListing, describeHookConfig } from './hooks-listing.js';
 export type {
   HooksListing,
   HooksListingConfig,
+  HooksListingDisabledReason,
   HooksListingOrigin,
   HooksListingRow,
 } from './hooks-listing.js';
@@ -45,6 +46,21 @@ export {
   extractEnvVarNames,
 } from './envInterpolator.js';
 export { UrlValidator, createUrlValidator } from './urlValidator.js';
+export { HOOK_EVENT_DISPLAY, hookEventDisplay } from './hook-event-display.js';
+export type { HookEventDisplayMeta } from './hook-event-display.js';
+export {
+  DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_FUNCTION_HOOK_TIMEOUT_MS,
+  describeHookTimeout,
+  isLegacyMillisecondHookTimeout,
+  resolveCommandHookTimeoutMs,
+} from './hook-timeout.js';
+export type {
+  HookTimeoutDescription,
+  HookTimeoutSource,
+} from './hook-timeout.js';
 
 // Export interfaces and enums
 export type { HookRegistryEntry } from './hookRegistry.js';

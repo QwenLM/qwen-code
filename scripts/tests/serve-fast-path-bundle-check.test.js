@@ -188,6 +188,28 @@ describe('serve fast-path bundle check', () => {
     ]);
   });
 
+  it.each([
+    'packages/acp-bridge/src/session-control-plane.ts',
+    'packages/acp-bridge/dist/session-control-plane.js',
+    'packages/acp-bridge/src/channel-harness.ts',
+    'packages/acp-bridge/dist/channel-harness.js',
+  ])('keeps extracted runtime %s out of the pre-listen closure', (input) => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [staticImport('dist/chunks/acp-runtime.js')],
+      }),
+      'dist/chunks/acp-runtime.js': output({ inputs: [input] }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'ACP bridge runtime',
+        matchedInput: input,
+      }),
+    ]);
+  });
+
   it('allows forbidden runtime files behind dynamic imports', () => {
     const metafile = makeMetafile({
       'dist/chunks/run-qwen-serve.js': output({

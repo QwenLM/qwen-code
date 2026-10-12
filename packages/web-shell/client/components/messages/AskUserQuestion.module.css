@@ -435,8 +435,10 @@
   opacity: 0.6;
 }
 
-@container (max-width: 420px) {
-  .actions > [data-shortcut]::after {
-    display: none;
+@supports (container-type: inline-size) {
+  @container (max-width: 420px) {
+    .actions > [data-shortcut]::after {
+      display: none;
+    }
   }
 }

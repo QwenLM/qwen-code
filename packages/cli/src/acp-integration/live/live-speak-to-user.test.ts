@@ -26,4 +26,17 @@ describe('SpeakToUserTool', () => {
     ).resolves.toMatchObject({ returnDisplay: 'Spoke to user' });
     expect(speak).toHaveBeenCalledWith('原样说出这句话。');
   });
+
+  it('tells the agent to continue in text after voice disconnects', async () => {
+    const tool = new SpeakToUserTool(vi.fn(async () => false));
+    const result = await tool
+      .build({ message: '任务完成了。' })
+      .execute(new AbortController().signal);
+    expect(result).toMatchObject({
+      llmContent: expect.stringContaining(
+        'include this update in the final text',
+      ),
+      returnDisplay: 'Voice disconnected; update not spoken: 任务完成了。',
+    });
+  });
 });

@@ -7,7 +7,6 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
   HELD_EXPIRY_OPTIONS,
@@ -290,6 +289,23 @@ describe('SettingsSchema', () => {
       });
     });
 
+    // The bundled Mem0 runtime validates this same field with its own zod copy
+    // (mem0-settings.ts `int().min(1).max(30_000).default(5000)`, pinned by
+    // mem0-settings.test.ts). Neither copy is derived from the other, so both
+    // are asserted against the documented contract in
+    // docs/users/features/mem0.md: drifting either one turns a test red.
+    it('should bound memory.mem0.timeoutMs to the runtime contract', () => {
+      expect(
+        getSettingsSchema().memory.properties.mem0.jsonSchemaOverride
+          ?.properties.timeoutMs,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: 30_000,
+        default: 5000,
+      });
+    });
+
     it('should have top-level proxy setting in schema', () => {
       expect(getSettingsSchema().proxy).toBeDefined();
       expect(getSettingsSchema().proxy.type).toBe('string');
@@ -355,8 +371,8 @@ describe('SettingsSchema', () => {
       expect(advisorModel.type).toBe('string');
       expect(advisorModel.category).toBe('Model');
       expect(advisorModel.default).toBe('');
-      expect(advisorModel.requiresRestart).toBe(false);
-      expect(advisorModel.showInDialog).toBe(true);
+      expect(advisorModel.requiresRestart).toBe(true);
+      expect(advisorModel.showInDialog).toBe(false);
     });
 
     it('should define the built-in Explore model setting', () => {
@@ -457,7 +473,8 @@ describe('SettingsSchema', () => {
       expect(timeout.category).toBe('Model');
       expect(timeout.default).toBeUndefined();
       expect(timeout.minimum).toBe(1);
-      expect(timeout.maximum).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP);
+      expect(timeout.maximum).toBe(900);
+      expect(timeout.description).toMatch(/^Deprecated\./);
       expect(timeout.requiresRestart).toBe(false);
       expect(timeout.showInDialog).toBe(false);
     });
@@ -685,6 +702,9 @@ describe('SettingsSchema', () => {
 
       // Check that advanced settings are hidden from dialog
       expect(getSettingsSchema().security.properties.auth.showInDialog).toBe(
+        false,
+      );
+      expect(getSettingsSchema().tools.properties.freeform.showInDialog).toBe(
         false,
       );
       expect(getSettingsSchema().permissions.showInDialog).toBe(false);

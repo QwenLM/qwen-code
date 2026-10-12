@@ -32,7 +32,22 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 
 Run `/hooks` to open a read-only browser of the hooks this session runs. It moves from events to matchers to the individual hooks under a matcher; events without matcher support go straight to their hooks. A hook's details show its type, where it comes from, whether it is enabled, its command, URL or prompt, and, when they are set, its timeout, status message, HTTP `if` condition and whether it runs once or in the background. Hooks registered for the current session by skills or the SDK are listed with the source Session.
 
-When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, the browser says so at the top. It does not change anything: to add, edit or remove a hook, edit `settings.json`.
+The browser never edits your configuration: to add, change or remove a hook, edit `settings.json`. It does re-read it. Opening the interactive menu reloads hook definitions from the user, workspace and system (System and SystemDefaults) settings files used by this session, including when the session runs in a worktree, so definitions you added, changed or removed since the session started take effect without a restart. If the user or workspace file cannot be read or parsed, both previous settings snapshots and the running hooks are retained, the files are left untouched, and an error is shown. If a system settings file cannot be read or parsed, the hooks from the system files stay as they were, your other edits still take effect, the file is left untouched, and an error names it.
+
+Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
+
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Hooks registered at runtime by skills or the SDK are not affected. Project hooks load only in a trusted folder. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
+
+### Agent frontmatter scope
+
+Hooks declared in an agent's frontmatter apply only to that invocation, including
+its `SubagentStart` and `SubagentStop` events. They do not inherit into nested
+agents or run for parents and siblings. Global settings hooks and session-wide
+skill/function hooks retain their existing scope. Project-agent hooks recheck
+the trust of the workspace that supplied the agent before every event.
+
+Use `SubagentStop` for agent completion; `Stop` is not automatically remapped.
+Move an agent hook to settings if it should observe the whole session.
 
 ## Hook Types
 
@@ -544,16 +559,53 @@ Hook output supports three categories of fields:
 
 - `hookSpecificOutput.permissionDecision`: "allow", "deny", or "ask" (REQUIRED)
 - `hookSpecificOutput.permissionDecisionReason`: explanation for the decision (REQUIRED)
-- `hookSpecificOutput.updatedInput`: modified tool input parameters to use instead of original
-- `hookSpecificOutput.additionalContext`: additional context information
+- `hookSpecificOutput.updatedInput`: an object that replaces the tool's whole input (see [Replacing the tool input](#replacing-the-tool-input))
+- `hookSpecificOutput.additionalContext`: text appended, after a blank line, to this call's tool result that the model sees next (for a call made from a Code Mode `exec` script, to the `exec` call's result; see below). It is delivered whatever the decision: after the tool's own output when it runs, or after the error message when it is denied, stopped, or fails. `<` and `>` are escaped.
 
 The `permissionDecision` value controls whether the tool runs:
 
-- `"allow"` — run the tool without the usual approval prompt.
+- `"allow"` — let the call continue; the usual permission checks and approval prompt still apply.
 - `"deny"` — block the tool; it does not execute and an error is returned to the model.
-- `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
+- `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. This confirmation takes the place of the usual approval prompt, and no permission rule, approval mode (including YOLO) or PermissionRequest hook approves the call instead; a PermissionRequest hook can still deny it, or replace its input, which the user then confirms. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
 
 For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather than interpreting inline Markdown. This keeps formatting markers and link targets visible to the user.
+
+With `"ask"`, the hook runs once. Its `additionalContext` is delivered with the tool result if the user confirms, and dropped if the user declines or the call is cancelled. In ACP sessions (IDE integrations), `"ask"` is currently treated as `"deny"`, and the context is delivered with the denial.
+
+`additionalContext` goes into the tool result. It does not change the tool input, the approval prompt, the error shown while the tool runs, or the user's prompt. Because it becomes part of the tool result, it is saved in the session transcript with it and can appear wherever the full tool output is shown, such as the Ctrl+O detail view or a resumed session; it is not marked apart from the tool's own output.
+
+The text a call's PreToolUse hooks add is cut to `tools.truncateToolOutputThreshold` characters; in ACP sessions the same limit covers PreToolUse and PostToolUseFailure context together. The batch output limits still apply to the result as a whole.
+
+The context is not delivered when the call is cancelled, or when the turn is cancelled before the tool results go back to the model, even if the tool itself completed.
+
+In Code Mode (`tools.codeModeOnly`), a call made from an `exec` script returns its result to the script, not to the model. Its PreToolUse and PostToolUseFailure context is appended to the `exec` call's tool result instead, after the `exec` call's own context, and the value the script receives is unchanged.
+
+##### Replacing the tool input
+
+`updatedInput` replaces the tool's entire input. It is not merged with the original: a field you leave out is removed, and the tool's own default for it applies. An empty object `{}` is a replacement too.
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "updatedInput": { "file_path": "/workspace/notes/today.md" }
+  }
+}
+```
+
+- A call's PreToolUse hooks run once, after the tool is known to be enabled and callable but before its input is validated or checked against permissions. A replacement can therefore correct an input that would have been rejected. When several calls from one turn are scheduled together, as in the interactive terminal UI, every call's hooks run before any of them runs.
+- The replacement then goes through everything the original input would have: the tool's own validation, `permissions` rules, the approval mode, plan mode, and the approval prompt, which shows the replacement. `"allow"` does not let a replacement skip any of these.
+- The hook cannot change which tool runs, its call id or its working directory. The model's own tool call stays as it was in the conversation; the approval prompt, the tool, its result and the PostToolUse event use the replacement.
+- An `updatedInput` that is present but not a JSON object (`null`, an array, a string or a number) stops the call with an error; the original input is not used. When hooks run in parallel, they all receive the same input, the last replacement in configuration order wins, and an invalid replacement from any of them stops the call. Hooks that run sequentially each receive the previous replacement as `tool_input`.
+- The older `hookSpecificOutput.tool_input` field only changes the input passed to the next sequential hook; it never changes the input the tool runs with. Use `updatedInput` instead. When an output has both, `updatedInput` wins.
+- A shell command that a hook could still rewrite is not run in parallel with other tool calls.
+- If a skill registers a PreToolUse hook while other calls from the same turn are still waiting to run, those calls are not run, because their hooks ran without it; the model is told to call the tool again.
+- Changes the user makes in the approval prompt (for example, modifying the content in an editor) come after the hooks ran.
+- `updatedInput` from an async hook is ignored.
+- In ACP sessions, `"ask"` is still treated as `"deny"` even with a replacement.
+- Tool calls run through a managed tool runtime, and fixed-policy calls made by an orchestrator, do not support `updatedInput` yet. A replacement stops the call with an error instead of running either input.
+
+A PermissionRequest hook's `decision.updatedInput` is checked the same way: one that is not a JSON object stops the call, and a replacement is validated and checked against the permission rules before it runs, and the hook's `"allow"` counts only as the approval of that replacement. A replacement that needs a decision the hook cannot make, such as an answer from the user, goes to the approval prompt instead; in ACP sessions it is not run. In AUTO mode, a replacement is reviewed again before it runs.
 
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
@@ -627,7 +679,7 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
 
 **Output Options**:
 
-- `hookSpecificOutput.additionalContext`: error handling information
+- `hookSpecificOutput.additionalContext`: error handling information, appended after the error in the tool result the model sees next. This applies both when the tool returns an error and when it throws. For a call made from a Code Mode `exec` script, it goes to the `exec` call's result instead (see [PreToolUse](#pretooluse)). `<` and `>` are escaped.
 - Standard hook output fields
 
 **Example Output**:
@@ -746,7 +798,7 @@ This two-field payload is written only for this kind of user-prompt record.
 `hookContext` intentionally duplicates the tagged part so offline and
 third-party consumers can identify its provenance without parsing model text.
 `displayText` is the pre-hook display projection and never includes the hook
-context. On the core/headless path it is the submitted projection when available, otherwise the expanded pre-hook prompt. ACP records the trusted display projection or raw request text before expansion when a projection or attachment references require a payload; otherwise it records the user message without `systemPayload` or `displayText`.
+context. On the core/headless path it is the submitted projection when available, otherwise the expanded pre-hook prompt. ACP records the trusted display projection or raw request text before expansion when a projection, attachment references, or input annotations require a payload; otherwise it records the user message without `systemPayload` or `displayText`.
 
 Transcript display consumers treat `displayText` as this user-prompt projection
 when `systemPayload.hookContext` is a string. For compatibility with released
@@ -940,6 +992,8 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 - `hookSpecificOutput.additionalContext`: additional context information
 
 **Note**: Since StopOutput extends HookOutput, all standard fields are available but the stopReason field is particularly relevant for this event.
+
+**Blocking cap**: consecutive blocking decisions are counted per prompt and keep counting across tool round trips, so a hook that blocks on every check ends the turn after `stopHookBlockingCap` blocks (default 8; `QWEN_CODE_STOP_HOOK_BLOCK_CAP` overrides it for one run). The count and `stop_hook_active` share the same record: both restart when the stop is allowed, when you steer or send new input, when a turn is retried, when a goal turn starts, and when the turn ends abnormally. In non-interactive text mode, Stop hook messages and cap warnings are written to stderr; JSON output is unchanged.
 
 **Example Output**:
 
@@ -1466,7 +1520,10 @@ It fires when the session starts, when context files are reloaded during the ses
 
 ## Hook Configuration
 
-Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files:
+Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks from settings and extensions run in this order: Project, User, System, Extension.
+
+> [!NOTE]
+> A hook must include a name field to be enabled or disabled individually at runtime. Hooks without a name will always execute when their event and matcher conditions are met.
 
 ```json
 {
@@ -1733,6 +1790,8 @@ sys.exit(0)
    - `[HTTP_HOOK_RUNNER]`, `[URL_VALIDATOR]`, `[PROMPT_HOOK_RUNNER]`, `[FUNCTION_HOOK_RUNNER]`, `[SKILL_HOOKS]`, `[SESSION_HOOKS_MANAGER]`, `[ASYNC_HOOK_REGISTRY]` and `[HOOK_AGGREGATOR]`: details from the individual runners and registries
 
    Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
+
+6. **Edited during the session.** Hooks are read when the session starts. After editing hook definitions, open the interactive `/hooks` menu once to reload them, or restart Qwen Code. Changes to hook controls and HTTP security settings require a restart.
 
 ### Other checks
 

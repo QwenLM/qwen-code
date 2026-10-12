@@ -12,6 +12,7 @@ import {
   SYSTEM_REMINDER_OPEN,
 } from '../core/environmentContext.js';
 import { generateSessionRecap } from './sessionRecap.js';
+import { content } from '../test-utils/model-fixtures.js';
 
 const reminder = (body: string) =>
   `${SYSTEM_REMINDER_OPEN}\n${body}\n${SYSTEM_REMINDER_CLOSE}`;
@@ -19,24 +20,20 @@ const reminder = (body: string) =>
 describe('generateSessionRecap', () => {
   it('strips startup and mid-session system reminders from recap input', async () => {
     const history: Content[] = [
-      {
-        role: 'user',
-        parts: [
-          { text: reminder('STARTUP_SKILL_LIST') },
-          { text: 'fix session title pollution' },
-        ],
-      },
+      content(
+        'user',
+        { text: reminder('STARTUP_SKILL_LIST') },
+        { text: 'fix session title pollution' },
+      ),
       { role: 'model', parts: [{ text: 'I found the title service.' }] },
       { role: 'user', parts: [{ text: reminder('ADDED_MCP_TOOLS') }] },
-      {
-        role: 'user',
-        parts: [
-          { text: reminder('PLAN_MODE_REMINDER') },
-          {
-            text: `continue with recap coverage\n${reminder('IDE_CONTEXT')}`,
-          },
-        ],
-      },
+      content(
+        'user',
+        { text: reminder('PLAN_MODE_REMINDER') },
+        {
+          text: `continue with recap coverage\n${reminder('IDE_CONTEXT')}`,
+        },
+      ),
     ];
 
     let captured: Content[] | null = null;
