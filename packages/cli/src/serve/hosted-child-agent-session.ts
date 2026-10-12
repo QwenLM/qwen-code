@@ -909,7 +909,7 @@ export class HostedChildAgentSession {
       definition: params.definition,
     };
     const replay = await this.admitLaunch(params, {
-      bytes: encodeChildLaunchEnvelope(envelope),
+      bytes: () => encodeChildLaunchEnvelope(envelope),
       matches: (committedBytes) => {
         const committed = decodeChildLaunchEnvelope(committedBytes);
         const sentPrompt = params.sentPrompt ?? params.prompt;
@@ -957,7 +957,7 @@ export class HostedChildAgentSession {
     const { inputRef } = await this.admitLaunch(
       { ...params, workspaceMode: 'shared' as const },
       {
-        bytes: encodeWorkflowLaunchEnvelope(envelope),
+        bytes: () => encodeWorkflowLaunchEnvelope(envelope),
         build: (inputRef) =>
           workflowLaunchBody({
             childRunId: params.childRunId,
@@ -990,7 +990,11 @@ export class HostedChildAgentSession {
       readonly executionCallId: string;
     },
     prepared: {
-      readonly bytes: Buffer;
+      /** Encoded only where a fresh launch publishes them (or the default
+       * matcher compares them): a replay restating a launch whose encoding
+       * would now pass the envelope bound still names its committed record
+       * (#13858 R3-4). */
+      readonly bytes: () => Buffer;
       readonly build: (inputRef: ManagedSessionDurableRef) => ChildSessionRun;
       readonly matches?: (committedBytes: Buffer) => boolean;
     },
@@ -1003,7 +1007,7 @@ export class HostedChildAgentSession {
       const committedBytes = await this.store.resources.read(existing.inputRef);
       const matches =
         prepared.matches ??
-        ((candidate: Buffer) => isDeepStrictEqual(candidate, prepared.bytes));
+        ((candidate: Buffer) => isDeepStrictEqual(candidate, prepared.bytes()));
       const sameEvidence =
         existing.ownerScopeId === params.ownerScopeId &&
         existing.rootSessionId === params.rootSessionId &&
@@ -1022,7 +1026,7 @@ export class HostedChildAgentSession {
     }
     const inputRef = await this.store.resources.publish(
       'managed-input',
-      prepared.bytes,
+      prepared.bytes(),
     );
     await this.commit(
       params.childRunId,

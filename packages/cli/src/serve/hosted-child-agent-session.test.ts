@@ -21,7 +21,10 @@ import {
   type ChildAgentLaunchParams,
   type WorkflowLaunchParams,
 } from './hosted-child-agent-session.js';
-import { decodeWorkflowLaunchEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import {
+  decodeWorkflowLaunchEnvelope,
+  MANAGED_CHILD_LIMITS,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 
 // The H4b gates are real: the kind gate admits `child_agent` and
@@ -456,6 +459,28 @@ describe('child Workspace receipt (#13753 I2)', () => {
         }
       });
     }
+  });
+
+  // #13858 R3-4: a re-driven launch whose member preamble grew past the
+  // envelope bound since the commit still names its committed record — the
+  // encode belongs to the fresh launch alone, never to the replay.
+  it('replays a launch whose restatement no longer fits the envelope bound', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      const committed = await children.admit(launchParams());
+      const sent = launchParams().prompt;
+      const restated = await children.admit({
+        ...launchParams(),
+        prompt: `${'p'.repeat(MANAGED_CHILD_LIMITS.maxEnvelopeBytes)}\n\n${sent}`,
+        sentPrompt: sent,
+      });
+      expect(restated.inputRef).toEqual(committed.inputRef);
+      expect(restated.envelope.prompt).toBe(sent);
+    });
   });
 
   it('refuses a replayed launch that names another isolation', async () => {
