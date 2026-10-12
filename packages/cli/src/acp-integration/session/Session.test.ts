@@ -46,6 +46,7 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
+  GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   goalPauseReasonForFailure,
@@ -34342,7 +34343,53 @@ describe('Session', () => {
             expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
               expect.objectContaining({
                 action: 'pause',
-                reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+                reason: GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
+              }),
+            ),
+          );
+          expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        });
+
+        it('names a cancel that arrives after the model started by its transport reason', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'interrupted-mid-model',
+          };
+          const turnKey = `goal-runtime:${permit.turnId}`;
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          let releaseStream!: () => void;
+          const streamGate = new Promise<void>((resolve) => {
+            releaseStream = resolve;
+          });
+          // Held open past the request, which is what puts the turn on the
+          // post-model settlement path rather than the pre-model one.
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            (async function* () {
+              await streamGate;
+              yield* createEmptyStream();
+            })(),
+          );
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
+          );
+
+          await session.cancelPendingPrompt('qwen:prompt-interrupted');
+          releaseStream();
+
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
+              expect.objectContaining({
+                action: 'pause',
+                reason: GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
               }),
             ),
           );

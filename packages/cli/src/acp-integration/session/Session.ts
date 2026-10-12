@@ -207,6 +207,7 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   applyPendingGoalProposal,
   formatProposeGoalRecoveryFailed,
@@ -2984,13 +2985,14 @@ export class Session implements SessionContext {
         const pauseReason =
           turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
             ? GOAL_PAUSE_REASON_SESSION_DISPOSED
-            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
-                turn.controller.signal.reason ===
-                  INTERRUPTED_PROMPT_ABORT_REASON
+            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON
               ? GOAL_PAUSE_REASON_USER_INTERRUPT
-              : managedSessionBlock
-                ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
-                : undefined;
+              : turn.controller.signal.reason ===
+                  INTERRUPTED_PROMPT_ABORT_REASON
+                ? GOAL_PAUSE_REASON_PROMPT_INTERRUPTED
+                : managedSessionBlock
+                  ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
+                  : undefined;
         if (
           pauseReason !== undefined &&
           runtime.getSnapshot().goal?.status === 'active'
@@ -3052,11 +3054,16 @@ export class Session implements SessionContext {
       // cause that names the pause. Enumerating them separately means a fifth
       // cause can compile, pause correctly, and fall through to the failure
       // arm -- mislabelling the stop in the journal, the `_meta.goalState`
-      // update and the card, with no test able to see it.
+      // update and the card, with no test able to see it. The two cancels in
+      // that list pause alike but do not read alike: the interrupted abort
+      // reason means the client or host cancelled the prompt, so only a user
+      // cancel may name the user.
       const pauseReason = supersededByNewPrompt
         ? undefined
         : cancelledTurn
-          ? GOAL_PAUSE_REASON_USER_INTERRUPT
+          ? turn.controller.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON
+            ? GOAL_PAUSE_REASON_PROMPT_INTERRUPTED
+            : GOAL_PAUSE_REASON_USER_INTERRUPT
           : result?.stopReason === 'max_tokens'
             ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
             : turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
