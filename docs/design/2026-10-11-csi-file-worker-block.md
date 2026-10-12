@@ -96,6 +96,9 @@ Write and Edit rethrow errors caught by their outer mutation wrapper when the
 signal is aborted, preserving cancellation propagation at the Core tool API.
 Non-aborted wrapper failures remain typed tool errors. This does not change the
 scheduler's existing cancellation classification or the tools' inner catches.
+Write uses this outer catch only with scoped `textFileIo`; the ordinary path
+delegates directly to its existing body, preserving pre-write rejections such
+as a regular-file parent, with or without cancellation.
 
 The scoped writer retains exact pre-write bytes and restores them on a refused
 partial write while preserving the original inode and mode. A failed new-file

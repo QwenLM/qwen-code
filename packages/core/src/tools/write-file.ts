@@ -323,15 +323,14 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 
   async execute(abortSignal: AbortSignal): Promise<ToolResult> {
+    const io = this.config.getFileSystemService().textFileIo;
+    if (!io) return this.executeObserved(abortSignal);
     try {
-      const io = this.config.getFileSystemService().textFileIo;
-      return io
-        ? await io.withMutation(
-            this.params.file_path,
-            abortSignal,
-            (mutation) => this.executeObserved(abortSignal, mutation),
-          )
-        : await this.executeObserved(abortSignal);
+      return await io.withMutation(
+        this.params.file_path,
+        abortSignal,
+        (mutation) => this.executeObserved(abortSignal, mutation),
+      );
     } catch (error) {
       if (abortSignal.aborted) throw error;
       return this.writeFailure(error);

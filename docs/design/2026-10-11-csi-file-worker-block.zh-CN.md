@@ -78,6 +78,8 @@ UTF-8 字节数超过 64 KiB 而拒绝 Read 结果。
 Write 和 Edit 在 signal 已取消时重抛外层 mutation wrapper 捕获的错误，保留
 Core 工具 API 的取消传播。未取消的 wrapper 错误仍返回带类型的工具失败。这不改变
 scheduler 已有的取消分类或工具的内层 catch。
+Write 仅在 scoped `textFileIo` 路径使用该外层 catch；普通路径直接委托已有逻辑，
+保留写入前的抛错行为，例如父路径是普通文件时，无论是否取消均拒绝。
 
 Scoped writer 保留写入前的精确字节，在部分写入失败时恢复原文件，同时保持
 原 inode 和 mode；新文件写入失败会删除自己创建的 leaf。Rollback 验证原始

@@ -226,22 +226,25 @@ describe('WriteFileTool', () => {
     },
   );
 
-  it('propagates an ordinary pre-write error after cancellation', async () => {
-    const parent = unread('parent.txt', 'original bytes');
-    const controller = new AbortController();
-    controller.abort();
-    const config = {
-      ...mockConfigInternal,
-      getFileReadCacheDisabled: () => true,
-    } as unknown as Config;
+  it.each([true, false])(
+    'propagates an ordinary pre-write error when aborted=%s',
+    async (aborted) => {
+      const parent = unread('parent.txt', 'original bytes');
+      const controller = new AbortController();
+      if (aborted) controller.abort();
+      const config = {
+        ...mockConfigInternal,
+        getFileReadCacheDisabled: () => true,
+      } as unknown as Config;
 
-    await expect(
-      new WriteFileTool(config)
-        .build({ file_path: path.join(parent, 'child.txt'), content: 'new' })
-        .execute(controller.signal),
-    ).rejects.toMatchObject({ code: 'EEXIST' });
-    expect(fs.readFileSync(parent, 'utf8')).toBe('original bytes');
-  });
+      await expect(
+        new WriteFileTool(config)
+          .build({ file_path: path.join(parent, 'child.txt'), content: 'new' })
+          .execute(controller.signal),
+      ).rejects.toMatchObject({ code: 'EEXIST' });
+      expect(fs.readFileSync(parent, 'utf8')).toBe('original bytes');
+    },
+  );
 
   it('reports a scoped directory confirmation as a structured target error', async () => {
     const io: TextFileIo = {
