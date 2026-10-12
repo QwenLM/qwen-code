@@ -3253,10 +3253,17 @@ export class LlmChat {
             else paths.push(resolvePath(this.config.getTargetDir(), filePath));
           }
         }
+        // A PreToolUse or PermissionRequest `updatedInput` replaces the executed
+        // args while history keeps the model-authored ones, so a hook can
+        // retarget a read off every path derivable here.
+        const hookRetargetPossible =
+          this.config.hasHooksForEvent?.('PreToolUse') ||
+          this.config.hasHooksForEvent?.('PermissionRequest');
         // Keep unresolvable reads resident by preserving their actual text;
         // normal compaction owns this batch before any recovery artifact is written.
         const guarded =
-          unresolvedRead && !this.isForkedChat
+          (unresolvedRead || (hookRetargetPossible && cutResults.length > 0)) &&
+          !this.isForkedChat
             ? entries
             : await finalizeToolResponses(
                 this.config,
@@ -3290,15 +3297,7 @@ export class LlmChat {
                 if (!stat || !fileReadCache.markReadEvictedFromHistory(stat))
                   unresolvedRead = true;
               }
-              // A PreToolUse or PermissionRequest `updatedInput` replaces the
-              // executed args while history keeps the model-authored ones, so a
-              // hook can retarget a read off every path derivable here. Fail
-              // closed instead.
-              if (
-                unresolvedRead ||
-                this.config.hasHooksForEvent?.('PreToolUse') ||
-                this.config.hasHooksForEvent?.('PermissionRequest')
-              )
+              if (unresolvedRead)
                 fileReadCache.markAllReadsEvictedFromHistory();
               if (paths.length > 0) {
                 try {

@@ -12230,90 +12230,52 @@ describe('LlmChat', async () => {
       expect(clear).not.toHaveBeenCalled();
     });
 
-    it('disarms every read when a PreToolUse hook could have retargeted the cut one', async () => {
-      const stat = { dev: 1, ino: 100 } as Stats;
-      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
-      // The history-derivable path resolves and is already cached, so the
-      // surgical disarm succeeds and nothing else would flag this batch.
-      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
-      const markAllReadsEvictedFromHistory = vi.fn();
-      const clear = vi.fn();
-      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
-        clear,
-        markReadEvictedFromHistory,
-        markAllReadsEvictedFromHistory,
-      } as unknown as ReturnType<Config['getFileReadCache']>);
-      mockConfig.hasHooksForEvent = (event: string) => event === 'PreToolUse';
-      mockStreamsOnce(
-        streamOf(
-          modelChunk(
-            [fnCall('read_file', { file_path: 'a.txt' }, 'retargeted-read')],
-            undefined,
-            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+    // A hook's `updatedInput` rewrites the executed args while history keeps
+    // the model-authored path, and a worker-executed read's residency lives in
+    // the worker's own FileReadCache, unreachable from this process. Preserve
+    // the batch for normal compaction instead of cutting it.
+    it.each(['PreToolUse', 'PermissionRequest'])(
+      'preserves a cut read batch when a %s hook could have retargeted it',
+      async (event) => {
+        const invalidateReadCache = vi.fn();
+        mockConfig.getExecutionEnvironment = () =>
+          ({ invalidateReadCache }) as unknown as ReturnType<
+            Config['getExecutionEnvironment']
+          >;
+        const markAllReadsEvictedFromHistory = vi.fn();
+        const clear = vi.fn();
+        vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+          clear,
+          markAllReadsEvictedFromHistory,
+        } as unknown as ReturnType<Config['getFileReadCache']>);
+        mockConfig.hasHooksForEvent = (name: string) => name === event;
+        mockStreamsOnce(
+          streamOf(
+            modelChunk(
+              [fnCall('read_file', { file_path: 'a.txt' }, 'retargeted-read')],
+              undefined,
+              { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
+            ),
           ),
-        ),
-        textStream('done'),
-      );
-      await sendDrain('read', 'first');
-      await sendDrain(
-        [
-          fnResponse(
-            'read_file',
-            { output: 'x'.repeat(20_000) },
-            'retargeted-read',
-          ),
-        ],
-        'second',
-      );
-      // Only the residency release widens; the shrink itself still happens.
-      expect(resultChars(1)).toBeLessThan(20_000);
-      expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
-      expect(markAllReadsEvictedFromHistory).toHaveBeenCalled();
-      expect(clear).not.toHaveBeenCalled();
-    });
-
-    it('disarms every read when a PermissionRequest hook could have retargeted the cut one', async () => {
-      // A PermissionRequest `decision.updatedInput` rebuilds the call with new
-      // args (scheduler rebuildWithPermissionRequestInput) exactly like a
-      // PreToolUse rewrite, while history keeps the model-authored path.
-      const stat = { dev: 1, ino: 100 } as Stats;
-      vi.mocked(fsPromises.stat).mockResolvedValue(stat);
-      const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
-      const markAllReadsEvictedFromHistory = vi.fn();
-      const clear = vi.fn();
-      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
-        clear,
-        markReadEvictedFromHistory,
-        markAllReadsEvictedFromHistory,
-      } as unknown as ReturnType<Config['getFileReadCache']>);
-      mockConfig.hasHooksForEvent = (event: string) =>
-        event === 'PermissionRequest';
-      mockStreamsOnce(
-        streamOf(
-          modelChunk(
-            [fnCall('read_file', { file_path: 'a.txt' }, 'retargeted-read')],
-            undefined,
-            { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
-          ),
-        ),
-        textStream('done'),
-      );
-      await sendDrain('read', 'first');
-      await sendDrain(
-        [
-          fnResponse(
-            'read_file',
-            { output: 'x'.repeat(20_000) },
-            'retargeted-read',
-          ),
-        ],
-        'second',
-      );
-      expect(resultChars(1)).toBeLessThan(20_000);
-      expect(markReadEvictedFromHistory).toHaveBeenCalledWith(stat);
-      expect(markAllReadsEvictedFromHistory).toHaveBeenCalled();
-      expect(clear).not.toHaveBeenCalled();
-    });
+          textStream('done'),
+        );
+        await sendDrain('read', 'first');
+        await sendDrain(
+          [
+            fnResponse(
+              'read_file',
+              { output: 'x'.repeat(20_000) },
+              'retargeted-read',
+            ),
+          ],
+          'second',
+        );
+        expect(resultChars(1)).toBe(20_000);
+        expect(invalidateReadCache).not.toHaveBeenCalled();
+        expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
+        expect(clear).not.toHaveBeenCalled();
+      },
+    );
 
     it.each([
       ['pressure', 200_000],
