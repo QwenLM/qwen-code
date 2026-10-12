@@ -47465,6 +47465,17 @@ describe('Session', () => {
 
       expect(build).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
+      expect(
+        mockLlmClient.recordCompletedToolCall,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'enablement_tool',
+        {},
+        expect.objectContaining({
+          callId: 'enablement_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'not_started',
+        }),
+      );
       expect(result.parts[0].functionResponse?.response).toEqual({
         error: 'Tool call was cancelled before execution.',
       });
@@ -47653,6 +47664,17 @@ describe('Session', () => {
       expect(result.parts[0].functionResponse?.response).toEqual({
         error: 'The tool had already completed; its output was discarded.',
       });
+      expect(
+        mockLlmClient.recordCompletedToolCall,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'cancel_tool',
+        {},
+        expect.objectContaining({
+          callId: 'execution_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'cancelled',
+        }),
+      );
       expect(endExecutionSpanSpy).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
@@ -48598,10 +48620,16 @@ describe('Session', () => {
       },
     );
 
-    it('prefers cancellation when PostToolUse stops after execution settles', async () => {
+    it('protects a skill write when PostToolUse cancels after execution settles', async () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
         .mockImplementation(() => {});
+      const endToolSpanSpy = vi.spyOn(core, 'endToolSpan');
+      const realClient = new core.LlmClient(mockConfig);
+      mockLlmClient.recordCompletedToolCall.mockImplementation(
+        realClient.recordCompletedToolCall.bind(realClient),
+      );
+      const args = { file_path: '/repo/.qwen/skills/example/SKILL.md' };
       const abortController = new AbortController();
       const messageBus = {
         request: vi
@@ -48638,7 +48666,7 @@ describe('Session', () => {
         persistedOutputFiles: ['/private/post-cancel-output.txt'],
       });
       mockToolRegistry.getTool.mockReturnValue(
-        mockAllowedTool('post_hook_tool', execute),
+        mockAllowedTool('write_file', execute),
       );
 
       const result = await (
@@ -48646,12 +48674,34 @@ describe('Session', () => {
       ).runToolCalls(abortController.signal, 'prompt-post-hook-cancel', [
         {
           id: 'post_hook_cancel_call',
-          name: 'post_hook_tool',
-          args: {},
+          name: 'write_file',
+          args,
         },
       ]);
 
       expect(execute).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.recordCompletedToolCall,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'write_file',
+        args,
+        expect.objectContaining({
+          callId: 'post_hook_cancel_call',
+          status: 'cancelled',
+          executionStatus: 'success',
+        }),
+      );
+      expect(realClient['skillsModifiedInSession']).toBe(true);
+      expect(
+        realClient['recordedExperienceCallIds'].has('post_hook_cancel_call'),
+      ).toBe(true);
+      expect(realClient['toolCallCount']).toBe(0);
+      expect(realClient['pendingExperienceOutcomes'].size).toBe(0);
+      expect(realClient['recentCompletedToolNames']).toEqual([]);
+      expect(endToolSpanSpy).toHaveBeenCalledWith(expect.anything(), {
+        success: false,
+        cancelled: true,
+      });
       expect(result.parts[0].functionResponse?.response).toEqual({
         error: 'The tool had already completed; its output was discarded.',
       });

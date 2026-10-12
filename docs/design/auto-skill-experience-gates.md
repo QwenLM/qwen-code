@@ -12,7 +12,11 @@ This design replaces the trigger, not the review agent or shell process lifecycl
 It supersedes the counting, trigger and `ScheduleSkillReviewParams` sections of
 [the original AutoSkill proposal](skill-nudge/skill-nudge.md). That proposal's
 count-only snippets are historical, not the current caller contract; the review
-agent and write-sandbox design remain unchanged.
+agent and write-sandbox design remain unchanged. It also supersedes section 7
+and the corresponding completed-tool acceptance criterion of
+[ACP managed auto-memory](auto-memory/acp-managed-auto-memory.md): ACP forwards
+all terminal completions with their call ID and execution status, including
+cancellations; the shared client decides protection and accounting.
 
 ## Design
 
@@ -83,8 +87,9 @@ window is not retried.
   response; all production callers are covered. TUI forwards cancelled model
   completions even when deduped or owned by a secondary interaction, leaving
   protection and experience filtering to the shared client. Client-initiated
-  tools remain excluded. ACP uses raw chat streams, so it also forwards accepted
-  result batches. Baseline ACP does not schedule AutoSkill
+  tools remain excluded. ACP also forwards cancelled completions, preserving
+  their settled execution status and cancelled span outcome. ACP uses raw chat
+  streams, so it also forwards accepted result batches. Baseline ACP does not schedule AutoSkill
   reviews; this change preserves that activation scope rather than adding a new
   ACP feature.
 - Collocated tests and the existing skill-review integration tests: gate,
@@ -110,8 +115,11 @@ normalization tests cover reused provider IDs and generated IDs after truncation
 restore, compact-shaped history replacement and chat recreation; fresh completions
 still count and protect skill writes, while replay remains idempotent. Clear and
 session-switch controls permit ID reuse in a new session. ACP iterator failures
-before and after the first chunk retain exactly-once result acceptance. No new
-shell process-cancellation semantics are introduced.
+before and after the first chunk retain exactly-once result acceptance. ACP
+cancellation tests cover unstarted, execution-stage and post-execution outcomes;
+a post-execution skill write still sets protection and reserves its call ID
+without contributing experience or recent-tool hints. No new shell
+process-cancellation semantics are introduced.
 
 ## Risks and open questions
 
