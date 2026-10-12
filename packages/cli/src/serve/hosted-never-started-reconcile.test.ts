@@ -17,6 +17,7 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { parseChildShellRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { reconcileNeverStartedChildRuns } from './hosted-never-started-reconcile.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
@@ -42,8 +43,8 @@ vi.mock(
 
 const broker = vi.hoisted(() => ({
   acquire: vi.fn(async () => undefined),
-  status: vi.fn(
-    (_id: string): Promise<{ state: string } | undefined> =>
+  backgroundProcessStatus: vi.fn(
+    (_executionCallId: string): Promise<{ state: string } | undefined> =>
       Promise.resolve(undefined),
   ),
   calls: [] as string[],
@@ -62,9 +63,11 @@ vi.mock('./hosted-workspace-broker.js', () => {
       broker.calls.push('acquire');
       return broker.acquire();
     }
-    status(id: string): Promise<{ state: string } | undefined> {
-      broker.calls.push(`status:${id}`);
-      return broker.status(id);
+    backgroundProcessStatus(
+      executionCallId: string,
+    ): Promise<{ state: string } | undefined> {
+      broker.calls.push(`backgroundProcessStatus:${executionCallId}`);
+      return broker.backgroundProcessStatus(executionCallId);
     }
   }
   return { HostedWorkspaceBroker: FakeBroker };
@@ -95,7 +98,7 @@ beforeEach(() => {
   broker.calls.length = 0;
   broker.runtimeSessionIds.length = 0;
   broker.acquire.mockClear().mockResolvedValue(undefined);
-  broker.status.mockClear().mockResolvedValue(undefined);
+  broker.backgroundProcessStatus.mockClear().mockResolvedValue(undefined);
 });
 
 async function open(workerId = 'worker'): Promise<ManagedSession> {
@@ -178,15 +181,14 @@ async function strand(shellId: string): Promise<HostedChildRunSession> {
   return orchestrator;
 }
 
-async function appendIntent(
+async function appendIntentWithBody(
   executionCallId: string,
-  runtimeSessionId: string,
-  harnessSessionId = key.sessionId,
+  body: string,
 ): Promise<void> {
   const active = session!;
   const routeRef = await active.resources.publish(
     'managed-tool-input',
-    Buffer.from(JSON.stringify({ harnessSessionId, runtimeSessionId })),
+    Buffer.from(body),
   );
   const definitionRef = await active.resources.publish(
     'managed-tool-definition',
@@ -224,6 +226,17 @@ async function appendIntent(
   );
 }
 
+async function appendIntent(
+  executionCallId: string,
+  runtimeSessionId: string,
+  harnessSessionId = key.sessionId,
+): Promise<void> {
+  await appendIntentWithBody(
+    executionCallId,
+    JSON.stringify({ harnessSessionId, runtimeSessionId }),
+  );
+}
+
 async function reopen(): Promise<void> {
   await session!.close();
   session = undefined;
@@ -258,7 +271,7 @@ describe('reconcileNeverStartedChildRuns', () => {
     // The definitive proof needs no acquire: status probes are the only
     // Broker interaction, so a released runtime Session cannot wedge the
     // scan behind a permanent runtime_session_not_acquirable.
-    expect(broker.calls).toEqual(['status:shell-1:process']);
+    expect(broker.calls).toEqual(['backgroundProcessStatus:shell-1']);
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.runtimeSessionIds).toEqual(['runtime-a']);
     const taskId = `task_${managedExtensionRecordKey(key.sessionId, 'child_run', 'shell-1')}`;
@@ -278,6 +291,35 @@ describe('reconcileNeverStartedChildRuns', () => {
     });
   });
 
+  it('settles every stranded record that shares one runtime session', async () => {
+    await open();
+    await createManagedHarnessHandle(session!).ensureRunnable();
+    await strand('shell-1');
+    await strand('shell-2');
+    await appendIntent('shell-1', 'runtime-a');
+    await appendIntent('shell-2', 'runtime-a');
+    await reopen();
+
+    const result = await reconcileNeverStartedChildRuns({
+      authority: session!.authority,
+      resources: session!.resources,
+      childRuns: orchestratorOf(session!),
+      brokerOptions: BROKER_OPTIONS,
+    });
+
+    expect(result).toEqual({
+      scanned: 2,
+      settled: ['shell-1', 'shell-2'],
+      skipped: [],
+    });
+    expect(broker.runtimeSessionIds).toEqual(['runtime-a']);
+    expect(broker.calls).toEqual([
+      'backgroundProcessStatus:shell-1',
+      'backgroundProcessStatus:shell-2',
+    ]);
+    expect(broker.acquire).not.toHaveBeenCalled();
+  });
+
   it('settles each stranded record under its own runtime session', async () => {
     await open();
     await createManagedHarnessHandle(session!).ensureRunnable();
@@ -285,8 +327,8 @@ describe('reconcileNeverStartedChildRuns', () => {
     await strand('shell-2');
     await appendIntent('shell-1', 'runtime-a');
     await appendIntent('shell-2', 'runtime-b');
-    broker.status.mockImplementation(async (id) =>
-      id === 'shell-1:process' ? undefined : { state: 'executing' as const },
+    broker.backgroundProcessStatus.mockImplementation(async (id) =>
+      id === 'shell-1' ? undefined : { state: 'executing' as const },
     );
     await reopen();
 
@@ -335,7 +377,7 @@ describe('reconcileNeverStartedChildRuns', () => {
       await createManagedHarnessHandle(session!).ensureRunnable();
       await strand('shell-1');
       await appendIntent('shell-1', 'runtime-a');
-      broker.status.mockResolvedValue({ state });
+      broker.backgroundProcessStatus.mockResolvedValue({ state });
       await reopen();
 
       const result = await reconcileNeverStartedChildRuns({
@@ -357,7 +399,7 @@ describe('reconcileNeverStartedChildRuns', () => {
     await createManagedHarnessHandle(session!).ensureRunnable();
     await strand('shell-1');
     await appendIntent('shell-1', 'runtime-a');
-    broker.status.mockRejectedValue(new Error('broker down'));
+    broker.backgroundProcessStatus.mockRejectedValue(new Error('broker down'));
     await reopen();
 
     const result = await reconcileNeverStartedChildRuns({
@@ -369,6 +411,67 @@ describe('reconcileNeverStartedChildRuns', () => {
 
     expect(result.settled).toEqual([]);
     expect(result.skipped).toEqual(['shell-1']);
+    expect(committed('shell-1').run.execution).toBe('dispatch_started');
+  });
+
+  it.each([
+    ['a route body that is not JSON', (): string => 'NOT-JSON{{{'],
+    [
+      'a runtimeSessionId with a control character',
+      (): string =>
+        JSON.stringify({
+          harnessSessionId: key.sessionId,
+          runtimeSessionId: 'runtime-\u0001a',
+        }),
+    ],
+  ] as const)(
+    'leaves a record alone when its route is unreadable (%s)',
+    async (_label, routeBody) => {
+      await open();
+      await createManagedHarnessHandle(session!).ensureRunnable();
+      await strand('shell-1');
+      await appendIntentWithBody('shell-1', routeBody());
+      await reopen();
+
+      const result = await reconcileNeverStartedChildRuns({
+        authority: session!.authority,
+        resources: session!.resources,
+        childRuns: orchestratorOf(session!),
+        brokerOptions: BROKER_OPTIONS,
+      });
+
+      expect(result).toEqual({
+        scanned: 1,
+        settled: [],
+        skipped: ['shell-1'],
+      });
+      expect(broker.calls).toEqual([]);
+      expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
+      expect(committed('shell-1').run.execution).toBe('dispatch_started');
+    },
+  );
+
+  it('propagates a settle commit failure instead of downgrading it to a skip', async () => {
+    await open();
+    await createManagedHarnessHandle(session!).ensureRunnable();
+    await strand('shell-1');
+    await appendIntent('shell-1', 'runtime-a');
+    await reopen();
+    const settle = vi
+      .spyOn(HostedChildRunSession.prototype, 'settleFailed')
+      .mockRejectedValue(new Error('writer plane down'));
+    try {
+      await expect(
+        reconcileNeverStartedChildRuns({
+          authority: session!.authority,
+          resources: session!.resources,
+          childRuns: orchestratorOf(session!),
+          brokerOptions: BROKER_OPTIONS,
+        }),
+      ).rejects.toThrow('writer plane down');
+    } finally {
+      settle.mockRestore();
+    }
     expect(committed('shell-1').run.execution).toBe('dispatch_started');
   });
 
@@ -390,7 +493,7 @@ describe('reconcileNeverStartedChildRuns', () => {
       settled: [],
       skipped: ['shell-1'],
     });
-    expect(broker.status).not.toHaveBeenCalled();
+    expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
     expect(broker.runtimeSessionIds).toEqual([]);
     expect(committed('shell-1').run.execution).toBe('dispatch_started');
   });
@@ -411,7 +514,66 @@ describe('reconcileNeverStartedChildRuns', () => {
 
     expect(result.settled).toEqual([]);
     expect(result.skipped).toEqual(['shell-1']);
-    expect(broker.status).not.toHaveBeenCalled();
+    expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
+  });
+
+  it('refuses a shell admit when the production kind gate is restored', async () => {
+    await open();
+    await createManagedHarnessHandle(session!).ensureRunnable();
+    enablement.childRun = false;
+
+    await expect(
+      orchestratorOf(session!).admit({
+        shellId: 'shell-1',
+        ownerScopeId: 'scope-main',
+        executionCallId: 'shell-1',
+        args: { command: 'printf hi', is_background: true },
+      }),
+    ).rejects.toThrow('registered but not enabled');
+  });
+
+  it('never scans a child_agent record, the one kind production can commit today', async () => {
+    await open();
+    await createManagedHarnessHandle(session!).ensureRunnable();
+    const agents = new HostedChildAgentSession(
+      {
+        authority: session!.authority,
+        resources: session!.resources,
+      },
+      session!.authority.sessionHeader.sessionKey,
+    );
+    await agents.admit({
+      childRunId: 'run-1',
+      ownerScopeId: 'scope-main',
+      rootSessionId: key.sessionId,
+      completion: 'sent',
+      description: 'audit the diff',
+      prompt: 'review the change',
+      definition: {
+        definitionId: 'agent-main',
+        definitionRevision: 3,
+        definitionDigest: 'f'.repeat(64),
+      },
+      workspaceMode: 'shared',
+      workingDirectory: '.',
+      executionCallId: 'call-1',
+    });
+    await agents.dispatchStarted('run-1', {
+      dispatchId: 'dispatch-1',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await reopen();
+
+    const result = await reconcileNeverStartedChildRuns({
+      authority: session!.authority,
+      resources: session!.resources,
+      childRuns: orchestratorOf(session!),
+      brokerOptions: BROKER_OPTIONS,
+    });
+
+    expect(result).toEqual({ scanned: 0, settled: [], skipped: [] });
+    expect(broker.calls).toEqual([]);
+    expect(broker.runtimeSessionIds).toEqual([]);
   });
 
   it('leaves the Broker untouched when nothing is stranded', async () => {
@@ -434,6 +596,6 @@ describe('reconcileNeverStartedChildRuns', () => {
 
     expect(result).toEqual({ scanned: 0, settled: [], skipped: [] });
     expect(broker.acquire).not.toHaveBeenCalled();
-    expect(broker.status).not.toHaveBeenCalled();
+    expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
   });
 });

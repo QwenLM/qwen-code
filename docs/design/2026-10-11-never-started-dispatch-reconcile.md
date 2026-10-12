@@ -5,7 +5,9 @@
 Status: proposed (2026-10-11, author wenshao)
 Tracks: #12380 Stage H → #12827, finding **A3** of the #13532 acceptance run.
 Out of scope: A1 itself (#13789, merged), the cross-Session wedge (#13800),
-enabling `monitor_run` or the `child_run` `shell` kind.
+enabling `monitor_run` or the `child_run` `shell` kind, and #13801's Gap A
+(the in-turn never-started proof gate — see "What is deliberately NOT
+built").
 
 ## Problem statement
 
@@ -37,20 +39,26 @@ reported as never-started.
 
 ## Key evidence chain (all verified at HEAD)
 
-1. **A missing `:process` row is a complete proof of never-started.**
-   `RuntimeBrokerService` admits the `:process` ledger row (keyed
-   `<executionCallId>:process`, durable JDBC) at execute-admission, _before_
-   `beginDispatch` runs, inside the same `.thenApply` block
-   (`RuntimeBrokerService.java` execute path). Admission therefore strictly
-   precedes dispatch:
+1. **A missing `:process` row is a complete proof of never-started for an
+   `is_background` dispatch** — the row is admitted for that dispatch alone
+   (`RuntimeBrokerService.admitBackgroundProcess`). `RuntimeBrokerService`
+   admits the `:process` ledger row (keyed `<executionCallId>:process`,
+   durable JDBC) at execute-admission, _before_ `beginDispatch` runs, inside
+   the same `.thenApply` block (`RuntimeBrokerService.java` execute path).
+   Admission therefore strictly precedes dispatch:
    - row **absent** ⇒ execute-admission never happened ⇒ dispatch never
      began ⇒ the worker never received the call ⇒ no cgroup unit could
      exist. The cgroup-unit leg of the issue's two-part evidence is
      _entailed by_ the row leg and needs no separate check (the harness
      cannot see worker-local units anyway).
    - row **present** ⇒ dispatch began ⇒ the process may or may not have
-     started: **ambiguous ⇒ stays as-is** (that is the B1 family, #13533,
-     out of scope here).
+     started: **ambiguous ⇒ stays as-is** — with one definitive member this
+     arm deliberately does not consume: a row the Broker itself settled
+     terminally with `executionStatus: 'not_started'` is the Runtime's own
+     durable never-started proof (it rides the same status read the client
+     already fetches), and widening the proof to it is B1 follow-up. Every
+     other row-present state is the ambiguous B1 family (#13533), out of
+     scope here.
 2. **The 404 asymmetry makes the proof conservative.** The Broker's
    `requireExecution` looks the row up by `executionCallId` in the shared
    repository _first_ and throws `runtime_execution_not_found` (404) before
@@ -114,7 +122,10 @@ runtimeSessionId)`. No acquire: a released runtime Session would wedge a
    mandatory reacquire behind a permanent
    `runtime_session_not_acquirable`, while the definitive not-found answer
    needs no session context anyway (§3).
-4. Per candidate: `status(<executionCallId>:process)`:
+4. Per candidate: `backgroundProcessStatus(<executionCallId>)` — the
+   client owns the `:process` ledger-key suffix
+   (`HostedWorkspaceBroker`), so a key change cannot drift this arm's
+   proof open:
    - `undefined` (404, definitive) ⇒
      `childRuns.settleFailed(shellId, { stopReason: 'start_failed',
 started: false })` → commits `state: failed`,
@@ -158,7 +169,21 @@ if (session.childRuns && brokerOptions)
 - No `monitor_run` arm: monitor records strand at the same window but the
   issue frames R1 on `child_run` (monitor `dispatchStarted` also keeps
   `state: 'admitted'`, which is the _under_-claiming direction tracked by
-  #13377's mirror — a different symptom, out of scope).
+  #13377's mirror — a different symptom, out of scope). The proof itself
+  does not transfer either: the `:process` ledger row is admitted only for
+  an `is_background` dispatch
+  (`RuntimeBrokerService.admitBackgroundProcess`), and a monitor's input
+  carries `is_monitor`, never `is_background`, so no row exists to be
+  absent and the absence read is NOT a never-started proof for
+  `monitor_run` — extending this arm there requires a different proof
+  first.
+- No fix for #13801 R1 Gap A — the in-turn proof gate: when a background
+  reserve never lands a publication row (capacity or owner refusal, a
+  missing `await_runtime` checkpoint), the in-turn `close_not_started`
+  arm cannot prove never-started, and such a record strands until a
+  reopen runs this arm — which a resident Session may never see. Closing
+  that half lives in `hosted-workspace-tool-turn.ts`'s dispatch path, is
+  its own follow-up, and must stay row-absence-only when it lands (R3).
 - No periodic scanner: reload-only per R1. A broker-outage-at-open hole
   stays stranded until a later reload; strictly better than today (never).
 - No `release()` after probing: releasing persists `RELEASED` and wedges
@@ -171,12 +196,13 @@ if (session.childRuns && brokerOptions)
 Unit level (`hosted-never-started-reconcile.test.ts`, local-store rig with a
 stubbed `HostedWorkspaceBroker` module):
 
-- **R1 settle**: stranded `dispatch_started` record + `status(':process')
-→ undefined` ⇒ record reads `failed` + `not_started_proven` +
-  `stopReason: start_failed`; **reopen** the authority again and assert the
-  same (reload-visible). Assert `broker.acquire` is never called: the
-  definitive absence read carries no liveness prerequisite (released
-  runtime Session still proves the missing `:process` row).
+- **R1 settle**: stranded `dispatch_started` record +
+  `backgroundProcessStatus() → undefined` ⇒ record reads `failed` +
+  `not_started_proven` + `stopReason: start_failed`; **reopen** the
+  authority again and assert the same (reload-visible). Assert
+  `broker.acquire` is never called: the definitive absence read carries no
+  liveness prerequisite (released runtime Session still proves the missing
+  `:process` row).
 - **R2 by construction**: after the settle, `authority.taskViews()` shows a
   terminal task (`state: failed`, no runtime hold) instead of
   running/provisioning.
@@ -201,7 +227,9 @@ execution: 'not_started_proven'} }`, `valid: true` — replayed by the
 Hook wiring (`hosted-harness-session.test.ts`):
 
 - A load on a Session with a stranded record invokes the reconcile with the
-  built session (module mock; **fails if the hook is removed**).
+  built session (module mock; **fails if the hook is removed**), and the
+  open answer is held until the reconcile completes (**fails if the hook
+  drops its `await`**).
 
 ## Files affected
 

@@ -165,6 +165,7 @@ vi.mock('./hosted-monitor-wake-turn.js', async (importOriginal) => {
 
 const neverStartedReconcile = vi.hoisted(() => ({
   fn: vi.fn((input: unknown) => input),
+  gate: undefined as Promise<void> | undefined,
 }));
 vi.mock('./hosted-never-started-reconcile.js', async (importOriginal) => {
   const actual =
@@ -173,10 +174,13 @@ vi.mock('./hosted-never-started-reconcile.js', async (importOriginal) => {
     >();
   return {
     ...actual,
-    reconcileNeverStartedChildRuns: (
+    reconcileNeverStartedChildRuns: async (
       input: Parameters<typeof actual.reconcileNeverStartedChildRuns>[0],
     ) => {
       neverStartedReconcile.fn(input);
+      const gate = neverStartedReconcile.gate;
+      neverStartedReconcile.gate = undefined;
+      if (gate !== undefined) await gate;
       return actual.reconcileNeverStartedChildRuns(input);
     },
   };
@@ -943,6 +947,29 @@ describe('Hosted Harness no-tool session', () => {
         brokerOptions: expect.anything(),
       }),
     );
+  });
+
+  it('holds the fresh Session open until the never-started reconcile completes', async () => {
+    neverStartedReconcile.fn.mockClear();
+    let release!: () => void;
+    neverStartedReconcile.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let opened = false;
+    const pending = hookApp().then((app) => {
+      opened = true;
+      return app;
+    });
+    try {
+      await vi.waitFor(() =>
+        expect(neverStartedReconcile.fn).toHaveBeenCalledTimes(1),
+      );
+      expect(opened).toBe(false);
+    } finally {
+      release();
+    }
+    await pending;
+    expect(opened).toBe(true);
   });
 
   it.each([

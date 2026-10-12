@@ -5,7 +5,8 @@
 状态：提案（2026-10-11，作者 wenshao）
 跟踪：#12380 阶段 H → #12827，#13532 验收运行的发现 **A3**。
 不在范围内：A1 本体（#13789，已合入）、跨 Session 楔死（#13800）、
-启用 `monitor_run` 或 `child_run` 的 `shell` kind。
+启用 `monitor_run` 或 `child_run` 的 `shell` kind，以及 #13801 的
+Gap A（回合内「从未启动」取证门 —— 见「有意不做的事」）。
 
 ## 问题陈述
 
@@ -34,17 +35,23 @@ R3 —— 不放宽：含糊的结果必须保持阻塞，绝不被报为「从�
 
 ## 关键证据链（全部在当前 HEAD 核实）
 
-1. **缺失 `:process` 行是「从未启动」的完整证明。** `RuntimeBrokerService`
-   在 execute 准入时、_早于_ `beginDispatch`，于同一个 `.thenApply`
-   块内入账 `:process` 账本行（键为 `<executionCallId>:process`，JDBC
-   持久化，`RuntimeBrokerService.java` execute 路径）。因此准入严格
-   先于派发：
+1. **对一次 `is_background` 派发，缺失 `:process` 行是「从未启动」
+   的完整证明** —— 该行也只为 `is_background` 派发入账
+   （`RuntimeBrokerService.admitBackgroundProcess`）。
+   `RuntimeBrokerService` 在 execute 准入时、_早于_ `beginDispatch`，
+   于同一个 `.thenApply` 块内入账 `:process` 账本行（键为
+   `<executionCallId>:process`，JDBC 持久化，
+   `RuntimeBrokerService.java` execute 路径）。因此准入严格先于派发：
    - 行**缺失** ⇒ execute 准入从未发生 ⇒ 派发从未开始 ⇒ worker 从未
      收到该调用 ⇒ cgroup 单元不可能存在。issue 二分证据中的
      cgroup 单元那一腿**已被行证据蕴含**，无需另行核查（harness 本来
      也看不到 worker 本地的单元）。
    - 行**存在** ⇒ 派发已开始 ⇒ 进程可能启动也可能没有：**含糊 ⇒
-     保持原状**（那是 B1 家族，#13533，不在本片范围）。
+     保持原状** —— 其中有一个本 arm 有意不消费的确定性成员：Broker
+     自己终态结算为 `executionStatus: 'not_started'` 的行，本身就是
+     Runtime 持久的「从未启动」证明（它随客户端本已读取的同一次
+     status 应答返回），把证明放宽到它是 B1 的后续工作。其余一切
+     「行存在」状态都是含糊的 B1 家族（#13533），不在本片范围。
 2. **404 的不对称性让证明天然保守。** Broker 的 `requireExecution`
    *先*按 `executionCallId` 在共享仓储中查行，行不在时抛出
    `runtime_execution_not_found`（404），早于一切 Session/binding
@@ -105,7 +112,9 @@ reconcileNeverStartedChildRuns(input: {
 runtimeSessionId)`。不 acquire：已释放的 runtime Session 会让强制
    重取永久被拒 `runtime_session_not_acquirable`，而确定性的
    「从未启动」读取不需要任何会话上下文（§3）。
-4. 逐候选：`status(<executionCallId>:process)`：
+4. 逐候选：`backgroundProcessStatus(<executionCallId>)` ——
+   `:process` 账本键后缀由客户端（`HostedWorkspaceBroker`）持有，
+   键的变化不会让本 arm 的取证漂移敞开：
    - `undefined`（404，确定性缺失）⇒
      `childRuns.settleFailed(shellId, { stopReason: 'start_failed',
 started: false })` → 经 `commitExtensionRecord` 提交
@@ -146,7 +155,18 @@ if (session.childRuns && brokerOptions)
 - 不做 `monitor_run` arm：monitor 记录在同一窗口搁浅，但 issue 的
   R1 只针对 `child_run`（monitor 的 `dispatchStarted` 连
   `state: 'admitted'` 都不变，是**少报**方向，属 #13377 的镜像 ——
-  另一种症状，不在范围内）。
+  另一种症状，不在范围内）。证明本身同样不可迁移：`:process` 账本行
+  只为 `is_background` 派发入账
+  （`RuntimeBrokerService.admitBackgroundProcess`），而 monitor 的输入
+  携带 `is_monitor`、绝不携带 `is_background`，因此根本没有可缺失的
+  行，「缺失即证明」对 `monitor_run` 不成立 —— 向那里扩展必须先找到
+  另一种证明。
+- 不修 #13801 R1 的 Gap A —— 回合内取证门：当一次后台 reserve 从未
+  落下 publication 行（容量或 owner 拒绝、`await_runtime` 检查点缺
+  失），回合内的 `close_not_started` arm 无法证明「从未启动」，这样
+  的记录只能搁浅到某次重开运行本 arm —— 而常驻 Session 可能永远不会
+  重开。补上另一半位于 `hosted-workspace-tool-turn.ts` 的派发路径，
+  是它自己的后续工作，且落地时必须保持「仅行缺失」（R3）。
 - 不做周期扫描器：按 R1 只做 reload。open 时 Broker 不可达留下的洞，
   留到下一次 reload 自愈；严格好于今天（永远没有）。
 - 探测后不 `release()`：release 会持久 `RELEASED` 并楔死该 runtime
@@ -160,7 +180,7 @@ if (session.childRuns && brokerOptions)
 stub 的 `HostedWorkspaceBroker` 模块）：
 
 - **R1 结算**：搁死的 `dispatch_started` 记录 +
-  `status(':process') → undefined` ⇒ 记录读作 `failed` +
+  `backgroundProcessStatus() → undefined` ⇒ 记录读作 `failed` +
   `not_started_proven` + `stopReason: start_failed`；**再重开**一次
   authority 断言相同（reload 可见）。断言 `broker.acquire` 从未被
   调用：确定性缺失读取本身不依赖会话活力（已释放的 runtime Session
@@ -186,7 +206,8 @@ execution: 'not_started_proven'} }`，`valid: true` —— 由现有 TS 与
 接线（`hosted-harness-session.test.ts`）：
 
 - 带搁死记录的会话 load 会以构建好的会话调用该 reconcile（模块
-  mock；**hook 被移除即红**）。
+  mock；**hook 被移除即红**），且 open 的应答被扣住直到 reconcile
+  完成（**hook 丢掉 `await` 即红**）。
 
 ## 受影响文件
 

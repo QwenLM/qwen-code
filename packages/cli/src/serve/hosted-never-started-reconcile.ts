@@ -162,7 +162,7 @@ export async function reconcileNeverStartedChildRuns(input: {
       const executionCallId = record.run.executionCallId ?? record.shellId;
       let answer: { state: string } | undefined;
       try {
-        answer = await broker.status(`${executionCallId}:process`);
+        answer = await broker.backgroundProcessStatus(executionCallId);
       } catch {
         skipped.push(record.shellId);
         continue;
