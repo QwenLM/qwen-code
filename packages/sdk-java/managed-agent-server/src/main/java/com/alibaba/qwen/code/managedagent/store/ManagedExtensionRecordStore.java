@@ -436,7 +436,7 @@ public class ManagedExtensionRecordStore {
             }
             if ("model.attempt".equals(event.path("kind").asText())
                     && "started".equals(payload.path("state").asText())) {
-                if (resourcePhase) {
+                if (v2) {
                     throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
                 }
                 dispatch = true;

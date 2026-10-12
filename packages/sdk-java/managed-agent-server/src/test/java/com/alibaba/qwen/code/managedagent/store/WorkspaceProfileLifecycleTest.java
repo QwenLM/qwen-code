@@ -222,6 +222,25 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @Test
+    void rejectsNewModelAttemptsDuringBothLifecyclePhases() {
+        var f = fixture();
+        var operation = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);
+        byte[] bytes = "{\"managedSession\":{\"kind\":\"model.attempt\",\"payload\":{\"state\":\"started\"}}}\n"
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        var records = new ManagedExtensionRecordStore(f.jdbc);
+        for (boolean resources : java.util.List.of(false, true)) {
+            if (resources) {
+                f.transactions.executeWithoutResult(ignored -> f.lifecycle.recoverEffects(operation));
+            }
+            boolean resourcePhase = WorkspaceLifecycleStore.resourceClaim(f.jdbc, "tenant", f.session,
+                    WorkspaceLifecycleStore.authority(operation));
+            assertThat(resourcePhase).isEqualTo(resources);
+            assertThatThrownBy(() -> records.hasNewLifecycleDispatch("tenant", f.session, bytes, ignored -> null, true, resourcePhase))
+                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_admission_closed"));
+        }
+    }
+
+    @Test
     void unknownPersistedProtocolCannotAcquireARecoveryOwner() {
         var f = fixture();
         var operation = admit(f, WorkspaceToolProfiles.MCP, OperationKind.CLOSE);
