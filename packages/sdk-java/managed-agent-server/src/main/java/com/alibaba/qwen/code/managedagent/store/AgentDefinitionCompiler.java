@@ -94,7 +94,8 @@ final class AgentDefinitionCompiler {
                     || !(entry.get("profile") instanceof String profile)) {
                 throw unsupported("tools");
             } else {
-                if (!toolProfiles.contains(profile)) {
+                if (WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(profile)
+                        || !toolProfiles.contains(profile)) {
                     throw unsupported("tools");
                 }
                 // A Shell profile always asks (#13271); it may never pair
