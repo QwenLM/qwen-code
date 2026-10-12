@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 import {
   getHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -462,6 +463,10 @@ describe('ManagedToolRuntime', () => {
       >;
     config.getFileReadCache = () =>
       new Map() as unknown as ReturnType<Config['getFileReadCache']>;
+    config.getFileSystemService = () =>
+      new StandardFileSystemService() as unknown as ReturnType<
+        Config['getFileSystemService']
+      >;
     config.getWorkspaceContext = () =>
       ({
         isPathWithinWorkspace: () => true,
