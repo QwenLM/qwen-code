@@ -3259,10 +3259,14 @@ export class LlmChat {
         const hookRetargetPossible =
           this.config.hasHooksForEvent?.('PreToolUse') ||
           this.config.hasHooksForEvent?.('PermissionRequest');
+        const cutRead = cutResults.some((result) => {
+          const name = canonicalToolName(result.name ?? '');
+          return name === ToolNames.TOOL_CALL || FILE_PATH_TOOLS.has(name);
+        });
         // Keep unresolvable reads resident by preserving their actual text;
         // normal compaction owns this batch before any recovery artifact is written.
         const guarded =
-          (unresolvedRead || (hookRetargetPossible && cutResults.length > 0)) &&
+          (unresolvedRead || (hookRetargetPossible && cutRead)) &&
           !this.isForkedChat
             ? entries
             : await finalizeToolResponses(

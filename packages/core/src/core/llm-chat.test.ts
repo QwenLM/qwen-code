@@ -12277,6 +12277,15 @@ describe('LlmChat', async () => {
       },
     );
 
+    // A hook can only retarget a *read* off the paths derivable here; a shell
+    // batch carries no such path, so a hook must not preserve it.
+    it('still shrinks a shell-only cut batch when a PreToolUse hook is configured', async () => {
+      mockConfig.hasHooksForEvent = (name: string) => name === 'PreToolUse';
+      await reportUsage(NEAR_AUTO);
+      await sendDrain([result('shell-only')], 'second');
+      expect(resultChars(1)).toBeLessThan(12_000);
+    });
+
     it.each([
       ['pressure', 200_000],
       ['aggregate', 1_000],
