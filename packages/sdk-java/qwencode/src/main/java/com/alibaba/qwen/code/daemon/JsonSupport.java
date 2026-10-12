@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.daemon;
 
+import com.alibaba.fastjson2.JSON;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -35,10 +36,15 @@ final class JsonSupport {
      * managed workflow launch block is the first prompt ever to carry a
      * fractional number across it: fastjson2's `Double.toString` scientific
      * form diverges from ECMAScript outside [0.001, 1e7), so the digest
-     * substrate is canonicalized here, not at each call site. Only contract
-     * JSON values appear (Map, List, String, Boolean, null, and finite
-     * numbers); key order follows each map's own iteration order, as the
-     * builders of these blocks use LinkedHashMap.
+     * substrate is canonicalized here, not at each call site. Contract JSON
+     * values (Map, List, String, Boolean, null, and finite numbers) render
+     * directly; key order follows each map's own iteration order, as the
+     * builders of these blocks use LinkedHashMap. Every other value — a
+     * Jackson tree a caller read from a store column (the channel policy of
+     * a `submit_input` body), a record, an enum — is the same request body
+     * this encoder replaced fastjson2 for, so it renders as fastjson2
+     * rendered it and is read back strictly into contract values, keeping
+     * the output canonical either way.
      */
     private static void writeCanonical(Object value, StringBuilder out) {
         if (value == null) {
@@ -75,8 +81,8 @@ final class JsonSupport {
         } else if (value instanceof Number) {
             writeCanonicalNumber((Number) value, out);
         } else {
-            throw new IllegalArgumentException(
-                    "Unsupported JSON value type: " + value.getClass().getName());
+            writeCanonical(parseValue(JSON.toJSONString(value),
+                    "JSON value of type " + value.getClass().getName()), out);
         }
     }
 
@@ -225,6 +231,24 @@ final class JsonSupport {
             out.append('+');
         }
         out.append(exponent);
+    }
+
+    /** One strict JSON value of any shape, as contract values. */
+    private static Object parseValue(String json, String context) {
+        try (JsonParser parser = STRICT_JSON.createParser(json)) {
+            JsonToken token = parser.nextToken();
+            if (token == null) {
+                throw new DaemonProtocolException(context + " is empty");
+            }
+            Object parsed = readValue(parser, token, context);
+            if (parser.nextToken() != null) {
+                throw new DaemonProtocolException(
+                        context + " must contain exactly one JSON value");
+            }
+            return parsed;
+        } catch (IOException e) {
+            throw new DaemonProtocolException(context + " contains invalid JSON", e);
+        }
     }
 
     static Map<String, Object> parseObject(String json, String context) {

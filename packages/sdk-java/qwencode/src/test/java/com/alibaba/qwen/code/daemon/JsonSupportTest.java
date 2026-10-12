@@ -169,6 +169,64 @@ class JsonSupportTest {
                 JsonSupport.encode(value));
     }
 
+    /** A bean, the shape fastjson2 renders by its getters. */
+    public static final class ChannelPolicy {
+        private final String privatePolicy;
+        private final List<String> allowedUsers;
+        private final double ratio;
+        private final String note;
+
+        ChannelPolicy(String privatePolicy, List<String> allowedUsers,
+                double ratio, String note) {
+            this.privatePolicy = privatePolicy;
+            this.allowedUsers = allowedUsers;
+            this.ratio = ratio;
+            this.note = note;
+        }
+
+        public String getPrivatePolicy() {
+            return privatePolicy;
+        }
+
+        public List<String> getAllowedUsers() {
+            return allowedUsers;
+        }
+
+        public double getRatio() {
+            return ratio;
+        }
+
+        public String getNote() {
+            return note;
+        }
+    }
+
+    private enum PolicyMode {
+        ALLOWLIST
+    }
+
+    /**
+     * Request bodies are not all contract values: the channel `submit_input`
+     * body carries its policy as the Jackson tree read from the store column,
+     * and fastjson2 rendered every such value before this encoder replaced
+     * it. They still encode — the same JSON fastjson2 produced, canonicalized
+     * (`1.0E-7` → `1e-7`, the lone surrogate escaped) — instead of throwing
+     * and turning every inbound channel event into a 400.
+     */
+    @Test
+    void encodeRendersNonContractValuesAsFastjsonDidThenCanonicalizes() {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("policy", new ChannelPolicy("allowlist", List.of("a@b"), 1e-7,
+                "x\uD800y"));
+        value.put("mode", PolicyMode.ALLOWLIST);
+        value.put("tail", List.of(PolicyMode.ALLOWLIST, 1));
+        assertEquals("{\"policy\":{\"allowedUsers\":[\"a@b\"],"
+                        + "\"note\":\"x\\ud800y\",\"privatePolicy\":\"allowlist\","
+                        + "\"ratio\":1e-7},\"mode\":\"ALLOWLIST\","
+                        + "\"tail\":[\"ALLOWLIST\",1]}",
+                JsonSupport.encode(value));
+    }
+
     @Test
     void protocolHelperMessagesKeepTheirFieldPath() {
         Map<String, Object> block = new LinkedHashMap<>();
