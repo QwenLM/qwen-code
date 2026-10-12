@@ -351,6 +351,36 @@ it('refuses a script whose masked source calls workflow() as a nested launch', a
   );
 });
 
+// #13858 R4-4: the child's agents carry no tools and use nothing on the
+// Harness host; a literal host-bound agent() option would fail the whole
+// run after a launch slot was spent, so admission refuses it up front.
+it('refuses a script whose agent() passes a host-bound option before any record commits', async () => {
+  for (const [source, option] of [
+    ["return await agent('scan', { tools: ['read_file'] });", 'tools'],
+    ["return await agent('scan', { agentType: 'Explore' });", 'agentType'],
+  ] as const) {
+    const responses = await executeWorkflow(
+      createTurn(),
+      call({ script: source }),
+    );
+    expect(JSON.stringify(responses)).toContain(
+      `agent() on line 1 passes ${option}`,
+    );
+    expect(JSON.stringify(responses)).toContain('text-only agents');
+  }
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+  // A text-only agent() with the options that still apply is admitted.
+  const admitted = await executeWorkflow(
+    createTurn(),
+    call({
+      script: "return await agent('scan', { model: 'm', effort: 'high' });",
+    }),
+  );
+  expect(JSON.stringify(admitted)).toContain('Workflow child started');
+});
+
 it('refuses the foreground workflow launch and rejects the sibling batch while a Workspace mount is at stake', async () => {
   // A Session-scoped hold (here the Hook catalog's) blocks foreground and
   // background alike and is answered by the Session-owner arm.

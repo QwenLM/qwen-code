@@ -68,7 +68,27 @@ export interface WorkflowScriptShape {
    * member call (`x.workflow(`) is not the injected global and is absent.
    */
   readonly nestedWorkflowCalls: readonly number[];
+  /**
+   * `agent(` call sites whose literal options object names a key that
+   * reaches the dispatching host (tools, agentType, isolation, workingDir),
+   * in source order. Lexical only: options built elsewhere are not seen,
+   * so the runtime refusal stays the boundary and this is its early echo.
+   */
+  readonly hostBoundAgentOptions: readonly WorkflowHostBoundAgentOption[];
 }
+
+export interface WorkflowHostBoundAgentOption {
+  readonly option: (typeof HOST_BOUND_AGENT_OPTION_KEYS)[number];
+  /** 1-based line of the option key. */
+  readonly line: number;
+}
+
+const HOST_BOUND_AGENT_OPTION_KEYS = [
+  'tools',
+  'agentType',
+  'isolation',
+  'workingDir',
+] as const;
 
 const PROMPT_SUMMARY_CHARS = 60;
 const LOOP_HEAD_CHARS = 40;
@@ -260,6 +280,7 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
   const rowByContext = new Map<number, WorkflowShapeRow>();
   const violations: WorkflowDeterminismViolation[] = [];
   const nestedWorkflowCalls: number[] = [];
+  const hostBoundAgentOptions: WorkflowHostBoundAgentOption[] = [];
   const stack: Context[] = [];
   // Indexes of the `}` that closed a `do { }` body, so its `while (...)` tail
   // is not read as a new loop around the next statement.
@@ -380,6 +401,45 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
     lastRowWasTopLevel = context === undefined;
   };
 
+  // Keys of an object literal that sits directly in the argument list:
+  // nested objects (a schema's own `tools` property) are not options.
+  const recordHostBoundOptions = (open: number): void => {
+    const close = matchingClose(open);
+    if (close < 0) return;
+    let parens = 0;
+    let braces = 0;
+    let keyLine = line;
+    for (let k = open + 1; k < close; k++) {
+      const c = code[k];
+      if (c === '\n') keyLine++;
+      if (c === '(' || c === '[') parens++;
+      else if (c === ')' || c === ']') parens--;
+      else if (c === '{') braces++;
+      else if (c === '}') braces--;
+      else if (
+        parens === 0 &&
+        braces === 1 &&
+        IDENT_START.test(c) &&
+        !IDENT_PART.test(code[k - 1] ?? '')
+      ) {
+        const key = readIdent(k);
+        const after = skipSpace(k + key.length);
+        const before = previousNonSpaceIndex(k);
+        if (
+          (HOST_BOUND_AGENT_OPTION_KEYS as readonly string[]).includes(key) &&
+          (code[before] === '{' || code[before] === ',') &&
+          (code[after] === ':' || code[after] === ',' || code[after] === '}')
+        ) {
+          hostBoundAgentOptions.push({
+            option: key as WorkflowHostBoundAgentOption['option'],
+            line: keyLine,
+          });
+        }
+        k += key.length - 1;
+      }
+    }
+  };
+
   const recordMemberCall = (
     object: 'Date' | 'Math',
     end: number,
@@ -401,7 +461,10 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
     switch (word) {
       case 'agent': {
         const open = skipSpace(end);
-        if (code[open] === '(') recordAgent(start, open);
+        if (code[open] === '(') {
+          recordAgent(start, open);
+          recordHostBoundOptions(open);
+        }
         return;
       }
       case 'workflow': {
@@ -547,6 +610,7 @@ export function scanWorkflowScriptShape(source: string): WorkflowScriptShape {
     agentCalls,
     determinismViolations: violations,
     nestedWorkflowCalls,
+    hostBoundAgentOptions,
   };
 }
 

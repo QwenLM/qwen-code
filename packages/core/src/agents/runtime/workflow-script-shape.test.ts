@@ -363,3 +363,40 @@ describe('scanWorkflowScriptShape — nested workflow calls', () => {
     expect(shape.nestedWorkflowCalls).toEqual([]);
   });
 });
+
+// The managed workflow child's agents carry no tools and use nothing on
+// the Harness host; the hosted admission refuses a literal host-bound
+// option early on this signal (#13858 R4-4), the runtime refuses the rest.
+describe('scanWorkflowScriptShape — host-bound agent options', () => {
+  it('reports each literal host-bound option key with its line', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        "await agent('a', { tools: ['read_file'] })",
+        "await agent('b', {",
+        "  model: 'm',",
+        "  agentType: 'Explore',",
+        '})',
+        "await agent('c', { isolation: 'worktree', workingDir })",
+      ),
+    );
+    expect(shape.hostBoundAgentOptions).toEqual([
+      { option: 'tools', line: 1 },
+      { option: 'agentType', line: 4 },
+      { option: 'isolation', line: 6 },
+      { option: 'workingDir', line: 6 },
+    ]);
+  });
+
+  it('ignores nested keys, strings, comments and text-only options', () => {
+    const shape = scanWorkflowScriptShape(
+      script(
+        "await agent('a', { schema: { properties: { tools: { type: 'string' } } } })",
+        "await agent('b', { model: 'm', effort: 'high', label: 'tools' })",
+        "// agent('c', { tools: [] })",
+        "const note = \"agent('d', { agentType: 'x' })\"",
+        "const tools = ['x']; return agent('e', { label: tools[0] })",
+      ),
+    );
+    expect(shape.hostBoundAgentOptions).toEqual([]);
+  });
+});

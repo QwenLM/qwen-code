@@ -599,10 +599,14 @@ export const HOSTED_AGENT_TOOL: FunctionDeclaration = {
  * by default through a durable notification, or folded into this tool
  * result when run_in_background is false.
  */
+/** The posture of a managed workflow's agents, stated once for the
+ * declaration and the admission refusal. */
+const HOSTED_WORKFLOW_TEXT_ONLY_AGENTS =
+  'In this profile agent() runs text-only agents: they carry no tools and use nothing on the host, so tools, agentType, isolation and workingDir are unavailable; model, effort and schema still apply.';
+
 export const HOSTED_WORKFLOW_TOOL: FunctionDeclaration = {
   name: 'workflow',
-  description:
-    'Launch one workflow as an independent child Session of this Workspace. The script is deterministic JavaScript with the injected globals phase(), log(), agent(), parallel(), pipeline(), args and budget, and cannot import anything; Date and Math.random() throw. Runs in the background by default: the run settles later and its result arrives as a notification input. With run_in_background false the call waits and returns the run result directly. Saved-workflow names, script paths, resume and nesting are unavailable in this profile: pass the complete script inline.',
+  description: `Launch one workflow as an independent child Session of this Workspace. The script is deterministic JavaScript with the injected globals phase(), log(), agent(), parallel(), pipeline(), args and budget, and cannot import anything; Date and Math.random() throw. ${HOSTED_WORKFLOW_TEXT_ONLY_AGENTS} Runs in the background by default: the run settles later and its result arrives as a notification input. With run_in_background false the call waits and returns the run result directly. Saved-workflow names, script paths, resume and nesting are unavailable in this profile: pass the complete script inline.`,
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -2693,6 +2697,12 @@ export class HostedWorkspaceToolTurn {
                 // ones.
                 const extra = shape.nestedWorkflowCalls.length - 1;
                 validationError = `Hosted workflow script is invalid: workflow() on line ${shape.nestedWorkflowCalls[0]}${extra > 0 ? ` and ${extra} more` : ''} launches a nested run whose script this launch never pinned. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
+              } else if (shape.hostBoundAgentOptions.length > 0) {
+                // The child refuses these at dispatch and fails the whole
+                // run; refusing here keeps the model's correction free of
+                // a spent launch slot (#13858 R4-4).
+                const [first] = shape.hostBoundAgentOptions;
+                validationError = `Hosted workflow script is invalid: agent() on line ${first.line} passes ${first.option}. ${HOSTED_WORKFLOW_TEXT_ONLY_AGENTS}`;
               }
             }
           }
