@@ -634,11 +634,24 @@ public class SessionLifecycleCoordinator {
             if (lifecycle == null || !runtimeWarmer.supportsWorkspaceClose()) {
                 throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
             }
-            if (lifecycle.recoverEffects(operation) == null) {
+            JsonNode recovered = lifecycle.recoverEffects(operation);
+            if (recovered == null) {
                 if (!harness.supportsLifecycle()) {
                     throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }
-                JsonNode receipt = harness.settleLifecycle(operation);
+                JsonNode receipt;
+                try {
+                    receipt = harness.settleLifecycle(operation);
+                } catch (com.alibaba.qwen.code.daemon.HostedHarnessSettleAnsweredException answered) {
+                    // The Harness answered the settle but Java could not
+                    // process the receipt — the latch still sets: a later
+                    // failure of this attempt is not "the settle never
+                    // happened" (review round 11, R7-2). A pre-send
+                    // DaemonProtocolException (e.g. the protocol-1 refusal)
+                    // never carries the marker and stays unlatched.
+                    harnessSettled.set(true);
+                    throw answered;
+                }
                 // The Harness was asked to stop and answered: even when the
                 // receipt write below refuses, the settle did reach the
                 // Harness and a later failure of this attempt is not "the
@@ -646,9 +659,12 @@ public class SessionLifecycleCoordinator {
                 harnessSettled.set(true);
                 lifecycle.saveEffects(operation, receipt);
             } else {
-                // The recovered receipt is durable proof a prior attempt
-                // reached the Harness.
-                harnessSettled.set(true);
+                // A receipt a prior attempt saved from the Harness is
+                // durable proof it reached the Harness; a neverInitialized
+                // receipt was synthesized and persisted by the store itself
+                // for a Session the Harness never booted, with zero Harness
+                // contact (review round 11, R11-2).
+                harnessSettled.set(!recovered.path("neverInitialized").asBoolean(false));
             }
             harness.detachLifecycle(operation);
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {

@@ -205,6 +205,20 @@ public class ActionResponseCoordinator {
                         clock.millis());
                 return;
             }
+            if (error instanceof RuntimeBrokerException failure
+                    && !failure.isRetryable()
+                    && "workspace_unavailable".equals(failure.getCode())) {
+                // A named refusal keeps its own code even at budget
+                // exhaustion — the generic delivery-failed code would name
+                // a component that did not fail, and it is on the
+                // re-admission allowlist while this one is not: recorded
+                // under the generic code, a client retry would resurrect
+                // the operation and burn another full budget on a refusal
+                // that can never succeed.
+                actions.complete(op, owner, failure.getCode(), null, false,
+                        clock.millis());
+                return;
+            }
             if (!answered
                     && op.attemptCount() - op.budgetExemptAttempt()
                             >= dispatch.getMaxOperationRetries()) {
@@ -223,15 +237,6 @@ public class ActionResponseCoordinator {
                         "action_response_delivery_failed",
                         null,
                         false,
-                        clock.millis());
-                return;
-            }
-            if (error instanceof RuntimeBrokerException failure
-                    && !failure.isRetryable()
-                    && "workspace_unavailable".equals(failure.getCode())) {
-                // Not harness_confirmed: the Workspace authority refused
-                // before the Harness was ever asked.
-                actions.complete(op, owner, failure.getCode(), null, false,
                         clock.millis());
                 return;
             }

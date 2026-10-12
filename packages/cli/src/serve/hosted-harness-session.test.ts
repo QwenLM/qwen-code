@@ -8545,6 +8545,38 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  it('deregisters the Session when the close sealed the writer but the release failed', async () => {
+    // A plain Session (no hooks): the close reaches managed.close()
+    // directly, so the boundary release fails inside it, after its finally
+    // sealed the writer (review round 11, R11-3).
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'releaseActivation',
+    ).mockRejectedValue(new Error('resource store unavailable'));
+    const failed = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(failed.status).toBe(503);
+    expect(failed.body.code).toBe('managed_session_close_failed');
+    // The sealed-but-rejected session is deregistered: a follow-up gets a
+    // clean 404 instead of a stranded entry answering against a dead
+    // journal. A retried DELETE does not re-run the release either.
+    const followUp = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(followUp.status).toBe(404);
+    expect(followUp.body.code).toBe('hosted_session_not_found');
+  });
+
   it('pins dynamic Hook revisions and rejects unscoped operations', async () => {
     const { server, authorize } = await hookApp();
     const operationId = randomUUID();

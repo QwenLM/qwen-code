@@ -6987,6 +6987,14 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_turn_active');
     session.mcpBusy = true;
     session.mcpClosing = true;
+    // The deregistration is safe only once the close was attempted:
+    // close()'s own finally either sealed the writer (a rejection after
+    // that point — e.g. the boundary release — leaves a durably sealed
+    // journal that every later write would hit, R11-3) or failed the seal
+    // itself (nothing is usable either way). A failure before that — a
+    // hook or admission rejection — left the writer open and the Session
+    // usable, so the entry stays.
+    let closeAttempted = false;
     try {
       if (session.lifecycle || authority) {
         if (req.method === 'DELETE')
@@ -7094,11 +7102,10 @@ export function registerHostedHarnessSessionRoutes(
             ),
           );
       }
+      closeAttempted = true;
       await session.managed.close(
         session.lifecycle ? { releaseActivation: false } : undefined,
       );
-      for (const stop of session.streams) stop();
-      sessions.delete(req.params['id']);
       res.sendStatus(204);
     } catch (cause) {
       writeStderrLineSafe(
@@ -7106,6 +7113,16 @@ export function registerHostedHarnessSessionRoutes(
       );
       error(res, 503, 'managed_session_close_failed');
     } finally {
+      // A rejection after close() ran must not strand the Session in
+      // memory: the writer may be durably sealed while the caller was told
+      // the close failed (review round 11, R11-3), and leaving the entry
+      // re-arms a session whose every later journal write fails. A
+      // rejection before close() ran — a hook or admission refusal — left
+      // the writer open, so the entry stays usable.
+      if (closeAttempted) {
+        for (const stop of session.streams) stop();
+        sessions.delete(req.params['id']);
+      }
       session.mcpClosing = !!session.lifecycle;
       session.mcpBusy = false;
     }

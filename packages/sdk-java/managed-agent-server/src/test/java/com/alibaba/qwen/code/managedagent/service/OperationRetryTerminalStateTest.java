@@ -1139,6 +1139,150 @@ class OperationRetryTerminalStateTest {
         }
     }
 
+    // A settle the Harness answered but Java failed to decode still counts
+    // as reached: the latch sets on the answered marker the client throws
+    // after a 200, so the operation keeps the settled budget and the
+    // unsettled code instead of the plain budget and a protocol error
+    // (review round 11, R7-2). The cases sit at the plain budget's edge
+    // (10) and at the settled budget's edge (10 × 4).
+    @ParameterizedTest(name = "attemptCount = {0}")
+    @ValueSource(ints = {10, 40})
+    void aSettleAnsweredButUndecodableKeepsTheSettledBudget(int attemptCount) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(attemptCount, 0, 1);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.supportsLifecycle()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+        com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
+                lifecycle = mock(
+                        com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class);
+        // No durable receipt, so the settle calls the Harness; the Harness
+        // answered 200 but the receipt failed to decode — the client marks
+        // it as answered.
+        doThrow(new com.alibaba.qwen.code.daemon.HostedHarnessSettleAnsweredException(
+                "POST /session/:id/lifecycle contains invalid JSON", null))
+                .when(harness).settleLifecycle(any());
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
+        coordinator.setWorkspaceLifecycleStore(lifecycle);
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            if (attemptCount < 40) {
+                verify(store, never()).failOperation(anyString(),
+                        anyString(), anyString(), anyString(), anyLong(),
+                        anyString());
+                verify(store).retryOperation(eq("tenant"), eq("session"),
+                        eq("op-close"), anyString(), eq(1L), anyLong());
+            } else {
+                verify(store).failOperation(eq("tenant"), eq("session"),
+                        eq("op-close"), anyString(), eq(1L),
+                        eq("session_close_completion_unsettled"));
+            }
+            verify(store, never()).completeOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // A neverInitialized receipt is synthesized and persisted by the store
+    // itself for a Session the Harness never booted — its presence is not
+    // proof a prior attempt reached the Harness, so the settle keeps the
+    // plain budget and the settle's own code instead of the 4x settled
+    // budget and session_close_completion_unsettled (review round 11,
+    // R11-2). The cases sit at the plain budget's edge (10) and far past
+    // it (40), where a mis-set latch would still be waiting.
+    @ParameterizedTest(name = "attemptCount = {0}")
+    @ValueSource(ints = {10, 40})
+    void aNeverInitializedReceiptDoesNotReachTheSettledBudget(
+            int attemptCount) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(attemptCount, 0, 1);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(harness.isAvailable()).thenReturn(true);
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+        com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
+                lifecycle = mock(
+                        com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class);
+        // The store synthesized and persisted the receipt with zero Harness
+        // contact — the Session was never booted there.
+        when(lifecycle.recoverEffects(any())).thenReturn(
+                new ObjectMapper().createObjectNode()
+                        .put("neverInitialized", true));
+        // The settle's next step keeps failing (the detach endpoint is
+        // down), which classifies as the lifecycle hooks code.
+        doThrow(mock(com.alibaba.qwen.code.daemon.DaemonHttpException.class))
+                .when(harness).detachLifecycle(any());
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(
+                        store,
+                        sessionStore,
+                        harness,
+                        runtimeWarmer,
+                        mock(ChildResultRelayStore.class),
+                        new ObjectMapper(),
+                        mock(ChildLifecycleAdmissions.class),
+                        mock(ObjectProvider.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(),
+                        new ManagedAgentProperties());
+        coordinator.setWorkspaceLifecycleStore(lifecycle);
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(harness, never()).settleLifecycle(any());
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("workspace_lifecycle_hooks_unsettled"));
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(),
+                    eq("session_close_completion_unsettled"));
+            verify(store, never()).completeOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
     // A writer check that itself fails is treated as live, so a permanent
     // refusal thrown before the Harness was asked to stop is published the
     // same way — budget-exempt, with the refusal's code — rather than
@@ -2149,14 +2293,20 @@ class OperationRetryTerminalStateTest {
     // false): the Workspace authority refused before the Harness was ever
     // asked, so the record must not claim a harness_confirmed admission
     // (review round 6, R6-1).
-    @Test
-    void aWorkspaceUnavailableCompletesTerminallyWithoutHarnessConfirmation()
-            throws Exception {
+    // The named refusal keeps its code at and past the budget too — recorded under the generic delivery-failed code it
+    // would become re-admissible, and a client retry would resurrect the
+    // operation to burn another full budget on a refusal that can never
+    // succeed (review round 11, R11-1). The cases sit below, at, and above
+    // the default budget (10).
+    @ParameterizedTest(name = "attemptCount = {0}")
+    @ValueSource(ints = {1, 10, 11})
+    void aWorkspaceUnavailableCompletesTerminallyWithoutHarnessConfirmation(
+            int attemptCount) throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
-        OperationRecord claimed = actionOperation(1);
+        OperationRecord claimed = actionOperation(attemptCount);
         JsonNode body = actionBody();
         when(sessions.claimOperation(eq("tenant"), eq("session"),
                 eq("op-action"), anyString(), any(Duration.class)))
@@ -2178,6 +2328,9 @@ class OperationRetryTerminalStateTest {
 
         verify(actions).complete(eq(claimed), anyString(),
                 eq("workspace_unavailable"), isNull(), eq(false), anyLong());
+        verify(actions, never()).complete(any(), anyString(),
+                eq("action_response_delivery_failed"), any(), anyBoolean(),
+                anyLong());
         verify(sessions, never()).retryOperation(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyLong(), anyBoolean());
         verify(sessions, never()).retryOperation(anyString(), anyString(),

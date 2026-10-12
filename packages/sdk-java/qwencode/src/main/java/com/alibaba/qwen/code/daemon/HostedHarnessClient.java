@@ -703,10 +703,19 @@ public final class HostedHarnessClient implements AutoCloseable {
         HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/lifecycle",
                 request, ref.getHarnessClientId(), operation);
         requireMutationStatus(response, 200, operation);
-        Map<String, Object> receipt = JsonSupport.parseObject(response.getBody(), operation);
+        // Past this point the Harness has answered 200: a failure to decode
+        // or match the receipt is a post-answer failure, which the
+        // coordinator must not read as "the settle never happened".
+        Map<String, Object> receipt;
+        try {
+            receipt = JsonSupport.parseObject(response.getBody(), operation);
+        } catch (DaemonProtocolException error) {
+            throw new HostedHarnessSettleAnsweredException(error.getMessage(), error);
+        }
         if (!java.util.Objects.equals(request.get("sessionKey"), receipt.get("sessionKey"))
                 || !java.util.Objects.equals(request.get("kind"), receipt.get("kind"))) {
-            throw new DaemonProtocolException("Hosted lifecycle receipt identity differs");
+            throw new HostedHarnessSettleAnsweredException(
+                    "Hosted lifecycle receipt identity differs", null);
         }
         return receipt;
     }
