@@ -71,11 +71,11 @@ public class ManagedActionStore {
 
     private OwnerRow ownerRow(String tenantId, String sessionId) {
         return DataAccessUtils.nullableSingleResult(jdbc.query(
-                "SELECT owner_actor_key, creator_actor_key, workspace_id"
+                "SELECT owner_actor_key, creator_actor_key, workspace_id, tool_profile"
                         + " FROM managed_agent_session WHERE"
                         + " tenant_id = ? AND session_id = ?",
                 (result, row) -> new OwnerRow(result.getBytes(1),
-                        result.getBytes(2), result.getString(3)),
+                        result.getBytes(2), result.getString(3), result.getString(4)),
                 tenantId, sessionId));
     }
 
@@ -127,7 +127,7 @@ public class ManagedActionStore {
                         tenantId, session.workspaceId(), key).isEmpty();
     }
 
-    private record OwnerRow(byte[] owner, byte[] creator, String workspaceId) {
+    private record OwnerRow(byte[] owner, byte[] creator, String workspaceId, String toolProfile) {
     }
 
     private static ApiException forbidden() {
@@ -135,6 +135,13 @@ public class ManagedActionStore {
                 HttpStatus.FORBIDDEN,
                 "action_forbidden",
                 "Only the Session's owner or a Workspace operator may answer its Actions.");
+    }
+
+    private static ApiException shellForbidden() {
+        return new ApiException(
+                HttpStatus.FORBIDDEN,
+                "action_forbidden",
+                "Only the Session's recorded owner may answer its Shell Actions.");
     }
 
     void apply(
@@ -426,9 +433,12 @@ public class ManagedActionStore {
             }
             return new OperationAdmission(existing, true);
         }
-        if (!admitted && !workspaceOperatorAdmits(tenantId, ownerRow,
-                actorKey)) {
-            throw forbidden();
+        // A Shell answer runs a command, so the Workspace-operator arm does
+        // not apply. Other Actions keep that arm.
+        boolean shell = ownerRow != null && WorkspaceToolProfiles.isPublicShell(ownerRow.toolProfile());
+        if (!admitted && (shell || !workspaceOperatorAdmits(tenantId, ownerRow,
+                actorKey))) {
+            throw shell ? shellForbidden() : forbidden();
         }
         // Every bound admission certifies delivery exactly like the
         // submitter family: the recorded create-command actor must still
@@ -537,6 +547,34 @@ public class ManagedActionStore {
                 (r, row) -> new OperationTarget(r.getString(1), r.getString(2), r.getString(3)),
                 now,
                 now);
+    }
+
+    public void settleEndedResponses(long now) {
+        List<OperationTarget> ended = jdbc.query(
+                "SELECT o.tenant_id, o.session_id, o.operation_id FROM managed_agent_operation o"
+                        + " JOIN managed_agent_action a ON a.tenant_id = o.tenant_id AND"
+                        + " a.session_id = o.session_id AND a.action_id = o.action_id"
+                        + " WHERE o.operation_kind = 'ACTION_RESPONSE' AND o.delivery_state IN"
+                        + " ('PENDING', 'LEASED') AND a.state <> 'requested' LIMIT 50",
+                (r, row) -> new OperationTarget(r.getString(1), r.getString(2), r.getString(3)));
+        for (OperationTarget target : ended) {
+            Response response = response(target.tenantId(), target.sessionId(), target.operationId());
+            Action action = find(target.tenantId(), target.sessionId(), response.actionId()).orElseThrow();
+            boolean matched = "decided".equals(action.state())
+                    && decisionDigest(response.body()).equals(action.decisionDigest());
+            jdbc.update(
+                    "UPDATE managed_agent_operation SET state = ?, admission_stage ="
+                            + " 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?,"
+                            + " error_code = ?, decision_receipt_id = ?, lease_owner = NULL,"
+                            + " lease_until = NULL, updated_at = ?, completed_at = ? WHERE tenant_id"
+                            + " = ? AND session_id = ? AND operation_id = ? AND operation_kind ="
+                            + " 'ACTION_RESPONSE' AND delivery_state IN ('PENDING', 'LEASED')",
+                    matched ? "COMPLETED" : "FAILED",
+                    "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
+                    matched ? null : endedCode(action.state()),
+                    matched ? action.decisionReceiptId() : null,
+                    now, now, target.tenantId(), target.sessionId(), target.operationId());
+        }
     }
 
     @Transactional

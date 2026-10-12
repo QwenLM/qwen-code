@@ -5,6 +5,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
 import java.util.concurrent.CountDownLatch;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.timeout;
@@ -2730,6 +2731,83 @@ class HarnessCoordinatorTest {
             public void close() {
             }
         };
+    }
+
+    @Test
+    void rejectsInvalidLeaseRenewConfiguration() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        ManagedAgentProperties zeroRenew = new ManagedAgentProperties();
+        zeroRenew.getDispatch().setLeaseRenewInterval(Duration.ZERO);
+        // A zero renew interval used to die on the worker thread holding
+        // the claimed turn; a renew >= duration kept losing the lease at
+        // the first renewal and read as hosted_harness_unavailable.
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), zeroRenew))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
+        ManagedAgentProperties inverted = new ManagedAgentProperties();
+        inverted.getDispatch().setLeaseDuration(Duration.ofSeconds(10));
+        inverted.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(10));
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), inverted))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
+        // A sub-millisecond renew is positive, so only validating the
+        // truncated millis rejects it; the scheduler would otherwise receive
+        // period 0 and die on the worker thread holding the claimed turn.
+        ManagedAgentProperties subMillis = new ManagedAgentProperties();
+        subMillis.getDispatch()
+                .setLeaseRenewInterval(Duration.ofNanos(999_999));
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), subMillis))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
+        // With the default 60 s duration a negative renew passes the
+        // renew >= duration comparison, so only the renew-side bound rejects
+        // it.
+        ManagedAgentProperties negativeRenew = new ManagedAgentProperties();
+        negativeRenew.getDispatch()
+                .setLeaseRenewInterval(Duration.ofSeconds(-1));
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), negativeRenew))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
+        // A renew just under the duration orders below it but leaves no
+        // margin for the renewal's own execution.
+        ManagedAgentProperties tightRenew = new ManagedAgentProperties();
+        tightRenew.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(59));
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), tightRenew))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
+        // A sub-millisecond pair whose truncated margin is zero: both sides
+        // round to 1 ms, so the renewal period equals the lease on the
+        // scheduler's clock.
+        ManagedAgentProperties zeroMargin = new ManagedAgentProperties();
+        zeroMargin.getDispatch().setLeaseDuration(Duration.ofNanos(1_900_000));
+        zeroMargin.getDispatch()
+                .setLeaseRenewInterval(Duration.ofNanos(1_500_000));
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), zeroMargin))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
+        // The defaults (60 s lease / 20 s renew) keep passing.
+        new HarnessCoordinator(store, harness, new HarnessEventProjector(),
+                mock(RuntimeWarmer.class), directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties()).close();
     }
 
     private static ExecutorService directExecutor() {

@@ -102,6 +102,10 @@ function history(count: number, exists: boolean): HostedFileHistoryRecord {
 }
 
 async function persistRaw(record: Record<string, unknown>) {
+  // The production writer wraps the hosted fields around a reader-facing
+  // record; the commit-time fence refuses an envelope without one.
+  const previous = (await session.sink.project()).at(-1)!;
+  const state = record['state'] as HostedFileHistoryRecord['state'];
   await session.authority.commitDomainRecord(
     {
       operation: 'commitFileHistory',
@@ -111,7 +115,23 @@ async function persistRaw(record: Record<string, unknown>) {
         .update(JSON.stringify(record))
         .digest('hex'),
     },
-    { domain: 'file_history', content: record },
+    {
+      domain: 'file_history',
+      content: {
+        ...record,
+        record: {
+          uuid: randomUUID(),
+          parentUuid: previous.uuid,
+          sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+          timestamp: new Date().toISOString(),
+          type: 'system',
+          subtype: 'file_history_snapshot',
+          cwd: previous.cwd,
+          version: previous.version,
+          systemPayload: { snapshots: state.snapshots },
+        },
+      },
+    },
     { class: 'trusted_entry' },
   );
 }
