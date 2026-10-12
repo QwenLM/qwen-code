@@ -23,6 +23,57 @@ afterEach(() => {
 });
 
 describe('JavaManagedAgentClient', () => {
+  it('uses all existing task POST routes with headers, credentials and cancellation', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        jsonResponse({ data: [], hasMore: false, nextCursor: 'floor' }),
+      );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ 'x-tenant': 'tenant' }),
+    });
+    const abort = new AbortController();
+    await client.listTasks(
+      { sessionId: 's1', cursor: 'page', limit: 50 },
+      abort.signal,
+    );
+    await client.getTask({ sessionId: 's1', taskId: 'task1' }, abort.signal);
+    await client.listTaskEvents(
+      { sessionId: 's1', taskId: 'task1', after: 'checkpoint', limit: 50 },
+      abort.signal,
+    );
+    await client.cancelTask(
+      {
+        sessionId: 's1',
+        taskId: 'task1',
+        idempotencyKey: 'saved',
+        requestId: 'trace',
+      },
+      abort.signal,
+    );
+    expect(
+      fetchImpl.mock.calls.map(([url]) => String(url).split('/v1')[1]),
+    ).toEqual([
+      '/tasks/query',
+      '/tasks/get',
+      '/tasks/events/query',
+      '/tasks/cancel',
+    ]);
+    for (const [, init] of fetchImpl.mock.calls) {
+      expect(init?.method).toBe('POST');
+      expect(init?.credentials).toBe('include');
+      expect(init?.signal).toBe(abort.signal);
+      expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant');
+    }
+    expect(JSON.parse(String(fetchImpl.mock.calls[2][1]?.body))).toEqual({
+      sessionId: 's1',
+      taskId: 'task1',
+      after: 'checkpoint',
+      limit: 50,
+    });
+  });
   it('binds the default browser fetch to the global object', async () => {
     const fetchImpl = vi.fn(function (this: unknown) {
       if (this !== globalThis) throw new TypeError('Illegal invocation');

@@ -24344,6 +24344,7 @@ describe('App session callbacks', () => {
       setEnabled: vi.fn(),
       refreshPermission: vi.fn(),
       syncLanguage,
+      requestPermissionOnce: vi.fn(),
     });
     const { rerender } = renderApp();
     await flush();

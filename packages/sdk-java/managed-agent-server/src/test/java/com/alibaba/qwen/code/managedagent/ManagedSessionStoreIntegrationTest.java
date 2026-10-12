@@ -78,6 +78,67 @@ class ManagedSessionStoreIntegrationTest {
     private ManagedExtensionRecordStore records;
 
     @Test
+    void promotesAtomicallyAndRefusesOlderHttpReadersIncludingReplay() throws Exception {
+        String session = "g3-reader-" + UUID.randomUUID();
+        String base = "/internal/managed-session-store/v1/sessions/" + session;
+        String ceiling = "X-Qwen-Managed-Max-Readable-Storage-Version";
+        var writer = writerRequest(WRITER_A);
+        mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(writer.toString())).andExpect(status().isOk());
+        ObjectNode body = objectMapper.createObjectNode().put("v", 1).put("promptId", "original-prompt")
+                .put("runtimeSessionId", "original-prompt").put("bindingId", "original-binding")
+                .put("generation", "1").put("workspaceGeneration", "1").put("fileHistoryTurnId", "original-prompt");
+        body.putObject("sessionKey").put("tenantId", TENANT).put("workspaceId", WORKSPACE).put("sessionId", session);
+        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+        ObjectNode commit = genesisRequest("{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n", bytes);
+        ((ObjectNode) commit.withArray("resources").get(0)).put("kind", "hosted-turn-cleanup");
+        mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(commit.toString()))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
+        assertThat(jdbc.queryForObject("SELECT storage_version FROM qwen_managed_session_journal_head WHERE session_id = ?", Integer.class, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id = ?", Integer.class, session)).isZero();
+        mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).header(ceiling, "2")
+                .contentType(MediaType.APPLICATION_JSON).content(commit.toString())).andExpect(status().isOk());
+        for (String header : List.of("", "1")) {
+            for (String path : List.of("/restore", "/transactions", "/resources/resource-context")) {
+                var read = get(base + path).header(TenantContextFilter.HEADER, TENANT)
+                        .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE);
+                if (!header.isEmpty()) read.header(ceiling, header);
+                mvc.perform(read).andExpect(status().isConflict())
+                        .andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
+            }
+            var replay = post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                    .contentType(MediaType.APPLICATION_JSON).content(commit.toString());
+            if (!header.isEmpty()) replay.header(ceiling, header);
+            mvc.perform(replay).andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
+            var before = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session);
+            var acquire = post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                    .contentType(MediaType.APPLICATION_JSON).content(writer.toString());
+            if (!header.isEmpty()) acquire.header(ceiling, header);
+            mvc.perform(acquire).andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
+            var renewBody = objectMapper.createObjectNode().put("workspaceId", WORKSPACE).put("writerId", WRITER_A).put("writerGeneration", 1).put("leaseMillis", 60_000);
+            var renew = post(base + "/writers:renew").header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).contentType(MediaType.APPLICATION_JSON).content(renewBody.toString());
+            if (!header.isEmpty()) renew.header(ceiling, header);
+            mvc.perform(renew).andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("managed_session_reader_version_unsupported"));
+            assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session)).isEqualTo(before);
+        }
+        mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).header(ceiling, "2")
+                .contentType(MediaType.APPLICATION_JSON).content(commit.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.replayed").value(true));
+        mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).header(ceiling, "2")
+                .param("workspaceId", WORKSPACE)).andExpect(status().isOk()).andExpect(jsonPath("$.storageVersion").value(2));
+    }
+
+    @Test
     void reportsAMigrationFenceAsADefiniteConflictWithoutChangingTheWriter() throws Exception {
         String session = "migration-" + UUID.randomUUID();
         String storage = "storage-" + UUID.randomUUID();

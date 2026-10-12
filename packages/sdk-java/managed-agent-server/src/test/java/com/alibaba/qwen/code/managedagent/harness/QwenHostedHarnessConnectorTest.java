@@ -2185,6 +2185,26 @@ class QwenHostedHarnessConnectorTest {
                 .isInstanceOf(IllegalStateException.class);
     }
 
+    // A stale milliseconds-style turn deadline (the pre-sweep spelling
+    // of one hour) binds PT1000H under the seconds convention — the
+    // binding side is pinned in ManagedAgentPropertiesTest — and the
+    // refusal message must name the convention: a millisecond range
+    // statement tells the operator the value they wrote is legal.
+    @Test
+    void turnDeadlineRefusalNamesTheSecondsConvention() {
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setTurnDeadline(Duration.ofSeconds(3600000));
+        assertThatThrownBy(() ->
+                new QwenHostedHarnessConnector(properties,
+                        mock(AgentStateStore.class),
+                        mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Hosted Harness turn deadline must be between"
+                        + " 1ms and about 24.8 days; a suffix-less number"
+                        + " binds as seconds, so write 3600s rather than"
+                        + " 3600000");
+    }
+
     @Test
     void closesTheLazyClientAndRejectsLateUse() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
