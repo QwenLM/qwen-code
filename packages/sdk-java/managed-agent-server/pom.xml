@@ -142,6 +142,22 @@
                         </configuration>
                     </execution>
                     <execution>
+                        <id>csi-session</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>csi-session</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiSessionMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>csi-runtime</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>csi-runtime</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <id>operator-recovery</id>
                         <goals><goal>repackage</goal></goals>
                         <configuration>

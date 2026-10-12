@@ -1,0 +1,140 @@
+# 私有 CSI Session 与 SQL 权威拆分
+
+[English](2026-10-12-csi-session-authority-block.md) | [简体中文](2026-10-12-csi-session-authority-block.zh-CN.md)
+
+## 状态与来源
+
+这是供维护者评审的 feature 拆分。来源为 PR #13526 的
+`4088e2455c2c9cb922fe42987d8f29f3ed2a6c49`，拆分基线为主干
+`18f80f56666a347a2b67b2ef98099cc58356b253`。保留 #13899 已合并的 worker
+及本地进程拒绝边界，以及 #13894 的 publication 加锁修复。原提案分支不变。
+验证结果必须标明实际执行的拆分候选。
+
+## 问题与当前状态
+
+主干已有基于 descriptor 的私有文件 worker，并在本地进程 runtime 中拒绝该能力。
+Worker 的正向测试使用明确的 authority fixture。主干尚未把持久化的私有 Session、
+原 activation 和原生日志接到 worker 的 context 及执行证据。
+
+原提案包含该连接，但与 Hosted 执行、冷恢复、应用退役和物理完成混在一起。
+整文件复制共享源码还会覆盖主干后续修复。本拆分沿完整 READY 授权链展开，保留普通行为。
+
+## 目标与边界
+
+- 通过显式 operator 命令创建私有 Session，在事务中固定原 request、context、
+  storage、profile 和身份。
+- 仅准入原始 writer 和首次 activation；校验建立每个有限文件调用的已提交日志及资源。
+- 持久化精确 SQL 执行 grant，并按同一原 Session 认证 worker context、history
+  preparation 和 execution 回读。
+- 保留有界资源读取 ownership 及失败证据。
+- 保留普通 Session、publication、runtime 和工具行为。
+
+公开 CSI 选择、Hosted runner、替代 writer、冷恢复、DRAINING continuation、
+terminal cut、finalization、物理 stop/unpublish、release 和 reuse 不在本次范围内。
+私有不支持的路径在改变 ownership 或调用 worker 前拒绝。原生日志 parser 可以校验
+message、model-attempt 和 tool-result record，因为它们是文件授权的输入；
+这不引入 Hosted 执行入口。
+
+## 拟议改动
+
+| 层               | 改动与消费者                                                                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 私有创建         | 显式 Session 命令、request key 持久化，以及 Managed Agent store 中已注册 storage/context 资格校验。普通 selector 不变。                                      |
+| 原身份           | 共享 CSI boot/request 身份、managed Session guard，以及 Broker binding/Session repository 校验。每次准入使用选定的原 binding。                               |
+| 原生日志         | Managed Session Store commit preflight/acceptance 与 activation/history proof。Resource、journal head、writer 和 activation 仍是单一事务权威。               |
+| SQL 执行         | Native tool reservation、完整 batch 成员、dispatch checkpoint，以及 binding/execution repository 中的不可变 grant 持久化。Reservation 不等于 authorization。 |
+| Worker transport | 选定 Session adapter 与 HTTP transport 中的认证 native readback route、context 安装、history 和有限文件执行。                                                |
+| 资源读取         | 持久化 OPEN/RETURNED/UNKNOWN 读 ownership，并重查原 writer、resource 字节/metadata 和 delivery 边界。不确定读取仍有记录。                                    |
+| Schema           | 为 request pin、首次 activation、native authorization 和 resource-read ownership 使用新的未发布 migration。已发布 migration 不变。                           |
+
+主要影响 `packages/sdk-java/runtime-broker` 和
+`packages/sdk-java/managed-agent-server`。既有共享 store、transport、schema 和
+configuration 仅接入必要 CSI 增量；从固定来源拆出私有类及测试。保留主干已有
+workspace execution lease schema，以及后续普通 reader、collection、definition、
+rename 和 cancellation 行为。
+
+## 决策与约束
+
+### 单一原 owner
+
+Capability digest 与 configuration 标识私有文件 profile。创建固定规范 request key
+和 context revision 1。准入要求持久化的原 Session、binding generation、storage、
+boot/Pod 身份、lease 与 installed context 一致。未知、歧义、变化、draining 或
+替代身份均拒绝，不回退到 primary runtime。本次仅支持首次原 writer 和 activation；
+writer 过期后不能换新 owner。
+
+### 单一 SQL 权威
+
+操作校验原 connection 和 transaction。锁顺序从 placement、retention 开始，随后
+锁 managed parent/native head 及原 runtime/execution record。Adapter 不持 parent
+SQL 锁跨 worker I/O；调用前后校验同一个 original。READ COMMITTED 与预热的
+REPEATABLE READ 都必须通过 locking read 看到冲突的当前状态。
+
+Journal proof 校验精确 durable resource 字节、身份、链、reference、checkpoint
+和完整 accepted batch 成员。接受真实 producer 的 native message 与数值编码。
+Worker path、input bytes 与 preparation evidence 来自已提交 record，不信调用者
+标志。不可变 grant 固定原 dispatch generation 和授权 journal revision/sequence。
+重试不能用新 head 或新 owner 替换它。
+
+### READY 范围与失败行为
+
+Adapter 仅准入 READY 工作。既有 retirement evidence 是拒绝条件，不是 DRAINING
+continuation 权威。它不实现 release，也不宣称物理完成。失败或不确定读取保留
+durable ownership evidence。不支持的 recovery 和 terminal 操作拒绝。
+
+已合并的 worker 在有 execution 时拒绝 prepare，在 preparation 期间拒绝 execution。
+Producer 必须在尝试 preparation 前停止为该 Session 发出 execution。本 adapter
+不循环重试，也不推断通用 worker 409 可以安全重试；保留原证据及失败状态。
+后续自动 producer 需要明确 retry 与 retirement 的契约，包括既有共用错误码。
+
+### Migration history
+
+主干 V64–V68 已被占用。拆出的未发布 CSI 增量使用新的递增版本，提交前再次检查
+冲突。不重写主干已发布 migration，也不改 #13526 的 migration。
+
+## 验证与验收条件
+
+1. 先 dry-run 全局 CLI；若全局 CLI 无法到达私有 Java operator，则使用自有 SQL/API
+   fallback。
+2. 验证私有创建与准确 replay、变化 request 拒绝、原 activation/renewal，以及
+   替代 writer 拒绝。
+3. 将已提交 native intent/checkpoint/resource 接到实际 SQL grant 和认证 worker
+   回读。缺失成员、字节变化、外来 credential、错误 context 或过期 authorization
+   必须在文件效果前拒绝。验证准确重试和 retained history。
+4. 使用两个独立数据库连接，在两种支持的 isolation level 下验证当前状态 fence，
+   并校验 placement 先于 retention。
+5. 验证资源读取，包括不确定 delivery、lease 过期和 metadata/bytes 变化；
+   不清除 ownership evidence。
+6. 对比普通对照，运行受影响 Java 测试、静态检查、migration 检查、仓库
+   build/typecheck/bundle 及相关 worker 测试。
+7. 完成连续两次干净的完整 diff 自审与独立评审。
+
+Darwin 上的正向私有 worker 执行需要明确记录 Linux metadata/procfs translation。
+该证据不资格化原生 Linux CSI、Kubernetes、SQL producer 部署或安全物理复用。
+原提案上的测试不资格化拆分分支。
+
+### 已观察证据与待完成验收
+
+本拆分是供评审的 Draft。本地 build、typecheck、bundle、定向 Java 与 worker
+测试已通过。独立自有 MySQL 8.4 测试应用了完整 migration 清单，并观察到实际
+私有 CREATE/replay、七个原生日志 commit 及其 replay、原 activation/renewal、
+替代拒绝、普通对照、认证 adapter bind 回读，以及两种 isolation level 下的
+当前状态 locking read。独立回归还覆盖 retained request pin 与 worker 大小的
+HTTP result 接收边界。每份报告记录实际候选及构建产物 hash。
+
+这些观察尚未完成验收条件 3：实际 SQL execution grant、认证 execution 回读、
+正向 worker 与 retained-history 效果尚未连起来执行。Resource delivery fault
+目前有 H2 单测覆盖，没有独立 MySQL 端到端资格验证。Protocol fixture 和纯 proof
+测试不能称为实际 SQL grant 或部署验证。PR 的独立测试报告区分这些证据层次；
+rollout 前仍需维护者评审并完成剩余验收。
+
+## 风险、后续与开放问题
+
+这是较大的跨包 feature，需要按仓库 core infrastructure advisory 交给维护者做
+架构评审，不授予生产 rollout 批准。Retained owner 在本次没有 release 路径；
+operator 不能把逻辑成功当作 storage 可复用。
+
+Hosted 接入、冷恢复、应用/物理聚合退役、安全 release/reuse，以及 producer 公平性
+和错误分类仍是后续工作。原位文件 mutation 保留 #13899 已声明的失败语义；
+本次不增加 crash-atomic replacement。拆分时保留已声明的私有 READY 边界，
+不需要新增业务或架构决定。

@@ -33,6 +33,7 @@ public final class JdbcRuntimeBrokerSchema {
             addColumn(statement, "qwen_runtime_binding", "loss_evidence_json", "LONGTEXT");
             addColumn(statement, "qwen_runtime_binding", "stop_evidence_json", "LONGTEXT");
             addColumn(statement, "qwen_runtime_binding", "drain_receipt_json", "LONGTEXT");
+            addColumn(statement, "qwen_runtime_binding", "first_activation_journal_revision", "BIGINT");
             addColumn(statement, "qwen_runtime_harness_drain", "phase", "VARCHAR(32) NOT NULL DEFAULT 'DRAINING'");
             addColumn(statement, "qwen_runtime_harness_drain", "operation_id", "VARCHAR(128)");
             addColumn(statement, "qwen_runtime_harness_drain", "claim_generation", "BIGINT NOT NULL DEFAULT 0");
@@ -41,6 +42,7 @@ public final class JdbcRuntimeBrokerSchema {
             addColumn(statement, "qwen_tool_execution", "loss_evidence_id", "VARCHAR(512)");
             addColumn(statement, "qwen_tool_execution", "authorized_dispatch_generation", "BIGINT");
             addColumn(statement, "qwen_tool_execution", "authorized_binding_version", "BIGINT");
+            addColumn(statement, "qwen_tool_execution", "native_authorization_json", "LONGTEXT");
             addIndex(statement, "qwen_runtime_binding", "qwen_runtime_storage_bindings_idx", "storage_id, binding_id");
             addIndex(statement, "qwen_runtime_session", "idx_runtime_session_id", "runtime_session_id");
         } catch (SQLException exception) {

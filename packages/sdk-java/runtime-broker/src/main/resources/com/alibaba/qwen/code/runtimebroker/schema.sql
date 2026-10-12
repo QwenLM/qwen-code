@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     resource_handle_json LONGTEXT,
     loss_evidence_json LONGTEXT,
     stop_evidence_json LONGTEXT,
+    first_activation_journal_revision BIGINT,
     runtime_instance_id VARCHAR(512),
     runtime_endpoint VARCHAR(2048),
     runtime_lease_id VARCHAR(512),
@@ -164,6 +165,7 @@ CREATE TABLE IF NOT EXISTS qwen_tool_execution (
     loss_evidence_id VARCHAR(512),
     authorized_dispatch_generation BIGINT,
     authorized_binding_version BIGINT,
+    native_authorization_json LONGTEXT,
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash),
     INDEX idx_tool_execution_session

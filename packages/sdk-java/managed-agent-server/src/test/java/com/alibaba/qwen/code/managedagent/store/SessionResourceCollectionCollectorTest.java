@@ -1174,4 +1174,30 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         return jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource_collection"
                 + " WHERE session_scope_key = ?", Long.class, sessionScope);
     }
+    @Test
+    void retainedPrivatePinRefusesAStaleClaimAndPreservesInlineBytes() {
+        initSession();
+        head(session);
+        publish("private-content", CONTENT, new byte[100]);
+        retire();
+        jdbc.update("INSERT INTO qwen_managed_session_resource_collection"
+                + " (session_scope_key, tenant_key, session_key, tenant_id, session_id, created_at)"
+                + " VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))", resScope,
+                ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session), tenant, session);
+        var collector = collector(true, Duration.ZERO);
+        var claim = collector.claim();
+        assertThat(claim).isNotNull();
+        jdbc.update("INSERT INTO managed_agent_session"
+                + " (tenant_id, session_id, agent_id, status, created_at, updated_at, runtime_request_key)"
+                + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 0, 0, ?)", tenant, session, "a".repeat(64));
+        var before = rows();
+        var beforeLedger = ledger();
+        assertThatThrownBy(() -> collector.collect(claim)).isInstanceOfSatisfying(ApiException.class,
+                error -> assertThat(error.getCode()).isEqualTo("csi_managed_mutation_unavailable"));
+        assertThat(rows()).usingRecursiveComparison().isEqualTo(before);
+        assertThat(ledger()).isEqualTo(beforeLedger);
+        assertThat(collector.runOnce()).isFalse();
+        assertThat(rows()).usingRecursiveComparison().isEqualTo(before);
+    }
+
 }

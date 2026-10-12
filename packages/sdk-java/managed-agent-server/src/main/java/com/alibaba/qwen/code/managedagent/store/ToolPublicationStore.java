@@ -232,6 +232,7 @@ public final class ToolPublicationStore {
             String suppliedHash, Row row, JsonNode binding, Original original, Access access,
             boolean deferActivationLapse) {
         JsonNode key = binding.get("sessionKey");
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, row.tenant(), row.session());
         ToolPublicationRetentionStore.requireLive(jdbc, row.tenant(), row.session());
         require(row.tenant().equals(text(key, "tenantId"))
                 && row.workspace().equals(text(key, "workspaceId"))
@@ -470,7 +471,11 @@ public final class ToolPublicationStore {
                     + " capture_held_bytes = capture_used_bytes, producer_held_bytes = producer_used_bytes,"
                     + " admission_held_bytes = CASE WHEN producer_phase IN ('FINISHED', 'REFERENCED')"
                     + " THEN admission_held_bytes ELSE admission_used_bytes END"
-                    + " WHERE tenant_key = ? AND state = 'OPEN' AND expires_at <= ?", tenantKey, writer.now());
+                    + " WHERE tenant_key = ? AND state = 'OPEN' AND expires_at <= ?"
+                    + " AND NOT EXISTS (SELECT 1 FROM managed_agent_session s"
+                    + " WHERE s.tenant_id = qwen_tool_publication.tenant_id"
+                    + " AND s.session_id = qwen_tool_publication.session_id AND s.csi_guard = TRUE)",
+                    tenantKey, writer.now());
             var totals = jdbc.queryForMap("SELECT COALESCE(SUM(capture_held_bytes + producer_held_bytes"
                     + " + admission_held_bytes), 0) AS reserved,"
                     + " COALESCE(SUM(CASE WHEN state = 'OPEN' AND producer_phase IN ('OPEN', 'FINISHING')"

@@ -14,7 +14,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /** Durable Session-root protection; elapsed time never closes a physical PUT. */
 public final class ToolPublicationRetentionStore {
-    private static final long READ_BUDGET_MILLIS = 120_000;
+    static final long READ_BUDGET_MILLIS = 120_000;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 
@@ -61,7 +61,7 @@ public final class ToolPublicationRetentionStore {
     }
 
     static void lockDeletion(JdbcTemplate jdbc, String tenant, String session) {
-        lockSession(jdbc, tenant, session);
+        lockGenericSession(jdbc, tenant, session);
         jdbc.queryForList("SELECT publication_id FROM qwen_tool_publication"
                 + " WHERE tenant_id = ? AND session_id = ? ORDER BY publication_id FOR UPDATE", tenant, session);
     }
@@ -102,10 +102,18 @@ public final class ToolPublicationRetentionStore {
                 + " AND work_state <> 'READY'", ManagedToolResultStore.scope(tenant, session), tenant, session);
     }
 
+    static Map<String, Object> lockGenericSession(JdbcTemplate jdbc, String tenant, String session) {
+        lockTenant(jdbc, tenant);
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenant, session);
+        var heads = jdbc.queryForList("SELECT state FROM qwen_managed_session_journal_head"
+                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenant, session);
+        return heads.isEmpty() ? null : heads.getFirst();
+    }
+
     void lockRetainedPublication(String scope, String publication) {
         var row = jdbc.queryForMap("SELECT tenant_id, session_id FROM qwen_tool_publication"
                 + " WHERE scope_key = ? AND publication_id = ?", scope, publication);
-        lockSession(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"));
+        lockGenericSession(jdbc, (String) row.get("tenant_id"), (String) row.get("session_id"));
         String state = jdbc.queryForObject("SELECT retention_state FROM qwen_tool_publication"
                 + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE", String.class, scope, publication);
         ToolPublicationContract.require(List.of("PINNED", "RETIRING").contains(state), "Publication is collected");
@@ -190,7 +198,7 @@ public final class ToolPublicationRetentionStore {
 
     public ReadLease read(String tenant, String session) {
         return transactions.execute(status -> {
-            lockSession(jdbc, tenant, session);
+            lockGenericSession(jdbc, tenant, session);
             requireLive(jdbc, tenant, session);
             String id = UUID.randomUUID().toString();
             jdbc.update("INSERT INTO qwen_output_read_lease (lease_id, tenant_key, session_key,"
@@ -222,18 +230,21 @@ public final class ToolPublicationRetentionStore {
         }
 
         public void check() {
-            var rows = jdbc.queryForList("SELECT l.expires_at, l.retirement_generation, r.generation,"
-                    + " CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000 + EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000 AS db_now FROM"
-                            + " qwen_output_read_lease l LEFT JOIN qwen_output_session_retirement r"
-                            + " ON r.tenant_key = l.tenant_key AND r.session_key = l.session_key"
-                            + " WHERE l.lease_id = ? AND l.tenant_key = ? AND l.session_key = ?",
-                    id, hash(tenant), hash(session));
-            if (closed || rows.size() != 1 || ((Number) rows.getFirst().get("expires_at")).longValue() <= ((Number) rows.getFirst().get("db_now")).longValue()
-                    || rows.getFirst().get("generation") != null
-                    || ((Number) rows.getFirst().get("retirement_generation")).longValue() != 0) {
-                throw new ApiException(HttpStatus.CONFLICT, "tool_output_read_expired",
-                        "The output read lease expired or its Session was retired.");
-            }
+            transactions.executeWithoutResult(status -> {
+                lockGenericSession(jdbc, tenant, session);
+                var rows = jdbc.queryForList("SELECT l.expires_at, l.retirement_generation, r.generation,"
+                        + " CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000 + EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000 AS db_now FROM"
+                                + " qwen_output_read_lease l LEFT JOIN qwen_output_session_retirement r"
+                                + " ON r.tenant_key = l.tenant_key AND r.session_key = l.session_key"
+                                + " WHERE l.lease_id = ? AND l.tenant_key = ? AND l.session_key = ?",
+                        id, hash(tenant), hash(session));
+                if (closed || rows.size() != 1 || ((Number) rows.getFirst().get("expires_at")).longValue() <= ((Number) rows.getFirst().get("db_now")).longValue()
+                        || rows.getFirst().get("generation") != null
+                        || ((Number) rows.getFirst().get("retirement_generation")).longValue() != 0) {
+                    throw new ApiException(HttpStatus.CONFLICT, "tool_output_read_expired",
+                            "The output read lease expired or its Session was retired.");
+                }
+            });
         }
 
         @Override
@@ -241,8 +252,11 @@ public final class ToolPublicationRetentionStore {
             if (closed) {
                 return;
             }
+            transactions.executeWithoutResult(status -> {
+                lockGenericSession(jdbc, tenant, session);
+                jdbc.update("DELETE FROM qwen_output_read_lease WHERE lease_id = ?", id);
+            });
             closed = true;
-            jdbc.update("DELETE FROM qwen_output_read_lease WHERE lease_id = ?", id);
         }
     }
 
@@ -251,7 +265,7 @@ public final class ToolPublicationRetentionStore {
         String attempt = transactions.execute(status -> {
             String tenant = key.path("tenantId").asText();
             String session = key.path("sessionId").asText();
-            lockSession(jdbc, tenant, session);
+            lockGenericSession(jdbc, tenant, session);
             requireLive(jdbc, tenant, session);
             var rows = jdbc.queryForList("SELECT retention_state FROM qwen_tool_publication"
                     + " WHERE scope_key = ? AND publication_id = ? AND tenant_id = ? AND session_id = ? FOR UPDATE",
@@ -267,11 +281,17 @@ public final class ToolPublicationRetentionStore {
         try {
             objects.putIfAbsent(objectKey, bytes);
         } catch (RuntimeException error) {
-            jdbc.update("UPDATE qwen_output_put_attempt SET state = 'UNKNOWN' WHERE attempt_id = ?", attempt);
+            transactions.executeWithoutResult(status -> {
+                lockGenericSession(jdbc, key.path("tenantId").asText(), key.path("sessionId").asText());
+                jdbc.update("UPDATE qwen_output_put_attempt SET state = 'UNKNOWN' WHERE attempt_id = ?", attempt);
+            });
             throw error;
         }
-        jdbc.update("UPDATE qwen_output_put_attempt SET state = 'RETURNED', completed_at = ?"
-                + " WHERE attempt_id = ? AND state = 'IN_FLIGHT'", now(jdbc), attempt);
+        transactions.executeWithoutResult(status -> {
+            lockGenericSession(jdbc, key.path("tenantId").asText(), key.path("sessionId").asText());
+            jdbc.update("UPDATE qwen_output_put_attempt SET state = 'RETURNED', completed_at = ?"
+                    + " WHERE attempt_id = ? AND state = 'IN_FLIGHT'", now(jdbc), attempt);
+        });
     }
 
     public record Candidate(String scope, String publication, String tenant, String session,

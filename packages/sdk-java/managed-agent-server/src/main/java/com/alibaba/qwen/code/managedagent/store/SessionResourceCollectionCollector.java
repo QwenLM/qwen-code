@@ -117,16 +117,19 @@ public final class SessionResourceCollectionCollector {
         var rows = jdbc.queryForList("SELECT r.tenant_key, r.session_key, r.tenant_id, r.session_id FROM"
                 + " qwen_output_session_retirement r LEFT JOIN qwen_managed_session_resource_collection c"
                 + " ON c.tenant_key = r.tenant_key AND c.session_key = r.session_key"
-                + " WHERE c.tenant_key IS NULL AND r.retired_at <= ? ORDER BY r.retired_at LIMIT 32", due);
+                + " WHERE c.tenant_key IS NULL AND r.retired_at <= ? AND NOT EXISTS (SELECT 1 FROM managed_agent_session s WHERE s.tenant_id = r.tenant_id AND s.session_id = r.session_id AND s.csi_guard = TRUE) ORDER BY r.retired_at LIMIT 32", due);
         for (var row : rows) {
             String tenant = (String) row.get("tenant_id");
             String session = (String) row.get("session_id");
-            jdbc.update("INSERT INTO qwen_managed_session_resource_collection"
-                    + " (session_scope_key, tenant_key, session_key, tenant_id, session_id, created_at)"
-                    + " VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))"
-                    + " ON DUPLICATE KEY UPDATE session_scope_key = session_scope_key",
-                    ManagedSessionStore.sessionScopeKey(tenant, session),
-                    row.get("tenant_key"), row.get("session_key"), tenant, session);
+            transactions.executeWithoutResult(status -> {
+                ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenant, session);
+                jdbc.update("INSERT INTO qwen_managed_session_resource_collection"
+                        + " (session_scope_key, tenant_key, session_key, tenant_id, session_id, created_at)"
+                        + " VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))"
+                        + " ON DUPLICATE KEY UPDATE session_scope_key = session_scope_key",
+                        ManagedSessionStore.sessionScopeKey(tenant, session),
+                        row.get("tenant_key"), row.get("session_key"), tenant, session);
+            });
         }
     }
 
@@ -137,13 +140,14 @@ public final class SessionResourceCollectionCollector {
         var candidates = jdbc.queryForList("SELECT session_scope_key, tenant_id, session_id FROM"
                 + " qwen_managed_session_resource_collection WHERE collected_at IS NULL"
                 + " AND gc_next_at >= 0 AND gc_next_at <= ? AND (gc_owner = ? OR gc_claim_until <= ?)"
+                + " AND NOT EXISTS (SELECT 1 FROM managed_agent_session s WHERE s.tenant_id = qwen_managed_session_resource_collection.tenant_id AND s.session_id = qwen_managed_session_resource_collection.session_id AND s.csi_guard = TRUE)"
                 + " ORDER BY gc_next_at, session_scope_key LIMIT 32",
                 time, owner, time);
         for (var candidate : candidates) {
             Claim claim = transactions.execute(status -> {
                 String tenant = (String) candidate.get("tenant_id");
                 String session = (String) candidate.get("session_id");
-                var head = ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);
+                var head = ToolPublicationRetentionStore.lockGenericSession(jdbc, tenant, session);
                 var row = jdbc.queryForMap("SELECT * FROM qwen_managed_session_resource_collection"
                         + " WHERE session_scope_key = ? FOR UPDATE", candidate.get("session_scope_key"));
                 long now = ToolPublicationRetentionStore.now(jdbc);
@@ -229,7 +233,7 @@ public final class SessionResourceCollectionCollector {
 
     private Boolean page(Claim claim) {
         // Session locks precede the ledger row lock, matching claim()'s order.
-        ToolPublicationRetentionStore.lockSession(jdbc, claim.tenant(), claim.session());
+        ToolPublicationRetentionStore.lockGenericSession(jdbc, claim.tenant(), claim.session());
         var row = jdbc.queryForMap("SELECT * FROM qwen_managed_session_resource_collection"
                 + " WHERE session_scope_key = ? FOR UPDATE", claim.scope());
         long now = ToolPublicationRetentionStore.now(jdbc);
@@ -296,10 +300,13 @@ public final class SessionResourceCollectionCollector {
     }
 
     private void defer(Claim claim) {
-        jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_owner = NULL, gc_claim_until = 0,"
-                + " gc_next_at = ?, gc_blocker = 'collection_retry'"
-                + " WHERE session_scope_key = ? AND gc_owner = ? AND gc_generation = ?",
-                ToolPublicationRetentionStore.now(jdbc) + CLAIM_MILLIS, claim.scope(), owner, claim.generation());
+        transactions.executeWithoutResult(status -> {
+            ManagedLegacySessionGuard.requireLegacyMutation(jdbc, claim.tenant(), claim.session());
+            jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_owner = NULL, gc_claim_until = 0,"
+                    + " gc_next_at = ?, gc_blocker = 'collection_retry'"
+                    + " WHERE session_scope_key = ? AND gc_owner = ? AND gc_generation = ?",
+                    ToolPublicationRetentionStore.now(jdbc) + CLAIM_MILLIS, claim.scope(), owner, claim.generation());
+        });
     }
 
     record Claim(String scope, String tenant, String session, long generation, String cursor) {}

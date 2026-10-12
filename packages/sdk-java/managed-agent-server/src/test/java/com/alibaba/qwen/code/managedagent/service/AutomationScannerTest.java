@@ -1619,7 +1619,7 @@ class AutomationScannerTest {
                 key);
         // A foreign request's claim already holds the key mid-flight:
         // this one never reaches the Harness and mirrors nothing.
-        ledger.claimCommand(new AutomationLedgerStore.CommandRow(tenant, key,
+        ledger.claimCommand(sessionId, new AutomationLedgerStore.CommandRow(tenant, key,
                 ACTOR, "deadbeef", scheduleId, ""), clock.get());
         assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
                 new AutomationDefinitionRequest(sessionId, "Goal",
@@ -1640,7 +1640,7 @@ class AutomationScannerTest {
         String key = "claim-" + UUID.randomUUID();
         String scheduleId = ManagedAutomationService.scheduleIdFor(tenant,
                 key);
-        ledger.claimCommand(new AutomationLedgerStore.CommandRow(tenant, key,
+        ledger.claimCommand(sessionId, new AutomationLedgerStore.CommandRow(tenant, key,
                 ACTOR, "digest-c", scheduleId, ""), clock.get());
         assertThat(ledger.settleCommand(tenant, key, "digest-c", ACTOR,
                 "{\"id\":\"" + scheduleId + "\"}")).isTrue();

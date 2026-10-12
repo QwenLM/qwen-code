@@ -47,6 +47,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
@@ -115,6 +116,9 @@ public class ManagedAgentService {
     }
 
     private boolean supportsClose(SessionRecord session) {
+        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+            return false;
+        }
         return session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
                 && store.workspaceFilesEnabled()
                 && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
@@ -266,7 +270,8 @@ public class ManagedAgentService {
             String parentSessionId, String childRunId, String description,
             String prompt, boolean isolated) {
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
-        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
+                || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -926,6 +931,9 @@ public class ManagedAgentService {
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
+        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+            return false;
+        }
         return retention || session.workspace() != null && !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
                 && store.workspaceFilesEnabled()
                 && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();

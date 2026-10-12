@@ -163,7 +163,7 @@ public class ManagedSessionStoreController {
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
                     String writerToken,
             @RequestParam String workspaceId) {
-        StoredResource resource = store.readResource(tenant.tenantId(),
+        StoredResource resource = store.readOwnerResource(tenant.tenantId(),
                 workspaceId, sessionId, resourceId, writerToken);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_LENGTH,

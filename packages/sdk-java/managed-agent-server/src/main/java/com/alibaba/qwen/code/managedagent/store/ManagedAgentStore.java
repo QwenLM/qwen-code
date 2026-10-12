@@ -36,6 +36,8 @@ import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -364,6 +366,51 @@ public class ManagedAgentStore implements AgentStateStore {
                 existing.getFirst(), false);
     }
 
+    Admission insertCsiSessionCommand(WorkspaceCsiRegistration registration,
+            String actorId, String idempotencyKey, String requestDigest,
+            String requestedRevision, String title, WorkspaceSelection selection) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("Private CSI CREATE requires a transaction");
+        }
+        String tenantId = registration.tenantId();
+        requireCreationScope(tenantId, idempotencyKey, true);
+        List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId, actorId, idempotencyKey);
+        if (!existing.isEmpty()) {
+            Admission replay = replayWorkspaceCommand(tenantId, actorId, requestDigest, existing.getFirst(), false);
+            requireCsiRequest(registration, replay.sessionId());
+            return replay;
+        }
+        AgentPin pin = resolveAgentPin(tenantId, "qwen-code", requestedRevision, true);
+        ResolvedBinding workspace = workspaces.resolveForCreation(tenantId, actorId, selection);
+        if (!registration.storageId().equals(workspace.binding().getStorageId())
+                || !CsiFilesRetirementProfile.CONFIG_REF.equals(workspace.configRef())
+                || !CsiFilesRetirementProfile.POLICY_REF.equals(workspace.policyRef())) {
+            throw workspaceExecutionUnavailable();
+        }
+        return insertSession(tenantId, "CREATE_SESSION", idempotencyKey, requestDigest,
+                "qwen-code", title, List.of(), null, workspace, actorId, pin, registration);
+    }
+
+    RuntimeProvisionRequest requireCsiRequest(WorkspaceCsiRegistration registration, String sessionId) {
+        SessionRecord session = requireSessionForUpdate(registration.tenantId(), sessionId);
+        if (!CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())
+                || session.workspace() == null
+                || !"qwen-code".equals(session.agentId())
+                || !CsiFilesRetirementProfile.CONTEXT_CONFIG_REF.equals(session.workspace().getContextConfigRef())
+                || !registration.storageId().equals(session.workspace().getStorageId())) {
+            throw workspaceExecutionUnavailable();
+        }
+        RuntimeProvisionRequest request = CsiFilesRetirementProfile.request(session.workspace(),
+                registration.mountRoot(), session.sessionId());
+        String saved = jdbc.queryForObject("SELECT runtime_request_key FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
+                session.tenantId(), session.sessionId());
+        if (!request.requestKey().equals(saved)) {
+            throw workspaceExecutionUnavailable();
+        }
+        return request;
+    }
+
     private static String childActorOf(String parentSessionId) {
         return "child:" + parentSessionId;
     }
@@ -410,11 +457,13 @@ public class ManagedAgentStore implements AgentStateStore {
             String childCwdRelative) {
         SessionRecord parent = requireSessionForUpdate(tenantId,
                 parentSessionId);
-        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
+                || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
         }
+        requireLegacyMutation(tenantId, parentSessionId);
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -583,6 +632,13 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission replayChildSessionCommand(String tenantId,
             String parentSessionId, String idempotencyKey,
             String requestDigest) {
+        SessionRecord parent = requireSessionForUpdate(tenantId, parentSessionId);
+        if (CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "child_parent_unavailable",
+                    "The parent Session cannot admit a child.");
+        }
+        requireLegacyMutation(tenantId, parentSessionId);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
                 childActorOf(parentSessionId), idempotencyKey);
         if (existing.isEmpty()) {
@@ -761,10 +817,21 @@ public class ManagedAgentStore implements AgentStateStore {
             String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved,
             String actorId, AgentPin pin) {
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId,
+                title, input, payloadDigest, resolved, actorId, pin, null);
+    }
+
+    private Admission insertSession(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String title, List<Map<String, Object>> input,
+            String payloadDigest, ResolvedBinding resolved,
+            String actorId, AgentPin pin, WorkspaceCsiRegistration registration) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();
+        String runtimeRequestKey = registration == null ? null
+                : CsiFilesRetirementProfile.request(workspace, registration.mountRoot(), sessionId).requestKey();
         String turnId = input.isEmpty() ? null : publicId("turn");
         String promptId = input.isEmpty() ? null
                 : UUID.randomUUID().toString();
@@ -778,9 +845,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
-                        + " creator_actor_key, owner_actor_key) VALUES"
+                        + " creator_actor_key, owner_actor_key, runtime_request_key) VALUES"
                         + " (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, ?, ?, ?, ?, ?)",
+                        + " ?, ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, pin.revision(), pin.digest(),
                 title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
@@ -791,8 +858,9 @@ public class ManagedAgentStore implements AgentStateStore {
                 workspace == null ? null : workspace.getContextRevision(),
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
-                workspace == null ? null : pin.toolProfile(),
-                actorKey, actorKey);
+                registration != null ? CsiFilesRetirementProfile.PROFILE
+                        : workspace == null ? null : pin.toolProfile(),
+                actorKey, actorKey, runtimeRequestKey);
         jdbc.update("INSERT INTO managed_agent_consumer_progress"
                         + " (tenant_id, session_id, consumer_name,"
                         + " covered_sequence, updated_at) VALUES"
@@ -837,6 +905,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
@@ -900,6 +969,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId) {
+        requireLegacyMutation(tenantId, sessionId);
         if (requireSessionForUpdate(tenantId, sessionId).workspace() != null
                 && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
@@ -932,6 +1002,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         requireSessionForUpdate(tenantId, sessionId);
         // Tenant and Session locks serialize admission without gap-locking missing index entries.
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
@@ -968,6 +1039,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionRecord completeSessionRename(String tenantId, String key,
             String sessionId, String title, String bootId, long revision) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         requireSessionForUpdate(tenantId, sessionId);
         List<RenameDelivery> rows = jdbc.query("SELECT * FROM managed_session_rename_delivery"
                         + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
@@ -994,6 +1066,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void abandonSessionRename(String tenantId, String key, String sessionId, long revision, String owner) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         requireSessionForUpdate(tenantId, sessionId);
         if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_session_rename_delivery"
                         + " WHERE tenant_id = ? AND session_id = ? AND revision = ? AND idempotency_key = ?"
@@ -1005,9 +1078,10 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     public List<RenameDelivery> deliverableRenames(long now) {
-        return jdbc.query("SELECT * FROM managed_session_rename_delivery WHERE"
-                        + " (delivery_state = 'PENDING' AND available_at <= ?)"
-                        + " OR (delivery_state = 'RUNNING' AND lease_until <= ?) LIMIT 100",
+        return jdbc.query("SELECT r.* FROM managed_session_rename_delivery r"
+                        + " JOIN managed_agent_session s ON s.tenant_id = r.tenant_id AND s.session_id = r.session_id"
+                        + " WHERE s.csi_guard = FALSE AND ((r.delivery_state = 'PENDING' AND r.available_at <= ?)"
+                        + " OR (r.delivery_state = 'RUNNING' AND r.lease_until <= ?)) LIMIT 100",
                 this::renameDelivery, now, now);
     }
 
@@ -1015,6 +1089,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public Optional<RenameDelivery> claimRename(RenameDelivery delivery, String owner, Duration lease) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, delivery.tenantId());
+        requireLegacyMutation(delivery.tenantId(), delivery.sessionId());
         requireSessionForUpdate(delivery.tenantId(), delivery.sessionId());
         long now = clock.millis();
         int claimed = jdbc.update("UPDATE managed_session_rename_delivery SET delivery_state = 'RUNNING',"
@@ -1030,7 +1105,10 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    @Transactional
     public void retryRename(RenameDelivery delivery, String owner, long availableAt) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, delivery.tenantId());
+        requireLegacyMutation(delivery.tenantId(), delivery.sessionId());
         jdbc.update("UPDATE managed_session_rename_delivery SET delivery_state = 'PENDING',"
                         + " available_at = ?, lease_owner = NULL, lease_until = NULL"
                         + " WHERE tenant_id = ? AND session_id = ? AND revision = ? AND lease_owner = ?",
@@ -1054,6 +1132,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
@@ -1114,6 +1193,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
@@ -1185,6 +1265,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void abandonSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId) {
+        requireLegacyMutation(tenantId, sessionId);
         // Keep the digest and receipt for replay and concurrent completion.
         // A completed outcome must never be overwritten by a failing sibling.
         jdbc.update("UPDATE managed_agent_command SET command_status = 'FAILED',"
@@ -1200,6 +1281,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId, OperationKind kind, String actorDigest,
             String idempotencyKey, String requestDigest) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         if (requireSessionForUpdate(tenantId, sessionId).workspace() != null) {
             throw workspaceExecutionUnavailable();
         }
@@ -1220,6 +1302,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId,
             String actorDigest, String key, String digest, boolean supported) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         return beginLifecycle(tenantId, sessionId, OperationKind.CLOSE, actorDigest, key, digest, actorId, supported);
     }
 
@@ -1281,6 +1364,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         requireWorkspaceCreator(session, actorId);
         if ("DELETED".equals(session.status())) {
@@ -1330,12 +1414,16 @@ public class ManagedAgentStore implements AgentStateStore {
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion,
             boolean refuseShell) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         if (protocolVersion == 1) {
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         }
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null) {
             requireWorkspaceCreator(session, actorId);
+        }
+        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+            throw workspaceExecutionUnavailable();
         }
         Optional<OperationRecord> existing = jdbc.query("SELECT * FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"
@@ -1442,6 +1530,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest,
             String targetCwdRelative, long expectedContextRevision) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         ContextBinding binding = session.workspace();
         if (binding == null) {
@@ -1543,6 +1632,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId, String operationId, String owner,
             long claimGeneration) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         OperationRecord operation = jdbc.query("SELECT * FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"
@@ -1628,6 +1718,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean failCwdChangeOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             String failureCode) {
+        requireLegacyMutation(tenantId, sessionId);
         long now = lifecycleDatabaseTime();
         return jdbc.update("UPDATE managed_agent_operation SET state ="
                         + " 'FAILED', delivery_state = 'CONFIRMED',"
@@ -1654,6 +1745,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // request rechecks the Session state, the task's cancel action
         // and the one-open-operation rule, atomically with its insert.
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         Optional<OperationRecord> existing = jdbc.query("SELECT * FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"
@@ -1736,7 +1828,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 "SELECT tenant_id, session_id, operation_id FROM"
                         + " managed_agent_operation WHERE operation_kind ="
                         + " 'TASK_CANCEL' AND delivery_state = 'PENDING'"
-                        + " AND available_at <= ? ORDER BY available_at"
+                        + " AND available_at <= ? AND EXISTS (SELECT 1 FROM managed_agent_session s WHERE s.tenant_id = managed_agent_operation.tenant_id AND s.session_id = managed_agent_operation.session_id AND s.csi_guard = FALSE) ORDER BY available_at"
                         + " LIMIT ?",
                 operationTargetMapper, now, limit));
         if (targets.size() < limit) {
@@ -1744,7 +1836,7 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " operation_id FROM managed_agent_operation"
                             + " WHERE operation_kind = 'TASK_CANCEL' AND"
                             + " delivery_state = 'LEASED' AND lease_until < ?"
-                            + " ORDER BY lease_until LIMIT ?",
+                            + " AND EXISTS (SELECT 1 FROM managed_agent_session s WHERE s.tenant_id = managed_agent_operation.tenant_id AND s.session_id = managed_agent_operation.session_id AND s.csi_guard = FALSE) ORDER BY lease_until LIMIT ?",
                     operationTargetMapper, now, limit - targets.size()));
         }
         return List.copyOf(targets);
@@ -1758,7 +1850,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " managed_agent_operation WHERE delivery_state ="
                         + " 'BLOCKED' AND available_at <= ? AND"
                         + " operation_kind = 'TASK_CANCEL' AND state ="
-                        + " 'RECOVERY_BLOCKED' ORDER BY available_at"
+                        + " 'RECOVERY_BLOCKED' AND EXISTS (SELECT 1 FROM managed_agent_session s WHERE s.tenant_id = managed_agent_operation.tenant_id AND s.session_id = managed_agent_operation.session_id AND s.csi_guard = FALSE) ORDER BY available_at"
                         + " LIMIT ?",
                 operationTargetMapper, lifecycleDatabaseTime(), limit);
     }
@@ -1768,6 +1860,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean settleTaskCancel(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             TaskCancelOutcome outcome, long retryAt) {
+        requireLegacyMutation(tenantId, sessionId);
         long now = lifecycleDatabaseTime();
         // A leased claim settles only while it is still this worker's; a
         // parked one (owner null) only while it is still parked, so a
@@ -1969,7 +2062,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 new ArrayList<>(
                         jdbc.query(
                                 "SELECT tenant_id, session_id, operation_id FROM"
-                                        + " managed_agent_operation WHERE operation_kind NOT IN"
+                                        + " managed_agent_operation o WHERE EXISTS (SELECT 1 FROM managed_agent_session s"
+                                        + " WHERE s.tenant_id = o.tenant_id AND s.session_id = o.session_id AND s.csi_guard = FALSE) AND operation_kind NOT IN"
                                         + " ('ACTION_RESPONSE', 'TASK_CANCEL') AND (delivery_state = 'PENDING' OR (delivery_state = 'BLOCKED' AND (operation_kind = 'CLOSE'"
                                         + " OR (operation_kind = 'DELETE' AND (session_status_before IN ('CLOSED', 'ARCHIVED') OR lifecycle_protocol_version = 1))))) AND"
                                         + " available_at <= ? ORDER BY available_at LIMIT ?",
@@ -1980,7 +2074,8 @@ public class ManagedAgentStore implements AgentStateStore {
             targets.addAll(
                     jdbc.query(
                             "SELECT tenant_id, session_id, operation_id FROM"
-                                + " managed_agent_operation WHERE operation_kind NOT IN"
+                                + " managed_agent_operation o WHERE EXISTS (SELECT 1 FROM managed_agent_session s"
+                                        + " WHERE s.tenant_id = o.tenant_id AND s.session_id = o.session_id AND s.csi_guard = FALSE) AND operation_kind NOT IN"
                                 + " ('ACTION_RESPONSE', 'TASK_CANCEL') AND delivery_state = 'LEASED' AND lease_until"
                                 + " < ? ORDER BY lease_until LIMIT ?",
                             operationTargetMapper,
@@ -1996,6 +2091,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId, String operationId, String owner,
             Duration leaseDuration) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         long now = lifecycleDatabaseTime();
         int updated = jdbc.update("UPDATE managed_agent_operation SET state ="
                         + " 'RUNNING', delivery_state = 'LEASED',"
@@ -2023,10 +2119,13 @@ public class ManagedAgentStore implements AgentStateStore {
         var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
         if (target.lifecycleProtocolVersion() == 1) {
             WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
-            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         }
         if (target.kind() == OperationKind.DELETE && target.lifecycleProtocolVersion() != 1) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
+        }
+        requireLegacyMutation(tenantId, sessionId);
+        if (target.lifecycleProtocolVersion() == 1) {
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         }
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (target.lifecycleProtocolVersion() == 1 && target.kind() == OperationKind.DELETE) {
@@ -2109,6 +2208,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, Duration duration) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         long now = lifecycleDatabaseTime();
         int updated = jdbc.update("UPDATE managed_agent_operation SET lease_until = ?, updated_at = ?"
                 + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND delivery_state = 'LEASED'"
@@ -2138,6 +2238,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         long now = lifecycleDatabaseTime();
         jdbc.update("UPDATE managed_agent_operation SET state = 'RECOVERY_BLOCKED', delivery_state = 'BLOCKED',"
                 + " error_code = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, updated_at = ?,"
@@ -2158,6 +2259,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operationId, String owner, long claimGeneration,
             long availableAt) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+        requireLegacyMutation(tenantId, sessionId);
         long delay = Math.max(0, availableAt - clock.millis());
         long now = lifecycleDatabaseTime();
         availableAt = Math.addExact(now, delay);
@@ -2546,7 +2648,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " managed_agent_session s JOIN"
                         + " managed_agent_snapshot p ON p.tenant_id ="
                         + " s.tenant_id AND p.session_id = s.session_id WHERE"
-                        + " p.covered_sequence > s.replay_floor_sequence"
+                        + " s.csi_guard = FALSE AND p.covered_sequence > s.replay_floor_sequence"
                         + " ORDER BY s.updated_at ASC LIMIT ?",
                 (result, row) -> new ReplayFloorTarget(
                         result.getString("tenant_id"),
@@ -2562,6 +2664,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
             long floorSequence) {
+        requireLegacyMutation(tenantId, sessionId);
         requireSessionForUpdate(tenantId, sessionId);
         ReplayWindow window = findReplayWindow(tenantId, sessionId);
         long floor = Math.min(floorSequence,
@@ -2585,9 +2688,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " managed_agent_consumer_progress p ON"
                         + " p.tenant_id = s.tenant_id AND p.session_id ="
                         + " s.session_id AND p.consumer_name = ? WHERE"
-                        + " s.last_sequence > p.covered_sequence"
+                        + " s.csi_guard = FALSE AND (s.last_sequence > p.covered_sequence"
                         + " OR (p.snapshot_stale_since IS NOT NULL"
-                        + " AND p.snapshot_stale_since <= ?)"
+                        + " AND p.snapshot_stale_since <= ?))"
                         + " ORDER BY p.updated_at ASC LIMIT ?",
                 (result, row) -> new MaterializationTarget(
                         result.getString("tenant_id"),
@@ -2599,6 +2702,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public MaterializationResult materializeNextBatch(String tenantId,
             String sessionId, int limit) {
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         Long covered = jdbc.queryForObject("SELECT covered_sequence FROM"
                         + " managed_agent_consumer_progress WHERE tenant_id"
@@ -2724,8 +2828,10 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    @Transactional
     public void deferMaterializationTarget(String tenantId,
             String sessionId) {
+        requireLegacyMutation(tenantId, sessionId);
         jdbc.update("UPDATE managed_agent_consumer_progress SET updated_at"
                         + " = ? WHERE tenant_id = ? AND session_id = ? AND"
                         + " consumer_name = ?",
@@ -2734,7 +2840,8 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public List<DispatchTarget> findDispatchable(long now, int limit) {
         return jdbc.query("SELECT tenant_id, session_id, turn_id FROM"
-                        + " managed_agent_turn WHERE status IN"
+                        + " managed_agent_turn t WHERE EXISTS (SELECT 1 FROM managed_agent_session s"
+                        + " WHERE s.tenant_id = t.tenant_id AND s.session_id = t.session_id AND s.csi_guard = FALSE) AND status IN"
                         + " ('ACCEPTED', 'RUNNING', 'CANCELLING') AND"
                         + " (dispatch_lease_until IS NULL OR"
                         + " dispatch_lease_until < ?) AND (retry_after IS"
@@ -2749,6 +2856,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public Optional<TurnRecord> claimTurn(String tenantId, String sessionId,
             String turnId, String owner, Duration leaseDuration) {
+        requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
         int updated = jdbc.update("UPDATE managed_agent_turn SET"
                         + " dispatch_owner = ?, dispatch_lease_until = ?,"
@@ -2764,8 +2872,10 @@ public class ManagedAgentStore implements AgentStateStore {
                 : findTurn(tenantId, sessionId, turnId);
     }
 
+    @Transactional
     public boolean renewTurn(String tenantId, String sessionId,
             String turnId, String owner, Duration leaseDuration) {
+        requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
         return jdbc.update("UPDATE managed_agent_turn SET"
                         + " dispatch_lease_until = ?, version = version + 1"
@@ -2777,8 +2887,10 @@ public class ManagedAgentStore implements AgentStateStore {
                 owner, now) == 1;
     }
 
+    @Transactional
     public void releaseTurnLease(String tenantId, String sessionId,
             String turnId, String owner) {
+        requireLegacyMutation(tenantId, sessionId);
         jdbc.update("UPDATE managed_agent_turn SET dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, version = version +"
                         + " 1 WHERE tenant_id = ? AND session_id = ? AND"
@@ -2787,8 +2899,10 @@ public class ManagedAgentStore implements AgentStateStore {
                 tenantId, sessionId, turnId, owner);
     }
 
+    @Transactional
     public void scheduleTurnRetry(String tenantId, String sessionId,
             String turnId, String owner, long retryAfter) {
+        requireLegacyMutation(tenantId, sessionId);
         jdbc.update("UPDATE managed_agent_turn SET retry_count = retry_count"
                         + " + 1, retry_after = ?, dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, updated_at = ?,"
@@ -2803,6 +2917,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public boolean bindHarness(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId) {
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
@@ -2831,6 +2946,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean bindRecoveredHarness(String tenantId, String sessionId,
             String turnId, String owner, String expectedHarnessBootId,
             String harnessBootId) {
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
@@ -2861,6 +2977,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void markSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner) {
+        requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
         int updated = jdbc.update("UPDATE managed_agent_turn SET"
                         + " submission_attempted = TRUE, updated_at = ?,"
@@ -2887,6 +3004,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public boolean withdrawSubmissionAttempted(String tenantId,
             String sessionId, String turnId, String owner) {
+        requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
         int updated = jdbc.update("UPDATE managed_agent_turn SET"
                         + " submission_attempted = FALSE, updated_at = ?,"
@@ -2904,6 +3022,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void recordAdmission(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             long lastEventId) {
+        requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
         int updated = jdbc.update("UPDATE managed_agent_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
@@ -2937,6 +3056,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String turnId, String owner, String expectedTurnEventEpoch,
             String expectedSessionEventEpoch, String eventEpoch,
             long lastEventId) {
+        requireLegacyMutation(tenantId, sessionId);
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
@@ -2990,6 +3110,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void retractContinuationOutput(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId,
             String eventEpoch) {
+        requireLegacyMutation(tenantId, sessionId);
         requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
@@ -3076,6 +3197,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String turnId, String owner, String eventEpoch,
             long fromSourceId, long retractionSourceId, String sourceBootId,
             String sourceEventEpoch, Long throughSourceId) {
+        requireLegacyMutation(tenantId, sessionId);
         boolean bounded = throughSourceId != null;
         if (bounded && (sourceBootId == null || sourceEventEpoch == null
                 || fromSourceId < 1 || throughSourceId < fromSourceId || throughSourceId >= retractionSourceId)) {
@@ -3168,6 +3290,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void recordHarnessEvents(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             List<HarnessEvent> events) {
+        requireLegacyMutation(tenantId, sessionId);
         if (events.isEmpty()) {
             return;
         }
@@ -3306,6 +3429,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void cancelBeforeAdmission(String tenantId, String sessionId,
             String turnId, String owner) {
+        requireLegacyMutation(tenantId, sessionId);
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
                 || turn.harnessEventEpoch() != null
@@ -3333,6 +3457,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void failTurn(String tenantId, String sessionId, String turnId,
             String owner, String code, String message) {
+        requireLegacyMutation(tenantId, sessionId);
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
                 || !ACTIVE_TURN_STATES.contains(turn.status())) {
@@ -3361,6 +3486,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void appendPublicEventIfAbsent(String tenantId, String sessionId,
             String turnId, String type, Map<String, Object> data,
             boolean terminal, String sourceKey) {
+        requireLegacyMutation(tenantId, sessionId);
         requireSessionForUpdate(tenantId, sessionId);
         if (!hasSourceEvent(tenantId, sessionId, sourceKey)) {
             appendEvent(tenantId, sessionId, turnId, type, data, terminal,
@@ -3372,6 +3498,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void appendLiveSessionEventIfAbsent(String tenantId,
             String sessionId, String type, Map<String, Object> data,
             String sourceKey) {
+        requireLegacyMutation(tenantId, sessionId);
         // A locking read sees the latest committed status, where a plain one
         // could still see the snapshot taken before a deletion committed.
         Optional<SessionRecord> session = jdbc.query("SELECT * FROM"
@@ -3646,6 +3773,10 @@ public class ManagedAgentStore implements AgentStateStore {
             input.add(Map.copyOf(block));
         }
         return List.copyOf(input);
+    }
+
+    private void requireLegacyMutation(String tenantId, String sessionId) {
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
     }
 
     private SessionRecord requireSessionForUpdate(String tenantId,

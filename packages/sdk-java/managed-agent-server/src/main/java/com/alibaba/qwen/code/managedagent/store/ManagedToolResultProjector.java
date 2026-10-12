@@ -73,6 +73,9 @@ public class ManagedToolResultProjector {
     }
 
     public void project(Claim claim) {
+        if (!store.admitsLegacyProjection(claim)) {
+            return;
+        }
         var data = publications.getIfAvailable();
         try (var lease = data == null ? null : data.readLease(claim.source().sessionKey())) {
             var statuses = jdbc.query("SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
