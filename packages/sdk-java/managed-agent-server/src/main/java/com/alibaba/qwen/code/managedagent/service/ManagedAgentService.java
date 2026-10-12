@@ -116,10 +116,8 @@ public class ManagedAgentService {
     }
 
     private boolean supportsClose(SessionRecord session) {
-        return session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
-                && store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
-                && harness.supportsLifecycle();
+        return session.workspace() == null || runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
+                && harness.supportsLifecycle(session.toolProfile());
     }
 
     private boolean hasActions(SessionRecord session) {
@@ -971,9 +969,8 @@ public class ManagedAgentService {
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
-        return retention || session.workspace() != null && !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
-                && store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
+        return retention || session.workspace() != null && runtimeWarmer != null
+                && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(session.toolProfile());
     }
 
     private Boolean foregroundShell(SessionRecord session) {

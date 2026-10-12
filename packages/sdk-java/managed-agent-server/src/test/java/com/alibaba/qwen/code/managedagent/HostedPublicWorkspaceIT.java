@@ -80,6 +80,7 @@ class HostedPublicWorkspaceIT {
     private boolean shell;
     private String shellDecision = "allow";
     private boolean durableClose;
+    private boolean shellLifecycleV2;
     private String shellFault;
     private HttpServer storeRelay;
     private ExecutorService relayExecutor;
@@ -109,6 +110,16 @@ class HostedPublicWorkspaceIT {
         // approval answered by the non-owner OPERATOR — pin the handoff,
         // or the responder ternary can collapse to the owner unnoticed.
         assertThat(operatorAnswered).hasSize(2);
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @Timeout(360)
+    void publicShellV2DeletionTriggersCollectionWithoutRetirementSeams() throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("L4 public collection requires real MySQL").startsWith("jdbc:mysql:");
+        durableClose = true;
+        shellLifecycleV2 = true;
+        publicForegroundShellUsesMandatoryApprovalOnBothSurfaces("allow");
     }
 
     @ParameterizedTest
@@ -157,15 +168,19 @@ class HostedPublicWorkspaceIT {
             assertThat(roots.get(index).resolve("child/background-proof.txt")).doesNotExist();
             assertThat(request("POST", route, body, workspace, "actor", 202)
                     .path(web ? "sessionId" : "id").asText()).isEqualTo(session);
-            for (String kind : List.of("close", "archive", "delete")) {
-                boolean restDelete = !web && "delete".equals(kind);
-                String lifecycle = web ? "/api/agent/web-shell/v1/sessions/" + kind
-                        : "/v1/agents/sessions/" + session + (restDelete ? "" : "/" + kind);
-                Object command = web ? Map.of("sessionId", session, "idempotencyKey", kind) : null;
-                assertUnavailable(request(restDelete ? "DELETE" : "POST", lifecycle, command, kind, "actor", 409));
+            if (shellLifecycleV2) {
+                deleteShellAndAwaitCollection(session, workspace, web, marker);
+            } else {
+                for (String kind : List.of("close", "archive", "delete")) {
+                    boolean restDelete = !web && "delete".equals(kind);
+                    String lifecycle = web ? "/api/agent/web-shell/v1/sessions/" + kind
+                            : "/v1/agents/sessions/" + session + (restDelete ? "" : "/" + kind);
+                    Object command = web ? Map.of("sessionId", session, "idempotencyKey", kind) : null;
+                    assertUnavailable(request(restDelete ? "DELETE" : "POST", lifecycle, command, kind, "actor", 409));
+                }
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE session_id = ?"
+                        + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')", Integer.class, session)).isZero();
             }
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE session_id = ?"
-                    + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')", Integer.class, session)).isZero();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE session_id = ?",
                     Integer.class, session)).isEqualTo(1);
             if ("allow".equals(decision)) assertThat(Files.readString(marker)).isEqualTo("once\n");
@@ -174,6 +189,36 @@ class HostedPublicWorkspaceIT {
         assertThat(answered).hasSize(2);
         assertThat(modelFailure.get()).isNull();
         assertThat(modelRequests).hasSize(8);
+    }
+
+    private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication WHERE tenant_id = ? AND session_id = ?"
+                + " AND producer_phase = 'REFERENCED'", Integer.class, tenant, session)).isPositive();
+        String companion = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code", "input", List.of(),
+                "workspace", Map.of("workspace_id", workspace, "cwd_relative", "child")),
+                "companion-" + workspace, "actor", 202).path("id").asText();
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                "SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, companion)).isEqualTo("ACTIVE"));
+        JsonNode admitted = web ? request("POST", "/api/agent/web-shell/v1/sessions/delete",
+                Map.of("sessionId", session, "idempotencyKey", "l4-delete"), "l4-delete", "actor", 202)
+                : request("DELETE", "/v1/agents/sessions/" + session, null, "l4-delete", "actor", 202);
+        String operation = admitted.path(web ? "operationId" : "id").asText();
+        await().atMost(Duration.ofSeconds(45)).untilAsserted(() -> assertThat(request("GET",
+                "/v1/agents/sessions/" + session + "/operations/" + operation, null, null, "actor", 200)
+                .path("status").asText()).isEqualTo("completed"));
+        assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM managed_agent_operation"
+                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", Integer.class, tenant, session, operation)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_session_retirement WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(1);
+        await().atMost(Duration.ofSeconds(90)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM qwen_tool_publication WHERE tenant_id = ? AND session_id = ? AND retention_state <> 'COLLECTED'",
+                Integer.class, tenant, session)).isZero());
+        assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, companion)).isEqualTo("ACTIVE");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_session_retirement WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, companion)).isZero();
+        assertThat(Files.readString(marker)).isEqualTo("once\n");
     }
 
     @ParameterizedTest
@@ -980,6 +1025,10 @@ class HostedPublicWorkspaceIT {
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode="
                 + (shell && "deny".equals(shellDecision) ? "auto-edit" : "default"));
         if (shell) arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
+        if (shellLifecycleV2) {
+            arguments.add("--qwen.managed-agent.tool-publication.gc-enabled=true");
+            arguments.add("--qwen.managed-agent.tool-publication.deletion-grace=0s");
+        }
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
@@ -1105,6 +1154,9 @@ class HostedPublicWorkspaceIT {
         environment.putAll(Map.of("HOME", home.toString(), "USERPROFILE", home.toString(), "QWEN_HOME", config.toString(),
                 "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
+        if (shellLifecycleV2) {
+            environment.put("QWEN_HOSTED_LIFECYCLE_V2_PROFILES", "hosted-workspace-shell/1");
+        }
         environment.put("TMPDIR", temporary.toString());
         environment.put("TMP", temporary.toString());
         environment.put("TEMP", temporary.toString());
