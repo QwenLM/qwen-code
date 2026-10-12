@@ -38,6 +38,14 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
+    'packages/cli/src/serve/workspace-recovery-worker.ts',
+    {
+      reason:
+        'The private offline migration worker pins deployment-owned QWEN_HOME and its retained file-history volume before validating recovery evidence.',
+      accesses: { 'key:QWEN_HOME': 2 },
+    },
+  ],
+  [
     'packages/acp-bridge/src/session-control-plane.ts',
     {
       reason: 'The ACP bridge debug switch is process-scoped.',
@@ -167,10 +175,23 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-context-worker.ts',
     {
       reason:
-        'Managed Runtime startup selects its deployment-owned MCP and Hook manifests from the process environment; definitions are then scoped by tenant and workspace.',
+        'Managed Runtime startup selects its deployment-owned MCP and Hook manifests and the delegated cgroup root for process isolation from the process environment; definitions are then scoped by tenant and workspace.',
       accesses: {
+        'key:QWEN_MANAGED_HOOK_CGROUP_ROOT': 1,
         'key:QWEN_MANAGED_HOOK_CONFIG': 1,
         'key:QWEN_MANAGED_MCP_CONFIG': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-csi-worker.ts',
+    {
+      reason:
+        'The Kubernetes Downward API supplies the current Pod identity to the single-Pod CSI worker process; attestation, drain and ACK routes capture it at registration rather than from workspace environment overlays.',
+      accesses: {
+        'key:QWEN_NODE_NAME': 3,
+        'key:QWEN_POD_NAMESPACE': 3,
+        'key:QWEN_POD_UID': 3,
       },
     },
   ],
@@ -203,11 +224,64 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/session-agents/adapters/claude-cli.ts',
+    {
+      reason:
+        "A session agent runs the user's own Claude Code CLI as a child process, so it inherits the daemon process environment (with nested-Claude markers scrubbed).",
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/adapters/codex-app-server.ts',
+    {
+      reason:
+        "A session agent runs the user's own Codex CLI as a child process, so it inherits the daemon process environment (CODEX_HOME, auth).",
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/program-probe.ts',
+    {
+      reason:
+        'Probing which agent CLIs are installed reads the process PATH and the QWEN_AGENT_*_PATH overrides of the daemon process.',
+      accesses: { whole: 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/orchestrator.ts',
+    {
+      reason:
+        'The session_send MCP child re-runs this CLI; its entry point is process-scoped, mirroring managed-runtime-session-worker.',
+      accesses: { 'key:QWEN_CLI_ENTRY': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-ledger.ts',
+    {
+      reason:
+        'The worker keeps its Shell process groups in a ledger the host named in the launch environment — read once and scrubbed so its own commands never inherit the path; its process-table queries read a full environment ' +
+        'only to force the ps locale, and its Windows stop path resolves taskkill from the process-scoped OS root.',
+      accesses: {
+        'computed:MANAGED_RUNTIME_LEDGER_ENV': 2,
+        'key:SystemRoot': 1,
+        whole: 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-runtime-session-worker.ts',
     {
       reason:
         "A Managed session's host starts its Runtime worker from its own CLI entry and process environment, as a Legacy host's commands inherit it.",
-      accesses: { 'key:QWEN_CLI_ENTRY': 1, whole: 2 },
+      accesses: { 'key:QWEN_CLI_ENTRY': 1, whole: 3 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-tool-executor.ts',
+    {
+      reason:
+        'The background Shell environment copies a fixed allowlist of inherited shell variables (PATH, HOME, locale, TMPDIR, USER, SHELL) from the Runtime worker process, matching what a Legacy host hands its commands; secrets are never copied by name.',
+      accesses: { 'computed:key': 1 },
     },
   ],
   [

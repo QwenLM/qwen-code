@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   ManagedSessionConflictError,
   type ManagedSessionAction,
@@ -32,13 +33,20 @@ export interface HostedApprovalSettings {
 }
 
 // Listing what each mode pre-approves means a tool added to a profile later
-// is asked about until someone decides otherwise.
+// is asked about until someone decides otherwise. `task_list` only reads the
+// Session's own team board (H4e-b1).
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
-  default: ['read_file'],
-  'auto-edit': ['read_file', 'write_file', 'edit'],
+  default: ['read_file', 'task_list'],
+  'auto-edit': ['read_file', 'write_file', 'edit', 'task_list'],
 };
+
+// `glob` ships with the `/2` search profiles, so those pre-approve it and no
+// other profile does. A name-keyed allowance would also pre-approve an
+// MCP-declared tool that happens to be called `glob` — the MCP server picks
+// its own names — and dispatch it without ever asking the operator.
+const SEARCH_PREAPPROVED_TOOLS: readonly string[] = ['glob'];
 
 /**
  * Reads a tool profile's approval settings. `plan` needs its own planning
@@ -90,19 +98,24 @@ export function hostedApprovalDefinition(
     : { approvalMode: settings.mode, approvalTimeoutMs: settings.timeoutMs };
 }
 
+/**
+ * Whether a call asks the operator. `searchProfile` is the Session's own
+ * `/2` search profile, the only place `glob` is pre-approved.
+ */
 export function hostedApprovalAsks(
   settings: HostedApprovalSettings,
   toolName: string,
+  searchProfile: boolean = false,
 ): boolean {
+  if (settings.mode === 'yolo') return false;
   return (
-    settings.mode !== 'yolo' &&
-    !PREAPPROVED_TOOLS[settings.mode].includes(toolName)
+    !PREAPPROVED_TOOLS[settings.mode].includes(toolName) &&
+    !(searchProfile && SEARCH_PREAPPROVED_TOOLS.includes(toolName))
   );
 }
 
 /** The Action's `optionsRef` resource, enough to project it without asking. */
-export interface HostedActionOptions {
-  readonly v: 1;
+interface HostedActionOptionsBase {
   readonly requestId: string;
   readonly turnId: string;
   readonly functionCallId: string;
@@ -116,6 +129,12 @@ export interface HostedActionOptions {
     readonly label: string;
   }>;
 }
+
+export type HostedActionOptions = HostedActionOptionsBase &
+  (
+    | { readonly v: 1 }
+    | { readonly v: 2; readonly inputRef: ManagedSessionDurableRef }
+  );
 
 function decisionBytes(
   optionId: string,
@@ -220,7 +239,7 @@ export async function endHostedAction(
   }
 }
 
-async function readHostedActionOptions(
+export async function readHostedActionOptions(
   session: ManagedSession,
   action: ManagedSessionAction,
 ): Promise<HostedActionOptions> {
@@ -231,6 +250,29 @@ async function readHostedActionOptions(
   ) as HostedActionOptions;
 }
 
+/** The closed vocabulary the Hosted refusals carry in 'reason'. */
+export type HostedRefusalReason =
+  | 'authorization_unreadable'
+  | 'activation_inactive'
+  | 'continuation_not_ready'
+  | 'file_history_unsettled'
+  | 'hook_operations_pending'
+  | 'inputs_unsettled'
+  | 'mcp_operations_pending'
+  | 'not_runnable'
+  | 'publication_incomplete'
+  | 'recovery_unsupported'
+  | 'restore_blocked'
+  | 'restore_verification_failed'
+  | 'takeover_failed'
+  | 'takeover_unrecovered'
+  | 'takeover_unsupported'
+  | 'turn_blocked'
+  | 'turn_unsettled'
+  | 'undo_unsettled'
+  | 'workspace_not_writable'
+  | 'writes_stopped';
+
 export type HostedActionResolution =
   | {
       readonly status: 200;
@@ -240,12 +282,19 @@ export type HostedActionResolution =
         readonly optionId: string;
       };
     }
-  | { readonly status: 400 | 404 | 409; readonly code: string };
+  | {
+      readonly status: 400 | 404 | 409;
+      readonly code: string;
+      readonly reason?: HostedRefusalReason;
+    };
 
-const RECOVERY_REQUIRED = {
+const recoveryRequired = (session: ManagedSession): HostedActionResolution => ({
   status: 409,
   code: 'hosted_turn_recovery_required',
-} as const;
+  // A stopped writer is the narrower state, so it is named even when the
+  // Session is also recovery-blocked.
+  reason: session.authority.writesStopped ? 'writes_stopped' : 'turn_blocked',
+});
 
 const ENDED_CODES = {
   expired: 'action_expired',
@@ -314,13 +363,13 @@ export async function resolveHostedAction(
     }
     if (writable()) throw cause;
     waiters.notify(requestId);
-    return RECOVERY_REQUIRED;
+    return recoveryRequired(session);
   };
   if (
     authority.action(requestId)!.state === 'requested' &&
     Date.now() >= options.expiresAt
   ) {
-    if (!writable()) return RECOVERY_REQUIRED;
+    if (!writable()) return recoveryRequired(session);
     try {
       await endHostedAction(session, requestId, 'expired', writable);
     } catch (cause) {
@@ -330,7 +379,7 @@ export async function resolveHostedAction(
   }
   const current = recorded();
   if (current) return current;
-  if (!writable()) return RECOVERY_REQUIRED;
+  if (!writable()) return recoveryRequired(session);
   const decisionRef = await session.resources.publish(
     'managed-action-decision',
     bytes,
@@ -338,7 +387,7 @@ export async function resolveHostedAction(
   // Another answer, the expiry or a cancel may have landed meanwhile.
   const landed = recorded();
   if (landed) return landed;
-  if (!writable()) return RECOVERY_REQUIRED;
+  if (!writable()) return recoveryRequired(session);
   try {
     await authority.resolveAction(
       {

@@ -1594,6 +1594,67 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void answersTheDetachedCaptureFamilyOfAV3Settle() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        // The background start settles its delivery blocked: the handle
+        // reaches the model through the session history, not the store.
+        Map<String, Object> capturedResult = new LinkedHashMap<>();
+        capturedResult.put("captureStatus", "detached");
+        capturedResult.put("captureReason", null);
+        capturedResult.put("manifest", null);
+        capturedResult.put("previewTruncated", false);
+        capturedResult.put("deliveryStatus", "blocked");
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("executionStatus", "success");
+        envelope.put("responseParts", List.of());
+        envelope.put("capture", capturedResult);
+        reply.set(json(200, JsonCodec.encode(Map.of(
+                "protocolVersion", 3,
+                "toolResult", "managed-tool-result/1",
+                "state", "settled",
+                "result", envelope))));
+        Map<String, Object> body = transport.statusV3(lease, session,
+                reference, 0).toCompletableFuture().get(2, TimeUnit.SECONDS);
+        assertEquals("settled", body.get("state"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result =
+                (Map<String, Object>) body.get("result");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> capture =
+                (Map<String, Object>) result.get("capture");
+        assertEquals("detached", capture.get("captureStatus"));
+        assertNull(capture.get("manifest"));
+        assertEquals("blocked", capture.get("deliveryStatus"));
+    }
+
+    @Test
+    void refusesADetachedCaptureStillNamingAManifestOrAReason() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        for (String broken : List.of(
+                "{\"captureStatus\":\"detached\",\"captureReason\":null,"
+                        + "\"previewTruncated\":false,\"deliveryStatus\":\"blocked\","
+                        + "\"manifest\":{\"resourceId\":\"res-1\","
+                        + "\"kind\":\"managed-tool-result-manifest\",\"schemaVersion\":1,"
+                        + "\"byteLength\":4,\"digest\":\"" + "a".repeat(64) + "\"}}",
+                "{\"captureStatus\":\"detached\",\"captureReason\":\"storage_failed\","
+                        + "\"previewTruncated\":false,\"deliveryStatus\":\"blocked\","
+                        + "\"manifest\":null}")) {
+            reply.set(json(200, ("{\"protocolVersion\":3,\"toolResult\":"
+                    + "\"managed-tool-result/1\",\"state\":\"settled\",\"result\":"
+                    + "{\"executionStatus\":\"success\",\"responseParts\":[],"
+                    + "\"capture\":" + broken + "}}")
+                    .getBytes(StandardCharsets.UTF_8)));
+            assertThrows(ExecutionException.class, () -> transport.statusV3(
+                    lease, session, reference, 0).toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS), broken);
+        }
+    }
+
+    @Test
     void rejectsExplicitNullAndEmptyOptionalResponseFields() throws Exception {
         ObjectNode settled = (ObjectNode) findIn(toolSuite("execute"), "success")
                 .required("expected").required("body").deepCopy();

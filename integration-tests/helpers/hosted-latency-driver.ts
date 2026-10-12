@@ -21,6 +21,7 @@ import {
   type HostedLatencyMeasurement,
   type HostedLatencySample,
 } from './hosted-latency-baseline.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -208,21 +209,7 @@ const proxy = createServer(async (req, res) => {
     } else {
       const bytes = Buffer.from(await upstream.arrayBuffer());
       if (isWarm) active.runtimeReadyMs = elapsed();
-      res.writeHead(
-        upstream.status,
-        Object.fromEntries(
-          [...upstream.headers].filter(
-            ([key]) =>
-              ![
-                'connection',
-                'content-length',
-                'content-encoding',
-                'transfer-encoding',
-              ].includes(key),
-          ),
-        ),
-      );
-      res.end(bytes);
+      relayUpstream(res, upstream, bytes);
     }
   } catch (cause) {
     proxyFailures.push(cause);
@@ -366,6 +353,7 @@ try {
     'integration-tests/helpers/hosted-latency-driver.ts',
     'integration-tests/helpers/hosted-latency-baseline.ts',
     'integration-tests/helpers/hosted-harness-process.ts',
+    'integration-tests/helpers/hosted-relay-headers.ts',
     'integration-tests/fake-openai-server.ts',
     'packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java',
   ];

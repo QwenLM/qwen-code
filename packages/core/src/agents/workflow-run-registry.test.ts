@@ -2559,9 +2559,11 @@ describe('workflow completion result projection', () => {
       )?.[1];
       expect(notice?.includes(snapshotPath)).toBe(true);
       expect(notice).toContain('if persistence succeeds');
-      expect(notice).toContain('plain JSON');
       expect(notice).toContain(
-        'Error, Map, and Set contents are not preserved',
+        'Its result field is plain JSON, so Error, Map, and Set contents are not preserved there',
+      );
+      expect(notice).toContain(
+        'its resultPreview field keeps the result as bounded display text, shown by /workflows wf_reporting',
       );
       expect(notice).toContain(
         'reported-failure previews may also be truncated',

@@ -256,7 +256,6 @@ export const legacyCoreBarrelImports = [
   'packages/cli/src/ui/commands/statsCommand.ts',
   'packages/cli/src/ui/commands/summaryCommand.ts',
   'packages/cli/src/ui/commands/tasksCommand.ts',
-  'packages/cli/src/ui/commands/workflowsCommand.ts',
   'packages/cli/src/ui/components/AppHeader.tsx',
   'packages/cli/src/ui/components/DebugModeNotification.tsx',
   'packages/cli/src/ui/components/DialogManager.tsx',

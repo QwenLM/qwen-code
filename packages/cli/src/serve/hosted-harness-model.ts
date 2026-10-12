@@ -14,6 +14,11 @@ import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
+import {
+  HostedModelUnavailableError,
+  type HostedAgentDefinition,
+} from './hosted-agent-definition.js';
+
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import {
   HostedHookRecoveryRequiredError,
@@ -53,8 +58,11 @@ export interface HostedHarnessModelResult {
 
 export interface HostedHarnessTextDeltas {
   delta(text: string): Promise<void>;
-  /** Whether the current model message already published durable text. */
-  published(): boolean;
+  /**
+   * Retract the current message's published deltas so a restarted attempt
+   * replaces them; a no-op when nothing is published (#13319).
+   */
+  retract(): Promise<void>;
 }
 
 export async function runHostedHarnessTextTurn(input: {
@@ -74,6 +82,9 @@ export async function runHostedHarnessTextTurn(input: {
     Partial<
       Pick<HostedWorkspaceToolTurn, 'resumeHookResults' | 'hookStopReason'>
     >;
+  workspaceContext?: { read(): string | undefined };
+  agentDefinition?: HostedAgentDefinition;
+  agentInstructions?: string;
   textDeltas?: HostedHarnessTextDeltas;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
@@ -99,6 +110,43 @@ export async function runHostedHarnessTextTurn(input: {
     true,
     { toolInvocationGuard: () => ({ allowed: false }) },
   );
+  const contextWithInstructions = (context: string | undefined) =>
+    [
+      input.agentInstructions
+        ? `# Agent instructions\n\n${input.agentInstructions}`
+        : undefined,
+      context,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  const model = input.agentDefinition?.model;
+  if (model) {
+    try {
+      const matches = config
+        .getAllConfiguredModels()
+        .filter((entry) => !entry.isRuntimeModel && entry.id === model.id);
+      if (matches.length !== 1) throw new HostedModelUnavailableError();
+      const selected = matches[0]!;
+      await config.switchModel(selected.authType, selected.id, {
+        requireCachedCredentials: true,
+        ...(selected.registryBaseUrl
+          ? { baseUrl: selected.registryBaseUrl }
+          : {}),
+      });
+    } catch (cause) {
+      try {
+        await config.shutdown({
+          shutdownTelemetry: false,
+          strictResourceCleanup: true,
+        });
+      } catch (cleanupCause) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness model cleanup failed: ${String(cleanupCause)}`,
+        );
+      }
+      throw new HostedModelUnavailableError(cause);
+    }
+  }
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
   let historyReady = false;
@@ -202,6 +250,12 @@ export async function runHostedHarnessTextTurn(input: {
   };
   try {
     await input.hooks?.ensureReady(input.signal);
+    // Seed instructions when memory reload is skipped; restore them after
+    // initialize() when its hierarchical memory refresh replaces user memory.
+    if (input.agentInstructions)
+      config.setUserMemory(
+        contextWithInstructions(input.workspaceContext?.read()),
+      );
     await config.initialize({
       signal: input.signal,
       skipHooks: true,
@@ -214,7 +268,19 @@ export async function runHostedHarnessTextTurn(input: {
     const authType = config.getModelsConfig().getCurrentAuthType();
     if (!authType)
       throw new Error('Hosted Harness model authentication is unavailable.');
-    await config.refreshAuth(authType, true);
+    if (input.agentInstructions) {
+      config.setUserMemory(
+        contextWithInstructions(input.workspaceContext?.read()),
+      );
+    }
+    try {
+      await config.refreshAuth(authType, true);
+    } catch (cause) {
+      if (model) throw new HostedModelUnavailableError(cause);
+      throw cause;
+    }
+    if (input.agentInstructions)
+      await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
     runPromptHook = input.modelScope
       ? createHostedPromptHookRunner(config, input.modelScope)
@@ -282,6 +348,10 @@ export async function runHostedHarnessTextTurn(input: {
     if (registry.getFunctionDeclarations().length !== 0) {
       throw new Error('Hosted Harness cannot advertise local tools.');
     }
+    // Safe mode stays on; the Session's Workspace instructions arrive through
+    // the context slot instead of the Harness host's filesystem. The loop below
+    // injects them before the first request too.
+    let injectedContext: string | undefined;
     const historyRecords = input.resumeFromToolResults
       ? input.history.slice(
           0,
@@ -309,7 +379,8 @@ export async function runHostedHarnessTextTurn(input: {
     // history drops an empty assistant record while keeping its prompt. Omit
     // both kinds of unanswered prompt even when later completed turns follow.
     const answered = (entry: Content | undefined): boolean =>
-      entry?.role === 'model' && !!entry.parts?.some((part) => !!part.text);
+      entry?.role === 'model' &&
+      !!entry.parts?.some((part) => !part.thought && !!part.text);
     client
       .getChat()
       .setHistory(
@@ -337,6 +408,14 @@ export async function runHostedHarnessTextTurn(input: {
       (await input.hooks?.wasStopBlocked(input.promptId)) ?? false;
     for (let round = 0; round < 16; round++) {
       input.signal.throwIfAborted();
+      const contextAvailable = input.workspaceContext?.read();
+      if (contextAvailable && contextAvailable !== injectedContext) {
+        // setUserMemory alone never reaches the wire: the system instruction
+        // was assembled during initialize() and is cached on the chat.
+        config.setUserMemory(contextWithInstructions(contextAvailable));
+        await client.refreshSystemInstruction();
+        injectedContext = contextAvailable;
+      }
       if (input.hooks?.hasPendingOperations)
         throw new HostedHookRecoveryRequiredError();
       if (input.toolTurn?.hookStopReason) {
@@ -371,6 +450,10 @@ export async function runHostedHarnessTextTurn(input: {
               round === 0 && !input.resumeFromToolResults
                 ? SendMessageType.UserQuery
                 : SendMessageType.ToolResult,
+            // Published deltas cannot be un-glued after the fact: a cut that
+            // already delivered content replays the request, and the RETRY
+            // handling below retracts the orphaned prefix (#13319).
+            retractDeliveredOutputOnRetry: true,
           },
         )) {
           if (event.type === LlmEventType.Content) {
@@ -382,19 +465,14 @@ export async function runHostedHarnessTextTurn(input: {
           } else if (event.type === LlmEventType.Retry) {
             calls = [];
             if (!event.isContinuation) {
-              if (textDeltas?.published()) {
-                throw new Error(
-                  'Hosted Harness cannot retract a published model attempt.',
-                );
-              }
+              // A restarted attempt replaces what the failed one published:
+              // retract the orphaned prefix from the durable feed before the
+              // replay's own deltas arrive (#13319).
+              await textDeltas?.retract();
               text = '';
             }
           } else if (event.type === LlmEventType.ModelFallback) {
-            if (textDeltas?.published()) {
-              throw new Error(
-                'Hosted Harness cannot retract a published model attempt.',
-              );
-            }
+            await textDeltas?.retract();
             calls = [];
             text = '';
           } else if (
@@ -477,11 +555,16 @@ export async function runHostedHarnessTextTurn(input: {
         suppressDisplay = display?.suppressOutput ?? false;
         if (suppressDisplay) text = '';
       }
-      if (!input.toolTurn) return { text, model: config.getModel() };
       const output = client.getHistory().at(-1);
       if (output?.role !== 'model' || !output.parts)
         throw new Error('Hosted model output is unavailable.');
       const parts = structuredClone(output.parts);
+      if (!input.toolTurn)
+        return {
+          text,
+          parts: suppressDisplay ? [] : parts,
+          model: config.getModel(),
+        };
       const functions = parts.filter((part) => part.functionCall);
       if (functions.length !== calls.length)
         throw new Error('Hosted model call history is inconsistent.');

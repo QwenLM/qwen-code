@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -37,6 +38,7 @@ public final class WorkspaceRecoveryStore {
     private final String id;
     private final String tenant;
     private final String storage;
+    private boolean lockSources;
 
     public WorkspaceRecoveryStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             WorkspaceStorageGuard guard, ToolPublicationObjectStore objects, String mode, byte[] requestBytes) {
@@ -65,47 +67,62 @@ public final class WorkspaceRecoveryStore {
             check(path.isAbsolute() && path.normalize().equals(path), "invalid_request");
         }
         String requestDigest = hash(requestBytes);
-        transactions.executeWithoutResult(status -> {
-            var existing = operation(id);
-            if (existing != null) {
-                check(tenant.equals(existing.get("tenant_id")) && storage.equals(existing.get("storage_id"))
-                        && mode.equals(existing.get("mode")) && requestDigest.equals(existing.get("request_digest")),
-                        "operation_conflict");
-                return;
-            }
-            Map<String, Object> capture = null;
-            JsonNode registration;
-            if ("verify".equals(mode)) {
-                capture = operation(uuid(request, "captureOperationId"));
-                check(capture != null && "SEALED".equals(capture.get("state"))
-                        && tenant.equals(capture.get("tenant_id")) && storage.equals(capture.get("storage_id")),
-                        "capture_not_sealed");
-                JsonNode original = parse((String) capture.get("request_json"));
-                for (String field : List.of("fenceOperationId", "mountRevision", "sourceRoot", "bundleRoot", "fileHistoryRoot")) {
-                    check(original.path(field).equals(request.path(field)), "operation_conflict");
+        // The stream-capture collector fences its byte drop with a locking read over this
+        // table; a registration that meets it fails with a lock wait instead of racing
+        // silently, and the collector defers and releases quickly, so retry transiently.
+        int attempts = 0;
+        while (true) {
+            try {
+                transactions.executeWithoutResult(status -> register(requestDigest));
+                break;
+            } catch (PessimisticLockingFailureException error) {
+                if (++attempts >= 3) {
+                    throw error;
                 }
-                registration = parse((String) capture.get("registration_json"));
-            } else {
-                registration = currentRegistration();
             }
-            jdbc.update("INSERT INTO managed_workspace_recovery_operation (operation_id, tenant_id, storage_id,"
-                    + " mode, capture_operation_id, request_digest, request_json, registration_json, source_digest,"
-                    + " session_count, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?,"
-                    + " CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))", id, tenant, storage, mode,
-                    capture == null ? null : capture.get("operation_id"), requestDigest, request.toString(),
-                    registration.toString(), hash(new byte[0]), "capture".equals(mode) ? "CAPTURING" : "VERIFYING");
-            if (capture != null) {
-                jdbc.update("INSERT INTO managed_workspace_recovery_session (operation_id, session_id, source_digest,"
-                        + " source_json, state) SELECT ?, session_id, source_digest, source_json, 'PENDING'"
-                        + " FROM managed_workspace_recovery_session WHERE operation_id = ?", id, capture.get("operation_id"));
-                jdbc.update("UPDATE managed_workspace_recovery_operation SET source_digest = ?, session_count = ?"
-                        + " WHERE operation_id = ?", capture.get("source_digest"), capture.get("session_count"), id);
-            } else {
-                SourceCut cut = scanSources(true);
-                jdbc.update("UPDATE managed_workspace_recovery_operation SET source_digest = ?, session_count = ?"
-                        + " WHERE operation_id = ?", cut.digest(), cut.count(), id);
+        }
+    }
+
+    private void register(String requestDigest) {
+        var existing = operation(id);
+        if (existing != null) {
+            check(tenant.equals(existing.get("tenant_id")) && storage.equals(existing.get("storage_id"))
+                    && mode.equals(existing.get("mode")) && requestDigest.equals(existing.get("request_digest")),
+                    "operation_conflict");
+            return;
+        }
+        Map<String, Object> capture = null;
+        JsonNode registration;
+        if ("verify".equals(mode)) {
+            capture = operation(uuid(request, "captureOperationId"));
+            check(capture != null && "SEALED".equals(capture.get("state"))
+                    && tenant.equals(capture.get("tenant_id")) && storage.equals(capture.get("storage_id")),
+                    "capture_not_sealed");
+            JsonNode original = parse((String) capture.get("request_json"));
+            for (String field : List.of("fenceOperationId", "mountRevision", "sourceRoot", "bundleRoot", "fileHistoryRoot")) {
+                check(original.path(field).equals(request.path(field)), "operation_conflict");
             }
-        });
+            registration = parse((String) capture.get("registration_json"));
+        } else {
+            registration = currentRegistration();
+        }
+        jdbc.update("INSERT INTO managed_workspace_recovery_operation (operation_id, tenant_id, storage_id,"
+                + " mode, capture_operation_id, request_digest, request_json, registration_json, source_digest,"
+                + " session_count, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?,"
+                + " CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))", id, tenant, storage, mode,
+                capture == null ? null : capture.get("operation_id"), requestDigest, request.toString(),
+                registration.toString(), hash(new byte[0]), "capture".equals(mode) ? "CAPTURING" : "VERIFYING");
+        if (capture != null) {
+            jdbc.update("INSERT INTO managed_workspace_recovery_session (operation_id, session_id, source_digest,"
+                    + " source_json, state) SELECT ?, session_id, source_digest, source_json, 'PENDING'"
+                    + " FROM managed_workspace_recovery_session WHERE operation_id = ?", id, capture.get("operation_id"));
+            jdbc.update("UPDATE managed_workspace_recovery_operation SET source_digest = ?, session_count = ?"
+                    + " WHERE operation_id = ?", capture.get("source_digest"), capture.get("session_count"), id);
+        } else {
+            SourceCut cut = scanSources(true);
+            jdbc.update("UPDATE managed_workspace_recovery_operation SET source_digest = ?, session_count = ?"
+                    + " WHERE operation_id = ?", cut.digest(), cut.count(), id);
+        }
     }
 
     public JsonNode call(String method, JsonNode params) {
@@ -157,8 +174,10 @@ public final class WorkspaceRecoveryStore {
                 default -> throw failure("unknown_method");
             };
         } catch (RecoveryFailure error) {
-            if ("source_drift".equals(error.code)) {
-                invalidate("source_drift");
+            if ("source_drift".equals(error.code) || "resource_collected".equals(error.code)) {
+                // The bytes have no other copy: no retry can succeed, so terminate instead
+                // of wedging CAPTURING and pinning this cut's retired Sessions forever.
+                invalidate(error.code);
             }
             recordFailure(error.code);
             throw error;
@@ -471,19 +490,37 @@ public final class WorkspaceRecoveryStore {
         return new SourceCut(HexFormat.of().formatHex(digest.digest()), count);
     }
 
+    public void assertCompatible() {
+        recheckBoundary();
+        var row = ownedOperation();
+        lockSources = true;
+        try {
+            SourceCut cut = scanSources(false);
+            check(cut.digest().equals(row.get("source_digest"))
+                    && cut.count() == ((Number) row.get("session_count")).longValue(), "source_drift");
+        } finally {
+            lockSources = false;
+        }
+    }
+
     private JsonNode currentSource(String session) {
+        return currentSource(jdbc, tenant, storage, session, lockSources);
+    }
+
+    static JsonNode currentSource(JdbcTemplate jdbc, String tenant, String storage, String session, boolean lockSources) {
         var rows = jdbc.queryForList("SELECT * FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?"
-                + " AND workspace_storage_id = ?", tenant, session, storage);
+                + " AND workspace_storage_id = ?" + (lockSources ? " FOR UPDATE" : ""), tenant, session, storage);
         check(rows.size() == 1, "source_drift");
         Map<String, Object> row = rows.getFirst();
-        check("qwen-code".equals(row.get("agent_id")) && Set.of("ACTIVE", "CLOSED", "ARCHIVED", "DELETED")
+        check(("qwen-code".equals(row.get("agent_id")) || row.get("agent_definition_digest") != null)
+                && Set.of("ACTIVE", "CLOSED", "ARCHIVED", "DELETED")
                 .contains(row.get("status")), "source_drift");
         var receipts = jdbc.queryForList("SELECT actor_id, idempotency_key, request_digest, turn_id, created_at"
                 + " FROM managed_workspace_create_command WHERE tenant_id = ? AND session_id = ?", tenant, session);
         check(receipts.size() == 1, "source_drift");
-        check(count("SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ? AND session_id = ?"
+        check(count(jdbc, "SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ? AND session_id = ?"
                 + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')", tenant, session) == 0, "source_drift");
-        check(count("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
+        check(count(jdbc, "SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
                 + " AND state NOT IN ('COMPLETED', 'FAILED')", tenant, session) == 0, "source_drift");
         ObjectNode source = JSON.createObjectNode().put("sessionId", session);
         ObjectNode binding = source.putObject("binding").put("tenantId", tenant);
@@ -497,6 +534,9 @@ public final class WorkspaceRecoveryStore {
         }
         check(binding.path("workspaceGeneration").asLong() > 0 && binding.path("contextRevision").asLong() > 0, "source_drift");
         fields(source, row, "configRef", "workspace_config_ref", "policyRef", "workspace_policy_ref", "approvalMode", "approval_mode");
+        // The pinned definition identity (D8c-1); null for qwen-code.
+        fields(source, row, "agentRevision", "agent_revision",
+                "agentDefinitionDigest", "agent_definition_digest");
         ObjectNode product = source.putObject("publicSession");
         fields(product, row, "version", "version", "status", "status", "lastSequence", "last_sequence",
                 "harnessBootId", "harness_boot_id", "harnessEventEpoch", "harness_event_epoch",
@@ -506,7 +546,12 @@ public final class WorkspaceRecoveryStore {
                 .put("actorIdHex", HexFormat.of().formatHex((byte[]) receipt.get("actor_id")));
         fields(creation, receipt, "idempotencyKey", "idempotency_key", "requestDigest", "request_digest",
                 "turnId", "turn_id", "createdAt", "created_at");
-        var heads = jdbc.query("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+        // Missing keys gap-lock other tenants; the retention authority lock prevents new writers here.
+        boolean lockHead = lockSources && count(jdbc,
+                "SELECT COUNT(*) FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+                tenant, session) != 0;
+        var heads = jdbc.query("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?"
+                + (lockHead ? " FOR UPDATE" : ""),
                 (result, index) -> {
                     var value = new ColumnMapRowMapper().mapRow(result, index);
                     value.put("writer_lease_until", result.getTimestamp("writer_lease_until"));
@@ -520,7 +565,7 @@ public final class WorkspaceRecoveryStore {
         } else {
             Map<String, Object> head = heads.getFirst();
             Timestamp lease = (Timestamp) head.get("writer_lease_until");
-            check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now()), "source_drift");
+            check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now(jdbc)), "source_drift");
             check(Set.of("ACTIVE", "SEALED", "DELETING", "DELETED").contains(head.get("state"))
                     && ((Number) head.get("storage_version")).intValue() == 1
                     && ((Number) head.get("compacted_through_revision")).longValue() == 0
@@ -551,7 +596,7 @@ public final class WorkspaceRecoveryStore {
             check(retiredHead.isNull() || "DELETED".equals(retiredHead.path("state").asText())
                     && retiredHead.path("latestCheckpointResourceId").isNull()
                     && retiredHead.path("writerId").isNull() && retiredHead.path("writerLeaseUntil").isNull(), "source_drift");
-            check(count("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
+            check(count(jdbc, "SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
                     + " AND operation_id = ? AND operation_kind = 'DELETE' AND state = 'COMPLETED'"
                     + " AND delivery_state = 'CONFIRMED' AND completed_at IS NOT NULL",
                     tenant, session, retirement.get("operation_id")) == 1, "source_drift");
@@ -635,10 +680,18 @@ public final class WorkspaceRecoveryStore {
     }
 
     private long count(String sql, Object... args) {
+        return count(jdbc, sql, args);
+    }
+
+    private static long count(JdbcTemplate jdbc, String sql, Object... args) {
         return Objects.requireNonNull(jdbc.queryForObject(sql, Long.class, args));
     }
 
     private Timestamp now() {
+        return now(jdbc);
+    }
+
+    private static Timestamp now(JdbcTemplate jdbc) {
         return Objects.requireNonNull(jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class));
     }
 
@@ -671,7 +724,7 @@ public final class WorkspaceRecoveryStore {
         return value.asLong();
     }
 
-    private static String uuid(JsonNode node, String field) {
+    static String uuid(JsonNode node, String field) {
         String value = text(node, field);
         try {
             check(UUID.fromString(value).toString().equals(value), "invalid_request");
@@ -701,6 +754,20 @@ public final class WorkspaceRecoveryStore {
         if (!condition) {
             throw failure(code);
         }
+    }
+
+    public static String errorCode(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        if (current instanceof RecoveryFailure failure) {
+            return failure.code;
+        }
+        if (current instanceof RuntimeBrokerException failure) {
+            return failure.getCode();
+        }
+        return "migration_failed";
     }
 
     static RecoveryFailure failure(String code) {

@@ -116,6 +116,48 @@ it('preserves payload identity separately from the explicitly selected v3 input 
   });
 });
 
+it('reserves a Tool v3 original under the logical turn id and the mapped Runtime Session', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, body) => {
+    requests.push(body);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        runtimeBindingId: 'binding',
+        bindingGeneration: '7',
+        status: { state: 'prepared' },
+      },
+    };
+  });
+  await broker.prepareV3(
+    'runtime-call',
+    `sha256:${'b'.repeat(64)}`,
+    `sha256:${'a'.repeat(64)}`,
+    'publication',
+    'arun_x:input',
+  );
+  expect(requests).toHaveLength(1);
+  // The publication store compares the persisted execution's turn id
+  // against the reserve reference's promptId (`Broker execution
+  // identity conflicts` when they split), while the Runtime identity
+  // stays the mapped one — one pair, two axes.
+  expect(requests[0]).toMatchObject({
+    idempotencyKey: 'turn:runtime-call',
+    turnId: 'arun_x:input',
+    toolCallId: 'runtime-call',
+    requestDigest: `sha256:${'a'.repeat(64)}`,
+    toolProtocol: 'v3',
+    publicationId: 'publication',
+    reference: {
+      sessionId: 'turn',
+      promptId: 'arun_x:input',
+      callId: 'runtime-call',
+      argsDigest: `sha256:${'b'.repeat(64)}`,
+    },
+  });
+});
+
 it.each([undefined, 'b'.repeat(64)])(
   'keeps the original Runtime owner separate from the prompt and input digest (%s)',
   async (inputDigest) => {
@@ -174,6 +216,68 @@ it('requires confirmation for the exact Shell receipt acknowledgement', async ()
       },
     }),
   ).rejects.toThrow('acknowledge');
+});
+
+it('replays a Shell receipt acknowledgement whose reply was lost', async () => {
+  const attempts: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, body) => {
+    attempts.push(body);
+    // The Broker applies the acknowledgement, but the reply never arrives.
+    if (attempts.length === 1) return { drop: true };
+    return {
+      body: { ...identity, executionCallId: 'execution', acknowledged: true },
+    };
+  });
+  await expect(
+    broker.acknowledge('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef: {
+        resourceId: 'outcome',
+        kind: 'managed-tool-outcome',
+        schemaVersion: 1,
+        byteLength: 0,
+        digest: 'a'.repeat(64),
+      },
+    }),
+  ).resolves.toBeUndefined();
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toEqual({
+    ...attempts[0],
+    requestId: expect.any(String),
+  });
+  expect((attempts[1] as Record<string, unknown>)['receipt']).toEqual(
+    attempts[0]!['receipt'],
+  );
+});
+
+it('does not replay a refused Shell receipt acknowledgement', async () => {
+  const attempts: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, body) => {
+    attempts.push(body);
+    return {
+      code: 409,
+      body: { code: 'runtime_execution_conflict', message: 'conflict' },
+    };
+  });
+  await expect(
+    broker.acknowledge('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef: {
+        resourceId: 'outcome',
+        kind: 'managed-tool-outcome',
+        schemaVersion: 1,
+        byteLength: 0,
+        digest: 'a'.repeat(64),
+      },
+    }),
+  ).rejects.toBeInstanceOf(HostedWorkspaceBrokerRejection);
+  expect(attempts).toHaveLength(1);
 });
 
 it('accepts the Broker acknowledgement envelope for a remote v3 receipt', async () => {
@@ -599,6 +703,27 @@ it('preserves a worker history refusal reason', async () => {
     code: 'managed_runtime_provider_operation_failed',
     reason: 'ordinary files only',
   });
+});
+
+it('reads Workspace context on its own tool-session route, through the result parser', async () => {
+  // The parser is the only gate between the Broker's reply and the system
+  // instruction: a name outside the closed list must not get through.
+  const paths: string[] = [];
+  let files: unknown = [{ name: 'QWEN.md', text: 'project rules' }];
+  const broker = await fixture((path) => {
+    paths.push(path);
+    return { body: { ...identity, result: { files } } };
+  });
+  await expect(broker.workspaceContext()).resolves.toEqual([
+    { name: 'QWEN.md', text: 'project rules' },
+  ]);
+  expect(paths[0]).toBe(
+    '/internal/runtime-broker/v1/tool-sessions/turn/control',
+  );
+  files = [{ name: '../etc/passwd', text: 'host' }];
+  await expect(broker.workspaceContext()).rejects.toThrow(
+    'Invalid Workspace context result.',
+  );
 });
 
 it('resolves a durable execution status for recovery reports', async () => {

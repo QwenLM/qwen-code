@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
+import com.alibaba.druid.pool.DruidDataSource;
 import java.net.URI;
 import java.util.Set;
 import java.util.UUID;
@@ -16,7 +15,7 @@ final class O4MySqlDatabase implements AutoCloseable {
     private final String database;
     private final String url;
     private final String user;
-    private final HikariDataSource source;
+    private final DruidDataSource source;
 
     O4MySqlDatabase() {
         String base = System.getProperty("qwen.o4.mysql.url");
@@ -29,12 +28,12 @@ final class O4MySqlDatabase implements AutoCloseable {
         admin.execute("CREATE DATABASE `" + database + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin");
         url = databaseUrl(base, database);
         try {
-            var config = new HikariConfig();
-            config.setJdbcUrl(url);
+            var config = new DruidDataSource();
+            config.setUrl(url);
             config.setUsername(user);
             config.setPassword(password);
-            config.setMaximumPoolSize(4);
-            source = new HikariDataSource(config);
+            config.setMaxActive(4);
+            source = config;
         } catch (RuntimeException error) {
             try { admin.execute("DROP DATABASE `" + database + "`"); }
             catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }

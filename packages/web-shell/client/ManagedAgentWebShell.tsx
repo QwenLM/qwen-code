@@ -1,5 +1,11 @@
 import './styles/globals.css';
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import {
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
 import { BrandProvider, type WebShellBrand } from './brandContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
@@ -51,29 +57,52 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     saveArtifact,
   } = props;
   const resolvedLanguage = normalizeLanguage(language);
+  // Function props may be inline closures: route them through a ref so the
+  // provider (and its caches, fetches and SSE) is rebuilt only when a real
+  // connection input changes, not on every parent render. Assigned in a
+  // layout effect: a render React discards (a suspended or interrupted
+  // transition) must not repoint the committed tree's callbacks, and a
+  // passive effect would come too late — the layout phase of a commit
+  // finishes before any passive effect, so a child effect of that same
+  // commit still reads the fresh callbacks.
+  const callbacksRef = useRef({ fetchImpl, getHeaders, saveArtifact });
+  useLayoutEffect(() => {
+    callbacksRef.current = { fetchImpl, getHeaders, saveArtifact };
+  });
+  const hasFetch = fetchImpl !== undefined;
+  const hasGetHeaders = getHeaders !== undefined;
+  const hasSaveArtifact = saveArtifact !== undefined;
   const provider = useMemo(
     () =>
       createJavaManagedAgentProvider({
         baseUrl,
         credentials,
         environmentId,
-        fetch: fetchImpl,
-        getHeaders,
+        fetch: !hasFetch
+          ? undefined
+          : (...args) => (callbacksRef.current.fetchImpl ?? fetch)(...args),
+        getHeaders: !hasGetHeaders
+          ? undefined
+          : () => callbacksRef.current.getHeaders?.() ?? {},
         agentId,
         productScope,
         enableWorkspaceBinding,
-        saveArtifact,
+        saveArtifact: !hasSaveArtifact
+          ? undefined
+          : (artifact, options) =>
+              callbacksRef.current.saveArtifact?.(artifact, options) ??
+              Promise.resolve(),
       }),
     [
       baseUrl,
       credentials,
       environmentId,
-      fetchImpl,
-      getHeaders,
       agentId,
       productScope,
       enableWorkspaceBinding,
-      saveArtifact,
+      hasFetch,
+      hasGetHeaders,
+      hasSaveArtifact,
     ],
   );
   const [selection, setSelection] = useState(() => ({
@@ -81,25 +110,35 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     externalSessionId: sessionId,
     selectedSessionId: sessionId,
   }));
-  const selectedSessionId =
-    selection.storageKey === provider.storageKey
-      ? selection.selectedSessionId
-      : sessionId === selection.externalSessionId
+  // With both sessionId and onSessionChange the host owns the selection:
+  // onSelectSession suppresses the internal write, but the echoed value
+  // still passes through the same state machine — otherwise a host can never
+  // return to "no selection" and a scope switch forwards the carried-over id.
+  const controlled = sessionId !== undefined && onSessionChange !== undefined;
+  let selectedSessionId: string | undefined;
+  if (
+    selection.storageKey !== provider.storageKey ||
+    selection.externalSessionId !== sessionId
+  ) {
+    // Adjust during render (React's adjusting-state-when-props-change
+    // pattern): an external switch is visible on this commit — an effect
+    // would paint one stale frame first. Only an id carried over from the
+    // previous identity is dropped, never an explicit new selection.
+    selectedSessionId =
+      selection.storageKey !== provider.storageKey &&
+      sessionId === selection.externalSessionId
         ? undefined
         : sessionId;
-  const [portalRoot, setPortalRoot] = useState<HTMLDivElement | null>(null);
-  const emptyMap = useMemo(() => new Map(), []);
-  useEffect(() => {
-    setSelection((current) => ({
+    setSelection({
       storageKey: provider.storageKey,
       externalSessionId: sessionId,
-      selectedSessionId:
-        current.storageKey !== provider.storageKey &&
-        sessionId === current.externalSessionId
-          ? undefined
-          : sessionId,
-    }));
-  }, [sessionId, provider.storageKey]);
+      selectedSessionId,
+    });
+  } else {
+    selectedSessionId = selection.selectedSessionId;
+  }
+  const [portalRoot, setPortalRoot] = useState<HTMLDivElement | null>(null);
+  const emptyMap = useMemo(() => new Map(), []);
 
   return (
     <ErrorBoundary
@@ -132,10 +171,11 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                         key={provider.storageKey}
                         sessionId={selectedSessionId}
                         onSelectSession={(next) => {
-                          setSelection((current) => ({
-                            ...current,
-                            selectedSessionId: next,
-                          }));
+                          if (!controlled)
+                            setSelection((current) => ({
+                              ...current,
+                              selectedSessionId: next,
+                            }));
                           onSessionChange?.(next);
                         }}
                         managedAgentProvider={provider}
