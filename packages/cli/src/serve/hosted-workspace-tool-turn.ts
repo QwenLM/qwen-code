@@ -124,9 +124,8 @@ import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import {
   ARGS_MAX_DEPTH,
   extractAndStripMeta,
-  workflowPreLaunchRefusal,
+  workflowPreLaunchGate,
 } from '@qwen-code/qwen-code-core/agents/runtime/workflow-sandbox.js';
-import { scanWorkflowScriptShape } from '@qwen-code/qwen-code-core/agents/runtime/workflow-script-shape.js';
 import { WORKFLOW_NAME_PATTERN } from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -2699,26 +2698,22 @@ export class HostedWorkspaceToolTurn {
               validationError = argsRefusal;
             }
             if (validationError === undefined) {
-              const refusal = workflowPreLaunchRefusal(args['script']);
-              if (refusal !== undefined) {
-                validationError = `Hosted workflow script is invalid: ${refusal.detail}`;
-              }
-            }
-            if (validationError === undefined) {
-              const shape = scanWorkflowScriptShape(args['script']);
-              if (shape.nestedWorkflowCalls.length > 0) {
+              const gate = workflowPreLaunchGate(args['script']);
+              if (gate.refusal !== undefined) {
+                validationError = `Hosted workflow script is invalid: ${gate.refusal.detail}`;
+              } else if (gate.shape.nestedWorkflowCalls.length > 0) {
                 // A nested launch resolves script bytes the pin never
                 // examined (a saved workflow from any tier). Refuse with
                 // the same model-correctable text the reference arguments
                 // carry, so the launched bytes stay exactly the pinned
                 // ones.
-                const extra = shape.nestedWorkflowCalls.length - 1;
-                validationError = `Hosted workflow script is invalid: workflow() on line ${shape.nestedWorkflowCalls[0]}${extra > 0 ? ` and ${extra} more` : ''} launches a nested run whose script this launch never pinned. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
-              } else if (shape.hostBoundAgentOptions.length > 0) {
+                const extra = gate.shape.nestedWorkflowCalls.length - 1;
+                validationError = `Hosted workflow script is invalid: workflow() on line ${gate.shape.nestedWorkflowCalls[0]}${extra > 0 ? ` and ${extra} more` : ''} launches a nested run whose script this launch never pinned. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
+              } else if (gate.shape.hostBoundAgentOptions.length > 0) {
                 // The child refuses these at dispatch and fails the whole
                 // run; refusing here keeps the model's correction free of
                 // a spent launch slot (#13858 R4-4).
-                const [first] = shape.hostBoundAgentOptions;
+                const [first] = gate.shape.hostBoundAgentOptions;
                 validationError = `Hosted workflow script is invalid: agent() on line ${first.line} passes ${first.option}. ${HOSTED_WORKFLOW_TEXT_ONLY_AGENTS}`;
               }
             }

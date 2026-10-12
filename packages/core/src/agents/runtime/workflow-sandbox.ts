@@ -356,36 +356,52 @@ export function describeWorkflowCompileError(
  * determinism description when the script reads a clock or a random
  * source. `suppressSyntaxHint` marks the refusals that are not syntax
  * problems, where the runner's default TypeScript-syntax hint would
- * mislead.
+ * mislead. A script that passes hands back what the gate already built —
+ * its meta and its shape — so no caller compiles or scans it again.
  */
-export function workflowPreLaunchRefusal(source: string):
+export type WorkflowPreLaunchGate =
   | {
-      readonly detail: string;
-      readonly suppressSyntaxHint: boolean;
+      readonly refusal: {
+        readonly detail: string;
+        readonly suppressSyntaxHint: boolean;
+      };
     }
-  | undefined {
+  | {
+      readonly refusal: undefined;
+      readonly meta: WorkflowMeta | null;
+      readonly shape: WorkflowScriptShape;
+    };
+
+export function workflowPreLaunchGate(source: string): WorkflowPreLaunchGate {
+  let meta: WorkflowMeta | null;
   try {
-    compileWorkflowScript(source);
+    meta = compileWorkflowScript(source).meta;
   } catch (cause) {
     if (cause instanceof WorkflowUnsupportedSyntaxError) {
-      return { detail: cause.message, suppressSyntaxHint: true };
+      return { refusal: { detail: cause.message, suppressSyntaxHint: true } };
     }
     return {
-      detail: describeWorkflowCompileError(
-        cause,
-        source.split(/\r\n|[\n\r\u2028\u2029]/).length,
-      ),
-      suppressSyntaxHint: false,
+      refusal: {
+        detail: describeWorkflowCompileError(
+          cause,
+          source.split(/\r\n|[\n\r\u2028\u2029]/).length,
+        ),
+        suppressSyntaxHint: false,
+      },
     };
   }
-  const violations = scanWorkflowScriptShape(source).determinismViolations;
-  if (violations.length === 0) {
-    return undefined;
+  const shape = scanWorkflowScriptShape(source);
+  if (shape.determinismViolations.length > 0) {
+    return {
+      refusal: {
+        detail: describeWorkflowDeterminismViolations(
+          shape.determinismViolations,
+        ),
+        suppressSyntaxHint: true,
+      },
+    };
   }
-  return {
-    detail: describeWorkflowDeterminismViolations(violations),
-    suppressSyntaxHint: true,
-  };
+  return { refusal: undefined, meta, shape };
 }
 
 /**
@@ -541,6 +557,7 @@ import { WorkflowUnsupportedSyntaxError } from './workflow-script-validation.js'
 import {
   describeWorkflowDeterminismViolations,
   scanWorkflowScriptShape,
+  type WorkflowScriptShape,
 } from './workflow-script-shape.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 

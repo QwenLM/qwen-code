@@ -68,9 +68,8 @@ import {
   type ResolvedSavedWorkflow,
 } from './workflow-saved.js';
 import {
-  compileWorkflowScript,
   type WorkflowMeta,
-  workflowPreLaunchRefusal,
+  workflowPreLaunchGate,
 } from './workflow-sandbox.js';
 import {
   resolveReviewWorkflowLimits,
@@ -401,14 +400,16 @@ export class WorkflowRunner {
         loaded?.savedWorkflowName ??
         registry?.get(runId)?.workflowName;
 
-      const refusal = workflowPreLaunchRefusal(script);
-      if (refusal !== undefined) {
+      // The gate's own compile hands its meta back: one compile, one
+      // error taxonomy for the bytes this run launches.
+      const gate = workflowPreLaunchGate(script);
+      if (gate.refusal !== undefined) {
         throw new WorkflowScriptNotLaunchedError(
-          refusal.detail,
-          refusal.suppressSyntaxHint ? '' : undefined,
+          gate.refusal.detail,
+          gate.refusal.suppressSyntaxHint ? '' : undefined,
         );
       }
-      scriptMeta = compileWorkflowScript(script).meta;
+      scriptMeta = gate.meta;
 
       if (options.resumeFromRunId) {
         // A resume replays a journal. With none to replay it would dispatch
