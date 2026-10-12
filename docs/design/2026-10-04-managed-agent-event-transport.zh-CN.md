@@ -224,10 +224,18 @@ rows, SSE frames, or MQ payloads"）：信封只是缩短延迟的指针。凡�
 5. RocketMQ 经典语义（带 ACK/重试的 at-least-once 消费、按 message group 有序）在
    经典 topic 上有充分文档，但**其对 LiteTopic 的适用性未核实**。
 
-**核销(2026-10-12,北京时间,依据公开文档——RIP-83 wiki、官方 LiteTopic 领域
-模型页、5.5.0 发布说明、Apache multi-agent 最佳实践、阿里云 ApsaraMQ 开发者参考与
-使用限制页、以及 5.5.0 LiteTopic 深度解读)。** 五项全部向 LiteTopic 有利方向
-核销;MQ2 启动时的预发复核仍然保留。
+**核销(2026-10-12,北京时间,依据公开文档与 5.5.0 源码 tag)。** 五项全部向
+LiteTopic 有利方向核销;MQ2 启动时的预发复核仍然保留。来源:[RIP-83
+wiki](https://github.com/apache/rocketmq/wiki/RIP%E2%80%9083-Lite-Topic:-A-New-Message-Model)、
+[LiteTopic 领域模型](https://rocketmq.apache.org/docs/domainModel/03litetopic/)、
+[5.5.0 发布说明](https://rocketmq.apache.org/zh/release-notes/2026/04/10/5.5.0/)、
+[multi-agent 最佳实践](https://rocketmq.apache.org/zh/docs/bestPractice/04multiagent/)、
+[阿里云 LiteTopic 参考](https://help.aliyun.com/zh/apsaramq-for-rocketmq/cloud-message-queue-rocketmq-5-x-series/developer-reference/litetopic)与
+[使用限制](https://help.aliyun.com/zh/apsaramq-for-rocketmq/cloud-message-queue-rocketmq-5-x-series/product-overview/usage-limits)、
+[5.5.0 LiteTopic 深度解读](https://www.cnblogs.com/alisystemsoftware/p/20189542);5.5.0 源码 tag:
+[LiteEventDispatcher](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/lite/LiteEventDispatcher.java#L107-L162)、
+[PopLiteMessageProcessor](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/processor/PopLiteMessageProcessor.java#L285-L328)、
+[AckMessageProcessor](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/processor/AckMessageProcessor.java#L539-L558)。
 
 1. **投递保证:at-least-once。** RocketMQ 核心模型即 at-least-once(「每条消息
    至少被成功投递一次」),失败按消费重试策略再投递、超过重试上限进 DLQ;阿里云
@@ -237,14 +245,20 @@ rows, SSE frames, or MQ payloads"）：信封只是缩短延迟的指针。凡�
    ——正是本设计的不变式 5。
 2. **排序:按 LiteTopic FIFO。** 官方领域模型页:每个 LiteTopic 默认一个队列,
    队列内消息按序存储与消费;消费模式仅有序,每个 LiteTopic 由单线程消费。
-3. **消费模型、位点、生命周期、配额。** 订阅按客户端(ClientID)而非消费组
-   共享:同组内各消费者可订阅不同 LiteTopic 集合,运行时可动态增删(每消费者
-   千量级)。位点存于 broker 侧——内存快照加 RocksDB 增量持久化。LiteTopic
-   首次发送/订阅自动创建,TTL 内无写入则自动删除并释放配额计数。RIP-83 点名
-   配额控制(每客户端/总量上限、就绪集合溢出控制),但 Apache 参数限制页未公布
-   LiteTopic 数字;阿里云公布了具体上限:每消费者 2,000 订阅(可工单调整)、
-   每 LiteTopic 200 TPS、按实例规格的创建/订阅配额表(最大铂金规格达 100 万
-   LiteTopic)。
+3. **消费模型、位点、生命周期、配额。** 订阅注册按客户端(ClientID)而非按组
+   锁定:同组内各消费者可订阅不同 LiteTopic 集合,运行时可动态增删(每消费者
+   千量级)。但**派发在组内共享**:每个 LiteTopic 消息恰好投递给组内一个客户端
+   ——5.5.0 的 `LiteEventDispatcher` 按组把订阅者分桶、首个成功客户端即停,锁、
+   FIFO 状态与位点均以 `(group, LiteTopic, 0)` 为键,因此一个节点 ACK 后组内
+   其他成员不会再看到该消息。跨节点唤醒扇出因此需要每节点一个消费组(派发器
+   会遍历所有组);这并入 §11 的路由决策。位点存于 broker 侧——内存快照加
+   RocksDB 增量持久化。LiteTopic 首次发送/订阅自动创建,TTL 内无写入则自动删除
+   并释放 LiteTopic 个数——但只要消费者未取消订阅,该订阅关系仍计入订阅总数
+   (阿里云特殊规则)。RIP-83 点名配额控制(每客户端/总量上限、就绪集合溢出
+   控制),但 Apache 参数限制页未公布 LiteTopic 数字;阿里云公布了具体上限:
+   每消费者 2,000 订阅(可工单调整)、每 LiteTopic 200 消费 TPS、按实例规格的
+   创建/订阅配额表——最大铂金规格 `rmq.u2.1000xlarge` 达 2,320 万;100 万对应的
+   是 `rmq.u2.30xlarge`。
 4. **客户端可用性。** 官方要求:服务端 ≥ 5.5.0、gRPC SDK ≥ 5.1.0;
    `LitePushConsumer`/`LiteProducer` 示例在 apache/rocketmq-clients 仓库。
    `subscribeLite()` 会做配额校验且可能失败——适配器必须把订阅当作可失败操作。
@@ -266,18 +280,18 @@ FIFO；`XREADGROUP` + `XACK` 消费组；未 ACK 条目经 pending entries list
 
 ### 5.2 能力表
 
-| 能力                                            | RocketMQ LiteTopic                                                                                                                            | Redis Streams                                          |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| 按 Session 寻址（每 Session 一个 topic/stream） | 为之设计（百万级、按会话）                                                                                                                    | 可行；每 key 一条 stream，内存开销随在线 stream 数增长 |
-| at-least-once 投递                              | 是——at-least-once 加重试与 DLQ;有序通道按固定间隔重试（2026-10-12 核实，§5.1）                                                                | 是，经消费组 + PEL 再投递                              |
-| 按 key 排序                                     | 是——每 LiteTopic 一个有序队列、单消费线程（2026-10-12 核实，§5.1）；本设计仍不要求（§2）                                                      | 是，每 stream FIFO                                     |
-| 消费者再投递 / 崩溃恢复                         | 是——broker 侧持久化位点（内存快照 + RocksDB 增量）从已提交水位续投（2026-10-12 核实，§5.1）                                                   | 是，超时后经 `XAUTOCLAIM`/`XCLAIM`                     |
-| 消费组（多节点 worker、唤醒汇聚）               | 模型不同：按客户端订阅而非按组负载均衡——每个订阅节点各收一份，恰合唤醒扇出（2026-10-12 核实，§5.1）                                           | 一等公民                                               |
-| 按 Session Suspend/Resume（背压、隔离）         | 有文档（按 topic 的消费端级）                                                                                                                 | 手工（停止读取该 key 的组）                            |
-| 百万级队列的保留与生命周期                      | 首次使用自动创建、TTL 到期自动删除并释放配额;OSS 未公布数值上限——阿里云公布每消费者 2,000 订阅、每 LiteTopic 200 TPS（2026-10-12 核实，§5.1） | 运维管理（`XTRIM`、key 过期）；存在无界增长风险        |
-| broker 成为 Session 真相的风险                  | 两种方案架构风险相同；不变式 1–3 一律禁止                                                                                                     | 相同                                                   |
-| 运维形态                                        | broker 集群；Java 客户端                                                                                                                      | 单 Redis / 集群；许多部署已有                          |
-| #12380 是否点名                                 | 是（"RocketMQ or Redis Streams"）                                                                                                             | 是                                                     |
+| 能力                                            | RocketMQ LiteTopic                                                                                                                                                                  | Redis Streams                                          |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| 按 Session 寻址（每 Session 一个 topic/stream） | 为之设计（百万级、按会话）                                                                                                                                                          | 可行；每 key 一条 stream，内存开销随在线 stream 数增长 |
+| at-least-once 投递                              | 是——at-least-once 加重试与 DLQ;有序通道的固定间隔重试仅有商业文档证据,开源页面未写明(2026-10-12 核实,§5.1)                                                                          | 是，经消费组 + PEL 再投递                              |
+| 按 key 排序                                     | 是——每 LiteTopic 一个有序队列、单消费线程（2026-10-12 核实，§5.1）；本设计仍不要求（§2）                                                                                            | 是，每 stream FIFO                                     |
+| 消费者再投递 / 崩溃恢复                         | 是——broker 侧持久化位点（内存快照 + RocksDB 增量）从已提交水位续投（2026-10-12 核实，§5.1）                                                                                         | 是，超时后经 `XAUTOCLAIM`/`XCLAIM`                     |
+| 消费组（多节点 worker、唤醒汇聚）               | 组内共享——每个 LiteTopic 消息恰好投递给组内一个客户端(5.5.0 源码核实,§5.1);跨节点扇出需每节点一个消费组(§11)                                                                        | 一等公民                                               |
+| 按 Session Suspend/Resume（背压、隔离）         | 有文档（按 topic 的消费端级）                                                                                                                                                       | 手工（停止读取该 key 的组）                            |
+| 百万级队列的保留与生命周期                      | 首次使用自动创建;TTL 删除释放 LiteTopic 个数(订阅关系仍计入订阅总数直至取消订阅);OSS 未公布数值上限——阿里云公布每消费者 2,000 订阅、每 LiteTopic 200 消费 TPS(2026-10-12 核实,§5.1) | 运维管理（`XTRIM`、key 过期）；存在无界增长风险        |
+| broker 成为 Session 真相的风险                  | 两种方案架构风险相同；不变式 1–3 一律禁止                                                                                                                                           | 相同                                                   |
+| 运维形态                                        | broker 集群；Java 客户端                                                                                                                                                            | 单 Redis / 集群；许多部署已有                          |
+| #12380 是否点名                                 | 是（"RocketMQ or Redis Streams"）                                                                                                                                                   | 是                                                     |
 
 ### 5.3 选型
 
@@ -367,7 +381,7 @@ MQ2 及以后不得启动。**
 1. 唤醒意图载体：继续把已提交的 `wake.requested` 记录作为唤醒信封来源，还是定义
    独立的 WakeIntent 记录（#13300 落地后取代 #12827 问题 3）？
 2. Session 信封由哪个节点消费——按 Session 的消费组路由方案，还是哈希分区的唤醒
-   worker？（MQ2 消费者接线前必须决定。）
+   worker？（MQ2 消费者接线前必须决定。）2026-10-12 核实的派发证据(§5.1):LiteTopic 派发在组内共享——每组每 LiteTopic 只有一个客户端收到消息——因此要扇出到每个节点需每节点一个消费组;若共用单一消费组,每条消息只唤醒一个节点,其余靠 SQL 扫描兜底。
 3. §5.1 LiteTopic 核实项：broker 文档核实已于 2026-10-12 完成,结果固定在
    §5.1 的核销块;剩余的是 MQ2 启动时对真实 5.5.0+ 集群的预发复核。
 4. 信封命名/字段：归入独立的 TypeScript 契约切片；本文 §4 是其输入而不是输出。

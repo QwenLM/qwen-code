@@ -289,11 +289,25 @@ broker/client documentation or a staging deployment before phase MQ2 starts):
    ordered messaging per message group) are well documented for classic
    topics, but **their carry-over to LiteTopic is UNVERIFIED**.
 
-**Resolution (verified 2026-10-12, Beijing, from public documentation — RIP-83
-wiki, the official LiteTopic domain-model page, the 5.5.0 release notes, the
-Apache multi-agent best practice, the Aliyun ApsaraMQ developer reference and
-usage-limits pages, and the 5.5.0 LiteTopic deep dive).** All five items
-resolve in LiteTopic's favor; the MQ2-start staging re-check still stands.
+**Resolution (verified 2026-10-12, Beijing, from public documentation and the
+5.5.0 source tag).** All five items resolve in LiteTopic's favor; the
+MQ2-start staging re-check still stands. Sources: [RIP-83
+wiki](https://github.com/apache/rocketmq/wiki/RIP%E2%80%9083-Lite-Topic:-A-New-Message-Model);
+[LiteTopic domain
+model](https://rocketmq.apache.org/docs/domainModel/03litetopic/); [5.5.0
+release
+notes](https://rocketmq.apache.org/zh/release-notes/2026/04/10/5.5.0/);
+[multi-agent best
+practice](https://rocketmq.apache.org/zh/docs/bestPractice/04multiagent/);
+[Aliyun LiteTopic
+reference](https://help.aliyun.com/zh/apsaramq-for-rocketmq/cloud-message-queue-rocketmq-5-x-series/developer-reference/litetopic)
+and [usage
+limits](https://www.alibabacloud.com/help/en/apsaramq-for-rocketmq/cloud-message-queue-rocketmq-5-x-series/product-overview/usage-limits);
+[5.5.0 LiteTopic deep
+dive](https://www.cnblogs.com/alisystemsoftware/p/20189542); 5.5.0 source tag
+[LiteEventDispatcher](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/lite/LiteEventDispatcher.java#L107-L162),
+[PopLiteMessageProcessor](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/processor/PopLiteMessageProcessor.java#L285-L328),
+[AckMessageProcessor](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/processor/AckMessageProcessor.java#L539-L558).
 
 1. **Delivery guarantee: at-least-once.** RocketMQ's core model is
    at-least-once ("each message can be successfully delivered at least once"),
@@ -307,18 +321,28 @@ resolve in LiteTopic's favor; the MQ2-start staging re-check still stands.
 2. **Ordering: per-LiteTopic FIFO.** The official domain-model page: each
    LiteTopic has one queue by default, stored and consumed in order;
    consumption is ordered-only, one consumer thread per LiteTopic.
-3. **Consumer model, offsets, lifecycle, quotas.** Subscription is per-client
-   (ClientID), not group-shared: consumers in one group may subscribe to
-   different LiteTopic sets and can add/remove at runtime (thousands per
-   consumer). Offsets are broker-side — memory snapshot plus incremental
+3. **Consumer model, offsets, lifecycle, quotas.** Subscription registration
+   is per-client (ClientID), not group-locked: consumers in one group may
+   subscribe to different LiteTopic sets and can add/remove at runtime
+   (thousands per consumer). Dispatch, however, is **shared within a group**:
+   exactly one client per group receives each LiteTopic message — the 5.5.0
+   `LiteEventDispatcher` buckets subscribers by group and stops after the
+   first successful client, and locks, FIFO state and the offset all key on
+   `(group, LiteTopic, 0)`, so after one node ACKs no other group member sees
+   the message. Cross-node wake fan-out therefore needs one consumer group
+   per node (the dispatcher iterates every group); this feeds the §11 routing
+   decision. Offsets are broker-side — memory snapshot plus incremental
    persistence on RocksDB. LiteTopics auto-create on first send/subscribe and
-   auto-delete when their TTL lapses without writes, releasing the quota
-   count. RIP-83 names quota controls (max topics per client/total, ready-set
-   overflow control) but Apache's parameter-limits page publishes no LiteTopic
-   numbers; Aliyun publishes concrete caps: 2,000 subscriptions per consumer
-   (ticket-raisable), 200 TPS per LiteTopic, and per-instance
-   creation/subscription quota tables by spec (up to 1M LiteTopics on the
-   largest Platinum spec).
+   auto-delete when their TTL lapses without writes, releasing the LiteTopic
+   count — but a subscription relation still occupies the subscription quota
+   until the consumer unsubscribes (Aliyun special rule). RIP-83 names quota
+   controls (max topics per client/total, ready-set overflow control) but
+   Apache's parameter-limits page publishes no LiteTopic numbers; Aliyun
+   publishes concrete caps: 2,000 subscriptions per consumer
+   (ticket-raisable), 200 consumption TPS per LiteTopic, and per-instance
+   creation/subscription quotas by spec — up to 23.2M LiteTopics on the
+   largest Platinum spec (`rmq.u2.1000xlarge`); 1M maps to
+   `rmq.u2.30xlarge`.
 4. **Client availability.** Official requirement: server ≥ 5.5.0, gRPC SDK
    ≥ 5.1.0; `LitePushConsumer`/`LiteProducer` examples live in
    apache/rocketmq-clients. `subscribeLite()` performs quota verification and
@@ -346,18 +370,18 @@ verified guarantees for any particular Redis deployment.
 
 ### 5.2 Capability table
 
-| Capability                                            | RocketMQ LiteTopic                                                                                                                                                                                | Redis Streams                                                     |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Per-Session addressing (one topic/stream per Session) | Designed for it (million-scale, per-session)                                                                                                                                                      | Possible; one stream per key, memory cost grows with live streams |
-| At-least-once delivery                                | Yes — at-least-once with retry + DLQ; ordered lanes retry at fixed intervals (verified 2026-10-12, §5.1)                                                                                          | Yes via consumer groups + PEL re-delivery                         |
-| Per-key ordering                                      | Yes — one ordered queue and one consumer thread per LiteTopic (verified 2026-10-12, §5.1); still not required by design (§2)                                                                      | Yes, per-stream FIFO                                              |
-| Re-delivery / crash recovery of consumers             | Yes — broker-persisted offsets (memory snapshot + incremental RocksDB) resume from the committed watermark (verified 2026-10-12, §5.1)                                                            | Yes via `XAUTOCLAIM`/`XCLAIM` after a timeout                     |
-| Consumer groups (multi-node workers, wake fan-in)     | Different model: per-client subscription, not group load-balancing — every subscribing node receives its own copy, which fits wake fan-out (verified 2026-10-12, §5.1)                            | First-class                                                       |
-| Suspend/Resume per Session (backpressure, quarantine) | Documented (per-topic consumer-level)                                                                                                                                                             | Manual (stop reading the group key)                               |
-| Retention & lifecycle of millions of queues           | Auto-create on first use, TTL auto-delete releasing quota; OSS numeric caps unpublished — Aliyun publishes 2,000 subscriptions per consumer and 200 TPS per LiteTopic (verified 2026-10-12, §5.1) | Operator-managed (`XTRIM`, key expiry); risk of unbounded growth  |
-| Broker as Session truth risk                          | Same architectural risk both ways; invariants 1–3 forbid it regardless                                                                                                                            | Same                                                              |
-| Ops profile                                           | Broker cluster; Java client                                                                                                                                                                       | Single Redis / cluster; already in many deployments               |
-| Named by #12380                                       | Yes ("RocketMQ or Redis Streams")                                                                                                                                                                 | Yes                                                               |
+| Capability                                            | RocketMQ LiteTopic                                                                                                                                                                                                                                                         | Redis Streams                                                     |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Per-Session addressing (one topic/stream per Session) | Designed for it (million-scale, per-session)                                                                                                                                                                                                                               | Possible; one stream per key, memory cost grows with live streams |
+| At-least-once delivery                                | Yes — at-least-once with retry + DLQ; the fixed-interval retry on ordered lanes is commercial-doc evidence only, OSS pages silent (verified 2026-10-12, §5.1)                                                                                                              | Yes via consumer groups + PEL re-delivery                         |
+| Per-key ordering                                      | Yes — one ordered queue and one consumer thread per LiteTopic (verified 2026-10-12, §5.1); still not required by design (§2)                                                                                                                                               | Yes, per-stream FIFO                                              |
+| Re-delivery / crash recovery of consumers             | Yes — broker-persisted offsets (memory snapshot + incremental RocksDB) resume from the committed watermark (verified 2026-10-12, §5.1)                                                                                                                                     | Yes via `XAUTOCLAIM`/`XCLAIM` after a timeout                     |
+| Consumer groups (multi-node workers, wake fan-in)     | Shared within a group — exactly one client per group receives each LiteTopic message (5.5.0 source-verified, §5.1); cross-node fan-out needs one consumer group per node (§11)                                                                                             | First-class                                                       |
+| Suspend/Resume per Session (backpressure, quarantine) | Documented (per-topic consumer-level)                                                                                                                                                                                                                                      | Manual (stop reading the group key)                               |
+| Retention & lifecycle of millions of queues           | Auto-create on first use; TTL auto-delete releases the LiteTopic count (a subscription still counts until unsubscribe); OSS numeric caps unpublished — Aliyun publishes 2,000 subscriptions per consumer and 200 consumption TPS per LiteTopic (verified 2026-10-12, §5.1) | Operator-managed (`XTRIM`, key expiry); risk of unbounded growth  |
+| Broker as Session truth risk                          | Same architectural risk both ways; invariants 1–3 forbid it regardless                                                                                                                                                                                                     | Same                                                              |
+| Ops profile                                           | Broker cluster; Java client                                                                                                                                                                                                                                                | Single Redis / cluster; already in many deployments               |
+| Named by #12380                                       | Yes ("RocketMQ or Redis Streams")                                                                                                                                                                                                                                          | Yes                                                               |
 
 ### 5.3 Selection
 
@@ -477,7 +501,11 @@ This slice's validation is documentation-only:
    question 3 once #13300 lands)?
 2. Which node consumes a Session's envelopes — a consumer-group-per-Session
    routing scheme, or hash-partitioned wake workers? (Decision needed before
-   MQ2 consumer wiring.)
+   MQ2 consumer wiring.) Dispatch evidence from the 2026-10-12 verification
+   (§5.1): LiteTopic dispatch is shared within a group — one client per group
+   per LiteTopic — so fan-out to every node requires one consumer group per
+   node, while a single shared group wakes exactly one node per message and
+   leans on the SQL-scan fallback otherwise.
 3. LiteTopic §5.1 items: the broker-docs verification ran 2026-10-12 and its
    results are pinned in §5.1's resolution block; what remains is the
    MQ2-start staging re-check against a real 5.5.0+ cluster.
