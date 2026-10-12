@@ -47,6 +47,15 @@ function rowKeyFor(
   return `${provider.authType}:${model.modelId}:${model.baseUrl ?? ''}`;
 }
 
+function isVisibleSettingsModel(
+  provider: DaemonWorkspaceProviderStatus,
+  model: DaemonWorkspaceProviderModel,
+): boolean {
+  return isVisibleComposerModel({
+    id: `${model.baseModelId}(${provider.authType})`,
+  });
+}
+
 /**
  * Resolves the single row that is "current", returning its row key. Preferring a
  * provider-qualified `modelId` match identifies an endpoint variant precisely.
@@ -63,8 +72,16 @@ function findCurrentRowKey(
   if (currentModelId) {
     const exact = all.find(({ model }) => model.modelId === currentModelId);
     if (exact) return rowKeyFor(exact.provider, exact.model);
+    const hiddenCurrent = all.find(
+      ({ provider, model }) =>
+        model.isCurrent && !isVisibleSettingsModel(provider, model),
+    );
+    if (hiddenCurrent)
+      return rowKeyFor(hiddenCurrent.provider, hiddenCurrent.model);
     const byBase = all.filter(
-      ({ model }) => model.baseModelId === currentModelId,
+      ({ provider, model }) =>
+        model.baseModelId === currentModelId &&
+        isVisibleSettingsModel(provider, model),
     );
     if (byBase.length === 1) {
       return rowKeyFor(byBase[0]!.provider, byBase[0]!.model);
@@ -147,9 +164,7 @@ export function ModelManagementSection({
   }
   for (const provider of displayProviders) {
     provider.models = provider.models.filter((model) =>
-      isVisibleComposerModel({
-        id: `${model.baseModelId}(${provider.authType})`,
-      }),
+      isVisibleSettingsModel(provider, model),
     );
   }
   const hasModels = displayProviders.some((p) => p.models.length > 0);

@@ -125,6 +125,74 @@ describe('ModelManagementSection', () => {
     expect(container.textContent).toContain('DeepSeek V4');
   });
 
+  it('resolves the current bare id without the hidden OAuth collision', () => {
+    const { container } = renderSection({
+      currentModelId: 'coder-model',
+      providers: ['qwen-oauth', 'openai'].map((authType) => ({
+        kind: 'model_provider' as const,
+        status: 'ok' as const,
+        authType,
+        current: authType === 'openai',
+        models: [
+          {
+            modelId: `qwen-route:v1:${authType}`,
+            baseModelId: 'coder-model',
+            name: 'coder-model',
+            isCurrent: false,
+            isRuntime: false,
+          },
+        ],
+      })),
+    });
+    expect(container.textContent).not.toContain('qwen-oauth');
+    expect(container.textContent).toContain('Current');
+    expect(
+      container.querySelector('button[aria-label="Set current coder-model"]'),
+    ).toBeNull();
+  });
+
+  it('does not transfer a hidden current OAuth model to a same-name OpenAI row', () => {
+    const { container } = renderSection({
+      currentModelId: 'coder-model',
+      providers: ['qwen-oauth', 'openai'].map((authType) => ({
+        kind: 'model_provider' as const,
+        status: 'ok' as const,
+        authType,
+        current: authType === 'qwen-oauth',
+        models: [
+          {
+            modelId: `qwen-route:v1:${authType}`,
+            baseModelId: 'coder-model',
+            name: 'coder-model',
+            isCurrent: authType === 'qwen-oauth',
+            isRuntime: false,
+          },
+        ],
+      })),
+    });
+    expect(container.textContent).not.toContain('Current');
+    expect(
+      container.querySelector('button[aria-label="Set current coder-model"]'),
+    ).not.toBeNull();
+  });
+
+  it('does not mark an unloaded saved configuration current by bare id', () => {
+    const { container } = renderSection({
+      providers: [],
+      currentModelId: 'coder-model',
+      configurations: [
+        {
+          key: 'saved-openai-coder',
+          authType: 'openai',
+          modelId: 'coder-model',
+          purpose: 'chat',
+        },
+      ],
+    });
+    expect(container.textContent).toContain('coder-model');
+    expect(container.textContent).not.toContain('Current');
+  });
+
   it('does not restore the hidden OAuth model from saved configurations', () => {
     const { container } = renderSection({
       providers: [],
