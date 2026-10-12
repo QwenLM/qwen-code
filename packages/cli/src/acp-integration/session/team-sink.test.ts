@@ -23,16 +23,22 @@ type LeaderCallback = (
 ) => void;
 
 class FakeTeamEmitter {
-  private readonly handlers = new Map<string, Set<(e: never) => void>>();
+  // A list, not a Set: TeamEventEmitter wraps a real Node EventEmitter, which
+  // accepts the same listener twice. A Set silently dedupes the sink's stable
+  // closures and makes every listener-count assertion below unfalsifiable.
+  private readonly handlers = new Map<string, ((e: never) => void)[]>();
 
   on(type: string, fn: (e: never) => void): void {
-    const set = this.handlers.get(type) ?? new Set();
-    set.add(fn);
-    this.handlers.set(type, set);
+    const list = this.handlers.get(type) ?? [];
+    list.push(fn);
+    this.handlers.set(type, list);
   }
 
   off(type: string, fn: (e: never) => void): void {
-    this.handlers.get(type)?.delete(fn);
+    const list = this.handlers.get(type);
+    if (!list) return;
+    const at = list.indexOf(fn);
+    if (at !== -1) list.splice(at, 1);
   }
 
   emit(type: string, payload: unknown): void {
@@ -42,7 +48,7 @@ class FakeTeamEmitter {
   }
 
   listenerCount(type: string): number {
-    return this.handlers.get(type)?.size ?? 0;
+    return this.handlers.get(type)?.length ?? 0;
   }
 }
 
