@@ -1227,8 +1227,10 @@ describe('managed session authority workflow records (H4c, enabled by the workfl
       expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
       // The gate narrows while the Session stays open: a new workflow
       // submission is refused on sight, and the persisted record still
-      // projects its task. Deleting the narrowing step should keep both
-      // halves of this test green; flipping the gate on replay would not.
+      // projects its task. The refusal is this test's control that the
+      // flag narrows anything at all — without the flag the same commit is
+      // answered by the revision chain instead — so it must stay asserted;
+      // the narrowed reopen below is what fails if replay re-ran the gate.
       enablement.workflowNarrowed = true;
       try {
         await expect(
