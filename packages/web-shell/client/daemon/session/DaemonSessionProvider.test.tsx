@@ -14,6 +14,7 @@ import {
   type ContextType,
   type ReactNode,
 } from 'react';
+import { useTrajectoryLiveSnapshot } from '../../trajectory/trajectory-live-context.js';
 import { McpAppToolsContext } from '../../mcpAppHostContext.js';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
@@ -156,6 +157,8 @@ interface MockSession {
   replaySnapshot: {
     compactedReplay: DaemonEvent[];
     liveJournal: DaemonEvent[];
+    lifecycleReplay?: DaemonEvent[];
+    lifecycleReplayIncomplete?: boolean;
   };
   consumeReplaySnapshot: () => {
     compactedReplay: DaemonEvent[];
@@ -601,6 +604,295 @@ vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => {
 });
 
 describe('DaemonSessionProvider', () => {
+  const lifecycleFrame = (
+    id: number,
+    phase: 'started' | 'ended',
+    executionId = 'tool-1',
+  ): DaemonEvent => ({
+    id,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-1',
+        _meta: {
+          toolLifecycle: {
+            v: 1,
+            kind: 'tool',
+            executionId,
+            sessionId: 'session-1',
+            callId: 'call-1',
+            toolName: 'read_file',
+            phase,
+            startedAt: 100,
+            ...(phase === 'ended'
+              ? {
+                  executionStatus: 'success',
+                  endedAt: 120,
+                  executionDurationMs: 20,
+                  outcome: 'success',
+                }
+              : { executionStatus: 'running' }),
+          },
+        },
+      },
+    },
+  });
+  const replayComplete: DaemonEvent = {
+    v: 1,
+    type: 'replay_complete',
+    data: {},
+  };
+  const untilAborted = (signal?: AbortSignal) =>
+    new Promise<void>((resolve) => {
+      if (signal?.aborted) resolve();
+      else signal?.addEventListener('abort', () => resolve(), { once: true });
+    });
+
+  it('bridges trajectory replay and metadata-only events on the existing subscription', async () => {
+    const release = createDeferred<void>();
+    const seen = createDeferred<void>();
+    const events = vi.fn(async function* (opts: { signal?: AbortSignal } = {}) {
+      await release.promise;
+      yield lifecycleFrame(2, 'ended');
+      yield replayComplete;
+      yield lifecycleFrame(3, 'started', 'tool-2');
+      seen.resolve();
+      await untilAborted(opts.signal);
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        lastEventId: 1,
+        replaySnapshot: {
+          compactedReplay: [lifecycleFrame(1, 'started')],
+          liveJournal: [],
+        },
+        events,
+      }),
+    );
+    let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      snapshot = useTrajectoryLiveSnapshot();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(snapshot?.status).toBe('catching-up');
+    expect(
+      [...snapshot!.tools.entries.values()].map((entry) => entry.status),
+    ).toEqual(['unknown']);
+    await act(async () => {
+      release.resolve();
+      await seen.promise;
+      await flushPromises();
+    });
+    expect(events).toHaveBeenCalledTimes(1);
+    expect(snapshot).toMatchObject({
+      status: 'live',
+      epoch: 'epoch-1',
+      lastEventId: 3,
+    });
+    expect(
+      [...snapshot!.tools.entries.values()].map((entry) => entry.status),
+    ).toEqual(['success', 'running']);
+    expect(blocks).toEqual([]);
+  });
+
+  it('seeds trajectory from the memory supplement while paged history is not yet persisted', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({
+        lastEventId: 2,
+        replaySnapshot: {
+          compactedReplay: [],
+          liveJournal: [],
+          lifecycleReplay: [
+            lifecycleFrame(1, 'started'),
+            lifecycleFrame(2, 'ended'),
+          ],
+          lifecycleReplayIncomplete: true,
+        },
+        async *events(opts = {}) {
+          yield replayComplete;
+          await untilAborted(opts.signal);
+        },
+      }),
+    );
+    let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      snapshot = useTrajectoryLiveSnapshot();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 100,
+    });
+    expect(snapshot).toMatchObject({
+      status: 'live',
+      lastEventId: 2,
+      incomplete: true,
+    });
+    expect(
+      [...snapshot!.tools.entries.values()].map((entry) => entry.status),
+    ).toEqual(['success']);
+    expect(blocks).toEqual([]);
+  });
+
+  it('retains trajectory terminals and recovers a short disconnect on the same session', async () => {
+    const drop = createDeferred<void>();
+    const connected = createDeferred<void>();
+    const resumed = createDeferred<void>();
+    let subscriptions = 0;
+    sdkMocks.sessions.push(
+      createMockSession({
+        lastEventId: 0,
+        async *events(opts = {}) {
+          subscriptions++;
+          if (subscriptions === 1) {
+            yield replayComplete;
+            yield lifecycleFrame(1, 'started');
+            connected.resolve();
+            await drop.promise;
+            return;
+          }
+          yield lifecycleFrame(2, 'ended');
+          yield replayComplete;
+          resumed.resolve();
+          await untilAborted(opts.signal);
+        },
+      }),
+    );
+    let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    function Harness() {
+      snapshot = useTrajectoryLiveSnapshot();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await connected.promise;
+    expect([...snapshot!.tools.entries.values()][0]?.status).toBe('running');
+    await act(async () => {
+      drop.resolve();
+      await resumed.promise;
+      await flushPromises();
+    });
+    expect(subscriptions).toBe(2);
+    expect(snapshot?.status).toBe('live');
+    expect(
+      [...snapshot!.tools.entries.values()].map((entry) => entry.status),
+    ).toEqual(['success']);
+  });
+
+  it('invalidates the previous trajectory while a same-id workspace switch is loading', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        async *events(opts = {}) {
+          yield replayComplete;
+          yield lifecycleFrame(1, 'started');
+          await untilAborted(opts.signal);
+        },
+      }),
+    );
+    let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      snapshot = useTrajectoryLiveSnapshot();
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect([...snapshot!.tools.entries.values()][0]?.status).toBe('running');
+    const pendingLoad = createDeferred<MockSession>();
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => pendingLoad.promise,
+    );
+    let switched!: Promise<void>;
+    await act(async () => {
+      switched = requireActions(actions).loadSession('session-1', {
+        workspaceCwd: '/other-workspace',
+      });
+      await flushPromises();
+    });
+    expect(snapshot?.status).not.toBe('live');
+    expect(
+      [...snapshot!.tools.entries.values()].some(
+        (entry) => entry.status === 'running',
+      ),
+    ).toBe(false);
+    await act(async () => {
+      pendingLoad.resolve(
+        createMockSession({
+          workspaceCwd: '/other-workspace',
+          events: createIdleEvents(),
+        }),
+      );
+      await switched;
+      await flushPromises();
+    });
+    expect(snapshot?.scope).toContain('/other-workspace');
+  });
+
+  it('rebuilds trajectory from a fresh snapshot after ring eviction', async () => {
+    const gap = createDeferred<void>();
+    const loaded = createDeferred<void>();
+    sdkMocks.sessions.push(
+      createMockSession({
+        lastEventId: 0,
+        async *events() {
+          yield replayComplete;
+          yield lifecycleFrame(1, 'started');
+          await gap.promise;
+          yield {
+            v: 1,
+            type: 'state_resync_required',
+            data: { reason: 'ring_evicted' },
+          };
+        },
+      }),
+      createMockSession({
+        lastEventId: 10,
+        replaySnapshot: {
+          compactedReplay: [lifecycleFrame(10, 'ended')],
+          liveJournal: [],
+        },
+        async *events(opts = {}) {
+          yield replayComplete;
+          loaded.resolve();
+          await untilAborted(opts.signal);
+        },
+      }),
+    );
+    let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    function Harness() {
+      snapshot = useTrajectoryLiveSnapshot();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      gap.resolve();
+      await loaded.promise;
+      await flushPromises();
+    });
+    expect(snapshot).toMatchObject({ status: 'live', lastEventId: 10 });
+    expect(
+      [...snapshot!.tools.entries.values()].map((entry) => entry.status),
+    ).toEqual(['success']);
+  });
+
   it('retains a persisted viewport boundary after the legacy live window reaches capacity', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
@@ -15855,13 +16147,19 @@ describe('DaemonSessionProvider', () => {
       sdkMocks.sessions.push(
         createMockSession({
           heartbeat,
-          events: createIdleEvents(),
+          async *events(opts = {}) {
+            yield replayComplete;
+            yield lifecycleFrame(1, 'started');
+            await untilAborted(opts.signal);
+          },
         }),
       );
       let connection: DaemonConnectionState | undefined;
+      let trajectory: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
 
       function Harness() {
         connection = useDaemonConnection();
+        trajectory = useTrajectoryLiveSnapshot();
         return null;
       }
 
@@ -15880,6 +16178,13 @@ describe('DaemonSessionProvider', () => {
       });
 
       expect(heartbeat).toHaveBeenCalled();
+      expect(trajectory).toMatchObject({
+        status: 'stale',
+        reason: 'auth_failure',
+      });
+      expect([...trajectory!.tools.entries.values()][0]?.status).toBe(
+        'unknown',
+      );
       expect(connection).toMatchObject({
         status: 'error',
         error: 'Unauthorized',

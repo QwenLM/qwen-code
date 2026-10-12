@@ -320,6 +320,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const { t } = useI18n();
   const {
     trajectory,
+    lifecycle,
     status,
     error,
     loadedPages,
@@ -1658,6 +1659,11 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         inspectorSelection.loader === loadPage && (
           <TrajectoryInspector
             row={inspectorRow}
+            lifecycle={
+              inspectorCurrent && inspectorRow
+                ? lifecycle.byRowKey.get(inspectorRow.key)
+                : undefined
+            }
             stale={!inspectorCurrent}
             turnSelected={selectedEntry?.kind === 'turn'}
             title={inspectorRow ? labelOf(inspectorRow, t).text : undefined}

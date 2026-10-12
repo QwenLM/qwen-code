@@ -9,6 +9,13 @@ import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import { buildTrajectory } from './buildTrajectory';
 import { projectTrajectoryWindow } from './projectTrajectoryWindow';
 import type { Trajectory } from './types';
+import {
+  projectHistoricalLifecycle,
+  projectTrajectoryLifecycle,
+  type TrajectoryLifecycleProjection,
+} from './project-trajectory-lifecycle';
+import { trajectoryLoaderIdentity } from './transcriptPageLoader';
+import { useTrajectoryLiveSnapshot } from './trajectory-live-context';
 
 /**
  * Records asked for per read. The daemon caps a page at 500 records and at
@@ -72,6 +79,7 @@ export const TRAJECTORY_BOOKMARK_LIMIT = 64;
 export const TRAJECTORY_CURSOR_BUDGET = 256 * 1024;
 
 export interface TrajectoryWindow {
+  lifecycle: TrajectoryLifecycleProjection;
   trajectory: Trajectory | undefined;
   status: 'idle' | 'loading' | 'ready' | 'error';
   error?: TrajectoryWindowFailure;
@@ -185,6 +193,7 @@ export function useTrajectoryWindow(
   const [state, setState] = useState<WindowState>(EMPTY_STATE);
   const stateRef = useRef(state);
   const generationRef = useRef(0);
+  const pagesOwnerRef = useRef(loadPage);
   const pendingRef = useRef<Operation | undefined>(undefined);
 
   const update = useCallback((next: WindowState) => {
@@ -409,6 +418,7 @@ export function useTrajectoryWindow(
   }, [run]);
 
   useEffect(() => {
+    pagesOwnerRef.current = loadPage;
     update(EMPTY_STATE);
     pendingRef.current = undefined;
     if (loadPage) refresh();
@@ -422,13 +432,55 @@ export function useTrajectoryWindow(
     };
   }, [loadPage, refresh, update]);
 
-  const pages = state.pages;
+  const pages = pagesOwnerRef.current === loadPage ? state.pages : undefined;
+  const {
+    requests,
+    tools,
+    status: liveStatus,
+    scope,
+    sessionId,
+    incomplete,
+    truncated: liveTruncated,
+  } = useTrajectoryLiveSnapshot();
   const trajectory = useMemo(
     () =>
       pages === undefined
         ? undefined
         : buildTrajectory(projectTrajectoryWindow(pages.flat())),
     [pages],
+  );
+  const historicalLifecycle = useMemo(
+    () => projectHistoricalLifecycle(pages?.flat() ?? []),
+    [pages],
+  );
+  const lifecycle = useMemo(
+    () =>
+      projectTrajectoryLifecycle(
+        historicalLifecycle,
+        trajectory,
+        trajectoryLoaderIdentity(loadPage),
+        {
+          requests,
+          tools,
+          status: liveStatus,
+          scope,
+          sessionId,
+          incomplete,
+          truncated: liveTruncated,
+        },
+      ),
+    [
+      historicalLifecycle,
+      trajectory,
+      loadPage,
+      requests,
+      tools,
+      liveStatus,
+      scope,
+      sessionId,
+      incomplete,
+      liveTruncated,
+    ],
   );
   const navigable =
     state.status !== 'loading' &&
@@ -438,6 +490,7 @@ export function useTrajectoryWindow(
     !pendingRef.current;
 
   return {
+    lifecycle,
     trajectory,
     status: state.status,
     error: state.error,
