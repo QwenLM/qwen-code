@@ -41,6 +41,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionStatus;
@@ -99,6 +100,13 @@ public class ToolPublicationAsyncVerificationTest {
     private void due(String operation) {
         fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = CURRENT_TIMESTAMP(6)"
                 + " WHERE operation_id = ?", operation);
+    }
+
+    private void blockRecovery(String recovery) {
+        new TransactionTemplate(fixture.manager).executeWithoutResult(status ->
+                assertThat(fixture.sessions.blockRecovery("tenant-1", "session-1", WRITER_TOKEN,
+                        new ManagedSessionStoreModels.BlockRecoveryRequest("workspace-1", "writer-1", 1,
+                                recovery, "test_recovery")).recoveryStatus()).isEqualTo(recovery));
     }
 
     private DataSource acceptCsiOperation() {
@@ -490,47 +498,72 @@ public class ToolPublicationAsyncVerificationTest {
     }
 
     @Test
-    void recoveryBlockDuringReadKeepsHealthyCandidateForRetry() {
+    void recoveryBlockDuringReadFailsWithoutQuarantiningHealthyCandidate() {
         data = replacement(Duration.ofMinutes(2), Duration.ofSeconds(3));
         byte[] bytes = "h".repeat(70000).getBytes(StandardCharsets.US_ASCII);
         data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "resource", "content:test",
                 "managed-tool-result-content", bytes, true);
-        bucket.midRead = () -> fixture.jdbc.update("UPDATE qwen_managed_session_journal_head"
-                + " SET recovery_status = 'BLOCKED_EXECUTION'");
+        bucket.midRead = () -> blockRecovery("BLOCKED_EXECUTION");
         assertThat(data.verifyNextOperation()).isTrue();
-        assertThat(status("resource").path("state").asText()).isEqualTo("PENDING");
+        assertThat(bucket.opens).hasValue(1);
+        assertThat(fixture.jdbc.queryForObject("SELECT recovery_status FROM qwen_managed_session_journal_head",
+                String.class)).isEqualTo("BLOCKED_EXECUTION");
+        assertThat(status("resource").path("state").asText()).isEqualTo("FAILED");
+        assertThat(status("resource").path("error").path("code").asText())
+                .isEqualTo("managed_tool_publication_fenced");
         assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
                 .isEqualTo("CANDIDATE");
         assertThat(fixture.jdbc.queryForObject("SELECT sha256 FROM qwen_tool_publication_object", String.class))
                 .isEqualTo(ToolPublicationContract.sha256(bytes));
         assertThat(bucket.objects.values().iterator().next()).isEqualTo(bytes);
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = 'READY'");
-        due("resource");
-        assertThat(data.verifyNextOperation()).isTrue();
-        assertThat(status("resource").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+                Timestamp.class)).isNull();
+        assertThat(data.verifyNextOperation()).isFalse();
+        assertThat(status("resource").path("state").asText()).isEqualTo("FAILED");
         assertThat(bucket.puts).hasValue(1);
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"BLOCKED_EXECUTION", "BLOCKED_RESOURCE", "BLOCKED", "UNKNOWN"})
-    void recoveryBlockBeforeClaimRetainsAcceptedTerminal(String recovery) {
-        byte[] bytes = terminal(70000);
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", bytes, true);
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = ?", recovery);
+    @ValueSource(strings = {"BLOCKED_EXECUTION", "BLOCKED_RESOURCE", "BLOCKED_WORKSPACE"})
+    void recoveryBlockBeforeClaimFailsWithoutReadingHealthyCandidate(String recovery) {
+        byte[] bytes = "h".repeat(70000).getBytes(StandardCharsets.US_ASCII);
+        data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "resource", "content:test",
+                "managed-tool-result-content", bytes, true);
+        blockRecovery(recovery);
         assertThat(data.verifyNextOperation()).isTrue();
-        assertThat(status("finish").path("state").asText()).isEqualTo("PENDING");
+        assertThat(status("resource").path("state").asText()).isEqualTo("FAILED");
+        assertThat(status("resource").path("error").path("code").asText())
+                .isEqualTo("managed_tool_publication_fenced");
+        assertThat(bucket.opens).hasValue(0);
         assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
                 .isEqualTo("CANDIDATE");
-        assertThat(fixture.jdbc.queryForObject("SELECT producer_used_bytes FROM qwen_tool_publication", Long.class))
-                .isEqualTo(bytes.length);
         assertThat(bucket.objects.values().iterator().next()).isEqualTo(bytes);
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > CURRENT_TIMESTAMP(6)"
-                + " FROM qwen_tool_publication_operation", Boolean.class)).isTrue();
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+                Timestamp.class)).isNull();
         assertThat(data.verifyNextOperation()).isFalse();
-        fixture.jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = 'READY'");
-        due("finish");
+        assertThat(status("resource").path("state").asText()).isEqualTo("FAILED");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BLOCKED_EXECUTION", "BLOCKED_RESOURCE", "BLOCKED_WORKSPACE"})
+    void recoveryBlockBeforeClaimPermanentlyFailsAcceptedTerminal(String recovery) {
+        byte[] bytes = terminal(70000);
+        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", bytes, true);
+        blockRecovery(recovery);
         assertThat(data.verifyNextOperation()).isTrue();
-        assertThat(status("finish").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(status("finish").path("state").asText()).isEqualTo("FAILED");
+        assertThat(status("finish").path("error").path("code").asText())
+                .isEqualTo("managed_tool_publication_fenced");
+        assertThat(bucket.opens).hasValue(0);
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object", Integer.class))
+                .isZero();
+        assertThat(fixture.jdbc.queryForObject("SELECT producer_used_bytes FROM qwen_tool_publication", Long.class))
+                .isZero();
+        assertThat(bucket.objects).isEmpty();
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+                Timestamp.class)).isNull();
+        assertThat(data.verifyNextOperation()).isFalse();
+        assertThat(status("finish").path("state").asText()).isEqualTo("FAILED");
         assertThat(bucket.puts).hasValue(1);
     }
 

@@ -263,10 +263,6 @@ public final class ToolPublicationStore {
                 && ((Number) head.get("writer_live")).intValue() == 1
                 && ((Number) head.get("activation_epoch")).longValue() == binding.get("activationEpoch").longValue(),
                 "Original Session owner is fenced");
-        if (deferActivationLapse && !"READY".equals(head.get("recovery_status"))) {
-            throw new ApiException(HttpStatus.CONFLICT, "managed_tool_publication_busy",
-                    "Session recovery is blocked");
-        }
         require("READY".equals(head.get("recovery_status")), "Original Session owner is fenced");
         // The grant expiry is min(writer lease, activation horizon), so a
         // real activation lapse expires the grant on the same clock and

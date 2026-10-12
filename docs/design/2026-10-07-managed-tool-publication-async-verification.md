@@ -90,6 +90,9 @@ a permanently failed predecessor fails finish rather than looping indefinitely.
 
 Permanent validation/storage-denial/fencing failures persist safe status/code
 without raw storage messages or credentials.
+Session recovery blocks permanently fail accepted verification; the product has
+no transition from a blocked Session back to READY. Authorization failure alone
+does not certify object-byte corruption.
 A lapsed activation horizon is retried when the activation id and epoch still
 match, because renewal keeps that identity. An expired writer lease stays a
 permanent fence. A permanently failed finish stays FAILED, leaves FINISHING,
