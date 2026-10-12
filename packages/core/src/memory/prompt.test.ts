@@ -218,6 +218,12 @@ describe('managed auto-memory prompt helpers', () => {
         mtimeMs: 0,
       });
       // Legal path components can expand into long percent-encoded targets.
+      // The final component's space run is tuned so the retained body (capped
+      // at MAX_INDEX_CHARS) plus the appended truncation notice lands just over
+      // MAX_INDEX_CHARS — the writer-budget path this test exercises. It was 250
+      // spaces before the index title was budgeted against the line (issue
+      // #13910); the shorter title shrinks each long line, so the run grew to
+      // keep the fixture over budget.
       const longDocs = ['A', 'B', 'C'].map((label) =>
         doc(
           `reference/${[
@@ -225,7 +231,7 @@ describe('managed auto-memory prompt helpers', () => {
               { length: 14 },
               (_, i) => `${label}${' '.repeat(253)}${i % 10}`,
             ),
-            `${label}${' '.repeat(250)}b.md`,
+            `${label}${' '.repeat(288)}b.md`,
           ].join('/')}`,
           label.repeat(120),
         ),

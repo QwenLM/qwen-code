@@ -34,6 +34,7 @@ import {
   INDEX_TRUNCATION_NOTICE,
   MAX_INDEX_LINE_CHARS,
   MAX_INDEX_LINES,
+  MIN_INDEX_TITLE_CHARS,
   trimIndexToBudget,
 } from './index-budget.js';
 
@@ -44,6 +45,9 @@ const MAX_INDEX_FIELD_CHARS = 120;
 // that fits whole in the leftover room is kept however small that room is.
 const MIN_INDEX_HOOK_CHARS = 24;
 const INDEX_HOOK_SEPARATOR = ' — ';
+// Chars the `- [](…)` wrapper spends around the title and the link target, i.e.
+// `- [`, `](` and the closing `)`.
+const INDEX_LINK_AFFIX_CHARS = '- []()'.length;
 const INDEX_ALSO_OPEN = ' (also: ';
 
 /**
@@ -174,24 +178,40 @@ function encodeIndexPathTarget(value: string): string {
 }
 
 /**
- * Render one index entry. The link is built first and never shortened, because
- * it is the entry's only functional part; the description takes whatever room
- * the link leaves, and is dropped entirely when that room is too small to be
- * useful. An entry whose link alone exceeds {@link MAX_INDEX_LINE_CHARS} is
- * therefore allowed to run long — a resolving long link beats a short dead one.
- * Grouped siblings reserve their space before the description is rendered;
- * targets that do not fit are dropped whole, never sliced.
+ * Render one index entry. The link target is never shortened, because it is the
+ * entry's only functional part; the title yields to {@link MAX_INDEX_LINE_CHARS}
+ * so `- [title](target)` fits whenever the path leaves room for at least
+ * {@link MIN_INDEX_TITLE_CHARS}, and the description takes whatever room the
+ * link leaves — dropped entirely when that room is too small to be useful. An
+ * entry whose link alone exceeds {@link MAX_INDEX_LINE_CHARS} (a path longer
+ * than the whole budget) is therefore allowed to run long — a resolving long
+ * link beats a short dead one. Grouped siblings reserve their space before the
+ * description is rendered; targets that do not fit are dropped whole, never
+ * sliced.
  */
 function docIndexLine(
   doc: ScannedAutoMemoryDocument,
   others: ScannedAutoMemoryDocument[] = [],
 ): string {
-  const title = sanitizeIndexField(doc.title) || doc.type;
-  const link = `- [${title}](${encodeIndexPathTarget(doc.relativePath)})`;
+  const target = encodeIndexPathTarget(doc.relativePath);
+  // The title shares the line budget with the link. Cap it so the assembled
+  // `- [title](target)` fits MAX_INDEX_LINE_CHARS whenever the path leaves room
+  // for even MIN_INDEX_TITLE_CHARS; a path long enough to starve the title is
+  // kept whole (a resolving long link beats a short dead one) and the line runs
+  // long instead, with the title clamped to the floor.
+  const titleLimit = Math.max(
+    MIN_INDEX_TITLE_CHARS,
+    MAX_INDEX_LINE_CHARS - INDEX_LINK_AFFIX_CHARS - target.length,
+  );
+  const title = truncateIndexField(
+    sanitizeIndexField(doc.title) || doc.type,
+    titleLimit,
+  );
+  const link = `- [${title}](${target})`;
   let also = '';
   for (const other of others) {
-    const target = encodeIndexPathTarget(other.relativePath);
-    const next = also ? `${also}, ${target}` : target;
+    const siblingTarget = encodeIndexPathTarget(other.relativePath);
+    const next = also ? `${also}, ${siblingTarget}` : siblingTarget;
     if (
       link.length + INDEX_ALSO_OPEN.length + next.length + 1 >
       MAX_INDEX_LINE_CHARS
