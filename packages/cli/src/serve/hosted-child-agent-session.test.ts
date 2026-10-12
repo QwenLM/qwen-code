@@ -1052,6 +1052,19 @@ describe('hosted workflow child session (#13803)', () => {
         .findLast((event) => event.kind === 'input.accepted');
       expect(input?.payload['source']).toBe('workflow');
       expect(input?.payload['turnId']).toBe('run-1:accept:notify');
+      // The funnel feeds the renderer the record's kind — the pure
+      // renderer's own test cannot see this wiring (#13858 R2-8).
+      const notified = JSON.parse(
+        (
+          await harness.store.read(
+            input!.payload['contentRef'] as Parameters<
+              typeof harness.store.read
+            >[0],
+          )
+        ).toString('utf8'),
+      ).text as string;
+      expect(notified).toContain('<kind>workflow</kind>');
+      expect(notified).toContain('Workflow child "workflow/audit" finished.');
       await children.markAccepted('run-1');
       await children.markConsumed('run-1');
       expect(children.record('run-1')!.run.delivery).toEqual({

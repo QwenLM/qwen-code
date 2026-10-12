@@ -23556,13 +23556,18 @@ describe('Hosted Harness Runtime turn takeover', () => {
       parentChildRunId: 'run-1',
       depth: 1,
     };
-    async function workflowApp(childShaped = true, withBroker = false) {
+    async function workflowApp(
+      childShaped = true,
+      withBroker = false,
+      toolProfile?: string,
+    ) {
       const server = await app(withBroker);
       const created = await headers(supertest(server).post('/session')).send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
         managedSessionStore: store(),
         ...(childShaped ? { lineage: CHILD_LINEAGE } : {}),
+        ...(toolProfile === undefined ? {} : { toolProfile }),
       });
       expect(created.status).toBe(200);
       const authorize = (request: supertest.Test) =>
@@ -23726,7 +23731,13 @@ describe('Hosted Harness Runtime turn takeover', () => {
       const warm = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'warm')
         .mockResolvedValue(undefined);
-      const { server, authorize, send } = await workflowApp(true, true);
+      // A tool-profiled Session: only the launch itself, never a missing
+      // profile, keeps the broker-backed tool turn away (#13858 R2-8).
+      const { server, authorize, send } = await workflowApp(
+        true,
+        true,
+        'hosted-workspace-shell/1',
+      );
       const admitted = await send(workflowPrompt(), PROMPT_ID);
       expect(admitted.status).toBe(202);
       await vi.waitFor(

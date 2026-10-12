@@ -412,6 +412,13 @@ it('refuses the foreground workflow launch and rejects the sibling batch while a
   expect(JSON.stringify(turnRefused)).not.toContain(
     HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner,
   );
+  // ...and the background launch it advises is really admitted under the
+  // same Turn-owned hold (#13858 R2-8).
+  const turnBackground = await executeWorkflow(
+    turnHeld,
+    call({ script: SCRIPT, run_in_background: true }, 'wf-bg'),
+  );
+  expect(JSON.stringify(turnBackground)).toContain('Workflow child started');
   // Foreground share a batch with a non-child tool call: no mount-arm —
   // the sibling still wedges the foreground child's single-mount world.
   const turn = createTurn();
@@ -454,9 +461,12 @@ it('refuses the foreground workflow launch and rejects the sibling batch while a
   expect(JSON.stringify(answer)).toContain(
     'cannot share a batch with a tool other than agent or workflow',
   );
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  // Only the advised background launch above ever committed.
+  expect(
+    session.authority
+      .extensionRecordsInDomain('child_run')
+      .map((entry) => entry.recordId),
+  ).toEqual(['prompt:wf-bg']);
 });
 
 it('admits a batch of a foreground child agent beside a background workflow', async () => {
@@ -675,11 +685,19 @@ it('refuses malformed background flags, empty and unstartable scripts', async ()
 });
 
 it('answers an over-size envelope with the byte_limit refusal, not recovery', async () => {
+  // A short script whose args carry the bytes: only the launch envelope's
+  // own bound can refuse it (the script bound never fires), and the args
+  // are three-byte characters, under the bound counted as UTF-16 units but
+  // over it in UTF-8 bytes (#13858 R2-8).
+  const blob = '界'.repeat(11 * 1024);
+  expect(blob.length).toBeLessThan(32 * 1024);
   const responses = await executeWorkflow(
     createTurn(),
-    call({ script: 's'.repeat(40 * 1024), run_in_background: true }),
+    call({ script: SCRIPT, args: { blob }, run_in_background: true }),
   );
-  expect(JSON.stringify(responses)).toContain('byte_limit');
+  expect(JSON.stringify(responses)).toContain(
+    'Hosted workflow refused this launch (byte_limit).',
+  );
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     0,
   );
@@ -842,6 +860,18 @@ it('spends the same concurrency and budget a child agent does', async () => {
     call({ script: SCRIPT }, 'call-5'),
   );
   expect(JSON.stringify(refused)).toContain('count_limit');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    4,
+  );
+  // Quotas gate NEW children only: re-driving the already-committed
+  // launch at the full cap names its record instead of refusing it
+  // (#13858 R4-8) — the re-driven batch of a restarted Harness.
+  const replayed = await executeWorkflow(
+    createTurn(),
+    call({ script: SCRIPT }, 'call-4'),
+  );
+  expect(JSON.stringify(replayed)).toContain('Workflow child started');
+  expect(JSON.stringify(replayed)).not.toContain('count_limit');
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     4,
   );

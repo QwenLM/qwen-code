@@ -613,6 +613,18 @@ describe('managed workflow child operations (#13803)', () => {
           args: null,
         }),
       ).toThrow('byte_limit');
+      // The bound counts UTF-8 bytes, not UTF-16 units: three-byte
+      // characters that fit the slack as units still refuse as bytes
+      // (#13858 R2-8).
+      const wide = '界'.repeat(Math.floor(slack / 3) + 1);
+      expect(wide.length).toBeLessThanOrEqual(slack);
+      expect(() =>
+        encodeWorkflowLaunchEnvelope({
+          definition: WORKFLOW_DEFINITION,
+          script: wide,
+          args: null,
+        }),
+      ).toThrow('byte_limit');
       // R1-6: a function or a symbol in args must throw here — without the
       // replacer `JSON.stringify` silently drops those members and the
       // encoder would emit bytes its own decoder refuses, or (worse)
