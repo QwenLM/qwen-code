@@ -1001,6 +1001,57 @@ describe('the board', () => {
     expect(two.blockedBy).toHaveLength(0);
   });
 
+  // The blocker-count limit follows the same replay rule: the remaining
+  // place is validated against the current board, so a crowded target
+  // gets its Not-committed entry instead of a fault escaping execute.
+  it('replays a remaining addBlocks place by its blocker cap against the current board', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'one', description: 'do one' },
+      'prompt:t1',
+    );
+    await teams.run(
+      'task_create',
+      { subject: 'two', description: 'do two' },
+      'prompt:t2',
+    );
+    // The original call committed only the subject place.
+    await teams.memberTaskUpdate('alice', 'cmd_cap', {
+      taskId: '1',
+      subject: 'renamed',
+    });
+    // The leader filled task 2 with the maximum since: 64 blockers.
+    const blockers: string[] = [];
+    for (let index = 0; index < 64; index += 1) {
+      const number = index + 3;
+      blockers.push(`${number}`);
+      await teams.run(
+        'task_create',
+        { subject: `filler-${number}`, description: 'f' },
+        `prompt:cap-${number}`,
+      );
+    }
+    await teams.run(
+      'task_update',
+      { taskId: '2', addBlockedBy: blockers },
+      'prompt:cap-fill',
+    );
+    const result = await teams.memberTaskUpdate('alice', 'cmd_cap', {
+      taskId: '1',
+      subject: 'renamed',
+      addBlocks: ['2'],
+    });
+    expect(result).toContain('Not committed');
+    expect(result).toContain('would exceed 64 blockers');
+    const two = parseTeamTask(
+      session.authority.extensionRecord('team_task', 'prompt:call-team#2')!
+        .record,
+    );
+    expect(two.blockedBy).toHaveLength(64);
+  });
+
   it('opens new tasks only in an active team', async () => {
     expect(
       await refusal(
