@@ -35,17 +35,24 @@ export interface ModCommand {
   argumentHint?: string;
 }
 
+export interface ModPlugin {
+  id: string;
+  name: string;
+  source: ModSource;
+  options: ModOptions;
+}
+
 export interface ModLog {
   text: string;
   to: 'debug' | 'transcript';
 }
 
 export type ModRequest =
-  | { type: 'load'; source: ModSource; options: ModOptions; cwd: string }
+  | { type: 'load'; plugins: ModPlugin[]; cwd: string }
   | { type: 'command'; command: string; args: string }
   | { type: 'end'; sessionId: string; reason: 'clear' | 'resume' | 'other' };
 
 export type ModReply =
   | { type: 'result'; json: string }
   | { type: 'error'; message: string }
-  | ({ type: 'log' } & ModLog);
+  | ({ type: 'log'; plugin: string } & ModLog);
