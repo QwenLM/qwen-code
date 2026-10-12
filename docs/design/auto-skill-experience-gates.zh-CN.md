@@ -21,7 +21,9 @@ AutoSkill 仍默认关闭；确认流程、managed skill 写入限制和内存�
 接受判定复用现有的请求所属 history-push 快照，覆盖首个流事件、正常提交和
 finally 路径。直接 `addHistory` 也消费匹配记录。重新提交的结果不能重复计数。
 被拒绝的输入不会推进评审窗口。skill 文件修改保护仍在本地执行完成时更新，
-即使 PostToolUse hook 随后拒绝该结果也保留保护；被拒绝的结果仍不计入经验。
+即使 PostToolUse hook 随后拒绝该结果，或调用在开始执行后结算为取消，也保留保护。
+被拒绝和取消的结果仍不计入经验，未开始的写入不设置保护。已取消的执行也保留
+完成调用 ID，避免重放重新设置 skill 保护。
 
 流内 ID normalization 除当前历史的 ID 外，也保留客户端在会话中已记录的
 完成调用 ID。压缩或 rewind/restore 因此不会让新的执行复用一个会被完成记账
@@ -62,7 +64,9 @@ Auto Memory 的提取、dream 和迁移保留原有类型门控。已派发评�
 - `packages/core/src/core/llm-chat.ts`：在流内 normalization 时保留会话已记录 ID，
   覆盖历史移除与主聊天重建。
 - headless CLI、TUI 和 ACP 完成路径：提供已有结构化响应，覆盖全部生产调用者。
-  ACP 使用原始聊天流，因此也转发已接受的结果批次。基线 ACP 不调度 AutoSkill
+  TUI 即使对已去重或属于次级交互的模型完成记录，也转发取消结果，由共享客户端
+  统一处理保护与经验过滤；client-initiated 工具仍排除。ACP 使用原始聊天流，
+  因此也转发已接受的结果批次。基线 ACP 不调度 AutoSkill
   评审；本改动保留这一启用范围，不新增 ACP 功能。
 - 同目录测试和既有 skill-review 集成测试：门控、结果、接线和生命周期回归。
 

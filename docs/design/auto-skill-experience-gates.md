@@ -26,8 +26,10 @@ history-push snapshot, including the first stream event, normal commit and
 finally path. Direct `addHistory` also consumes matching records. Re-submitted
 results cannot count twice. Rejected inputs do not advance the review window.
 Skill-file modification protection still updates at local execution completion,
-even if a PostToolUse hook subsequently denies the result. That denied result
-remains excluded from experience accounting.
+even if a PostToolUse hook subsequently denies the result or the call settles
+cancelled after execution started. Denied and cancelled results remain excluded
+from experience accounting and unstarted writes do not set protection. Cancelled
+executions reserve their completion IDs so replay cannot renew skill protection.
 
 Stream ID normalization also reserves the client's session-level recorded
 completion IDs, not just IDs in current history. Compression and rewind/restore
@@ -78,8 +80,11 @@ window is not retried.
 - `packages/core/src/core/llm-chat.ts`: reserve recorded session IDs during stream
   normalization, including after history removal and main-chat recreation.
 - Headless CLI, TUI and ACP completion paths: provide the existing structured
-  response; all production callers are covered. ACP uses raw chat streams, so it
-  also forwards accepted result batches. Baseline ACP does not schedule AutoSkill
+  response; all production callers are covered. TUI forwards cancelled model
+  completions even when deduped or owned by a secondary interaction, leaving
+  protection and experience filtering to the shared client. Client-initiated
+  tools remain excluded. ACP uses raw chat streams, so it also forwards accepted
+  result batches. Baseline ACP does not schedule AutoSkill
   reviews; this change preserves that activation scope rather than adding a new
   ACP feature.
 - Collocated tests and the existing skill-review integration tests: gate,

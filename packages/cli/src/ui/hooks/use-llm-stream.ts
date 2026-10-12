@@ -5061,11 +5061,11 @@ export const useLlmStream = (
             `${dedupedCallIds.join(', ')}`,
         );
         // Preserve local skill-write protection and recall hints, but never
-        // accept the dropped result as experience. Cancelled and client-owned
-        // calls do not belong to this completion bookkeeping.
+        // accept the dropped result as experience. Client-owned calls do not
+        // belong to this completion bookkeeping.
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (tc.status === 'cancelled' || tc.nativeAttemptsObserved) continue;
+          if (tc.nativeAttemptsObserved) continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
@@ -5223,10 +5223,7 @@ export const useLlmStream = (
             toolCall.request.prompt_id,
           );
         }
-        if (
-          toolCall.status !== 'cancelled' &&
-          !toolCall.nativeAttemptsObserved
-        ) {
+        if (!toolCall.nativeAttemptsObserved) {
           llmClient?.recordCompletedToolCall(
             toolCall.request.name,
             toolCall.request.args as Record<string, unknown>,

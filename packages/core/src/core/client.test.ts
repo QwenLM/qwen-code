@@ -10261,16 +10261,18 @@ Other open files:
         });
 
         it.each([
-          [5, true, true],
-          [4, true, true],
-          [5, false, true],
-          [5, true, false],
+          [5, true, true, false],
+          [4, true, true, false],
+          [5, false, true, false],
+          [5, true, false, false],
+          [5, true, true, true],
         ] as const)(
-          'checks terminal recursive steer without another tool (count=%s accepted=%s enabled=%s)',
-          async (count, accepted, enabled) => {
+          'checks terminal recursive steer without another tool (count=%s accepted=%s enabled=%s failsAfterPush=%s)',
+          async (count, accepted, enabled, failsAfterPush) => {
             await acceptReads(count);
             vi.mocked(mockConfig.getAutoSkillEnabled).mockReturnValue(enabled);
-            const eligible = count >= 5 && accepted && enabled;
+            const eligible =
+              count >= 5 && accepted && enabled && !failsAfterPush;
             if (eligible) {
               mockMemoryManager.scheduleSkillReview.mockReturnValue({
                 status: 'scheduled',
@@ -10285,6 +10287,9 @@ Other open files:
               }
               publishPushSnapshot(request, pushCount);
               pushCount += 1;
+              if (turnCount === 2 && failsAfterPush) {
+                throw new Error('provider failed after steer push');
+              }
               return textTurn('Done');
             });
             const steer: SteerInput = {
@@ -10304,10 +10309,12 @@ Other open files:
                 getSteerInput,
               },
             );
-            if (accepted) await result;
+            if (accepted && !failsAfterPush) await result;
             else
               await expect(result).rejects.toThrow(
-                'steer failed before history push',
+                failsAfterPush
+                  ? 'provider failed after steer push'
+                  : 'steer failed before history push',
               );
 
             expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
@@ -10317,7 +10324,10 @@ Other open files:
             expect(
               accepted ? steer.restore : steer.accept,
             ).not.toHaveBeenCalled();
-            if (accepted && enabled) {
+            expect(client['experienceSignals'].userSteer).toBe(
+              accepted && !eligible,
+            );
+            if (accepted && enabled && !failsAfterPush) {
               expect(
                 mockMemoryManager.scheduleSkillReview,
               ).toHaveBeenCalledOnce();
@@ -10796,41 +10806,61 @@ Other open files:
         },
       );
 
-      it('excludes cancelled-after-settle work without closing a retry', async () => {
-        client.recordCompletedToolCall('edit', undefined, {
-          ...completedOutcome('failure'),
-          executionStatus: 'error',
-          error: new Error('edit failed'),
-        });
-        await client.addHistory({
-          role: 'user',
-          parts: [responsePart('failure')],
-        });
-        client.recordCompletedToolCall(
-          'edit',
-          { path: '/test/project/root/.qwen/skills/example/SKILL.md' },
-          { ...completedOutcome('cancelled'), status: 'cancelled' },
-        );
-        await client.addHistory({
-          role: 'user',
-          parts: [responsePart('cancelled')],
-        });
-        expect(client['toolCallCount']).toBe(1);
-        expect(client['experienceSignals'].retryArc).toBe(false);
-        expect(client['failedExperienceToolNames'].has('edit')).toBe(true);
-        expect(client['skillsModifiedInSession']).toBe(false);
-      });
+      it.each(['success', 'error', 'cancelled'] as const)(
+        'protects cancelled-after-settle skill writes (%s) without closing a retry',
+        async (executionStatus) => {
+          client.recordCompletedToolCall('edit', undefined, {
+            ...completedOutcome('failure'),
+            executionStatus: 'error',
+            error: new Error('edit failed'),
+          });
+          await client.addHistory({
+            role: 'user',
+            parts: [responsePart('failure')],
+          });
+          client.recordCompletedToolCall(
+            'edit',
+            { path: '/test/project/root/.qwen/skills/example/SKILL.md' },
+            {
+              ...completedOutcome('cancelled'),
+              executionStatus,
+              status: 'cancelled',
+            },
+          );
+          await client.addHistory({
+            role: 'user',
+            parts: [responsePart('cancelled')],
+          });
+          expect(client['toolCallCount']).toBe(1);
+          expect(client['experienceSignals'].retryArc).toBe(false);
+          expect(client['failedExperienceToolNames'].has('edit')).toBe(true);
+          expect(client['skillsModifiedInSession']).toBe(true);
+          expect(client['pendingExperienceOutcomes'].size).toBe(0);
+        },
+      );
 
-      it.each(['denied', 'not_started'] as const)(
-        'retains recall hints for %s calls without counting experience',
+      it.each([
+        'denied',
+        'not_started',
+        'cancelled',
+        'cancelled_after_settle',
+      ] as const)(
+        'keeps recall hints only for non-cancelled %s calls without counting experience',
         (mode) => {
           client.recordCompletedToolCall('read_file', undefined, {
             ...completedOutcome(mode),
-            ...(mode === 'denied'
-              ? { errorType: ToolErrorType.EXECUTION_DENIED }
-              : { executionStatus: 'not_started' as const }),
+            ...(mode === 'cancelled_after_settle'
+              ? { status: 'cancelled' as const }
+              : mode === 'denied'
+                ? { errorType: ToolErrorType.EXECUTION_DENIED }
+                : { executionStatus: mode }),
           });
-          expect(client['recentCompletedToolNames']).toContain('read_file');
+          if (mode === 'cancelled' || mode === 'cancelled_after_settle')
+            expect(client['recentCompletedToolNames']).not.toContain(
+              'read_file',
+            );
+          else
+            expect(client['recentCompletedToolNames']).toContain('read_file');
           expect(client['pendingExperienceOutcomes'].size).toBe(0);
           expect(client['toolCallCount']).toBe(0);
         },
@@ -10906,9 +10936,12 @@ Other open files:
         expect(client['toolCallCount']).toBe(2);
         await client.addHistory(content);
         client.recordCompletedToolCall(
-          'read_file',
+          'run_shell_command',
           undefined,
           completedOutcome('read'),
+        );
+        expect(client['recentCompletedToolNames']).not.toContain(
+          'run_shell_command',
         );
         expect(client['toolCallCount']).toBe(2);
         expect(client['experienceSignals'].hasSubstantiveWork).toBe(true);
@@ -10939,7 +10972,9 @@ Other open files:
             client['skillsModifiedInSession'] = false;
             client.recordCompletedToolCall(tool, args, response);
             expect(client['skillsModifiedInSession']).toBe(
-              executionStatus === 'success' || executionStatus === 'error',
+              executionStatus === 'success' ||
+                executionStatus === 'error' ||
+                executionStatus === 'cancelled',
             );
             expect(client['pendingExperienceOutcomes'].size).toBe(0);
             expect(client['toolCallCount']).toBe(0);

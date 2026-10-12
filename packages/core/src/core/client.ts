@@ -3357,29 +3357,31 @@ export class LlmClient {
     args: Record<string, unknown> | undefined,
     response: CompletedToolOutcome,
   ): void {
+    if (this.recordedExperienceCallIds.has(response.callId)) return;
+    if (
+      response.executionStatus === 'success' ||
+      response.executionStatus === 'error' ||
+      response.executionStatus === 'cancelled'
+    ) {
+      this.recordedExperienceCallIds.add(response.callId);
+      // Cancellation cannot undo a skill write that already reached disk.
+      if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
+        const filePath =
+          args['file_path'] ?? args['path'] ?? args['target_file'];
+        if (
+          typeof filePath === 'string' &&
+          isProjectSkillPath(filePath, this.config.getProjectRoot())
+        ) {
+          this.skillsModifiedInSession = true;
+        }
+      }
+    }
     if (
       response.status === 'cancelled' ||
-      response.executionStatus === 'cancelled' ||
-      this.recordedExperienceCallIds.has(response.callId)
+      response.executionStatus === 'cancelled'
     )
       return;
     this.rememberCompletedToolName(toolName);
-    if (
-      response.executionStatus !== 'success' &&
-      response.executionStatus !== 'error'
-    )
-      return;
-    this.recordedExperienceCallIds.add(response.callId);
-
-    if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
-      const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
-      if (
-        typeof filePath === 'string' &&
-        isProjectSkillPath(filePath, this.config.getProjectRoot())
-      ) {
-        this.skillsModifiedInSession = true;
-      }
-    }
     if (!didToolCallProduceWork(response)) return;
     this.pendingExperienceOutcomes.set(response.callId, {
       toolName,
