@@ -14,6 +14,8 @@ The Session header gains a child Agent tasks button when the provider supports r
 
 The server has no kind filter. Read one raw page of 50 tasks, preserve its opaque cursor and order, and display only child Agent entries. Previous and next buttons browse raw pages. An empty filtered page with more pages is not evidence that the Session has no child tasks. Do not scan all pages or present a total count.
 
+Task-panel translations use a separate bilingual dictionary. The read-only transcript build replaces it with an empty stub through the existing Vite message boundary, so exported transcripts retain their payload budget without carrying task-panel copy.
+
 ## Provider and synchronization
 
 Add optional `tasks.list`, `tasks.get`, `tasks.listEvents`, `tasks.cancel.submit` and `tasks.cancel.query` to the Managed provider and carry optional `capabilities.tasks` in the summary. Types alias the generated WebShell task, event and command operation schemas. Java reads use the existing `/tasks/query`, `/tasks/get` and `/tasks/events/query` POST endpoints under `/api/agent/web-shell/v1`; mutations use `/tasks/cancel` and `/operations/query`. No endpoint, table, contract capability or Session event is added. Daemon has no task group. Java exposes cancellation only with an explicit `productScope` containing tenant and actor identity.

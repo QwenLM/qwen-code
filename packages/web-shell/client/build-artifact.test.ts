@@ -474,6 +474,14 @@ describe('build artifact — transcript entry (#11031)', () => {
     ).toEqual([]);
   });
 
+  it('carries no Managed task-panel strings or lookups', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js.includes('managed.tasks.')).toBe(false);
+  });
+
   it('carries no settings strings and looks none up', () => {
     // Same contract as the Live Voice stub above, for
     // client/settings/messages.ts: a settings.* lookup here would render as

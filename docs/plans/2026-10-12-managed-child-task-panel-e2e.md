@@ -17,6 +17,7 @@ Run isolated Playwright contexts from `.qwen/e2e-tests/managed-child-task-panel-
 5. Recovery: lost 202, refresh with intent only, explicit original-key replay, refresh with known operation ID, timeout and continue confirmation, recovery blocked, permission/query failure, storage refused. Unknown outcomes must never render failure or spawn a new key.
 6. Isolation: delayed list/detail/event/operation responses after changing task, page, Session and account; two tabs competing; hidden/closed panel pauses ordinary reads while cancel recovery survives.
 7. Events/Artifacts: expiry resets with a visible history gap; unknown types checkpoint without display, paged cursors are not replaced by task tails; authorized public Artifact refs use the existing reader.
+8. Export boundary: rebuild the library and verify the read-only transcript carries no `managed.tasks.*` strings or lookups and remains below its existing JS budget. Verify task cancellation and elapsed-time translations still work in English and Chinese in the interactive shell.
 
 ## Real Java and Hosted
 
@@ -29,6 +30,8 @@ Run affected client/provider/hook/component tests from `packages/web-shell`, plu
 ## Observed results (2026-10-12)
 
 The global qwen 0.25.0 availability baseline passed; the pre-change browser had no task entry despite `tasks: true`. The completed implementation passed 190 focused React 19 tests, 24 isolated React 18 tests and 73 Java task/cancel regressions. Controlled Chromium verification passed 10 main groups and 6 extra checks, including public Artifact preview, actual 30-second timeout, visibility pause/resume, two-tab contention and delayed Session responses. Root build, typecheck and bundle and the final Web Shell build/typecheck passed; generated types had no drift.
+
+The first Ubuntu CI run exposed a transcript bundle-budget regression: 1,329,779 UTF-16 code units exceeded the unchanged 1,325,000 ceiling. The existing artifact test reproduced the same failure locally. Moving all 51 English and 51 Chinese task-panel entries into a separate dictionary, stubbed only in the transcript build, reduced the JS remainder to 1,324,541. The new bundle-boundary guard failed against the old artifact and passed against the rebuilt artifact. All 26 artifact tests and 97 focused translation/panel/recovery tests passed; the copy values and the size ceiling were preserved.
 
 A real browser connected through a same-origin proxy to Java, Hosted Harness, Broker/worker and the child result relay. It submitted one cancel operation, observed a completed confirmed receipt while the task remained running/draining, then observed the task cancelled. The parent draft survived and the next parent Turn displayed `PARENT_CONTINUATION_OK`. The macOS rig used H2 in MySQL mode, a deterministic model and nondurable local workers. This proves this tested cancellation/continuation path; it does not establish Linux durable-worker recovery, full MySQL acceptance or live-model quality. Windows/Linux, React 18 browser rendering, native screen-reader output and mobile native WebViews were not tested. Scroll restoration was verified in component tests.
 

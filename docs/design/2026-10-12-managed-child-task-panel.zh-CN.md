@@ -14,6 +14,8 @@ Provider 支持读取且 `capabilities.tasks` 明确为 true 时，在 Session �
 
 服务端不支持类型过滤。每次读取一页 50 条原始任务，保留不透明游标和服务端顺序，只呈现子 Agent。上一页、下一页浏览原始分页。过滤后为空但存在后续页时，不能认定整个 Session 没有子任务。不全量扫描，也不展示总数。
 
+任务面板文案使用独立双语字典。只读 transcript 构建通过现有 Vite 文案边界将其替换为空 stub，使导出对话保留原有包体积预算，无需携带任务面板文案。
+
 ## Provider 与同步
 
 Managed Provider 增加可选的 `tasks.list`、`tasks.get`、`tasks.listEvents`、`tasks.cancel.submit` 和 `tasks.cancel.query`，summary 携带可选 `capabilities.tasks`。类型直接引用生成的 WebShell 任务、事件和 command operation schema。Java 读取复用 `/api/agent/web-shell/v1` 下的 `/tasks/query`、`/tasks/get` 和 `/tasks/events/query` POST 接口；变更复用 `/tasks/cancel` 与 `/operations/query`。不新增 endpoint、表、契约能力字段或 Session 事件。Daemon 不提供任务操作组。Java 仅在宿主提供包含租户和账号身份的明确 `productScope` 时暴露取消能力。
