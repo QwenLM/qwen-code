@@ -418,6 +418,15 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js.length).toBeLessThan(1_325_000);
   });
 
+  it('keeps selection copying and its converter out of the transcript entry', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('data-selection-copy-math');
+    expect(js).not.toContain('selectionCopyListWrapper');
+  });
+
   it('carries no Live Voice strings and looks none up', () => {
     // vite.lib.config.ts swaps client/live/messages.ts for an empty stub in
     // this build, which keeps ~200 entries out of every exported document. It
@@ -436,6 +445,18 @@ describe('build artifact — transcript entry (#11031)', () => {
     );
     expect(present).toEqual([]);
     expect(js).not.toContain('Talk in this browser');
+  });
+
+  it('keeps dictation strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]voice\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('voice.error.noModel');
+    expect(interactive).toContain('Dismiss voice message');
+    expect(interactive).toContain('当前工作区未配置语音模型。');
   });
 
   it('carries no collaboration strings and looks none up', () => {

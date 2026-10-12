@@ -196,6 +196,29 @@ vi.mock('./hosted-monitor-wake-turn.js', async (importOriginal) => {
   };
 });
 
+const neverStartedReconcile = vi.hoisted(() => ({
+  fn: vi.fn((input: unknown) => input),
+  gate: undefined as Promise<void> | undefined,
+}));
+vi.mock('./hosted-never-started-reconcile.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./hosted-never-started-reconcile.js')
+    >();
+  return {
+    ...actual,
+    reconcileNeverStartedChildRuns: async (
+      input: Parameters<typeof actual.reconcileNeverStartedChildRuns>[0],
+    ) => {
+      neverStartedReconcile.fn(input);
+      const gate = neverStartedReconcile.gate;
+      neverStartedReconcile.gate = undefined;
+      if (gate !== undefined) await gate;
+      return actual.reconcileNeverStartedChildRuns(input);
+    },
+  };
+});
+
 const state = vi.hoisted(() => ({
   root: '',
   assertWritable: vi.fn(async () => undefined),
@@ -1394,6 +1417,43 @@ describe('Hosted Harness no-tool session', () => {
       expect(state.model).not.toHaveBeenCalled();
     },
   );
+
+  it('runs the never-started reconcile for a fresh Session open', async () => {
+    neverStartedReconcile.fn.mockClear();
+    await hookApp();
+    expect(neverStartedReconcile.fn).toHaveBeenCalledTimes(1);
+    expect(neverStartedReconcile.fn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authority: expect.anything(),
+        resources: expect.anything(),
+        childRuns: expect.any(HostedChildRunSession),
+        brokerOptions: expect.anything(),
+      }),
+    );
+  });
+
+  it('holds the fresh Session open until the never-started reconcile completes', async () => {
+    neverStartedReconcile.fn.mockClear();
+    let release!: () => void;
+    neverStartedReconcile.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let opened = false;
+    const pending = hookApp().then((app) => {
+      opened = true;
+      return app;
+    });
+    try {
+      await vi.waitFor(() =>
+        expect(neverStartedReconcile.fn).toHaveBeenCalledTimes(1),
+      );
+      expect(opened).toBe(false);
+    } finally {
+      release();
+    }
+    await pending;
+    expect(opened).toBe(true);
+  });
 
   it.each([
     { tenantId: 'foreign' },
@@ -3937,7 +3997,7 @@ describe('Hosted Harness no-tool session', () => {
   }, 45_000);
 
   it('refuses a prompt while a wake park is still unsettled, retriably', async () => {
-    await prewriteAutomationParkedWakeSession();
+    const inputId = await prewriteAutomationParkedWakeSession();
     const repair = mockRepairBroker();
     // The first projection the wake classification reads after the load
     // hangs until the test lets go: only the prompt route's own
@@ -3995,6 +4055,31 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(false);
     releaseClassify();
     repair.unlatch();
+    // Drain the parked settle before teardown: an unsettled park keeps the
+    // wake pump retrying past this test's end, and its settle failures land
+    // in later tests' stderr spies. The pump's own view is the journal —
+    // watch the consume, not a route: a status poll can answer before the
+    // hung classification ever latches the block.
+    await vi.waitFor(
+      async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        expect(
+          journal.events.some(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === inputId,
+          ),
+        ).toBe(true);
+      },
+      { timeout: 15_000 },
+    );
     await vi.waitFor(
       async () => {
         const status = await authorize(
@@ -4004,7 +4089,10 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 15_000 },
     );
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    const closed = await headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(closed.status).toBe(204);
   }, 45_000);
 
   it('refuses a prompt whose wake-park probe let the pump block the Session', async () => {

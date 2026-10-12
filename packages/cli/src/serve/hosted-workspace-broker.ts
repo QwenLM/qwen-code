@@ -588,6 +588,20 @@ export class HostedWorkspaceBroker {
     return { state };
   }
 
+  /**
+   * Read-only never-started proof for one background dispatch: the Broker
+   * admits the `<executionCallId>:process` ledger row only at the
+   * execute-admission of an `is_background` dispatch, so this probe's
+   * definitive not-found is the absence read that proves the dispatch
+   * never began. The ledger-key suffix lives here, with every other
+   * Broker identity, so a key change cannot drift a caller's proof open.
+   */
+  async backgroundProcessStatus(
+    executionCallId: string,
+  ): Promise<{ state: string } | undefined> {
+    return this.status(`${executionCallId}:process`);
+  }
+
   async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
     const path = `/executions/${encodeURIComponent(id)}:acknowledge`;
     const body = {

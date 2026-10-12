@@ -15,6 +15,7 @@ import {
   TRAJECTORY_WINDOW_MESSAGES_ZH,
 } from './trajectory/window-messages.js';
 
+import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
   COLLAB_MESSAGES_EN,
@@ -782,15 +783,6 @@ const EN: Messages = {
   'mermaid.label': 'mermaid',
   'mermaid.errorLabel': 'mermaid (error)',
   'user.uploadedImage': (v) => `User uploaded image ${v?.index ?? 1}`,
-  'voice.noSpeech': 'No speech detected.',
-  'voice.stopDictation': 'Stop dictation',
-  'voice.transcribing': 'Transcribing…',
-  'voice.starting': 'Starting…',
-  'voice.errorRetry': (v) =>
-    `Voice error — click to retry${v?.message ? `: ${v.message}` : ''}`,
-  'voice.noSpeechRetry': 'No speech detected — click to retry',
-  'voice.startDictation': 'Start voice dictation',
-  'voice.error': 'Voice error',
   'resume.failedToLoad': 'Failed to load sessions',
   'toast.dismiss': 'Dismiss notification',
   'toast.dismissShort': 'Dismiss',
@@ -841,6 +833,9 @@ const EN: Messages = {
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'Branch',
   'assistant.copy': 'Copy',
+  'assistant.selectionCopy': 'Copy selection',
+  'assistant.copyPlainText': 'Copy plain text',
+  'assistant.copyMarkdown': 'Copy Markdown',
   'assistant.dissatisfied': 'Not satisfied',
   'assistant.satisfied': 'Satisfied',
   // A workspace agent's reply in a chat session. These render in exported
@@ -4337,6 +4332,7 @@ const EN: Messages = {
   'welcome.prompt': 'What would you like to do?',
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
+  ...VOICE_MESSAGES_EN,
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
@@ -5116,15 +5112,6 @@ const ZH: Messages = {
   'mermaid.label': 'mermaid',
   'mermaid.errorLabel': 'mermaid（错误）',
   'user.uploadedImage': (v) => `用户上传的图片 ${v?.index ?? 1}`,
-  'voice.noSpeech': '未检测到语音。',
-  'voice.stopDictation': '停止语音输入',
-  'voice.transcribing': '正在转录…',
-  'voice.starting': '正在启动…',
-  'voice.errorRetry': (v) =>
-    `语音错误 — 点击重试${v?.message ? `：${v.message}` : ''}`,
-  'voice.noSpeechRetry': '未检测到语音 — 点击重试',
-  'voice.startDictation': '开始语音输入',
-  'voice.error': '语音错误',
   'resume.failedToLoad': '加载会话失败',
   'toast.dismiss': '关闭通知',
   'toast.dismissShort': '关闭',
@@ -5174,6 +5161,9 @@ const ZH: Messages = {
   'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '分叉',
   'assistant.copy': '复制',
+  'assistant.selectionCopy': '复制所选内容',
+  'assistant.copyPlainText': '复制纯文本',
+  'assistant.copyMarkdown': '复制 Markdown',
   'assistant.dissatisfied': '不满意',
   'assistant.satisfied': '满意',
   'agentMessage.status.failed': '失败',
@@ -8386,6 +8376,7 @@ const ZH: Messages = {
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
+  ...VOICE_MESSAGES_ZH,
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
