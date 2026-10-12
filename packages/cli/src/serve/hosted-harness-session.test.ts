@@ -2920,6 +2920,7 @@ describe('Hosted Harness no-tool session', () => {
           ),
       );
       repair.unlatch();
+      const heldRuntimeTurns = new Set<string>();
       const session = {
         managed,
         automations: new HostedAutomationSession(
@@ -2930,7 +2931,7 @@ describe('Hosted Harness no-tool session', () => {
           },
           key,
         ),
-        heldRuntimeTurns: new Set<string>(),
+        heldRuntimeTurns,
       } as never;
       const aftermath = await settleCrashedWakeTurnAftermath({
         session,
@@ -2940,7 +2941,7 @@ describe('Hosted Harness no-tool session', () => {
         turnId: inputId,
       });
       expect(aftermath).toBe('settled');
-      expect(session.heldRuntimeTurns.has(inputId)).toBe(true);
+      expect(heldRuntimeTurns.has(inputId)).toBe(true);
     } finally {
       await managed.close().catch(() => undefined);
     }
