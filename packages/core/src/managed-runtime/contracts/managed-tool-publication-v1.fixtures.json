@@ -157,6 +157,27 @@
       "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"is_monitor\":true,\"max_events\":10000}}",
       "requestDigest": "sha256:ea6855bf1318a3b80dbe18c16111b07971a67d664675c23b9adcc01aa5a94ca5",
       "argsDigest": "sha256:033f3e2eecb32e7937ab202290fb19d236de3642c94b9b160d4d18f535f5808f"
+    },
+    {
+      "id": "shell-timeout-fractional",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\",\"timeout\":1.5}}",
+      "requestDigest": "sha256:cb62bf9066976e383e02a4acd6ed95c39ebc0f9a3826ae7297ce919e2e28ffe0",
+      "argsDigest": "sha256:ffe0129018abbd27827abf67631660619361e68d19a73d79dbfb517bacfb2d09"
+    },
+    {
+      "id": "monitor-idle-timeout-fractional",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"idle_timeout_ms\":1.5,\"is_monitor\":true}}",
+      "requestDigest": "sha256:671f6b007d5c24a526d6510336b6c2e1d8fdeabb396aa37f76a882d74d4ecfe6",
+      "argsDigest": "sha256:54e1edb1cb6af26ec6f8b0a290db70321871bae616ca5a5e20ae59eba678c513"
+    },
+    {
+      "id": "monitor-max-events-fractional",
+      "valid": false,
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"tail -f app.log\",\"is_monitor\":true,\"max_events\":1.5}}",
+      "requestDigest": "sha256:ffdb53168a65e0e0d5835317178e5804f11cb4bb218767743fe8d18a23247de2",
+      "argsDigest": "sha256:86af41b3a6163755b9c0ddf30077ec33fd82a2375eacd87b909dcddd3c9d7a88"
     }
   ],
   "bindingDigest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8",
