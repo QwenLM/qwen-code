@@ -373,3 +373,51 @@ Replace `${FIRECRAWL_API_KEY}` with your actual API key, or set it as an environ
 ```
 
 ---
+
+### looot
+
+A hosted MCP server from looot with web search, Google SERP results, news search and web page reading, next to company, people and email lookups. One key and one prepaid balance cover all of it. The agent sees the price before each call and a failed call costs nothing. Search queries and the URLs you ask it to read are sent to looot.
+
+- **Documentation:** https://docs.looot.ai
+- **Cost:** Paid (prepaid balance, top up from $5, no subscription, no free tier)
+- **Get API Key:** https://looot.ai
+- **Best for:** Web search plus company, people and email data from one account
+
+#### Available Tools
+
+- `web_search` — Web search
+- `google_search_results` — Google SERP results
+- `news_search` — News search
+- `read_web_page` — Read a single page as text
+
+The server also exposes lookups such as `find_work_email`, `enrich_company` and `search_companies`.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP)**
+
+```bash
+qwen mcp add looot \
+  -t http \
+  "https://api.looot.ai/mcp" \
+  -H "Authorization: Bearer ${LOOOT_API_KEY}"
+```
+
+**Method 2: `settings.json` (Remote MCP)**
+
+```json
+{
+  "mcpServers": {
+    "looot": {
+      "httpUrl": "https://api.looot.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LOOOT_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${LOOOT_API_KEY}` with your actual API key, or set it as an environment variable.
+
+---
