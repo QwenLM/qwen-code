@@ -33,10 +33,24 @@ vi.mock(
       >();
     return {
       ...actual,
+      // The shell kind is enabled in production (#13856), so every kind the
+      // production list carries goes through the real gate; a case that
+      // needs the shell kind shut closes it per test. A kind production
+      // has not enabled stays a fixture, admitted so the case runs what it
+      // is about rather than the kind gate.
       assertManagedSessionChildRunKindEnabled: (kind: string) => {
-        if (!enablement.childRun) {
-          actual.assertManagedSessionChildRunKindEnabled(kind);
+        if (kind === 'shell' && !enablement.childRun) {
+          throw new actual.ManagedSessionRecordError(
+            'domain child_run kind shell is registered but not enabled for submission.',
+          );
         }
+        if (
+          !(
+            actual.MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]
+          ).includes(kind)
+        )
+          return;
+        actual.assertManagedSessionChildRunKindEnabled(kind);
       },
     };
   },
