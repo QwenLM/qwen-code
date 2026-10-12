@@ -5,6 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -147,9 +149,20 @@ beforeEach(async () => {
         generation: '1',
         workspaceGeneration: '1',
       };
+      Object.defineProperty(this, 'acquired', {
+        value: true,
+        configurable: true,
+      });
     },
   );
-  vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      Object.defineProperty(this, 'acquired', {
+        value: false,
+        configurable: true,
+      });
+    },
+  );
   vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
     async (operation) => {
       requests.push(operation);
@@ -1880,6 +1893,24 @@ it('releases its broker when a tool turn acquired it after catalog restoration',
   expect(release.mock.instances[0]).toBe(replacement.broker);
 });
 
+it('drains the Hook-owned Runtime at close over a live background run (#13856)', async () => {
+  await hooks.ensureReady();
+  await hooks.broker.acquire();
+  const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+  release.mockClear();
+  // A Hook-configured Shell turn shares this broker and its `finish()`
+  // skips the release, so a background run that outlives the turn holds
+  // this Runtime: the routine arm refuses it, and only the drain stops it.
+  release.mockImplementation(async (options?: { readonly drain?: boolean }) => {
+    if (options?.drain !== true)
+      throw new HostedWorkspaceBrokerRejection(409, 'runtime_session_held');
+  });
+  await hooks.close();
+  expect(release.mock.calls.length).toBeGreaterThan(0);
+  for (const call of release.mock.calls)
+    expect(call).toEqual([{ drain: true }]);
+});
+
 it.each(['catalog', 'settled', 'lost-ack'])(
   'releases an earlier owner before acquiring a replacement (%s)',
   async (phase) => {
@@ -3205,5 +3236,96 @@ it.each([false, true])(
       ),
     ).toEqual(output);
     expect(runner).toHaveBeenCalledOnce();
+  },
+);
+
+it.each(['none', 'hook', 'borrowed'] as const)(
+  'releases only acquired Hook owners after actual HTTP warm (%s)',
+  async (mode) => {
+    vi.mocked(HostedWorkspaceBroker.prototype.warm).mockRestore();
+    vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRestore();
+    vi.mocked(HostedWorkspaceBroker.prototype.release).mockRestore();
+    const brokerRequests: Array<{
+      path: string;
+      owner: string;
+      drain: unknown;
+    }> = [];
+    let held = false;
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      const pathname = req.url!;
+      brokerRequests.push({
+        path: pathname,
+        owner: body.runtimeSessionId,
+        drain: body.drain ?? false,
+      });
+      const envelope = {
+        protocolVersion: 1,
+        requestId: body.requestId,
+        harnessSessionId: body.harnessSessionId,
+        runtimeSessionId: body.runtimeSessionId,
+        scope: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          workspaceGeneration: '1',
+          capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+        },
+        runtime: { bindingId: 'binding', generation: '1' },
+      };
+      res.setHeader('Content-Type', 'application/json');
+      if (pathname.endsWith('/runtimes:warm'))
+        res.end(JSON.stringify(envelope));
+      else if (pathname.endsWith('/tool-sessions:acquire')) {
+        held = true;
+        res.end(JSON.stringify({ ...envelope, acquired: true }));
+      } else if (pathname.endsWith(':release') && held) {
+        held = false;
+        res.end(JSON.stringify({ ...envelope, released: true }));
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ code: 'runtime_session_not_found' }));
+      }
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    try {
+      const port = (server.address() as { port: number }).port;
+      hooks = new HostedHookSession(
+        { baseUrl: `http://127.0.0.1:${port}`, token: 'test' },
+        session,
+        pin,
+      );
+      await hooks.broker.warm();
+      expect(hooks.broker.runtime).toEqual({
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      });
+      if (mode === 'hook') await hooks.acquire();
+      if (mode === 'borrowed') await hooks.broker.acquire();
+      expect(hooks.mountHeld).toBe(mode !== 'none');
+      let failure: unknown;
+      try {
+        await hooks.close();
+      } catch (cause) {
+        failure = cause;
+      }
+      expect(failure).toBeUndefined();
+      expect(
+        brokerRequests.filter((r) => r.path.endsWith(':release')),
+      ).toHaveLength(mode === 'none' ? 0 : 1);
+      if (mode !== 'none')
+        expect(
+          brokerRequests.filter((r) => r.path.endsWith(':release'))[0].drain,
+        ).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+    }
   },
 );

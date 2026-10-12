@@ -749,6 +749,20 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             return post(lease, ManagedShellProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
                     .thenApply(bytes -> ManagedShellProtocol.response(bytes, session, immutable));
         }
+        if (ManagedMonitorProtocol.isOperation(immutable)) {
+            ManagedMonitorProtocol.validateSession(session, immutable);
+            Map<String, Object> body = Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable);
+            byte[] encoded;
+            try {
+                encoded = encodeToolRequest(body, 16 * 1024);
+            } catch (IllegalArgumentException tooLarge) {
+                throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                        "Runtime Monitor operation exceeds its size limit.", false);
+            }
+            return post(lease, ManagedMonitorProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                    .thenApply(bytes -> ManagedMonitorProtocol.response(bytes, session, immutable));
+        }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
         // Workspace context reads the Session's files directly, as file history
         // does: neither needs a provider Session acquired first.

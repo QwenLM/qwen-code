@@ -108,18 +108,21 @@ export interface HostedRuntimeRecoveryReport {
   executions: HostedRuntimeRecoveryExecution[];
 }
 
-export interface HostedRecoveryTurn {
+export type HostedRecoveryTurn = {
   promptId: string;
   report: HostedRuntimeRecoveryReport;
-  /** Whether the recovery acquired the Runtime Session, which a later
-   * continue/cancel must release. */
-  acquiredRuntime: boolean;
   /** Whether the coordinator can still drive this report: every execution
    * reads known, and a drive report reached results_ready. The takeover
    * arms the undriven marker only in that case, since the coordinator fails
    * an undrivable one without ever calling continue/cancel. */
   drivable: boolean;
-}
+} &
+  // Whether the recovery acquired the Runtime Session, which a later
+  // continue/cancel must release; an acquired lease carries the Broker
+  // identity its handback needs.
+  (| { acquiredRuntime: false }
+    | { acquiredRuntime: true; runtimeSessionId: string }
+  );
 
 /**
  * Why a takeover load cannot continue the parked Turn. Every reason is a
@@ -1831,7 +1834,12 @@ export async function recoverHostedRuntimeTurn(input: {
   };
   return recovered({
     promptId,
-    acquiredRuntime,
+    ...(acquiredRuntime
+      ? {
+          acquiredRuntime: true as const,
+          runtimeSessionId: broker.runtimeSessionId,
+        }
+      : { acquiredRuntime: false as const }),
     report,
     // The marker arms only for a report the coordinator can drive:
     // everything answered known, and a drive report reached results_ready.
