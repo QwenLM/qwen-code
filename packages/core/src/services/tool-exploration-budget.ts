@@ -74,12 +74,9 @@ export class ToolExplorationBudget {
     if (kind === Kind.Read || kind === Kind.Search || kind === Kind.Fetch) {
       this.calls++;
     } else {
-      this.calls = 0;
-      this.reminded = false;
-      // Commit the zeroed floor, as reset() does: a rollback later in the
-      // same round-trip must not resurrect the previous phase's count or
-      // reminder latch.
-      this.commit();
+      // A non-read ends the phase, and reset() commits the zeroed floor so a
+      // later rollback cannot resurrect the previous phase's count or latch.
+      this.reset();
     }
   }
 
