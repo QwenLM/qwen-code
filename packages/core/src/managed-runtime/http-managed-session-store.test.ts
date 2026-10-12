@@ -3791,4 +3791,63 @@ describe('collectNestedResourceRefs', () => {
       ),
     ).toEqual([]);
   });
+
+  it('closes over the page envelopes a result manifest names (#13856)', () => {
+    // The gap the B2 rig arm proved: the walker traversed checkpoints and
+    // records but never the manifest → page hop, so a staged page envelope
+    // never reached the commit's resource closure and the Artifact's read
+    // chain 404'd on it.
+    const pageRef = closureRef('managed-tool-result-page', 'page-envelope');
+    const manifestRef = closureRef('managed-tool-result-manifest', 'manifest');
+    const manifest = Buffer.from(
+      JSON.stringify({
+        toolResult: 'managed-tool-result/1',
+        type: 'manifest',
+        tenantId: 'tenant',
+        sessionId: 'session',
+        turnId: 'turn',
+        executionCallId: 'execution',
+        callId: 'call',
+        invocationDigest: `sha256:${'a'.repeat(64)}`,
+        bindingGeneration: '1',
+        captureId: 'capture',
+        revision: 1,
+        executionStatus: 'success',
+        exitCode: 0,
+        signal: null,
+        captureScope: 'process_pipes',
+        capturePolicy: 'complete_required',
+        captureStatus: 'complete',
+        captureReason: null,
+        upstreamTruncated: false,
+        contents: [
+          {
+            streamId: 'stdout',
+            role: 'stdout',
+            mimeType: 'application/octet-stream',
+            state: 'sealed',
+            byteLength: 3,
+            digest: 'b'.repeat(64),
+            missingRanges: [],
+            body: {
+              pages: [{ ref: pageRef, segmentCount: 1, byteLength: 3 }],
+            },
+          },
+          {
+            streamId: 'stderr',
+            role: 'stderr',
+            mimeType: 'application/octet-stream',
+            state: 'sealed',
+            byteLength: 0,
+            digest: 'c'.repeat(64),
+            missingRanges: [],
+            body: { pages: [] },
+          },
+        ],
+      }),
+      'utf8',
+    );
+    const nested = collectNestedResourceRefs(manifestRef, manifest);
+    expect(nested).toEqual([pageRef]);
+  });
 });
