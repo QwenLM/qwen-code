@@ -15,6 +15,7 @@ import { managedExtensionRecordKey } from '@qwen-code/qwen-code-core/managed-run
 import {
   CHILD_NOTIFICATION_INLINE_LIMIT,
   childResultNotificationText,
+  childRunEndedText,
   childWorkspaceOutcomeText,
   HostedChildAgentSession,
   parseChildWorkspaceReceipt,
@@ -1110,6 +1111,58 @@ describe('hosted workflow child session (#13803)', () => {
         target: 'session',
         state: 'cancelled',
       });
+    });
+  });
+
+  // #13858 R3-7: the ended sentence names the kind its record carries —
+  // no caller can hand it a label that contradicts the record.
+  it('names an ended run by the kind its record carries', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admit(launchParams());
+      await children.admitWorkflow(workflowParams({ childRunId: 'run-2' }));
+      for (const runId of ['run-1', 'run-2']) {
+        await children.settleFailed(runId, {
+          stopReason: 'quota_exceeded',
+          reason: 'byte_limit',
+          started: false,
+        });
+      }
+      expect(childRunEndedText(children.record('run-1')!)).toMatch(
+        /^Child agent run failed \(/,
+      );
+      expect(childRunEndedText(children.record('run-2')!)).toMatch(
+        /^Workflow child run failed \(/,
+      );
+    });
+  });
+
+  // #13858 R2-10: a workflow task is real — a message to it is refused for
+  // what it is, never as an unknown task.
+  it('refuses a message to a workflow child as a workflow task', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await children.admitWorkflow(workflowParams({ childRunId: 'run-2' }));
+      const refused = await children.sendToChild({
+        taskId: children.taskIdOf('run-2'),
+        text: 'hello',
+        messageId: 'msg_call-9',
+        continuationRunId: 'prompt:call-9',
+        executionCallId: 'prompt:call-9',
+        closing: false,
+      });
+      expect(refused).toMatchObject({ kind: 'refused' });
+      expect(JSON.stringify(refused)).toContain(
+        'is a workflow child, which takes no messages',
+      );
     });
   });
 

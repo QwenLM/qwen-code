@@ -99,6 +99,7 @@ import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   childLaunchAdmission,
+  childKindLabel,
   childRunEndedText,
   childWorkspaceAnswerSuffix,
 } from './hosted-child-agent-session.js';
@@ -1128,11 +1129,6 @@ export function hostedChildRunIdFor(promptId: string, callId: string): string {
   return hostedCallKey(promptId, callId);
 }
 
-/**
- * The live background arm's started receipt, shared with the recovery
- * gap fill's background-orphan branch: one sentence naming the task the
- * model should track and exactly how results land on it.
- */
 /** H4e-b1: what a member's started answer adds once its join committed. */
 export function hostedTeamJoinedText(member: {
   readonly teamName: string;
@@ -1141,8 +1137,17 @@ export function hostedTeamJoinedText(member: {
   return ` It joined team "${member.teamName}" as "${member.name}", and its result arrives labeled with that name.`;
 }
 
-export function hostedAgentBackgroundStartedText(taskId: string): string {
-  return `Child agent started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`;
+/**
+ * The live background arm's started receipt, shared with the recovery
+ * gap fill's background-orphan branch: one sentence naming the child's
+ * kind, the task the model should track and exactly how results land on
+ * it.
+ */
+export function hostedChildBackgroundStartedText(
+  kind: 'child_agent' | 'workflow',
+  taskId: string,
+): string {
+  return `${childKindLabel(kind)} started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`;
 }
 
 /**
@@ -4690,7 +4695,6 @@ export class HostedWorkspaceToolTurn {
         childRunId,
         model,
         signal,
-        'Child agent',
       );
     }
     const taskId = managedChildTaskId(key.sessionId, childRunId);
@@ -4732,7 +4736,13 @@ export class HostedWorkspaceToolTurn {
     const started = convertToFunctionResponse(
       request.call.name,
       request.call.callId,
-      [{ text: hostedAgentBackgroundStartedText(taskId) + membership }],
+      [
+        {
+          text:
+            hostedChildBackgroundStartedText('child_agent', taskId) +
+            membership,
+        },
+      ],
     );
     await this.commit('tool_result', started, model);
     return started;
@@ -4838,18 +4848,13 @@ export class HostedWorkspaceToolTurn {
         childRunId,
         model,
         signal,
-        'Workflow child',
       );
     }
     const taskId = managedChildTaskId(key.sessionId, childRunId);
     const started = convertToFunctionResponse(
       request.call.name,
       request.call.callId,
-      [
-        {
-          text: `Workflow child started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`,
-        },
-      ],
+      [{ text: hostedChildBackgroundStartedText('workflow', taskId) }],
     );
     await this.commit('tool_result', started, model);
     return started;
@@ -4880,7 +4885,6 @@ export class HostedWorkspaceToolTurn {
         run.childRunId,
         model,
         signal,
-        run.toolName === 'workflow' ? 'Workflow child' : 'Child agent',
         journaled,
       );
     }
@@ -4953,7 +4957,6 @@ export class HostedWorkspaceToolTurn {
     childRunId: string,
     model: string,
     signal: AbortSignal,
-    label: 'Child agent' | 'Workflow child',
     journaled?: ReadonlySet<string>,
   ): Promise<Part[]> {
     for (;;) {
@@ -4976,7 +4979,7 @@ export class HostedWorkspaceToolTurn {
             request.call.name,
             request.call.callId,
             [],
-            childRunEndedText(record, label),
+            childRunEndedText(record),
           );
           if (!journaled?.has(request.call.callId))
             await this.commit('tool_result', ended, model);

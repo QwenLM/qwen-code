@@ -335,17 +335,22 @@ export function childWorkspaceEndedSuffix(record: ChildSessionRun): string {
   return "\n\n[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.";
 }
 
+/** The model-facing name of a child Session kind, defined once so every
+ * answer about a run names the kind its record carries. */
+export function childKindLabel(
+  kind: ChildSessionRun['kind'],
+): 'Child agent' | 'Workflow child' {
+  return kind === 'workflow' ? 'Workflow child' : 'Child agent';
+}
+
 /**
  * #13753 I2: the one-line end of an ended child run's answer, with its
  * workspace suffix. The live answer and the recovery gap fill must agree
- * (decision 7), so the sentence is defined once, here. The label names the
- * run's kind ('Child agent' | 'Workflow child').
+ * (decision 7), so the sentence is defined once, here, and names the kind
+ * the record itself carries.
  */
-export function childRunEndedText(
-  record: ChildSessionRun,
-  label: 'Child agent' | 'Workflow child',
-): string {
-  return `${label} run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).${childWorkspaceEndedSuffix(record)}`;
+export function childRunEndedText(record: ChildSessionRun): string {
+  return `${childKindLabel(record.kind)} run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).${childWorkspaceEndedSuffix(record)}`;
 }
 
 /**
@@ -380,7 +385,7 @@ export function childResultNotificationText(params: {
   /** #13753 I2: a worktree child's merge outcome, already rendered. */
   readonly workspace?: string;
 }): string {
-  const label = params.kind === 'workflow' ? 'Workflow child' : 'Child agent';
+  const label = childKindLabel(params.kind);
   const head = [
     '<task-notification>',
     `<task-id>${escapeXml(params.taskId)}</task-id>`,
@@ -654,9 +659,21 @@ export class HostedChildAgentSession {
       }
       const run = this.runForTask(params.taskId);
       if (run === undefined) {
+        // A workflow child's task id is a real task — the refusal says why
+        // it takes no message instead of denying it exists.
+        const workflow = this.store.authority
+          .extensionRecordsInDomain('child_run')
+          .map((entry) => parseChildRun(entry.record))
+          .some(
+            (record) =>
+              record.kind === 'workflow' &&
+              this.taskIdOf(record.childRunId) === params.taskId,
+          );
         return {
           kind: 'refused',
-          reason: `No child agent task ${params.taskId} was launched by this Session.`,
+          reason: workflow
+            ? `Task ${params.taskId} is a workflow child, which takes no messages in this profile; read its task surface instead.`
+            : `No child agent task ${params.taskId} was launched by this Session.`,
         };
       }
       // A continuation that never started is no head and left its
