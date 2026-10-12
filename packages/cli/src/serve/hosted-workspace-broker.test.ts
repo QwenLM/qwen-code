@@ -57,6 +57,28 @@ async function fixture(
   );
 }
 
+it.each([false, true])(
+  'carries the original cleanup fence with drain=%s',
+  async (drain) => {
+    const requests: Array<Record<string, unknown>> = [];
+    const broker = await fixture((_path, body) => {
+      requests.push(body);
+      return { body: { ...identity, released: true } };
+    });
+    await broker.release({
+      bindingId: 'original-binding',
+      generation: '7',
+      ...(drain ? { drain: true } : {}),
+    });
+    expect(requests[0]).toMatchObject({
+      runtimeSessionId: 'turn',
+      cleanupBindingId: 'original-binding',
+      cleanupGeneration: '7',
+    });
+    expect(requests[0]['drain']).toBe(drain ? true : undefined);
+  },
+);
+
 it.each(['tenantId', 'workspaceId', 'capabilityDigest'])(
   'rejects a mismatched %s at acquisition',
   async (field) => {
