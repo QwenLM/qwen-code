@@ -17,6 +17,28 @@ export function isVisibleComposerModel(model: { id: string }): boolean {
 }
 
 /**
+ * Whether Settings ▸ Model must hide a row for the discontinued built-in OAuth
+ * entry. Settings holds the structured form (`authType` on the provider, the
+ * base id and the runtime flag on the model), so the policy the other two
+ * surfaces express over an encoded id is expressed over those fields here, in
+ * one place, rather than hardcoded at the call site.
+ *
+ * Runtime snapshots are deliberately kept, matching `isDiscontinuedModel` in
+ * the VS Code webview: a session already authenticated on the model keeps
+ * seeing the one it is running, and only the registry entry is hidden.
+ */
+export function isDiscontinuedSettingsModel(
+  provider: { authType: string },
+  model: { baseModelId: string; isRuntime: boolean },
+): boolean {
+  return (
+    provider.authType === 'qwen-oauth' &&
+    model.baseModelId === 'coder-model' &&
+    !model.isRuntime
+  );
+}
+
+/**
  * Whether the model picker is unavailable for a fresh standalone draft: no
  * session attached yet and the hydrated catalog has no user-selectable
  * models. Shared by every picker entry point (composer toolbar, StatusBar

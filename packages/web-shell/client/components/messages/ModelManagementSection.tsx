@@ -12,6 +12,7 @@ import type {
   DaemonWorkspaceProviderStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { isDiscontinuedSettingsModel } from '../../utils/composerModels';
 import styles from './ModelManagementSection.module.css';
 
 export interface ModelDeleteTarget {
@@ -145,20 +146,17 @@ export function ModelManagementSection({
     });
   }
   // Settings is the third surface that has to drop the discontinued built-in
-  // OAuth entry: the composer, ChatPane and the advisor list already hide it.
-  // The filter runs on the merged list, not on `providers`, because the loop
-  // above recreates the row from a persisted configuration after the provider
-  // input has been read. Keyed on the auth type rather than the encoded
-  // `coder-model(qwen-oauth)` string, so an unrelated OpenAI-compatible model
-  // that happens to be called `coder-model` still renders (issue #13965).
+  // OAuth entry, so it asks the shared policy rather than restating it. The
+  // filter runs on the merged list, not on `providers`, because the loop above
+  // recreates the row from a persisted configuration after the provider input
+  // has been read (issue #13965).
   for (const provider of displayProviders) {
-    if (provider.authType !== 'qwen-oauth') continue;
     provider.models = provider.models.filter(
-      (model) => model.baseModelId !== 'coder-model',
+      (model) => !isDiscontinuedSettingsModel(provider, model),
     );
   }
   const hasModels = displayProviders.some((p) => p.models.length > 0);
-  const currentRowKey = findCurrentRowKey(displayProviders, currentModelId);
+  const currentRowKey = findCurrentRowKey(providers, currentModelId);
 
   return (
     <div className={styles.section} data-testid="model-management">

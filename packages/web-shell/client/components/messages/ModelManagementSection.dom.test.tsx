@@ -606,7 +606,7 @@ describe('ModelManagementSection issue #13965 discontinued OAuth model', () => {
   // built-in `qwen-oauth` group reaches Settings even when the session runs on
   // an OpenAI-compatible provider. The composer already hides it; Settings did
   // not.
-  function oauthProvider(): DaemonWorkspaceProviderStatus {
+  function oauthProvider(isRuntime = false): DaemonWorkspaceProviderStatus {
     return {
       kind: 'model_provider',
       status: 'ok',
@@ -619,13 +619,13 @@ describe('ModelManagementSection issue #13965 discontinued OAuth model', () => {
           name: 'coder-model',
           baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
           isCurrent: false,
-          isRuntime: true,
+          isRuntime,
         },
       ],
     };
   }
 
-  it('hides the built-in OAuth group and its row', () => {
+  it('hides the built-in OAuth group and its registry row', () => {
     const { container } = renderSection({
       providers: [...providers(), oauthProvider()],
     });
@@ -635,6 +635,17 @@ describe('ModelManagementSection issue #13965 discontinued OAuth model', () => {
     ).toBeNull();
     // The unrelated OpenAI-compatible rows are untouched.
     expect(container.textContent).toContain('GPT-4o');
+  });
+
+  it('keeps a runtime snapshot of the same entry', () => {
+    // The carve-out `isDiscontinuedModel` makes in the VS Code webview: a
+    // session already authenticated on the model must still see the one it is
+    // running, so only the registry entry is hidden.
+    const { container } = renderSection({
+      providers: [...providers(), oauthProvider(true)],
+    });
+    expect(container.textContent).toContain('qwen-oauth');
+    expect(container.textContent).toContain('Runtime');
   });
 
   it('does not resurrect the row through the saved-configuration merge', () => {
