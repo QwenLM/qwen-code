@@ -71,6 +71,7 @@ export function isHostedFileHistoryRefusal(
 
 export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
+  private leaseAcquired = false;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -83,6 +84,10 @@ export class HostedWorkspaceBroker {
 
   get runtimeSessionId(): string {
     return this.identity.runtimeSessionId;
+  }
+
+  get acquired(): boolean {
+    return this.leaseAcquired;
   }
 
   constructor(
@@ -164,6 +169,7 @@ export class HostedWorkspaceBroker {
     if (response['acquired'] !== true)
       throw new Error('Runtime did not acquire the Session.');
     this.readRuntime(response);
+    this.leaseAcquired = true;
   }
 
   private readRuntime(response: Record<string, unknown>): void {
@@ -616,21 +622,27 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async release(expected?: {
-    bindingId: string;
-    generation: string;
-  }): Promise<void> {
+  async release(
+    options?:
+      | { bindingId: string; generation: string; readonly drain?: boolean }
+      | { readonly drain?: boolean },
+  ): Promise<void> {
+    const expected = options && 'bindingId' in options ? options : undefined;
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release`,
-      expected
-        ? {
-            cleanupBindingId: expected.bindingId,
-            cleanupGeneration: expected.generation,
-          }
-        : {},
+      {
+        ...(expected
+          ? {
+              cleanupBindingId: expected.bindingId,
+              cleanupGeneration: expected.generation,
+            }
+          : {}),
+        ...(options?.drain === true ? { drain: true } : {}),
+      },
     );
     if (response['released'] !== true)
       throw new Error('Runtime Session release is unconfirmed.');
+    this.leaseAcquired = false;
   }
 
   private async request(

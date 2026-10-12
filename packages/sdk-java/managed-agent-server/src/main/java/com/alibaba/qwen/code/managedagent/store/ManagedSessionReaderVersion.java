@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.PublicSurface;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
@@ -16,7 +17,7 @@ final class ManagedSessionReaderVersion {
         int ceiling = SUPPORTED;
         if (RequestContextHolder.getRequestAttributes() instanceof ServletRequestAttributes attributes) {
             var request = attributes.getRequest();
-            String path = request.getRequestURI().substring(request.getContextPath().length());
+            String path = PublicSurface.pathWithinApplication(request);
             if (path.startsWith("/internal/managed-session-store/")
                     || path.startsWith("/internal/managed-tool-publications/")) {
                 String header = request.getHeader(HEADER);

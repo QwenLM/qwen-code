@@ -251,11 +251,12 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             JsonCodec.requiredString(body, "requestId", "release request");
             String harnessSessionId = JsonCodec.requiredString(body,
                     "harnessSessionId", "release request");
+            boolean drain = Boolean.TRUE.equals(body.get("drain"));
             CompletionStage<Boolean> release = body.containsKey("cleanupBindingId")
                     ? service.releaseOriginal(harnessSessionId, runtimeSessionId,
                             JsonCodec.requiredString(body, "cleanupBindingId", "release request"),
-                            Long.parseLong(JsonCodec.requiredString(body, "cleanupGeneration", "release request")), lifecycleAuthority(exchange))
-                    : service.release(harnessSessionId, runtimeSessionId);
+                            Long.parseLong(JsonCodec.requiredString(body, "cleanupGeneration", "release request")), lifecycleAuthority(exchange), drain)
+                    : service.release(harnessSessionId, runtimeSessionId, drain);
             complete(exchange, release, released -> envelope(harnessSessionId,
                             runtimeSessionId, "released", released));
             return;

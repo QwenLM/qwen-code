@@ -175,6 +175,7 @@ export async function reconcileHostedTurnCleanup(
   session: ManagedSession,
   options: HostedWorkspaceBrokerOptions,
   promptId?: string,
+  drain = false,
 ): Promise<Map<string, 'owed' | 'confirmed'>> {
   const events = session.authority.eventsInSequenceRange(
     1,
@@ -216,6 +217,7 @@ export async function reconcileHostedTurnCleanup(
     await broker.release({
       bindingId: descriptor.bindingId,
       generation: descriptor.generation,
+      ...(drain ? { drain: true } : {}),
     });
     await commitCleanup(
       session,

@@ -29,7 +29,7 @@ vi.mock('@qwen-code/qwen-code-core/mods/discovery.js', () => ({
   loadModDependencies: mocks.dependencies,
 }));
 vi.mock('@qwen-code/qwen-code-core/mods/runtime.js', () => ({
-  ModRuntime: { create: mocks.create },
+  ModRuntime: { createGroup: mocks.create },
 }));
 
 describe('headless Mod session ownership', () => {
@@ -63,7 +63,7 @@ describe('headless Mod session ownership', () => {
     };
     const adapter = { emitSystemMessage: vi.fn() };
     const runtime = {
-      getCommands: () => [{ name: 'hello', description: 'Hello' }],
+      getCommands: vi.fn(() => [{ name: 'hello', description: 'Hello' }]),
       runCommand: vi.fn().mockResolvedValue('answer'),
       end: vi.fn().mockResolvedValue(undefined),
       dispose: vi.fn().mockResolvedValue(undefined),
@@ -76,8 +76,8 @@ describe('headless Mod session ownership', () => {
     });
     mocks.dependencies.mockResolvedValue([]);
     mocks.create.mockImplementation(
-      async (_source, _cwd, log: (entry: ModLog) => void) => {
-        log({ to: 'transcript', text: 'startup log' });
+      async (_plugins, _cwd, log: (entry: ModLog, plugin: string) => void) => {
+        log({ to: 'transcript', text: 'startup log' }, 'hello-mod');
         return runtime;
       },
     );
@@ -148,6 +148,7 @@ describe('headless Mod session ownership', () => {
       messageType: 'info',
       content: 'answer',
     });
+    expect(runtime.getCommands).toHaveBeenCalledWith('id');
     expect(runtime.runCommand).toHaveBeenCalledWith('hello', 'hello', signal);
     expect(commands[0].modelInvocable).toBe(false);
   });
@@ -192,7 +193,9 @@ describe('headless Mod session ownership', () => {
     )!;
     sessions.push(session);
     await session.initialize(new AbortController().signal);
-    expect(mocks.create.mock.calls[0][4]).toEqual({ value: 'system' });
+    expect(mocks.create.mock.calls[0][0][0].options).toEqual({
+      value: 'system',
+    });
   });
 
   it.each(['missing', 'cycle', 'options'])(
@@ -261,10 +264,11 @@ describe('headless Mod session ownership', () => {
           },
     );
     await session.initialize(new AbortController().signal);
-    expect(mocks.create.mock.calls.map(([source]) => source.root)).toEqual([
-      '/consumer',
-      '/base',
-    ]);
+    expect(
+      mocks.create.mock.calls[0][0].map(
+        (plugin: { source: { root: string } }) => plugin.source.root,
+      ),
+    ).toEqual(['/consumer', '/base']);
   });
 
   it('checks transitive ordinary dependencies but ignores unrelated declarations', async () => {
@@ -315,10 +319,11 @@ describe('headless Mod session ownership', () => {
     );
     mocks.dependencies.mockResolvedValue([{ name: 'base' }]);
     await session.initialize(new AbortController().signal);
-    expect(mocks.create.mock.calls.map(([source]) => source.root)).toEqual([
-      '/base',
-      '/consumer',
-    ]);
+    expect(
+      mocks.create.mock.calls[0][0].map(
+        (plugin: { source: { root: string } }) => plugin.source.root,
+      ),
+    ).toEqual(['/base', '/consumer']);
   });
 
   describe.each(['direct', 'ordinary'] as const)(
@@ -490,6 +495,25 @@ describe('headless Mod session ownership', () => {
     );
     expect(runtime.runCommand).not.toHaveBeenCalled();
     expect(runtime.dispose).toHaveBeenCalled();
+  });
+
+  it('invalidates the whole chain when another participating plugin is disabled', async () => {
+    const extensions = ['wrapper', 'provider'].map((name) => ({
+      id: name,
+      name,
+      path: '/' + name,
+      version: '1.0.0',
+      isActive: true,
+    }));
+    const { session, runtime } = setup({ getExtensions: () => extensions });
+    const commands = await session.loadCommands(new AbortController().signal);
+    extensions[0].isActive = false;
+    await expect(commands[1].action!({} as CommandContext, '')).rejects.toThrow(
+      /chain changed/,
+    );
+    expect(runtime.runCommand).not.toHaveBeenCalled();
+    await session.close();
+    expect(runtime.end).not.toHaveBeenCalled();
   });
 
   it('keeps real CommandService namespacing and denylist behavior', async () => {

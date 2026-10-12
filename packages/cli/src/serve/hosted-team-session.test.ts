@@ -13,6 +13,7 @@ import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import {
   parseTeamState,
@@ -73,7 +74,7 @@ beforeEach(async () => {
   });
   const store = { authority: session.authority, resources: session.resources };
   children = new HostedChildAgentSession(store, sessionKey);
-  teams = new HostedTeamSession(store, sessionKey);
+  teams = new HostedTeamSession(store, sessionKey, children);
 });
 
 afterEach(async () => {
@@ -162,6 +163,7 @@ async function stopDeleteAtClosing(callKey: string): Promise<void> {
       }),
     },
     sessionKey,
+    children,
   );
   await expect(failing.run('team_delete', {}, callKey)).rejects.toThrow(
     'store unavailable',
@@ -854,6 +856,7 @@ describe('the board', () => {
         }),
       },
       sessionKey,
+      children,
     );
     // The description is a fresh resource on every computation, so a replay
     // that rebuilt the committed revision would conflict under its command.
@@ -1015,6 +1018,12 @@ it('rebuilds the team and its board from a reopened journal', async () => {
   const reopened = new HostedTeamSession(
     { authority: session.authority, resources: session.resources },
     sessionKey,
+    // The replaced session's funnel from beforeEach is closed with it, so
+    // this one is rebuilt beside the reopened funnel, as the loader does.
+    new HostedChildAgentSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+    ),
   );
   expect(session.authority.extensionRecordsInDomain('team_state')).toEqual(
     before,
@@ -1023,6 +1032,181 @@ it('rebuilds the team and its board from a reopened journal', async () => {
   expect(await reopened.run('task_list', {}, 'prompt:list')).toContain(
     '#1 [pending] — audit',
   );
+});
+
+// H4e-b3a (decision 10): the lead stops a member with request_shutdown,
+// committing the same stop an H4f cancel commits on the member's head, and
+// team_delete's refusal points here until the stop settles.
+describe('request_shutdown (H4e-b3a)', () => {
+  it('validates its argument in the batch', () => {
+    expect(hostedTeamArgumentError('request_shutdown', {})).toBe(
+      'to must be a string.',
+    );
+    expect(
+      hostedTeamArgumentError('request_shutdown', { to: 'alice', kind: 'x' }),
+    ).toBe('Hosted request_shutdown received unsupported argument "kind".');
+  });
+
+  it('refuses no team, an empty name and a stranger', async () => {
+    expect(
+      await refusal(teams.run('request_shutdown', { to: 'alice' }, 'p:s')),
+    ).toBe('No active team. Create a team first.');
+    await createTeam();
+    expect(
+      await refusal(teams.run('request_shutdown', { to: '!' }, 'p:s')),
+    ).toBe(
+      'Teammate name "!" sanitizes to an empty string. Choose a name with at least one alphanumeric character.',
+    );
+    expect(
+      await refusal(teams.run('request_shutdown', { to: 'bob' }, 'p:s')),
+    ).toBe('"bob" is not a member of team "review".');
+  });
+
+  it('commits the H4f stop on a running head, then reads it on replay', async () => {
+    await createTeam();
+    await addMember('alice');
+    expect(teams.committedBy('request_shutdown', 'p:stop')).toBe(false);
+    expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
+      'alice is being stopped. Delete the team once task_list shows it ended.',
+    );
+    expect(children.record('run-alice')!.stopRequested).toBe(true);
+    expect(teams.committedBy('request_shutdown', 'p:stop')).toBe(true);
+    // The stop evidence keys on the call, not the member: a call key that
+    // never ran has committed nothing.
+    expect(teams.committedBy('request_shutdown', 'p:other')).toBe(false);
+    // A re-driven call answers its committed stop from the records.
+    expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
+      'alice is already being stopped. Delete the team once task_list shows it ended.',
+    );
+    // team_delete still waits for the stop to settle.
+    expect(await refusal(teams.run('team_delete', {}, 'p:del'))).toContain(
+      'still has running members',
+    );
+    await settle('run-alice');
+    expect(await teams.run('team_delete', {}, 'p:del')).toBe(
+      'Team "review" deleted.',
+    );
+  });
+
+  it('says a continuation stopped before it attached may end without starting', async () => {
+    await createTeam();
+    await addMember('alice');
+    await settle('run-alice');
+    await children.sendToChild({
+      taskId: children.taskIdOf('run-alice'),
+      text: 'more work',
+      messageId: 'msg_shut_more',
+      continuationRunId: 'shut:more',
+      executionCallId: 'shut:more',
+      closing: false,
+    });
+    await children.requestStop('shut:more');
+    expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
+      'alice is already being stopped, before its latest continuation started: it may end without starting, and alice then goes back to its predecessor run. Check task_list once it settles; do not read the member as ended on this stop alone.',
+    );
+  });
+
+  it('leaves a finished head untouched and says so', async () => {
+    await createTeam();
+    await addMember('alice');
+    await settle('run-alice');
+    expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
+      'alice has finished: it takes no work unless you send it some, so nothing needed stopping. Its run was not touched.',
+    );
+    expect(children.record('run-alice')!.stopRequested).toBe(false);
+  });
+
+  it('names a head that completed after a stop was requested', async () => {
+    await createTeam();
+    await addMember('alice');
+    await children.requestStop('run-alice');
+    await settle('run-alice');
+    expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
+      'alice completed after a stop was requested; there is nothing left to stop.',
+    );
+  });
+
+  it('names an ended member', async () => {
+    await createTeam();
+    await addMember('alice');
+    await children.settleFailed('run-alice', {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+    expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
+      'alice has failed; there is nothing left to stop.',
+    );
+  });
+
+  it('does not credit a user cancel to a call that never ran', async () => {
+    await createTeam();
+    await addMember('alice');
+    // The H4f user cancel commits its stop under the revision-shaped id.
+    await children.requestStop('run-alice');
+    expect(teams.committedBy('request_shutdown', 'p:new')).toBe(false);
+    expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:new')).toBe(
+      'alice is already being stopped. Delete the team once task_list shows it ended.',
+    );
+    expect(teams.committedBy('request_shutdown', 'p:new')).toBe(false);
+  });
+
+  it('reads its keyed stop after the stopped continuation fell back', async () => {
+    await createTeam();
+    await addMember('alice');
+    await settle('run-alice');
+    await children.sendToChild({
+      taskId: children.taskIdOf('run-alice'),
+      text: 'more work',
+      messageId: 'msg_shut_more',
+      continuationRunId: 'shut:more',
+      executionCallId: 'shut:more',
+      closing: false,
+    });
+    expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
+      'alice is being stopped. Delete the team once task_list shows it ended.',
+    );
+    // The stopped continuation never starts and the head falls back, yet
+    // the keyed stop evidence still credits the call that requested it.
+    await children.settleCancelled('shut:more', { started: false });
+    expect(teams.committedBy('request_shutdown', 'p:stop')).toBe(true);
+  });
+
+  it('answers the settled head when its settlement outraced the stop', async () => {
+    await createTeam();
+    await addMember('alice');
+    const racing = new HostedTeamSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      {
+        requestStop: async (childRunId) => {
+          // The settlement beat the stop commit to the head's revision.
+          await settle(childRunId);
+          throw new ManagedSessionConflictError('the revision raced');
+        },
+      },
+    );
+    expect(
+      await racing.run('request_shutdown', { to: 'alice' }, 'p:stop'),
+    ).toBe(
+      'alice has finished: it takes no work unless you send it some, so nothing needed stopping. Its run was not touched.',
+    );
+    expect(racing.committedBy('request_shutdown', 'p:stop')).toBe(false);
+  });
+
+  it('refuses a stop on a lane that carries no child funnel', async () => {
+    await createTeam();
+    await addMember('alice');
+    const funnelless = new HostedTeamSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+    );
+    expect(
+      await refusal(
+        funnelless.run('request_shutdown', { to: 'alice' }, 'p:stop'),
+      ),
+    ).toBe('alice cannot be stopped from this Session.');
+  });
 });
 
 // H4e-b2 decision 2: a member is its continuation chain; the roster names

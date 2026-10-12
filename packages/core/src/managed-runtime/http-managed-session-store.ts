@@ -35,6 +35,10 @@ import {
 } from './hosted-recovery-records.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
 import {
+  MANAGED_TOOL_RESULT_KINDS,
+  parseToolResultManifestBytes,
+} from './managed-tool-result.js';
+import {
   MANAGED_MESSAGE_CHUNKS_KIND,
   managedMessageChunkParts,
 } from './managed-message-chunks.js';
@@ -1825,6 +1829,18 @@ export function collectNestedResourceRefs(
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
     return collectRefs([record]);
+  }
+  // A result manifest names its page envelopes: they are Session resources
+  // too, staged exactly like the manifest, and a commit that closes over
+  // the manifest but not its pages would leave the Artifact's read chain
+  // 404ing on the page hop (#13856). A body this parse cannot represent
+  // has no pages to close over, exactly like the input branch below.
+  if (ref.kind === MANAGED_TOOL_RESULT_KINDS.manifest) {
+    try {
+      return collectRefs([parseToolResultManifestBytes(bytes)]);
+    } catch {
+      return [];
+    }
   }
   // An input's envelope embeds what it admits — a channel attachment's ref
   // among them. The commit closes over those bytes exactly like an
