@@ -278,6 +278,58 @@ class ManagedAgentDefinitionTest {
         assertThat(rows(tenant)).isZero();
     }
 
+    @Test
+    void latestForUpdateBlocksAConcurrentLockingReadUntilCommit() throws Exception {
+        // Design §8: "no partially updated read under a concurrent update".
+        // A plain latest() takes no lock, so a concurrent transaction could
+        // interleave; latestForUpdate must hold the row lock until commit.
+        String tenant = tenant();
+        String agentId = json(create(tenant, "for-update", DEFINITION)
+                .andExpect(status().isAccepted())).path("id").asText();
+        javax.sql.DataSource dataSource = jdbc.getDataSource();
+        java.util.concurrent.CountDownLatch held =
+                new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicLong blockedMillis =
+                new java.util.concurrent.atomic.AtomicLong(-1);
+        Thread contender = new Thread(() -> {
+            try (java.sql.Connection connection = dataSource.getConnection()) {
+                connection.setAutoCommit(false);
+                held.await();
+                long started = System.nanoTime();
+                // A second FOR UPDATE read must wait for the holder's lock.
+                try (java.sql.Statement statement = connection.createStatement()) {
+                    statement.executeQuery("SELECT revision FROM"
+                            + " managed_agent_definition WHERE tenant_id = '" + tenant
+                            + "' AND agent_id = '" + agentId + "'"
+                            + " ORDER BY revision DESC LIMIT 1 FOR UPDATE");
+                }
+                blockedMillis.set(
+                        (System.nanoTime() - started) / 1_000_000);
+                connection.commit();
+            } catch (Exception error) {
+                throw new RuntimeException(error);
+            }
+        });
+        contender.start();
+        try (java.sql.Connection holder = dataSource.getConnection()) {
+            holder.setAutoCommit(false);
+            try (java.sql.Statement statement = holder.createStatement()) {
+                statement.executeQuery("SELECT revision FROM"
+                        + " managed_agent_definition WHERE tenant_id = '" + tenant
+                        + "' AND agent_id = '" + agentId + "'"
+                        + " ORDER BY revision DESC LIMIT 1 FOR UPDATE");
+            }
+            held.countDown();
+            // Hold the lock long enough that an unlocked read would finish
+            // well before commit.
+            Thread.sleep(500);
+            holder.commit();
+        }
+        contender.join(5000);
+        assertThat(contender.isAlive()).isFalse();
+        assertThat(blockedMillis.get()).isGreaterThanOrEqualTo(300);
+    }
+
     private ResultActions create(String tenant, String key, String body)
             throws Exception {
         return mvc.perform(post("/v1/agents").header(TENANT, tenant)
