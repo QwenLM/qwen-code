@@ -878,6 +878,8 @@ export class NativeLspService {
     let filePath: string | undefined;
     try {
       const url = new URL(uri);
+      // Windows drive paths can parse as single-letter URI schemes.
+      if (url.protocol.length === 2) return undefined;
       current = url.protocol !== 'file:';
       if (!current) filePath = fileURLToPath(url);
     } catch {
@@ -894,7 +896,9 @@ export class NativeLspService {
       }
     }
     cache.set(uri, current);
-    if (!current) this.deferWorkspaceDocument(uri);
+    if (!current && filePath !== undefined) {
+      this.deferWorkspaceDocument(pathToFileURL(filePath).toString());
+    }
     return current;
   }
 

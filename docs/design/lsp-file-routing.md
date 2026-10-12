@@ -90,8 +90,10 @@ are marked as requiring `/directory add` before another file query. No automatic
 allow-list or expansion of trusted directories is introduced. Workspace diagnostics
 and symbols omit results outside current workspace scope so revoked buffers are not
 presented as current. Valid virtual result URIs remain visible with a non-file
-marker; malformed URIs and bare paths are omitted. Workspace diagnostics reject a
-report with unusable URI entries when no usable nonempty diagnostics remain;
+marker; malformed URIs and bare paths are omitted. Single-letter URI schemes are
+treated as Windows drive paths after URI parsing, including drive-relative and
+whitespace-padded spellings. Workspace diagnostics reject a report with unusable
+URI entries when no usable nonempty diagnostics remain;
 legitimate out-of-scope file URIs do not count as unusable. Workspace output
 discloses that out-of-scope file results are omitted, even when
 empty. Result filtering uses fresh physical paths without per-item refusal logs,
@@ -100,8 +102,11 @@ URI syntax is omitted, but physical-resolution failures (including EACCES, ELOOP
 ESTALE and EIO) reject both workspace queries rather than certifying an unknown
 scope as outside. An unresolved result does not change delivered snapshots,
 pending-close metadata, hierarchy generations or the response-local scope cache;
-confirmed scope loss still defers the document. Tracked-document synchronization
-also rethrows physical-resolution failures rather than treating unknown scope as
+confirmed scope loss still defers the document using the canonical URI of the
+parsed file path, including spellings normalized by URL parsing. This preserves
+symlink aliases and invalidates the same lifecycle and hierarchy identity used by
+file queries. Tracked-document synchronization also rethrows physical-resolution
+failures rather than treating unknown scope as
 excluded. This uses the existing attempted-synchronization close/replay lifecycle,
 distinct from the state-preserving result-only check. Each workspace query has a `max(1000, limit)` result-scan budget across all servers,
 including rejected, malformed and duplicate entries. Workspace diagnostics refund

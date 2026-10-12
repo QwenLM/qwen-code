@@ -294,6 +294,39 @@ describe('NativeLspService disk document synchronization', () => {
             : service.workspaceDiagnostics(undefined, limit),
         );
 
+      it.each([
+        'C:\\proj\\src\\a.ts',
+        'c:/proj/a.ts',
+        'C:proj\\src\\a.ts',
+        'c:proj/a.ts',
+        '\tC:\\proj\\src\\a.ts',
+        ' c:/proj/a.ts',
+      ])(
+        'omits Windows bare path %s while preserving valid results',
+        async (target) => {
+          connection.request.mockResolvedValue(response([target, uri]));
+          const results = await query();
+          expect(results).toHaveLength(1);
+          expect(results[0]).toMatchObject(
+            method === 'workspace/symbol' ? { location: { uri } } : { uri },
+          );
+        },
+      );
+
+      it.each(['untitled:Untitled-1', 'jdt://contents/Foo.class'])(
+        'preserves virtual result URI %s',
+        async (target) => {
+          connection.request.mockResolvedValue(response([target]));
+          const results = await query();
+          expect(results).toHaveLength(1);
+          expect(results[0]).toMatchObject(
+            method === 'workspace/symbol'
+              ? { location: { uri: target } }
+              : { uri: target },
+          );
+        },
+      );
+
       it.each(['EACCES', 'ELOOP', 'ESTALE', 'EIO'])(
         'rejects unresolved result scope with %s instead of reporting clean',
         async (code) => {
@@ -1889,6 +1922,8 @@ describe('NativeLspService disk document synchronization', () => {
               [
                 'workspace',
                 'symbols',
+                'padded workspace',
+                'padded symbols',
                 'diagnostics',
                 'incomingCalls',
                 'outgoingCalls',
@@ -1901,19 +1936,25 @@ describe('NativeLspService disk document synchronization', () => {
           handle.textDocumentSync = sync;
           const [previous] = await prepare(extraUri);
           workspace.removeDirectory(extra);
-          if (operation === 'workspace') {
+          const reportedUri = operation.startsWith('padded')
+            ? ` \t${extraUri}`
+            : extraUri;
+          if (operation === 'workspace' || operation === 'padded workspace') {
             connection.request.mockResolvedValueOnce({
               items: [
                 {
-                  uri: extraUri,
+                  uri: reportedUri,
                   items: [{ range, message: 'revoked', severity: 1 }],
                 },
               ],
             });
             expect(await workspaceDiagnostics()).toEqual([]);
-          } else if (operation === 'symbols') {
+          } else if (
+            operation === 'symbols' ||
+            operation === 'padded symbols'
+          ) {
             connection.request.mockResolvedValueOnce([
-              { name: 'fn', location: { uri: extraUri, range } },
+              { name: 'fn', location: { uri: reportedUri, range } },
             ]);
             expect(await run(service.workspaceSymbols('fn'))).toEqual([]);
           } else if (operation === 'diagnostics') {
@@ -6064,6 +6105,12 @@ describe('NativeLspService disk document synchronization', () => {
     it.each(
       [
         'bare absolute path',
+        'C:\\proj\\src\\a.ts',
+        'c:/proj/a.ts',
+        'C:proj\\src\\a.ts',
+        'c:proj/a.ts',
+        '\tC:\\proj\\src\\a.ts',
+        ' c:/proj/a.ts',
         'file://[invalid',
         'https://[invalid',
         'file:///%ZZ',
