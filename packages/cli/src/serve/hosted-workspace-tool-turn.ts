@@ -225,7 +225,14 @@ function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
 
 // H3: background admissions exist only while the child_run domain is
 // enabled for commits; otherwise the turn keeps its foreground refusals.
+// QWEN_MANAGED_SESSION_TEST_DOMAINS is a test-only escape honored only by
+// these two admission checks so hosted probe witnesses can admit selected
+// H3 domains on an unmodified bundle; production never sets it, and the
+// store-side commit gate below keeps refusing what the registry disables.
 function childRunAdmissionsEnabled(): boolean {
+  if (admissionTestDomains('child_run')) {
+    return true;
+  }
   try {
     assertManagedSessionDomainEnabled('child_run');
     return true;
@@ -237,12 +244,23 @@ function childRunAdmissionsEnabled(): boolean {
 // H3: Monitor admissions exist only while the monitor_run domain is
 // enabled for commits; otherwise the turn keeps its monitor refusals.
 function monitorRunAdmissionsEnabled(): boolean {
+  if (admissionTestDomains('monitor_run')) {
+    return true;
+  }
   try {
     assertManagedSessionDomainEnabled('monitor_run');
     return true;
   } catch {
     return false;
   }
+}
+
+function admissionTestDomains(domain: string): boolean {
+  return (process.env['QWEN_MANAGED_SESSION_TEST_DOMAINS'] ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .includes(domain);
 }
 
 // H4b: child-agent admissions exist only while the child_run domain's
@@ -2405,7 +2423,7 @@ export class HostedWorkspaceToolTurn {
           ),
           ordinal,
           inputDigest:
-            (request.isShell || request.monitoring) && this.publication
+            request.isShell && this.publication
               ? request.argsDigest.slice(7)
               : (request.inputDigest ?? request.digest.slice(7)),
           progressCursor: null,
