@@ -16,6 +16,8 @@ import { DWClient } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
   BackgroundResponseContext,
+  BackgroundOutputDelivery,
+  BackgroundOutputPacket,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
   ChannelPermissionRequestContext,
@@ -14020,6 +14022,52 @@ describe('DingtalkChannel proactive send', () => {
       }
     },
   );
+
+  it('rechecks serialized payload budgets after an unsent background header changes', async () => {
+    const channel = proactive(createChannel({ interactiveCards: undefined }));
+    const { sendCalls } = stubProactiveFetch(
+      (index) => new Response('{}', { status: index === 0 ? 429 : 200 }),
+    );
+    const deliver = (
+      channel as unknown as {
+        createBackgroundOutputDelivery(
+          sessionId: string,
+          target: { target: SessionTarget; sourceLabel: string },
+        ): BackgroundOutputDelivery;
+      }
+    ).createBackgroundOutputDelivery('synthetic-session', {
+      target: groupTarget,
+      sourceLabel: 'Worker one',
+    });
+    const value = 'x'.repeat(14_939);
+    const packet: BackgroundOutputPacket = {
+      kind: 'agent',
+      status: 'running',
+      text: `\`\`\`ts\n${value}\n\`\`\``,
+      partial: false,
+      turnComplete: false,
+    };
+    await expect(deliver(packet)).rejects.toThrow();
+    await expect(
+      deliver({ ...packet, status: 'completed', text: '', turnComplete: true }),
+    ).resolves.toBeDefined();
+    const retried = sendCalls().slice(1).map(msgParamOf);
+    expect(retried.length).toBeGreaterThan(1);
+    for (const message of retried) {
+      expect(Buffer.byteLength(JSON.stringify(message))).toBeLessThanOrEqual(
+        15_000,
+      );
+      expect(message.text.startsWith('Worker one\n\n')).toBe(true);
+    }
+    expect(
+      retried
+        .map((message) =>
+          [...message.text.matchAll(/x+/g)].map((run) => run[0]).join(''),
+        )
+        .join(''),
+    ).toBe(value);
+    expect(retried[0]!.text).toContain('✅ Background task completed');
+  });
 
   it('splits long proactive messages into continuation chunks', async () => {
     const channel = proactive(createChannel());

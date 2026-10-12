@@ -10,6 +10,7 @@ export interface MarkdownChunkOptions {
 }
 
 const parser = unified().use(remarkParse).use(remarkGfm);
+const blockParser = unified().use(remarkParse);
 const fallbackNotice =
   '> Markdown element exceeds the message limit; original text follows in parts.\n\n';
 
@@ -40,6 +41,7 @@ function chunkMarkdown(
     measure ??
     ((value: string) =>
       unit === 'utf8' ? Buffer.byteLength(value, 'utf8') : value.length);
+  const minimum = size(`${fallbackNotice}\`\`\`text\n\n\`\`\``) + 4;
   if (size(text) <= targetLength && !/`{3}|~{3}/u.test(text)) return [text];
   const source = (node: Nodes) =>
     text.slice(node.position!.start.offset!, node.position!.end.offset!);
@@ -109,25 +111,6 @@ function chunkMarkdown(
             break;
           }
         }
-        const ampersand = value.lastIndexOf('&', end - 1);
-        if (firstOnly && ampersand >= 0) {
-          const entity = /^&(?:#\d+|#x[\da-f]+|[a-z][a-z\d]*);/iu.exec(
-            value.slice(ampersand),
-          );
-          if (entity && ampersand + entity[0].length > end) {
-            end = ampersand || entity[0].length;
-          }
-        }
-        // Keep escaped punctuation with its escape character.
-        const escapes = value.slice(0, end).match(/\\+$/u)?.[0].length ?? 0;
-        const next = value.charCodeAt(end);
-        const escapedPunctuation =
-          (next >= 33 && next <= 47) ||
-          (next >= 58 && next <= 64) ||
-          (next >= 91 && next <= 96) ||
-          (next >= 123 && next <= 126);
-        if (firstOnly && escapes % 2 && escapedPunctuation)
-          end = end > 1 ? end - 1 : 2;
       }
       if (firstOnly && end < value.length) {
         const whitespace = /^\s+/u.exec(value.slice(end))?.[0].length ?? 0;
@@ -152,6 +135,29 @@ function chunkMarkdown(
             }
           }
         }
+      }
+      if (firstOnly && end < value.length) {
+        const ampersand = value.lastIndexOf('&', end - 1);
+        if (firstOnly && ampersand >= 0) {
+          const entity = /^&(?:#\d+|#x[\da-f]+|[a-z][a-z\d]*);/iu.exec(
+            value.slice(ampersand),
+          );
+          if (entity && ampersand + entity[0].length > end) {
+            end =
+              ampersand ||
+              (size(entity[0]) <= maxLength ? entity[0].length : end);
+          }
+        }
+        // Keep escaped punctuation with its escape character.
+        const escapes = value.slice(0, end).match(/\\+$/u)?.[0].length ?? 0;
+        const next = value.charCodeAt(end);
+        const escapedPunctuation =
+          (next >= 33 && next <= 47) ||
+          (next >= 58 && next <= 64) ||
+          (next >= 91 && next <= 96) ||
+          (next >= 123 && next <= 126);
+        if (firstOnly && escapes % 2 && escapedPunctuation)
+          end = end > 1 ? end - 1 : 2;
       }
       parts.push(value.slice(0, end));
       value = value.slice(end);
@@ -189,11 +195,17 @@ function chunkMarkdown(
       budget,
       Math.max(unit === 'utf8' ? 4 : 2, soft - overhead),
     );
-    // A fence whose wrapper dwarfs its payload degenerates into one
-    // near-empty message per few characters; past a bound the source goes
-    // out as bare text rather than storming wrappers or throwing.
-    if (preferred <= 0 || Math.ceil(size(value) / preferred) > 256)
-      return splitText(value, Math.max(unit === 'utf8' ? 4 : 2, soft));
+    if (preferred < soft / 2 || Math.ceil(size(value) / preferred) > 256) {
+      const info = opening.slice(closing.length).trimStart();
+      const bodyBudget = Math.floor(
+        Math.min(soft, limit - size(notice + info + '\n\n') - 8) / 3,
+      );
+      return splitText(value, bodyBudget).map((part) => {
+        const fence = fenceFor(part, info);
+        const separator = info.startsWith(fence[0]!) ? ' ' : '';
+        return `${notice}${fence}${separator}${info}\n${part}${!notice && part.endsWith('\n') ? '' : '\n'}${fence}`;
+      });
+    }
     const parts: string[] = [];
     let current = '';
     for (const line of value.match(/[^\n]*\n|[^\n]+$/gu) ?? []) {
@@ -227,11 +239,57 @@ function chunkMarkdown(
   }
 
   if (depth >= 16) return plainFallback(text, maxLength);
-  // remark-gfm parses GFM tables in quadratic time; past a bound, split
-  // linearly instead of blocking the channel daemon's send path on the parse.
-  if (size(text) > 100_000)
-    return splitText(text, Math.max(unit === 'utf8' ? 4 : 2, targetLength));
-  const tree = parser.parse(text);
+  // GFM table bodies parse quadratically. For large documents, identify
+  // blocks with CommonMark and validate only each table's two header lines.
+  const large = size(text) > 100_000;
+  const tree = (large ? blockParser : parser).parse(text);
+  if (large) {
+    const referenceContext =
+      '\n\n' +
+      tree.children
+        .filter((node) => node.type === 'definition')
+        .map(source)
+        .join('\n');
+    const parseAt = (raw: string, offset: number) => {
+      const children = parser
+        .parse(raw + referenceContext)
+        .children.filter((node) => node.type !== 'definition');
+      const shift = (child: Nodes) => {
+        child.position!.start.offset! += offset;
+        child.position!.end.offset! += offset;
+        if ('children' in child) child.children.forEach(shift);
+      };
+      children.forEach(shift);
+      return children;
+    };
+    tree.children = tree.children.flatMap((node): RootContent[] => {
+      if (node.type !== 'paragraph') return [node];
+      const raw = source(node);
+      const lines = raw.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
+      let offset = 0;
+      for (let i = 1; i < lines.length; i++) {
+        const header = lines[i - 1]!;
+        const delimiter = lines[i]!;
+        if (/^[ \t|:-]+\r?\n?$/u.test(delimiter)) {
+          const table = parser.parse(header + delimiter).children[0];
+          if (table?.type === 'table') {
+            const prefix = raw.slice(0, offset);
+            const before = parseAt(prefix, node.position!.start.offset!);
+            table.position = {
+              start: {
+                ...node.position!.start,
+                offset: node.position!.start.offset! + offset,
+              },
+              end: node.position!.end,
+            };
+            return [...before, table];
+          }
+        }
+        offset += header.length;
+      }
+      return parseAt(raw, node.position!.start.offset!);
+    });
+  }
   const definitions: Definition[] = [];
   let unfinishedFence = false;
   const collect = (node: Nodes) => {
@@ -250,7 +308,6 @@ function chunkMarkdown(
     hard,
     targetLength - Math.min(size(suffix), Math.floor(targetLength / 2)),
   );
-  const minimum = size(`${fallbackNotice}\`\`\`text\n\n\`\`\``) + 4;
   // A body window below the floor degenerates into mostly-duplicated messages
   // that each re-carry the suffix; degrade the whole document instead. A
   // nested level whose inherited budget cannot hold its own wrapped fallback
@@ -395,14 +452,13 @@ function chunkMarkdown(
           itemText,
         )!;
         const prefix = marker[0];
-        // Continuation lines sit at the item's content column, which for a
-        // task item includes the checkbox (prefix), not just the bullet.
-        const indent = ' '.repeat(prefix.length);
+        const indent = ' '.repeat(marker[1]!.length);
         const bareIndent = ' '.repeat(marker[1]!.length);
         const body = itemText
           .slice(prefix.length)
           .replace(new RegExp(`^ {1,${indent.length}}`, 'gm'), '');
         const wrap = (piece: string) => {
+          piece = piece.replace(/^\s*\n/u, '');
           const nested = /^(?:[-+*]|\d+[.)])\s/u.test(piece);
           // A piece that opens a block construct cannot stay on the marker
           // line (only paragraph text can follow a marker); give it its own

@@ -718,7 +718,7 @@ describe('round-5 review regressions', () => {
       const text =
         '- [x] intro ' +
         'p'.repeat(3760) +
-        '\n\n      ```js\n      const x = 1;\n      ```\n\n      trailing text here\n';
+        '\n\n  ```js\n  const x = 1;\n  ```\n\n  trailing text here\n';
       const chunks = splitMarkdown(text, options);
       let jsCode = 0;
       for (const chunk of chunks)
@@ -760,7 +760,7 @@ describe('round-5 review regressions', () => {
     }
   });
 
-  it('degrades to plain text when a fence plus notice cannot fit the budget', () => {
+  it('uses closed fragment fences when a whole-source fence is too costly', () => {
     for (const unit of ['utf16', 'utf8'] as const) {
       const options: MarkdownChunkOptions = { ...defaults, unit };
       for (const run of [1860, 9957]) {
@@ -775,7 +775,12 @@ describe('round-5 review regressions', () => {
           'a'.repeat(19_960);
         const chunks = splitMarkdown(text, options);
         expect(chunks.length).toBeLessThan(50);
-        expect(chunks.join('')).toBe(text);
+        expect(chunks.flatMap(code).join('')).toBe(text);
+        expect(
+          chunks.every((chunk) =>
+            chunk.includes('original text follows in parts'),
+          ),
+        ).toBe(true);
         checkBudget(chunks, options);
       }
     }
@@ -790,7 +795,103 @@ describe('round-5 review regressions', () => {
     const start = Date.now();
     const chunks = splitMarkdown(text, defaults);
     expect(Date.now() - start).toBeLessThan(10_000);
-    expect(chunks.join('')).toBe(text);
+    const recovered = chunks.flatMap((chunk) =>
+      chunk.trimEnd().split('\n').slice(2),
+    );
+    expect(recovered).toEqual(rows.split('\n'));
+    expect(
+      chunks.every((chunk) => chunk.startsWith('| a | b |\n|---|---|\n')),
+    ).toBe(true);
     checkBudget(chunks, defaults);
   });
+});
+
+it.each(['utf16', 'utf8'] as const)(
+  'retains final-cut escapes, entities and task paragraphs (%s)',
+  (unit) => {
+    const options = { ...defaults, unit };
+    for (const [lead, element] of [
+      [3794, '&amp;'],
+      [3797, '\\*'],
+    ] as const) {
+      const text = 'a'.repeat(lead) + element + ' '.repeat(8) + 'tail';
+      const chunks = splitMarkdown(text, options);
+      expect(chunks.join('')).toBe(text);
+      expect(chunks.some((chunk) => chunk.includes(element))).toBe(true);
+      expect(
+        chunks.flatMap((chunk) =>
+          nodes(chunk).filter((node) => node.type === 'list'),
+        ),
+      ).toHaveLength(0);
+      checkBudget(chunks, options);
+    }
+    const entityLike = '&' + 'a'.repeat(21_000) + ';';
+    const chunks = splitMarkdown(entityLike, options);
+    expect(chunks.join('')).toBe(entityLike);
+    checkBudget(chunks, options);
+    const task = '- [x] ' + 'a'.repeat(5000) + '\n\n  ' + 'b'.repeat(600);
+    const taskChunks = splitMarkdown(task, options);
+    expect(taskChunks.flatMap(code)).toEqual([]);
+    expect(
+      taskChunks
+        .flatMap((chunk) => nodes(chunk).filter((node) => node.type === 'text'))
+        .map((node) => (node.type === 'text' ? node.value : ''))
+        .join(''),
+    ).toBe('a'.repeat(5000) + 'b'.repeat(600));
+    expect(
+      taskChunks
+        .flatMap((chunk) =>
+          nodes(chunk).filter((node) => node.type === 'listItem'),
+        )
+        .every((node) => 'children' in node && node.children.length > 0),
+    ).toBe(true);
+    checkBudget(taskChunks, options);
+    const nested = '> '.repeat(17) + '`'.repeat(12_000) + '~'.repeat(12_000);
+    const nestedChunks = splitMarkdown(nested, options);
+    expect(nestedChunks.flatMap(code).join('')).toContain(
+      '`'.repeat(12_000) + '~'.repeat(12_000),
+    );
+    checkBudget(nestedChunks, options);
+  },
+);
+
+it('bounds wrapper amplification while preserving code language and value', () => {
+  const value = '`'.repeat(1808) + '~'.repeat(1808) + 'x'.repeat(24_000);
+  const text = '```'.repeat(604) + 'ts\n' + value + '\n' + '```'.repeat(604);
+  const chunks = splitMarkdown(text, defaults);
+  expect(chunks.length).toBeLessThan(50);
+  expect(chunks.flatMap(code).join('')).toBe(value);
+  expect(
+    chunks
+      .flatMap((chunk) => nodes(chunk).filter((node) => node.type === 'code'))
+      .every((node) => node.type === 'code' && node.lang === 'ts'),
+  ).toBe(true);
+  checkBudget(chunks);
+});
+
+it('preserves fences and top-level references above the large-document threshold', () => {
+  const value = 'code line\n'.repeat(11_000).trimEnd();
+  const text = `See [source].\n\n\`\`\`ts\n${value}\n\`\`\`\n\n[source]: https://docs.example.com/reference`;
+  const chunks = splitMarkdown(text, defaults);
+  expect(chunks.flatMap(code).join('\n')).toBe(value);
+  expect(
+    nodes(chunks[0]!).some(
+      (node) => node.type === 'linkReference' && node.identifier === 'source',
+    ),
+  ).toBe(true);
+  expect(
+    nodes(chunks[0]!).some(
+      (node) =>
+        node.type === 'definition' &&
+        node.url === 'https://docs.example.com/reference',
+    ),
+  ).toBe(true);
+  for (const chunk of chunks) {
+    expect(
+      nodes(chunk)
+        .filter((node) => node.type === 'code')
+        .every((node) => node.type === 'code' && node.lang === 'ts'),
+    ).toBe(true);
+  }
+  checkBudget(chunks);
 });
