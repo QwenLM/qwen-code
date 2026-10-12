@@ -920,6 +920,78 @@ it('on resume never consumes a timed-out call that was answered before a late re
   );
 });
 
+// The unlocked arms keep the same rule: a cancelled owner settled and
+// answered the call as unknown, then died before the fold; the late reply
+// moved the entry to accepted. The resumed wait folds the journaled
+// answer and leaves the entry unconsumed — the call never read the reply.
+it.each([
+  ['a live', false],
+  ['a cancelled', true],
+] as const)(
+  'on resume under %s signal never consumes a reply that landed after the call was answered',
+  async (_label, aborted) => {
+    await seedFirstInput(
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+        'write the board',
+    );
+    const [run] = await parkCalls([
+      { callId: 'call-cut', toolName: 'task_create' },
+    ]);
+    await commands.runCommand({
+      commandId: run!.commandId,
+      kind: 'board_write',
+      args: { subject: 'x', description: 'y' },
+      executionCallId: 'call-cut',
+      closing: false,
+    });
+    await commands.handover(run!.commandId, PARENT);
+    await commands.settle(run!.commandId, 'unknown');
+    await session.sink.write({
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: sessionKey.sessionId,
+      timestamp: new Date().toISOString(),
+      model: 'model',
+      type: 'tool_result',
+      cwd: rootDir,
+      version: 'test',
+      daemonPromptId: 'prompt',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-cut',
+              name: 'task_create',
+              response: { error: sessionCommandEvidenceText('accepting') },
+            },
+          },
+        ],
+      },
+    });
+    await commands.answered(run!.commandId, {
+      outcome: 'answered',
+      text: 'Task #1 created: "x".',
+    });
+
+    const signal = new AbortController();
+    if (aborted) signal.abort();
+    await createTurn().resumeCommandWaitRuns(
+      [run!],
+      false,
+      'model',
+      signal.signal,
+    );
+    expect(commands.command(run!.commandId)?.run.delivery?.state).toBe(
+      'accepted',
+    );
+    expect(await journaledResults()).not.toContain('Task #1 created');
+    expect((await runnableCheckpoint()).continuation.phase).toBe(
+      'model_output_committed',
+    );
+  },
+);
+
 // In one batch the timed-out call answers by its journal while the call
 // the lock refused before it sent anything answers the fixed text, as
 // the live arm would have.

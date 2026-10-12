@@ -5110,7 +5110,10 @@ export class HostedWorkspaceToolTurn {
             model,
             journaled,
           );
-          await commands.commitConsumed(commandId);
+          // A call consumes only the reply it commits now: one already
+          // answered may have read the not-sent or unknown evidence before
+          // the relay's reply landed, and never read this one.
+          if (!journaled?.has(callId)) await commands.commitConsumed(commandId);
           return parts;
         }
         continue;
@@ -5281,7 +5284,10 @@ export class HostedWorkspaceToolTurn {
               model,
               journaled,
             );
-            await commands.commitConsumed(run.commandId);
+            // The same rule as the journal arm: only the reply committed
+            // now is the one the call read.
+            if (!journaled.has(run.functionCallId))
+              await commands.commitConsumed(run.commandId);
             await this.harness.resolveAwaitCommand(run.commandId);
             break;
           }
