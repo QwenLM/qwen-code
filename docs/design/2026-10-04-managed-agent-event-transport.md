@@ -500,17 +500,28 @@ This slice's validation is documentation-only:
 
 ## 11. Open questions for the tracker issue
 
-1. Wake-intent carrier: keep the committed `wake.requested` record as the
-   wake envelope source, or a distinct WakeIntent record (supersedes #12827
-   question 3 once #13300 lands)?
-2. Which node consumes a Session's envelopes — a consumer-group-per-Session
-   routing scheme, or hash-partitioned wake workers? (Decision needed before
-   MQ2 consumer wiring.) Dispatch evidence from the 2026-10-12 verification
-   (§5.1): LiteTopic dispatch is shared within a group — one client per group
-   per LiteTopic — so fan-out to every node requires one consumer group per
-   node, while a single shared group wakes one node per dispatch (a lost ACK
-   or client inactivity can move the redelivery to another member) and leans
-   on the SQL-scan fallback otherwise.
+1. Wake-intent carrier — **resolved 2026-10-12**: the committed
+   `wake.requested` record stays the wake envelope source. It commits with
+   its Session input in one transaction on the authoritative journal stream,
+   it already sits in the envelope v1 vocabulary and fixtures, and a distinct
+   WakeIntent record would store the same fact twice, against the
+   single-commit-carrier discipline (§2). This supersedes #12827 question 3
+   now that #13300 has landed.
+2. Session-envelope consumption routing — **resolved 2026-10-12**: a shared
+   bootstrap lane plus owner-side dynamic subscription. Dispatch evidence
+   from the 2026-10-12 verification (§5.1): LiteTopic dispatch is shared
+   within a group — one dispatch attempt selects exactly one client per
+   group, and a redelivery after a lost ACK or client inactivity can move to
+   another member. Consumer-group-per-Session is the wrong axis (a group per
+   Session means millions of groups; LiteTopic already provides per-Session
+   addressing), and group-per-node fan-out is unnecessary because the
+   activation fence, not the broker, decides which node may act. So: a
+   pending-activation wake rides one shared bootstrap group (any worker takes
+   it and attempts activation through the fence, with SQL scans as the
+   backstop), and a node that wins activation subscribes to that Session's
+   LiteTopic (per-client, dynamic) and unsubscribes on release — the
+   Session's owner is then the sole subscriber and dispatch lands exactly on
+   it.
 3. LiteTopic §5.1 items: the broker-docs verification ran 2026-10-12 and its
    results are pinned in §5.1's resolution block; what remains is the
    MQ2-start staging re-check against a real 5.5.0+ cluster.
