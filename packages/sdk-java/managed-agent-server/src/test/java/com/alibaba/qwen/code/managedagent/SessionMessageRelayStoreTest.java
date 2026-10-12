@@ -216,6 +216,32 @@ class SessionMessageRelayStoreTest {
                 "cmd_executing", "session_command"));
     }
 
+    // One sender's commands pass strictly in order — but only across the
+    // open window: an unclassified row over a planned/accepting record.
+    // A cancelled entry's leftover relaying row never gets another scan
+    // (HANDOVER_SQL no longer sees the record), so it must not hold the
+    // younger command behind it; a classified row never holds either.
+    @Test
+    void ordersCommandsByTheirOpenWindowOnly() {
+        String sender = UUID.randomUUID().toString();
+        command(sender, "cmd_1_cancelled", "cancelled",
+                "{\"route\":\"to_parent\"}");
+        command(sender, "cmd_2_open", "accepting",
+                "{\"route\":\"to_parent\"}");
+        command(sender, "cmd_3_new", "planned", "{\"route\":\"to_parent\"}");
+        store.claim(TENANT, sender, "cmd_1_cancelled", "owner-a", 31_000,
+                1_000);
+        assertThat(store.olderOpenCommand(TENANT, sender, "cmd_2_open"))
+                .isFalse();
+        store.claim(TENANT, sender, "cmd_2_open", "owner-a", 31_000, 1_000);
+        assertThat(store.olderOpenCommand(TENANT, sender, "cmd_3_new"))
+                .isTrue();
+        store.classify(store.find(TENANT, sender, "cmd_2_open"), "owner-a",
+                "unknown", "gave up", 2_000);
+        assertThat(store.olderOpenCommand(TENANT, sender, "cmd_3_new"))
+                .isFalse();
+    }
+
     @Test
     void leasesAdvancesDefersAndClassifiesOnlyForTheClaimant() {
         String sender = UUID.randomUUID().toString();

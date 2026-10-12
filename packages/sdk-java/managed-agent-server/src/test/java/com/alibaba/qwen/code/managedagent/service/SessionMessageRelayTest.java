@@ -741,6 +741,35 @@ class SessionMessageRelayTest {
                 anyLong(), anyLong(), anyLong());
     }
 
+    // Decision 2: the member's own timeout may settle the outbound before
+    // the relay ever classifies its row. A terminal record is classified
+    // on sight — never re-executed — whatever the ledger row holds.
+    @Test
+    void classifiesAnAlreadyUnknownCommandWithoutExecutingItAgain() {
+        pending.set(commandPending("unknown"));
+        commandBody("board_write", CHILD);
+        when(records.readResourceBytes(TENANT, "resource-args"))
+                .thenReturn(CONTENT);
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        assertThat(row.get().lastError())
+                .isEqualTo("command is already unknown");
+    }
+
+    @Test
+    void classifiesAnAlreadyCancelledCommandWithoutExecutingIt() {
+        pending.set(commandPending("cancelled"));
+        commandBody("board_write", CHILD);
+        when(records.readResourceBytes(TENANT, "resource-args"))
+                .thenReturn(CONTENT);
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(row.get().lastError())
+                .isEqualTo("command is already cancelled");
+    }
+
     @Test
     void cancelsACommandWhoseParentClosedBeforeTheHandover() {
         pending.set(commandPending("planned"));

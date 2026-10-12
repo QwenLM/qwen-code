@@ -259,9 +259,14 @@ export interface ManagedHarnessHandle {
    * the continuation advances to `model_output_committed`. Returns null
    * when no durable wait is in progress; rejects when the open durable
    * wait is not the command wait; restating an already-folded call
-   * answers the same checkpoint.
+   * answers the same checkpoint. `options.timedOut` is decision 4's
+   * durable lock: a fold carrying it stamps the group, so a replacement
+   * owner of the same Turn refuses the next command at once.
    */
-  resolveAwaitCommand(commandId: string): Promise<HarnessCheckpointV1 | null>;
+  resolveAwaitCommand(
+    commandId: string,
+    options?: { readonly timedOut?: boolean },
+  ): Promise<HarnessCheckpointV1 | null>;
   /**
    * Commits safety point C: an admitted Runtime tool as `await_runtime` with
    * `durable_wait`. The original executionCallId is dispatched at most once.
@@ -911,6 +916,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         commandWait: {
           runs,
           holdsWorkspaceMount: options.holdsWorkspaceMount,
+          timedOut: false,
         },
       });
       await this.commitHarnessCheckpoint(
@@ -1034,6 +1040,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
 
   async resolveAwaitCommand(
     commandId: string,
+    options?: { readonly timedOut?: boolean },
   ): Promise<HarnessCheckpointV1 | null> {
     return this.mutateCheckpoint(async () => {
       this.assertNotDetached();
@@ -1112,6 +1119,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         previous: adopted,
         ...identity,
         commandId,
+        timedOut: options?.timedOut,
       });
       const advanced =
         checkpoint.continuation.phase === 'model_output_committed';

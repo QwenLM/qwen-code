@@ -262,6 +262,12 @@ export interface HarnessCommandWaitRun {
 export interface HarnessCommandWaitGroup {
   readonly runs: readonly HarnessCommandWaitRun[];
   readonly holdsWorkspaceMount: boolean;
+  /**
+   * Decision 4's durable lock: once one call of the Turn timed out the
+   * fold that carried it stamps this, so a replacement owner of the same
+   * Turn refuses the next command at once instead of minting a new wait.
+   */
+  readonly timedOut: boolean;
 }
 
 export interface HarnessOutputGroup {
@@ -1038,7 +1044,11 @@ function parseCommandWait(
   // null — the same mixed-version rule as the agent wait.
   if (value === null || value === undefined) return null;
   const record = object(value, 'commandWait');
-  assertNoUnknownKeys(record, ['runs', 'holdsWorkspaceMount'], 'commandWait');
+  assertNoUnknownKeys(
+    record,
+    ['runs', 'holdsWorkspaceMount', 'timedOut'],
+    'commandWait',
+  );
   const runs = jsonArray(record['runs'], 'commandWait.runs').map(
     (item, index) => parseCommandWaitRun(item, `commandWait.runs[${index}]`),
   );
@@ -1057,7 +1067,17 @@ function parseCommandWait(
   if (typeof mount !== 'boolean') {
     fail('commandWait.holdsWorkspaceMount must be a boolean.');
   }
-  return { runs, holdsWorkspaceMount: mount };
+  // Checkpoints written before the lock existed carry no key: a wait
+  // that never stamped it reads as not timed out, never as unknown.
+  const timedOut = record['timedOut'];
+  if (timedOut !== undefined && typeof timedOut !== 'boolean') {
+    fail('commandWait.timedOut must be a boolean.');
+  }
+  return {
+    runs,
+    holdsWorkspaceMount: mount,
+    timedOut: timedOut === true,
+  };
 }
 
 function parseParentHistory(
@@ -1902,6 +1922,7 @@ export function createConsumedCommandWaitHarnessCheckpoint(input: {
   readonly coveredSequence: number;
   readonly previousCheckpointId: string | null;
   readonly commandId: string;
+  readonly timedOut?: boolean;
 }): HarnessCheckpointV1 {
   if (input.previous.continuation.phase !== 'await_command') {
     throw new ManagedSessionRecordError(
@@ -1953,6 +1974,9 @@ export function createConsumedCommandWaitHarnessCheckpoint(input: {
     commandWait: {
       runs,
       holdsWorkspaceMount: input.previous.commandWait.holdsWorkspaceMount,
+      // The lock is sticky: once any fold of this wait stamped it, every
+      // later fold of the same group carries it.
+      timedOut: input.timedOut === true || input.previous.commandWait.timedOut,
     },
     output: input.previous.output,
     followUp: input.previous.followUp,

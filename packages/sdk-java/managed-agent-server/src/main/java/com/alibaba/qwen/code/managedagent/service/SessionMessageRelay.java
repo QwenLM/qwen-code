@@ -496,6 +496,17 @@ public class SessionMessageRelay {
             store.advance(row, owner, "relaying", target, now,
                     now + LEASE_MS, now);
         }
+        if (!"planned".equals(state) && !"accepting".equals(state)) {
+            // Decision 2: the sender already holds this command's
+            // terminal answer — its own timeout moved accepting to
+            // cancelled or unknown while the entry was in flight. The
+            // pass owes the ledger row only its classification now,
+            // never a second execute, whatever the row's state.
+            store.classify(row, owner,
+                    "unknown".equals(state) ? "unknown" : "done",
+                    "command is already " + state, now);
+            return;
+        }
         if (target == null) {
             throw new IllegalStateException(
                     "a handed-over command names no target");

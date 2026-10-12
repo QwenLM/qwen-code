@@ -417,6 +417,157 @@ it('answers a handed command as unknown past the bound and locks the batch after
   expect(commands.command(commandIdOf('call-lw'))).toBeUndefined();
 });
 
+// The checkpoint names the whole batch, so an owner that dies between
+// the park commit and its first outbound leaves a run with no record.
+// The recovered wait answers it as not sent and folds — never tries to
+// settle a record that does not exist.
+it('on resume folds a checkpointed call whose outbound never committed, as not sent', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const commandId = commandIdOf('call-lost');
+  const harness = createManagedHarnessHandle(session);
+  const argsRef = await session.resources.publish(
+    'managed-command-args',
+    Buffer.from(JSON.stringify({ subject: 'x', description: 'y' }), 'utf8'),
+  );
+  await harness.commitAwaitCommand(
+    [
+      {
+        commandId,
+        functionCallId: 'call-lost',
+        toolName: 'task_create',
+        modelMessageId: 'assistant-lost',
+        folded: false,
+      },
+    ],
+    { turnId: 'prompt', promptId: 'prompt' },
+    {
+      holdsWorkspaceMount: false,
+      attempt: { attemptId: 'assistant-lost', routeRef: argsRef },
+    },
+  );
+  expect(commands.command(commandId)).toBeUndefined();
+  const parked = await session.authority.harnessRunAuthorization();
+  if (parked.status !== 'runnable')
+    throw new Error(`expected runnable, got ${parked.status}`);
+  expect(parked.checkpoint.continuation.phase).toBe('await_command');
+  const turn = createTurn();
+  await expect(
+    turn.resumeCommandWaitRuns(
+      parked.checkpoint.commandWait?.runs ?? [],
+      false,
+      'model',
+      new AbortController().signal,
+    ),
+  ).resolves.toBeUndefined();
+  // The not-sent answer is journaled under the call's own id — word for
+  // word the live arm's planned answer (decision 14).
+  const projected = await session.sink.project();
+  const parts = projected
+    .filter(
+      (entry) =>
+        entry.daemonPromptId === 'prompt' && entry.type === 'tool_result',
+    )
+    .flatMap((entry) => entry.message?.parts ?? []);
+  expect(JSON.stringify(parts)).toContain('call-lost');
+  expect(JSON.stringify(parts)).toContain('was not sent and nothing happened');
+  const settled = await session.authority.harnessRunAuthorization();
+  if (settled.status !== 'runnable')
+    throw new Error(`expected runnable, got ${settled.status}`);
+  expect(settled.checkpoint.continuation.phase).toBe('model_output_committed');
+  // Nothing settled a record: none exists, and that is the point.
+  expect(commands.command(commandId)).toBeUndefined();
+});
+
+// Decision 4's lock is durable: once one command of the Turn timed out
+// the fold carries the stamp, so a replacement owner of the same prompt
+// refuses the next command at once — and re-stamps the fresh group, so
+// the lock outlives every owner.
+it('keeps a timed-out Turn locked across owners', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const turn = createTurn();
+  const running = execute(turn, [
+    call({ subject: 'x', description: 'y' }, 'call-live', 'task_create'),
+  ]);
+  const commandId = commandIdOf('call-live');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  await commands.handover(commandId, PARENT);
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.now() + 121_000);
+  await running;
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('unknown');
+  vi.useRealTimers();
+  const stamped = await session.authority.harnessRunAuthorization();
+  if (stamped.status !== 'runnable')
+    throw new Error(`expected runnable, got ${stamped.status}`);
+  expect(stamped.checkpoint.commandWait?.timedOut).toBe(true);
+
+  // The replacement owner: the same prompt, a fresh Turn.
+  const restarted = createTurn();
+  const parts = await execute(restarted, [
+    call({ subject: 'z', description: 'w' }, 'call-after', 'task_create'),
+  ]);
+  expect(texts(parts)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+  expect(commands.command(commandIdOf('call-after'))).toBeUndefined();
+  const restamped = await session.authority.harnessRunAuthorization();
+  if (restamped.status !== 'runnable')
+    throw new Error(`expected runnable, got ${restamped.status}`);
+  expect(restamped.checkpoint.commandWait?.timedOut).toBe(true);
+
+  // And the owner after that, from the re-stamped group alone.
+  const next = createTurn();
+  const again = await execute(next, [
+    call({ status: 'pending' }, 'call-final', 'task_list'),
+  ]);
+  expect(texts(again)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
+  expect(commands.command(commandIdOf('call-final'))).toBeUndefined();
+});
+
+// A budget refusal is a normal local answer, so it owes the parked wait
+// its fold: a durable wait left behind turns the Turn's next call into a
+// recovery fault instead of the same local refusal.
+it('folds the parked wait on a budget refusal, so the next call refuses the same way', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board forever',
+  );
+  // Mint the per-run budget by hand: a direct count of outbound records
+  // is the rule's own evidence.
+  for (let index = 0; index < 256; index += 1) {
+    await commands.runCommand({
+      commandId: commandIdOf(`budget-seed-${index}`),
+      kind: 'board_read',
+      args: { filter: 'all' },
+      executionCallId: `budget-seed-${index}`,
+      closing: false,
+    });
+  }
+  const parts = await execute(createTurn(), [
+    call({ subject: 'x', description: 'y' }, 'call-over', 'task_create'),
+  ]);
+  expect(texts(parts)).toContain('budget_exhausted');
+  const folded = await session.authority.harnessRunAuthorization();
+  if (folded.status !== 'runnable')
+    throw new Error(`expected runnable, got ${folded.status}`);
+  expect(folded.checkpoint.continuation.phase).toBe('model_output_committed');
+  // The Turn's next call meets the same local refusal, never a recovery
+  // fault from its own durable wait.
+  const again = await execute(createTurn(), [
+    call({ subject: 'x', description: 'y' }, 'call-over-2', 'task_create'),
+  ]);
+  expect(texts(again)).toContain('budget_exhausted');
+}, 60_000);
+
 it('declares the widened send_message beside the member tools (b3c)', async () => {
   await seedFirstInput(
     teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'sync with bob',
