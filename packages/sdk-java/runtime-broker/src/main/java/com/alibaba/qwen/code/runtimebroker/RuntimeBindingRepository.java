@@ -10,6 +10,13 @@ public interface RuntimeBindingRepository {
     RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
             RuntimeSessionRecord candidate);
 
+    /** Creates a RELEASED receipt under the same generation lock as admission. */
+    default RuntimeSessionRecord createSessionTombstone(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord candidate) {
+        throw new RuntimeBrokerException(501, "runtime_session_tombstone_unavailable",
+                "Runtime repository does not support atomic Session retirement", false);
+    }
+
     /** Existing idempotency receipts remain readable after admission closes. */
     ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate);
