@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type React from 'react';
+import React from 'react';
 import { Text, Box } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 import stripAnsi from 'strip-ansi';
-import { getCachedStringWidth } from './textUtils.js';
-import { TABLE_MAX_ROW_LINES as MAX_ROW_LINES } from './pending-rendered-height.js';
+import { getCachedStringWidth, truncateToWidth } from './textUtils.js';
 import { theme } from '../semantic-colors.js';
+import { useOverflowActions } from '../contexts/OverflowContext.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import {
   INLINE_CODE_SPAN_PATTERN_SOURCE,
@@ -34,10 +34,9 @@ import {
 
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
+const MAX_ROW_LINES = 4;
 
-// MAX_ROW_LINES (the wrap-height threshold that switches a row to the vertical
-// layout) is imported from pending-rendered-height so the renderer and the
-// pending-height estimator can never disagree on the format decision.
+// The height estimator uses renderTableText's exact layout and format choice.
 
 /**
  * Below this width the column-aware budget (see `minHorizontalTableWidth`
@@ -79,6 +78,7 @@ interface TableRendererProps {
    * overflowing the viewport and triggering the scroll-to-top lock.
    */
   maxHeight?: number;
+  registerOverflow?: boolean;
 }
 
 /** Map Ink-compatible named colors to ANSI foreground codes */
@@ -439,6 +439,42 @@ function wrapText(
   return lines.length > 0 ? lines : [''];
 }
 
+const TableText: React.FC<{
+  text: string;
+  contentWidth: number;
+  maxHeight?: number;
+  isStreaming: boolean;
+  registerOverflow: boolean;
+}> = ({ text, contentWidth, maxHeight, isStreaming, registerOverflow }) => {
+  const id = React.useId();
+  const { addOverflowingId, removeOverflowingId } = useOverflowActions() ?? {};
+  const lines =
+    maxHeight === undefined ? [] : wrapText(text, contentWidth, { hard: true });
+  const isClipped = maxHeight !== undefined && lines.length > maxHeight;
+  React.useEffect(() => {
+    if (registerOverflow && isClipped) {
+      addOverflowingId?.(id);
+    } else {
+      removeOverflowingId?.(id);
+    }
+    return () => removeOverflowingId?.(id);
+  }, [registerOverflow, isClipped, id, addOverflowingId, removeOverflowingId]);
+  if (isClipped) {
+    const kept = lines.slice(0, Math.max(0, maxHeight - 1));
+    kept.push(
+      applyColor(
+        truncateToWidth(
+          isStreaming ? '… more rows streaming …' : '… more rows not shown …',
+          contentWidth,
+        ),
+        theme.text.secondary,
+      ),
+    );
+    text = kept.join('\n');
+  }
+  return <Text>{text}</Text>;
+};
+
 /**
  * Custom table renderer for markdown tables.
  *
@@ -452,33 +488,18 @@ function wrapText(
  * 4. Vertical fallback format when rows would be too tall
  * 5. Safety check against terminal resize races
  */
-export const TableRenderer: React.FC<TableRendererProps> = ({
+export function renderTableText({
   headers,
   rows,
   contentWidth,
   aligns,
   enableInlineMath = false,
   isStreaming = false,
-  maxHeight,
-}) => {
+}: TableRendererProps): string {
   const colCount = headers.length;
 
   // Empty table — nothing to render
-  if (colCount === 0) {
-    return <Box />;
-  }
-
-  // Clip the fully-rendered table to `maxHeight` text lines (streaming preview
-  // backstop). Operates on the final joined string so it is exact for wrapped
-  // rows and the vertical fallback alike.
-  const clampToMaxHeight = (text: string): string => {
-    if (maxHeight === undefined) return text;
-    const all = text.split('\n');
-    if (all.length <= maxHeight) return text;
-    const kept = all.slice(0, Math.max(1, maxHeight - 1));
-    kept.push(applyColor('… more rows streaming …', theme.text.secondary));
-    return kept.join('\n');
-  };
+  if (colCount === 0) return '';
 
   // ── Precompute per-cell metrics to avoid repeated renderMarkdownToAnsi calls ──
   const computeMetrics = (text: string) => {
@@ -758,13 +779,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   // ── Choose format ──
-  if (useVerticalFormat) {
-    return (
-      <Box marginY={1}>
-        <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
-      </Box>
-    );
-  }
+  if (useVerticalFormat) return renderVerticalFormat();
 
   // ── Build the complete horizontal table as strings ──
   const headerRendered = headerMetrics.map((m) => m.rendered);
@@ -800,17 +815,23 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     // rows and would render an empty string (a blank box). Better to keep the
     // horizontal header — even if it slightly overflows a very narrow terminal
     // — than to make the box the PR draws immediately vanish.
-    return (
-      <Box marginY={1}>
-        <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
-      </Box>
-    );
+    return renderVerticalFormat();
   }
 
-  // Render as a single Text block to prevent Ink wrapping mid-row
-  return (
+  return tableLines.join('\n');
+}
+
+export const TableRenderer: React.FC<TableRendererProps> = (props) =>
+  props.headers.length === 0 ? (
+    <Box />
+  ) : (
     <Box flexDirection="column" marginY={1}>
-      <Text>{clampToMaxHeight(tableLines.join('\n'))}</Text>
+      <TableText
+        text={renderTableText(props)}
+        contentWidth={props.contentWidth}
+        maxHeight={props.maxHeight}
+        isStreaming={props.isStreaming ?? false}
+        registerOverflow={props.registerOverflow ?? false}
+      />
     </Box>
   );
-};

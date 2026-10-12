@@ -16,6 +16,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
+import { useOverflowActions } from '../contexts/OverflowContext.js';
 import { parseCodeFenceInfo } from './markdownUtilities.js';
 import {
   fitPendingSlice,
@@ -57,6 +58,7 @@ interface MarkdownDisplayProps {
    * respects the same viewport budget the outer wrapper enforces. See #6867.
    */
   enforceHeightBudget?: boolean;
+  registerOverflow?: boolean;
 }
 
 export interface MarkdownSourceCopyIndexOffsets {
@@ -138,9 +140,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
   enforceHeightBudget = false,
+  registerOverflow = false,
 }) => {
   const { renderMode } = useRenderMode();
-  if (!text) return <></>;
+  const overflowId = React.useId();
+  const { addOverflowingId, removeOverflowingId } = useOverflowActions() ?? {};
 
   const renderVisualBlocks = renderMode === 'render';
   // Some models stream long runs of trailing newlines after useful content.
@@ -205,16 +209,24 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // tail means the user is asked to approve a plan whose remainder never
   // appears — a model could hide steps past the budget. See #6867.
   let droppedSourceLines = 0;
+  // Complete results also reserve a row for the source-tail truncation cue.
+  const tableMaxHeight =
+    pendingRenderedBudget !== undefined && availableTerminalHeight !== undefined
+      ? Math.max(
+          isPending ? 2 : 1,
+          availableTerminalHeight -
+            TABLE_PENDING_RESERVED_ROWS -
+            (enforceHeightBudget && !isPending ? 1 : 0),
+        )
+      : undefined;
   if (pendingRenderedBudget !== undefined) {
-    const tableClampRows =
-      availableTerminalHeight !== undefined
-        ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
-        : Number.MAX_SAFE_INTEGER;
+    const tableClampRows = tableMaxHeight ?? Number.MAX_SAFE_INTEGER;
     const { keptLines } = fitPendingSlice(
       allLines,
       contentWidth,
       pendingRenderedBudget,
       tableClampRows,
+      isPending,
     );
     if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);
@@ -223,6 +235,21 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   }
   const showTruncationCue =
     enforceHeightBudget && !isPending && droppedSourceLines > 0;
+  React.useEffect(() => {
+    if (registerOverflow && showTruncationCue) {
+      addOverflowingId?.(overflowId);
+    } else {
+      removeOverflowingId?.(overflowId);
+    }
+    return () => removeOverflowingId?.(overflowId);
+  }, [
+    registerOverflow,
+    showTruncationCue,
+    overflowId,
+    addOverflowingId,
+    removeOverflowingId,
+  ]);
+  if (!text) return <></>;
 
   // Hold back a still-forming table at the streaming frontier. A table is only
   // recognized once its separator line (matching the header's column count) has
@@ -578,7 +605,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             // its format from all rows (not just the first) so it does not flip
             // horizontal→vertical when the message finally commits.
             isFrontier={false}
-            availableTerminalHeight={availableTerminalHeight}
+            maxHeight={tableMaxHeight}
+            registerOverflow={registerOverflow}
           />,
         );
       }
@@ -793,7 +821,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         // End of content: this table is at the streaming frontier and may still
         // gain rows, so anchor its format to the first row while pending.
         isFrontier={true}
-        availableTerminalHeight={availableTerminalHeight}
+        maxHeight={tableMaxHeight}
+        registerOverflow={registerOverflow}
       />,
     );
   }
@@ -1125,7 +1154,7 @@ interface RenderTableProps {
   contentWidth: number;
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
-  /** True while the whole message is still streaming — drives the height clamp. */
+  /** True while the whole message is still streaming. */
   isPending?: boolean;
   /**
    * True only for the table at the streaming frontier (end of content, may still
@@ -1134,7 +1163,8 @@ interface RenderTableProps {
    * true so a bare RenderTable behaves like the frontier.
    */
   isFrontier?: boolean;
-  availableTerminalHeight?: number;
+  maxHeight?: number;
+  registerOverflow?: boolean;
 }
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
@@ -1145,30 +1175,20 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   enableInlineMath = false,
   isPending = false,
   isFrontier = true,
-  availableTerminalHeight,
-}) => {
-  // The height clamp tracks whether the MESSAGE is streaming (overflow can grow
-  // on any tick). The format anchor tracks whether THIS TABLE is still streaming
-  // — only the frontier table anchors its format to the first row; a completed
-  // mid-content table measures all rows. Keeping the clamp on isPending (not
-  // isFrontier) means a mid-content table is still bounded, so the estimator's
-  // clamped cost still matches the render and cannot under-estimate.
-  const maxHeight =
-    isPending && availableTerminalHeight !== undefined
-      ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
-      : undefined;
-  return (
-    <TableRenderer
-      headers={headers}
-      rows={rows}
-      contentWidth={contentWidth}
-      aligns={aligns}
-      enableInlineMath={enableInlineMath}
-      isStreaming={isPending && isFrontier}
-      maxHeight={maxHeight}
-    />
-  );
-};
+  maxHeight,
+  registerOverflow,
+}) => (
+  <TableRenderer
+    headers={headers}
+    rows={rows}
+    contentWidth={contentWidth}
+    aligns={aligns}
+    enableInlineMath={enableInlineMath}
+    isStreaming={isPending && isFrontier}
+    maxHeight={maxHeight}
+    registerOverflow={registerOverflow}
+  />
+);
 
 const RenderTable = React.memo(RenderTableInternal);
 

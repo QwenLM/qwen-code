@@ -6,7 +6,6 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  TABLE_CHROME_ROWS,
   estimateWrappedRows,
   isTableStart,
   fitPendingSlice,
@@ -63,6 +62,12 @@ describe('estimateWrappedRows', () => {
   it('wraps a line wider than the content width', () => {
     // 30 ASCII cols at width 10 → ceil(30/10) = 3 rows.
     expect(estimateWrappedRows('a'.repeat(30), 10)).toBe(3);
+  });
+
+  it('counts word wrapping rather than dividing the total character width', () => {
+    expect(
+      estimateWrappedRows(`${'a'.repeat(40)} `.repeat(22).trim(), 78),
+    ).toBe(22);
   });
 
   it('counts CJK double-width characters when wrapping', () => {
@@ -138,7 +143,6 @@ describe('fitPendingSlice', () => {
     const { keptLines } = fitPendingSlice(lines, 80, 10, CLAMP);
     // First-block table is kept whole (walk stops after it).
     expect(keptLines).toBe(lines.length);
-    expect(TABLE_CHROME_ROWS).toBe(5);
   });
 
   it('cuts BEFORE a non-first table that would overflow the remaining budget', () => {
@@ -362,13 +366,10 @@ describe('fitPendingSlice', () => {
   });
 
   it('anchors the vertical trigger to the first row (a tall LATER row stays horizontal)', () => {
-    // Mirrors TableRenderer: the format is decided from the header + FIRST data
-    // row only, so a short first row keeps the table horizontal even when a
-    // later row wraps past MAX_ROW_LINES. Horizontal height sums every row:
-    // header(1)+row1(1)+row2(ceil(180/34)=6) + 1 sep + chrome 5 = 14. intro(1)+14
-    // = 15 > budget 12 → clipped. If the trigger looked at all rows it would
-    // charge the shorter vertical height (~9) and wrongly keep it.
-    const tall = 'z'.repeat(180);
+    // The streaming frontier stays horizontal; the long cell takes eight rows
+    // at the renderer's proportional width. A complete table switches to the
+    // shorter vertical layout, which fits the same budget.
+    const tall = 'z'.repeat(500);
     const lines = [
       'intro',
       '| A | B |',
@@ -376,9 +377,10 @@ describe('fitPendingSlice', () => {
       '| x | y |',
       `| ${tall} | y |`,
     ];
-    const { keptLines, clipped } = fitPendingSlice(lines, 80, 12, CLAMP);
+    const { keptLines, clipped } = fitPendingSlice(lines, 80, 14, CLAMP);
     expect(clipped).toBe(true);
     expect(keptLines).toBe(1);
+    expect(fitPendingSlice(lines, 80, 14, CLAMP, false).clipped).toBe(false);
   });
 
   it('accounts for wrapping of non-table lines', () => {

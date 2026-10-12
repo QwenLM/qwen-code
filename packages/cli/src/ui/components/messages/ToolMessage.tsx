@@ -645,6 +645,8 @@ const StringResultRenderer: React.FC<{
           isPending={false}
           availableTerminalHeight={availableHeight}
           contentWidth={childWidth}
+          enforceHeightBudget
+          registerOverflow={registerOverflow ?? true}
         />
       </Box>
     );
@@ -886,16 +888,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCappingShell && shellCapHeight === shellOutputMaxLines;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
-  // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
-  // we're forcing it to not render as markdown when the response is too long, it will fallback
-  // to render as plain text, which is contained within the terminal using MaxSizedBox.
-  // `isCappingShell` keeps the cap honest when ctrl+s has been pressed
-  // (#10640): constrainHeight=false drops the height budget (availableHeight
-  // above is undefined) but the ui.shellOutputMaxLines cap still binds.
-  // Resumed sessions rebuild tool displays without renderOutputAsMarkdown
-  // (default true), so without this the capped shell output would escape
-  // through the markdown branch, which MaxSizedBox does not contain.
-  if (availableHeight || isCappingShell) {
+  // Keep capped shell output on MaxSizedBox's tail-preserving plain-text path,
+  // including resumed results whose Markdown flag defaults to true (#10640).
+  if (isCappingShell) {
     renderOutputAsMarkdown = false;
   }
 

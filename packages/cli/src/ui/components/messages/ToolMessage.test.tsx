@@ -1794,6 +1794,7 @@ describe('<ToolMessage />', () => {
         {...baseProps}
         name="some-other-tool"
         resultDisplay={longString}
+        renderOutputAsMarkdown={false}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
         forceShowResult
@@ -1821,6 +1822,7 @@ describe('<ToolMessage />', () => {
         name="some-other-tool"
         contentWidth={20}
         resultDisplay={longSingleLine}
+        renderOutputAsMarkdown={false}
         status={ToolCallStatus.Success}
         availableTerminalHeight={12}
         forceShowResult

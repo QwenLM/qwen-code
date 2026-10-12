@@ -855,6 +855,7 @@ describe('<TableRenderer />', () => {
           rows={rows}
           contentWidth={contentWidth}
           maxHeight={maxHeight}
+          isStreaming
         />,
       );
       return lastFrame() ?? '';
@@ -893,7 +894,10 @@ describe('<TableRenderer />', () => {
       // still be clipped to maxHeight with the cue.
       const output = renderWithMaxHeight(['A', 'B'], manyRows, 8, 20);
       expect(getVisibleLines(output).length).toBeLessThanOrEqual(8);
-      expect(stripAnsi(output)).toContain('more rows streaming');
+      expect(stripAnsi(output)).toContain('more rows');
+      for (const line of getVisibleLines(output)) {
+        expect(stringWidth(line)).toBeLessThanOrEqual(20);
+      }
     });
   });
 
