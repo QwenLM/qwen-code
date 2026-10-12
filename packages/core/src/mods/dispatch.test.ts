@@ -168,7 +168,7 @@ describe('Mod middleware through real isolated realms', () => {
     "on('*',{},()=>({})); on('*',{args:'x'},()=>({}));",
     "on('command.run',{command:/hello/g},()=>({}));",
     "on('!*',()=>({}));",
-    "on('tool.call',()=>({}));",
+    "on('model.request',()=>({}));",
     "on('command.run',{args:undefined},()=>({}));",
     "on('command.run',()=>({})).catch(()=>({})).catch(()=>({}));",
   ])('rejects unsupported registration: %s', async (code) => {
