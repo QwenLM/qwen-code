@@ -296,7 +296,7 @@ class HostedWorkspaceToolTurnIT {
         boolean verifiedRecovery = !faults && !latency && !operatorRecovery && "Linux".equals(System.getProperty("os.name"));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=" + verifiedRecovery);
         var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
-        if (unicode && cases.contains("o2")) {
+        if (unicode) {
             application.initializers(context -> registerUnicodePublication((GenericApplicationContext) context));
         }
         if (sseGaps) {
@@ -308,7 +308,7 @@ class HostedWorkspaceToolTurnIT {
         }
         try (var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new))) {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
-            if (unicode && cases.contains("o2")) {
+            if (unicode) {
                 spring.getBean(ManagedAgentProperties.class).getToolPublication()
                         .setServiceBaseUrl("http://127.0.0.1:" + spring.getWebServer().getPort());
             }
@@ -445,10 +445,16 @@ class HostedWorkspaceToolTurnIT {
                             assertThat(Files.readString(workspace.resolve("child/unicode-secondary-ok.txt")))
                                     .isEqualTo("中文😀é\\ud800");
                             for (String sessionId : List.of(sessions.get(index).get("sessionId").toString(), secondarySessionId)) {
-                                int publications = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication"
-                                        + " WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, sessionId);
-                                if (cases.contains("o2")) assertThat(publications).isPositive();
-                                else assertThat(publications).isZero();
+                                var publications = jdbc.queryForList("SELECT state, producer_phase,"
+                                        + " CASE WHEN accepted_complete THEN 1 ELSE 0 END AS complete"
+                                        + " FROM qwen_tool_publication WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+                                if (cases.contains("o2")) {
+                                    assertThat(publications).hasSize(1);
+                                    var publication = publications.getFirst();
+                                    assertThat(publication.get("state")).isIn("OPEN", "FENCED");
+                                    assertThat(publication.get("producer_phase")).isEqualTo("REFERENCED");
+                                    assertThat(((Number) publication.get("complete")).intValue()).isEqualTo(1);
+                                } else assertThat(publications).isEmpty();
                                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution"
                                         + " WHERE harness_session_id = ?", Integer.class, sessionId)).isEqualTo(1);
                                 var execution = jdbc.queryForMap("SELECT dispatch_generation, execution_state, execution_status"
