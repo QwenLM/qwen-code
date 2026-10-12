@@ -15,7 +15,28 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                 || exists(connection, "SELECT 1 FROM managed_workspace_csi_retirement"
                         + " WHERE binding_id = ? AND runtime_generation = ? LIMIT 1",
                 binding.getBindingId(), binding.getGeneration())
-                || childRunUnsettled(connection, binding);
+                || childRunUnsettled(connection, binding)
+                || backgroundRunUnsettled(connection, binding);
+    }
+
+    private static boolean backgroundRunUnsettled(Connection connection, RuntimeBindingRecord binding)
+            throws SQLException {
+        String tenantId = binding.getRequest().getScope().getTenantId();
+        // Session-open treats a missing <call>:process row as proof that the Shell never started.
+        return exists(connection, "SELECT 1 FROM qwen_tool_execution e"
+                + " JOIN qwen_managed_session_extension_record r ON r.tenant_id = ?"
+                + " AND r.session_id = e.harness_session_id AND r.domain = 'child_run'"
+                + " WHERE e.binding_id = ? AND e.runtime_generation = ?"
+                + " AND CAST(e.binding_id AS BINARY(2048)) = CAST(? AS BINARY(2048))"
+                + " AND CAST(RIGHT(e.execution_call_id, 8) AS BINARY(8)) = CAST(':process' AS BINARY(8))"
+                + " AND CAST(r.tenant_id AS BINARY(2048)) = CAST(? AS BINARY(2048))"
+                + " AND CAST(r.workspace_id AS BINARY(2048)) = CAST(? AS BINARY(2048))"
+                + " AND CAST(r.session_id AS BINARY(2048)) = CAST(e.harness_session_id AS BINARY(2048))"
+                + " AND CAST(r.domain AS BINARY(2048)) = CAST('child_run' AS BINARY(2048))"
+                + " AND CAST(r.task_kind AS BINARY(2048)) = CAST('background_shell' AS BINARY(2048))"
+                + " AND r.settled_at IS NULL LIMIT 1",
+                tenantId, binding.getBindingId(), binding.getGeneration(), binding.getBindingId(), tenantId,
+                binding.getRequest().getScope().getWorkspaceId());
     }
 
     private static boolean childRunUnsettled(Connection connection, RuntimeBindingRecord binding) throws SQLException {

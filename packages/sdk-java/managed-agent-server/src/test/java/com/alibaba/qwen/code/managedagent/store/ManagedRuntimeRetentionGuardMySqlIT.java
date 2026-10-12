@@ -42,6 +42,21 @@ class ManagedRuntimeRetentionGuardMySqlIT {
         contract.aDifferentRawIdentityCannotEndChildProtection();
     }
 
+    @Test
+    void unsettledBackgroundShellRetainsBothIsolationModesUntilSettlement() throws Exception {
+        contract.unsettledBackgroundShellRetainsBothIsolationModesUntilSettlement();
+    }
+
+    @Test
+    void backgroundEvidenceRequiresExactIdentityGenerationKindAndProcessSuffix() throws Exception {
+        contract.backgroundEvidenceRequiresExactIdentityGenerationKindAndProcessSuffix();
+    }
+
+    @Test
+    void backgroundSettlementIsReadOnTheSweepConnection() throws Exception {
+        contract.backgroundSettlementIsReadOnTheSweepConnection();
+    }
+
     @AfterEach
     void removeTestSchema() {
         if (admin != null && schema != null) {

@@ -578,7 +578,7 @@ describe('reconcileNeverStartedChildRuns', () => {
     expect(broker.backgroundProcessStatus).not.toHaveBeenCalled();
   });
 
-  it('refuses a shell admit when the production kind gate is restored', async () => {
+  it('admits a shell through the enabled production kind gate', async () => {
     await open();
     await createManagedHarnessHandle(session!).ensureRunnable();
     enablement.childRun = false;
@@ -590,7 +590,7 @@ describe('reconcileNeverStartedChildRuns', () => {
         executionCallId: 'shell-1',
         args: { command: 'printf hi', is_background: true },
       }),
-    ).rejects.toThrow('registered but not enabled');
+    ).resolves.toMatchObject({ kind: 'managed-tool-args' });
   });
 
   it('never scans a child_agent record, the one kind production can commit today', async () => {

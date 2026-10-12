@@ -8,12 +8,17 @@ import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeRetention;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -52,19 +57,8 @@ class ManagedRuntimeRetentionGuardTest {
     void unsettledChildRetainsDrainedBindingUntilCanonicalRunSettles() throws Exception {
         child();
         var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]));
-        var created = bindings.findOrCreate(request("child"));
-        var claim = bindings.claimOperation(created.getBindingId(), "fixture", Duration.ofSeconds(2));
-        var seed = claim.getProvisionSeed();
-        var ready = bindings.compareAndSet(claim, claim.withAttestation(new RuntimeLease(seed.getProvisionalRuntimeId(),
-                URI.create("http://127.0.0.1:9"), seed.getToken(), seed.getLeaseId(), seed.getEpoch()),
-                new RuntimeResourceHandle("local-process", 1, Map.of("worker", "fixture")), Instant.now(), Instant.now()));
-        var draining = bindings.compareAndSet(ready, ready.withDrainRequested(true, Instant.now()));
-        var receipt = new RuntimeDrainReceipt(draining.getBindingId(), draining.getGeneration(),
-                seed.getProvisionRequestId(), draining.getResourceHandle(), Instant.now());
-        var retired = bindings.compareAndSet(draining, draining.withDrainReceipt(receipt)
-                .withState(RuntimeBindingRecord.State.RELEASED, draining.getLease(), Instant.parse("2000-01-01T00:00:00Z")));
-        assertThat(retired).isNotNull();
-        await().atMost(Duration.ofSeconds(5)).until(() -> !retired.getOperationLeaseUntil().isAfter(Instant.now()));
+        var retired = retire(bindings, request("child"));
+        var receipt = retired.getDrainReceipt();
         jdbc.update("INSERT INTO qwen_managed_child_result_relay (tenant_id, parent_session_id, child_run_id,"
                 + " creation_key, child_session_id, state, created_at, updated_at)"
                 + " VALUES ('tenant', 'parent', 'run', 'creation', 'child', 'orphaned', 1, 1)");
@@ -177,6 +171,115 @@ class ManagedRuntimeRetentionGuardTest {
         }
     }
 
+    @Test
+    void unsettledBackgroundShellRetainsBothIsolationModesUntilSettlement() throws Exception {
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]));
+        var executions = new JdbcToolExecutionRepository(source);
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var retention = new JdbcRuntimeRetention(source, bindings, guard);
+        for (String isolation : java.util.List.of("session", "workspace")) {
+            String harness = "root-" + isolation;
+            String runtime = "runtime-" + isolation;
+            var retired = retire(bindings, request(isolation.equals("session") ? harness : null));
+            jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at)"
+                    + " VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', 1, 1)", harness);
+            projection("tenant", harness, "background_shell");
+            var old = Instant.parse("2000-01-01T00:00:00Z");
+            var session = sessions.findOrCreate(new RuntimeSessionRecord(new RuntimeSession(harness, runtime, "bootstrap",
+                    retired.getRequest().getScope()), retired.getBindingId(), retired.getGeneration(),
+                    RuntimeSessionRecord.State.ACQUIRING, 0, old));
+            assertThat(sessions.compareAndSet(session, session.withState(RuntimeSessionRecord.State.RELEASED, old)))
+                    .isNotNull();
+            for (String call : java.util.List.of(isolation + "-call", isolation + "-call:process")) {
+                var prepared = executions.findOrCreate(ToolExecutionRecord.prepared(call, call + "-key",
+                        retired.getBindingId(), retired.getGeneration(), harness, runtime, "turn", "call", "digest",
+                        Map.of("sessionId", runtime, "promptId", "turn", "callId", "call", "argsDigest", "digest")));
+                assertThat(executions.settlePrepared(prepared, Map.of("executionStatus", "success"), old)).isNotNull();
+            }
+            var protectedBatch = retention.sweep(Duration.ofDays(30), 100, null);
+            assertThat(protectedBatch.executionsDeleted() + protectedBatch.sessionsDeleted()
+                    + protectedBatch.bindingsDeleted()).isZero();
+            assertThat(executions.findByExecutionCallId(isolation + "-call:process")).isNotNull();
+            assertThat(sessions.findById(retired.getRequest().getScope(), runtime)).isNotNull();
+            assertThat(bindings.findById(retired.getBindingId())).isNotNull();
+            var replacement = bindings.findOrCreate(retired.getRequest());
+            assertThat(replacement.getGeneration()).isEqualTo(retired.getGeneration() + 1);
+            jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'failed', settled_at = 2"
+                    + " WHERE session_id = ?", harness);
+            var collected = retention.sweep(Duration.ofDays(30), 100, null);
+            assertThat(collected.executionsDeleted()).isEqualTo(2);
+            assertThat(collected.sessionsDeleted()).isEqualTo(1);
+            assertThat(collected.bindingsDeleted()).isEqualTo(1);
+            assertThat(bindings.findById(retired.getBindingId())).isNull();
+            assertThat(executions.findByExecutionCallId(isolation + "-call:process")).isNull();
+            assertThat(bindings.findById(replacement.getBindingId())).isNotNull();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_extension_record"
+                    + " WHERE session_id = ?", Integer.class, harness)).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void backgroundEvidenceRequiresExactIdentityGenerationKindAndProcessSuffix() throws Exception {
+        backgroundEvidence();
+        try (var connection = source.getConnection()) {
+            var binding = binding("binding", 4);
+            assertThat(guard.bindingReferenced(connection, binding)).isTrue();
+            assertThat(guard.bindingReferenced(connection, binding("binding", 5))).isFalse();
+            for (String column : java.util.List.of("tenant_id", "workspace_id", "session_id", "domain", "task_kind")) {
+                jdbc.update("UPDATE qwen_managed_session_extension_record SET " + column + " = CONCAT(" + column + ", ' ')");
+                assertThat(guard.bindingReferenced(connection, binding)).as(column).isFalse();
+                jdbc.update("UPDATE qwen_managed_session_extension_record SET " + column + " = TRIM(" + column + ")");
+            }
+            jdbc.update("UPDATE qwen_tool_execution SET binding_id = 'binding '");
+            assertThat(guard.bindingReferenced(connection, binding)).isFalse();
+            jdbc.update("UPDATE qwen_tool_execution SET binding_id = 'binding', execution_call_id = 'call:PROCESS'");
+            assertThat(guard.bindingReferenced(connection, binding)).isFalse();
+            jdbc.update("UPDATE qwen_tool_execution SET execution_call_id = 'call'");
+            assertThat(guard.bindingReferenced(connection, binding)).isFalse();
+            jdbc.update("UPDATE qwen_tool_execution SET execution_call_id = 'call:process'");
+            assertThat(guard.bindingReferenced(connection, binding)).isTrue();
+        }
+    }
+
+    @Test
+    void backgroundSettlementIsReadOnTheSweepConnection() throws Exception {
+        backgroundEvidence();
+        try (var connection = source.getConnection()) {
+            connection.setAutoCommit(false);
+            try (var update = connection.prepareStatement("UPDATE qwen_managed_session_extension_record SET settled_at = 2")) {
+                update.executeUpdate();
+            }
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
+            connection.rollback();
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isTrue();
+        }
+    }
+
+    private void backgroundEvidence() {
+        projection("tenant", "harness", "background_shell");
+        new JdbcToolExecutionRepository(source).findOrCreate(ToolExecutionRecord.prepared("call:process", "key",
+                "binding", 4, "harness", "runtime", "turn", "call", "digest",
+                Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", "digest")));
+    }
+
+    private static RuntimeBindingRecord retire(JdbcRuntimeBindingRepository bindings, RuntimeProvisionRequest request)
+            throws Exception {
+        var created = bindings.findOrCreate(request);
+        var claim = bindings.claimOperation(created.getBindingId(), "fixture", Duration.ofSeconds(2));
+        var seed = claim.getProvisionSeed();
+        var ready = bindings.compareAndSet(claim, claim.withAttestation(new RuntimeLease(seed.getProvisionalRuntimeId(),
+                URI.create("http://127.0.0.1:9"), seed.getToken(), seed.getLeaseId(), seed.getEpoch()),
+                new RuntimeResourceHandle("local-process", 1, Map.of("worker", "fixture")), Instant.now(), Instant.now()));
+        var draining = bindings.compareAndSet(ready, ready.withDrainRequested(true, Instant.now()));
+        var receipt = new RuntimeDrainReceipt(draining.getBindingId(), draining.getGeneration(),
+                seed.getProvisionRequestId(), draining.getResourceHandle(), Instant.now());
+        var retired = bindings.compareAndSet(draining, draining.withDrainReceipt(receipt)
+                .withState(RuntimeBindingRecord.State.RELEASED, draining.getLease(), Instant.parse("2000-01-01T00:00:00Z")));
+        assertThat(retired).isNotNull();
+        await().atMost(Duration.ofSeconds(5)).until(() -> !retired.getOperationLeaseUntil().isAfter(Instant.now()));
+        return retired;
+    }
+
     private void publication(String key) {
         jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id,"
                 + " session_id, publication_id, execution_key, capture_id, binding_json, binding_digest,"
@@ -208,13 +311,15 @@ class ManagedRuntimeRetentionGuardTest {
 
     private void child() { jdbc.update(childSql()); }
 
-    private void projection() {
+    private void projection() { projection("tenant", "parent", "child_agent"); }
+
+    private void projection(String tenant, String session, String kind) {
         jdbc.update("INSERT INTO qwen_managed_session_extension_record (session_scope_key, record_key, tenant_id,"
                 + " workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id,"
                 + " task_kind, task_state, runtime_state, delivery_target, delivery_state, created_at)"
-                + " VALUES (?, ?, 'tenant', 'workspace', 'parent', 'child_run', 'run', ?, 1, 'resource',"
-                + " 'child_agent', 'pending', 'unbound', 'session', 'planned', 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", "parent"),
-                ManagedExtensionProjection.recordKey("parent", "child_run", "run"), "a".repeat(64));
+                + " VALUES (?, ?, ?, 'workspace', ?, 'child_run', 'run', ?, 1, 'resource',"
+                + " ?, 'pending', 'unbound', 'session', 'planned', 1)",
+                ManagedSessionStore.sessionScopeKey(tenant, session),
+                ManagedExtensionProjection.recordKey(session, "child_run", "run"), tenant, session, "a".repeat(64), kind);
     }
 }

@@ -873,6 +873,11 @@ Child Session lineage also keeps a binding until its canonical parent child_run
 has a committed terminal projection; a missing projection remains protected.
 This lets cascade and relay repair a stopped child's original Runtime identity.
 Lineage and permanent relay classifications are never collected here.
+A `:process` execution also keeps its whole binding family while its owning
+Session has an unsettled background Shell child_run, including top-level
+Sessions and Workspace isolation. This preserves the process-status evidence
+used by Session-open never-started reconciliation until those Shell records
+settle; the association conservatively protects the whole owning Session.
 Publication and CSI ACK references keep the original execution and its parents,
 including already collected publications; unreferenced siblings may be removed.
 Nonterminal children, live operation/dispatch leases and managed bindings without

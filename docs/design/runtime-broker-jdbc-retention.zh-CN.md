@@ -20,11 +20,13 @@ Operator recovery、Workspace holder 和 CSI retirement 保护整个 binding，�
 
 子 Session 的 lineage 在父 child_run 的 canonical projection 缺失或 settled_at 为空时保护 binding。即使子会话已停止、没有 tool execution 或 Workspace holder，cascade 与 relay 的修复仍可能需要原 binding 身份。在 sweep 同连接上按主键读取 lineage 和父 projection，并精确校验原始身份。Lineage 在子会话 warm 前提交，终态 run 不可重新打开；已提交的 settled_at 结束此项保护。Session lineage、父记录和永久 relay ledger 均保留。
 
+存在 `<call>:process` execution 的 binding，在该 execution 所属 Session 仍有未结算的后台 Shell child_run projection 时也必须保留，覆盖顶层 Session 以及 Session、Workspace 两种隔离方式。Session-open reconciliation 将该行缺失作为未启动证明，因此须在所属 Session 的后台 Shell 记录结算前保留整个家族。Guard 在 sweep 同连接上使用有索引的存在性查询，并精确复核 tenant、Workspace、Session 和 generation。这是保守的 Session 级保护，并不逐条匹配 Shell 与 execution。
+
 ## 组件与并发
 
 JdbcRuntimeRetention 提供不依赖框架的 JDBC sweep，嵌入方提供同连接引用检查器。返回续扫游标以及扫描、跳过和各表删除计数。两层 keyset 游标跟踪 binding 和子表阶段；已检查的受保护行也推进游标。Binding 游标比较使用带六位小数的 UTC 字面值，避免 Connector/J 因 MariaDB 兼容握手截断时间参数而停滞。完整扫描后回绕，重启可安全重扫。
 
-批量值为 B 时，每轮最多检查 B 个 binding、B 个子行，三表合计最多删除 B 行。大家族跨轮处理。每个事务依次锁 tenant placement domain、slot、binding 和子记录；使用当前已提交状态复查资格与引用，然后依次删除 execution、session、binding。不执行无界级联删除。数据库错误回滚并向上抛出。Local publication 修改在原有事务中依次锁 tenant placement guard、原 JDBC binding 和 execution，再锁 publication，防止引用创建与删除竞争，并保持 session 生命周期的锁顺序。CSI 保持现有锁顺序。
+批量值为 B 时，每轮最多选取 B 个 binding 候选、B 个待删子行候选，三表合计最多删除 B 行。引用查询可能读取额外的索引行；批量计数不限制数据库实际读取行数。大家族跨轮处理。每个事务依次锁 tenant placement domain、slot、binding 和子记录；使用当前已提交状态复查资格与引用，然后依次删除 execution、session、binding。不执行无界级联删除。数据库错误回滚并向上抛出。Local publication 修改在原有事务中依次锁 tenant placement guard、原 JDBC binding 和 execution，再锁 publication，防止引用创建与删除竞争，并保持 session 生命周期的锁顺序。CSI 保持现有锁顺序。
 
 Managed-server 使用独立单线程 scheduler，只有 Broker 和 retention 同时开启才创建。qwen.managed-agent.runtime-broker.retention 配置为 enabled=false、max-age=30d、batch-size=100（1–1000）、scan-delay=1m。保留期和间隔必须至少为 1ms。不带单位的 max-age 按天解析；显式单位（包括至少为 1ms 且小于一天的保留期）保持原义。成功轮次记录计数；失败轮次记录错误并在下个周期重试。失败只回滚当前 binding 事务，同轮此前的提交继续保留，暂不提供这些部分提交的计数报告。恢复调度保持独立。已有 HTTP 和业务 repository 接口保持不变。
 
@@ -41,6 +43,8 @@ Managed-server 使用独立单线程 scheduler，只有 Broker 和 retention 同
 覆盖年龄边界、数据库时钟、生命周期状态、物理证据、有效租约、非终态子记录、generation 连续性和过期查询。覆盖全部外部引用、已完成 recovery、COLLECTED publication 和不同哈希算法。验证大家族与受保护行的有界推进，包括亚秒时间戳、同时间戳的 ID 排序和单行批次，并覆盖并发清理、回滚及引用创建竞争。对照内存实现的 placement 决策，并断言历史记录零解密。检查 schema/Flyway 一致性、旧库升级、调度隔离和配置开关。事务锁与 collation 必须在 MySQL/MariaDB 上验证，不能只依赖 H2。
 
 复现子会话已停止但父记录仍欠 dispatch/attach journal 修复的场景：清理须保留原 binding，使修复能够完成。验证 projection 缺失时保守保留、原始身份不匹配不能结束保护、guard 能读取 sweep 事务自己的写入，以及 canonical 终态 projection 允许清理而不回收 lineage 或 relay 分类。
+
+验证顶层 Session 的未结算后台 Shell 在两种隔离模式下均保留原 process-status 证据，而已结算 projection 允许清理；检查原始身份与 generation 不匹配，以及替代 generation 的接纳。
 
 集中 H2 和 MySQL 8.4.11 验证已通过，包括有界清理、回滚、精确 placement 比较、publication 行锁，以及过期 Broker 历史查询不会触发 provisioning 或 dispatch。查询计划检查确认 MySQL 可以使用候选、tenant/状态和引用索引。本地尚未验证 MariaDB；查询计划检查不代表延迟基准测试。
 
