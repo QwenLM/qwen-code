@@ -126,7 +126,7 @@ materializer 用数据库租约和 fencing token 领取有界工作。首片验�
 
 投影使用独立单线程调度器，已有 Harness、生命周期和消息任务保留默认调度器。READY 源不会再次认领：当前实现仅产生一次 projection_revision 1。重放消费者保留单调 revision 检查以拒绝重复或过期事件；第二次策略投影需要前文所述另行评审的表示 migration。公开 delivery pending 为预留值；已接受回执目前只公开 committed 或 blocked。缺失公开 Turn 映射有独立的 unsupported 诊断。
 
-元数据每请求评估一次当前原始读取策略，按 Session scope 批量查询 publication 可用性。内容读取仍在每个 chunk 边界重新检查权限与 catalog。初始 guard 和 range 边界先于元数据闭包读取。固定 revision 的读取仍验证完整不可变元数据闭包；本次不减少闭包验证，也不节流当前权限检查。审计区分 denied、rejected、interrupted 与 completed，包含成功的零字节流。
+元数据每请求评估一次当前原始读取策略，按 Session scope 批量查询 publication 可用性。内容读取仍在每个 chunk 边界重新检查权限与 catalog。初始 guard 和 range 边界先于元数据闭包读取。固定 revision 的读取仍验证完整不可变元数据闭包；本次不减少闭包验证，也不节流当前权限检查。审计区分 denied、rejected、interrupted 与 completed，包含成功的零字节流。（2026-10-02 由 issue #13181 取代：逐 chunk 的访问复检改为按 `qwen.managed-agent.artifacts.read-revalidation-interval` 窗口化，默认 5 秒；读取租约的持久性检查仍逐 chunk 执行。见[查询放大修复设计](2026-10-02-managed-agent-query-amplification.zh-CN.md) §7。）
 
 预览源窗口最多 8 KiB，另受 UTF-8 字节和 200 行上限约束。自动预览复用每个 artifact 已校验的元数据句柄；若校验相交分段需要读取超过 1 MiB，则省略预览。artifact 元数据与用户主动请求的内容仍可读取。WebShell 保留包含 lookback bytes 的四页缓存，同 Session 刷新期间保持输出面板打开，在当前 Turn 新增结果行前结算 assistant 文本。临时 429/503 内容读取按 Retry-After 对同一请求最多重试一次，等待上限五秒，超过上限的 Retry-After 直接返回错误而不提前重试；取消也会终止等待。每次普通测试运行都比较 Java 产生的契约 fixture，仅规范化时间戳和随机分配的 event ID。
 
@@ -173,7 +173,7 @@ O3 每项操作都要求可信 tenant/actor principal，再验证当前 Session/
 
 未知或不可读资源遵守产品 404 策略。允许发现 Artifact、但禁止读取原始 bytes 的调用者收到 `403 artifact_content_forbidden`。只有已授权调用者才能观察过期版本 `410`。O3 不使保留表示过期；`410` 为未来保留期实现预留，当前缺失或被隔离的内容按不可用处理。授权检查先于可能泄露长度/版本的 range 和 precondition 错误。审计 actor、作用域 ID、决定和字节数，不记录内容、凭证或签名链接。
 
-请求准入、首字节发送前，以及有界流 chunk 边界都检查权限与当前 catalog/表示可用性。撤权、删除或 quarantine 停止后续 chunk，已经发送的 bytes 无法收回。客户端断开时终止传输并释放并发名额。公开元数据及 bytes 响应使用 `Cache-Control: private, no-store`。
+请求准入、首字节发送前，以及有界流 chunk 边界都检查权限与当前 catalog/表示可用性。撤权、删除或 quarantine 停止后续 chunk，已经发送的 bytes 无法收回。客户端断开时终止传输并释放并发名额。公开元数据及 bytes 响应使用 `Cache-Control: private, no-store`。（2026-10-02 由 issue #13181 取代：流内访问复检至多每个 `read-revalidation-interval`（默认 5 秒）一次——撤权/删除在窗口到期后的第一个 chunk 边界生效；逐 chunk 的租约检查不变。见[查询放大修复设计](2026-10-02-managed-agent-query-amplification.zh-CN.md) §7。）
 
 ## 7. 精确 bytes、HTTP 与有界下载
 
@@ -227,7 +227,7 @@ O3 增加公开引用映射和读取准入，O4 负责物理垃圾回收。只�
 | 投影提交、响应/SSE 丢失                                                   | 结果/列表/Snapshot 恢复返回相同 ID 和 revision。                                                                                               |
 | Turn 先完成                                                               | 迟到结果更新已结算 Item，不产生新 Turn 或模型续跑。                                                                                            |
 | Session 删除与投影竞争                                                    | Session 行门禁阻止删除开始后的公开写入；源按恢复策略保留或 suppressed。                                                                        |
-| range/下载过程中撤权                                                      | 按约定 chunk 边界停止后续交付，不触发 Runtime 操作。                                                                                           |
+| range/下载过程中撤权                                                      | 按约定 chunk 边界停止后续交付，不触发 Runtime 操作。（自 2026-10-02 起，issue #13181：在复检窗口到期后的第一个 chunk 边界停止，默认 5 秒。）   |
 | 已接受 bytes 损坏或丢失                                                   | 可用性变为 unavailable，诊断有界；原执行/捕获事实保留。                                                                                        |
 | 未确认的 publication candidate 操作 deadline 在持久 finish/receipt 前到期 | 不公开已接受 Artifact；该 liveness 策略由 [#13019](https://github.com/QwenLM/qwen-code/issues/13019) 负责，不表示保留的 publication 数据过期。 |
 

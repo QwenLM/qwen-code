@@ -130,10 +130,23 @@ interface ScoredTool {
   score: number;
 }
 
-function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
-  return Boolean(
-    registry.getTool(ToolNames.TOOL_SEARCH) &&
-      registry.getTool(ToolNames.TOOL_CALL),
+export function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
+  const toolNames = registry.getAllToolNames();
+  return (
+    toolNames.includes(ToolNames.TOOL_SEARCH) &&
+    toolNames.includes(ToolNames.TOOL_CALL)
+  );
+}
+
+/**
+ * Whether model-facing prose may offer the Direct-mode route (`tool_search`,
+ * then `tool_call`): the bridge is registered and the session is not
+ * CodeModeOnly, which hides and refuses `tool_call` even though both halves
+ * stay registered there.
+ */
+export function isDirectToolBridgeAvailable(registry: ToolRegistry): boolean {
+  return (
+    !registry.isCodeModeOnly?.() && isDeferredToolBridgeAvailable(registry)
   );
 }
 
@@ -325,6 +338,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     return registry.getAllTools().filter(
       (t) =>
         registry.isDeferredAndHidden(t.name) &&
+        registry.isToolDeclared(t.name) &&
         (!bindings || bindings.has(t.name)) &&
         // Context-gated: the leader's discovery stays unrestricted (the
         // predicate itself is ungated so prepareTools can fail closed).

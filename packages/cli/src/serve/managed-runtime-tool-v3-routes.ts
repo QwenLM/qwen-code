@@ -220,7 +220,8 @@ export function registerManagedRuntimeToolV3Routes(
         !parsed ||
         !ref ||
         !cap ||
-        parsed['toolName'] !== 'run_shell_command' ||
+        (parsed['toolName'] !== 'run_shell_command' &&
+          parsed['toolName'] !== 'monitor') ||
         !input ||
         typeof input !== 'object' ||
         Array.isArray(input)
@@ -230,7 +231,7 @@ export function registerManagedRuntimeToolV3Routes(
         const view = await executor.executeV3({
           reference: ref,
           capture: cap,
-          toolName: 'run_shell_command',
+          toolName: parsed['toolName'] as 'run_shell_command' | 'monitor',
           input: input as Record<string, unknown>,
         });
         res.status(200).json({

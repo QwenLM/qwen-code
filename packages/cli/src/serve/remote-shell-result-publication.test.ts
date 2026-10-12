@@ -99,6 +99,24 @@ const request = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('remote Shell result publication', () => {
+  it('keeps an installed grant blocked before any capture or tool starts', () => {
+    const publisher = new RemoteShellResultPublisher();
+    const resolver = vi.fn(async () => undefined);
+    const executor = new ManagedToolExecutor(resolver, publisher);
+    expect(publisher.hasInstalledPublication).toBe(false);
+    publisher.install(installation, boot);
+    expect(publisher.hasInstalledPublication).toBe(true);
+    const retirementId = '550e8400-e29b-41d4-a716-446655440000';
+    executor.sealAdmission(retirementId);
+    expect(executor.getDrainObservation(retirementId)).toMatchObject({
+      workState: 'BLOCKED',
+      pendingStarts: 0,
+      pendingInvocations: 0,
+      blockers: ['publication_lifecycle_unqualified'],
+    });
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
   it.each(['segment', 'finish'])(
     'recovers %s publication without repeating a real Shell side effect',
     async (fault) => {

@@ -65,6 +65,7 @@ class ToolPublicationConfigurationTest {
                 new com.aliyun.oss.common.auth.DefaultCredentials("test", "test"));
         var client = (com.aliyun.oss.OSSClient) ToolPublicationConfiguration.buildOss(properties, credentials);
         try {
+            assertThat(client.getCredentialsProvider()).isSameAs(credentials);
             assertThat(client.getClientConfiguration().getSignatureVersion())
                     .isEqualTo(com.aliyun.oss.common.comm.SignVersion.V4);
             assertThat(client.getClientConfiguration().getMaxErrorRetry()).isEqualTo(1);
@@ -79,6 +80,33 @@ class ToolPublicationConfigurationTest {
         settings.setOssEndpoint("http://oss-cn-hangzhou.aliyuncs.com");
         assertThatThrownBy(() -> ToolPublicationConfiguration.buildOss(properties, credentials))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("regional HTTPS");
+    }
+
+    @Test
+    void theJournalHeadAuthorizationFlagReachesTheStore() {
+        var configuration = new ToolPublicationConfiguration();
+        var properties = new ManagedAgentProperties();
+        var settings = properties.getToolPublication();
+        settings.setExecutionBytes(1024L * 1024 * 1024);
+        settings.setSessionBytes(1024L * 1024 * 1024);
+        settings.setTenantBytes(1024L * 1024 * 1024);
+        settings.setActiveCaptures(4L);
+        settings.setEntryConcurrency(4);
+        assertThat(storeOf(configuration, properties).journalHeadAuthorization())
+                .isFalse();
+        settings.setJournalHeadAuthorization(true);
+        assertThat(storeOf(configuration, properties).journalHeadAuthorization())
+                .isTrue();
+    }
+
+    private ToolPublicationStore storeOf(ToolPublicationConfiguration configuration,
+            ManagedAgentProperties properties) {
+        return configuration.toolPublicationStore(mock(JdbcTemplate.class),
+                mock(PlatformTransactionManager.class),
+                mock(ManagedSessionStore.class),
+                mock(com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class),
+                mock(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class),
+                properties);
     }
 
     private ToolPublicationDataStore data(ManagedAgentProperties properties) {

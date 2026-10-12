@@ -41,14 +41,45 @@ public class ManagedSessionStoreController {
         this.store = store;
     }
 
+    private static com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycleAuthority(HttpHeaders headers) {
+        String operation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.OPERATION_HEADER);
+        String generation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.GENERATION_HEADER);
+        if (operation == null && generation == null) {
+            return null;
+        }
+        try {
+            return new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority(operation, Long.parseLong(generation));
+        } catch (RuntimeException error) {
+            throw new ApiException(org.springframework.http.HttpStatus.BAD_REQUEST, "invalid_lifecycle_authority", "Invalid lifecycle authority.");
+        }
+    }
+
+    @PostMapping("/execution:authorize")
+    public java.util.Map<String, Object> authorizeOrdinary(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken, request);
+        return java.util.Map.of("authorized", true);
+    }
+
+    @PostMapping("/lifecycle:authorize")
+    public java.util.Map<String, Object> authorizeLifecycle(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.AuthorizeLifecycleRequest request,
+            @RequestHeader HttpHeaders headers) {
+        store.authorizeLifecycle(tenant.tenantId(), sessionId, writerToken, request, lifecycleAuthority(headers));
+        return java.util.Map.of("authorized", true);
+    }
+
     @PostMapping("/writers:acquire")
     public WriterGrant acquire(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
                     String writerToken,
-            @Valid @RequestBody AcquireWriterRequest request) {
+            @Valid @RequestBody AcquireWriterRequest request,
+            @RequestHeader HttpHeaders headers) {
         return store.acquireWriter(tenant.tenantId(), sessionId,
-                writerToken, request);
+                writerToken, request, lifecycleAuthority(headers));
     }
 
     @PostMapping("/writers:renew")
@@ -56,9 +87,10 @@ public class ManagedSessionStoreController {
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
                     String writerToken,
-            @Valid @RequestBody RenewWriterRequest request) {
+            @Valid @RequestBody RenewWriterRequest request,
+            @RequestHeader HttpHeaders headers) {
         return store.renewWriter(tenant.tenantId(), sessionId,
-                writerToken, request);
+                writerToken, request, lifecycleAuthority(headers));
     }
 
     @PostMapping("/writers:seal")
@@ -66,9 +98,10 @@ public class ManagedSessionStoreController {
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
                     String writerToken,
-            @Valid @RequestBody SealWriterRequest request) {
+            @Valid @RequestBody SealWriterRequest request,
+            @RequestHeader HttpHeaders headers) {
         return store.sealWriter(tenant.tenantId(), sessionId,
-                writerToken, request);
+                writerToken, request, lifecycleAuthority(headers));
     }
 
     @PostMapping("/recovery:block")
@@ -86,9 +119,10 @@ public class ManagedSessionStoreController {
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
                     String writerToken,
-            @Valid @RequestBody CommitTransactionRequest request) {
+            @Valid @RequestBody CommitTransactionRequest request,
+            @RequestHeader HttpHeaders headers) {
         return store.commit(tenant.tenantId(), sessionId,
-                writerToken, request);
+                writerToken, request, lifecycleAuthority(headers));
     }
 
     @GetMapping("/restore")

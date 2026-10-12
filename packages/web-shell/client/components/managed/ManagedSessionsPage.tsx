@@ -19,6 +19,8 @@ import {
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
 import { useManagedActions } from './use-managed-actions';
+import { useManagedCwdChange } from './use-managed-cwd-change';
+import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
@@ -88,7 +90,6 @@ export function ManagedSessionsPage({
         onSelectSession={onSelectSession}
         workspaceCwd={workspaceCwd}
         provider={managedAgentProvider}
-        enabled
         cancellationEnabled={managedAgentProvider.canCancel}
       />
     );
@@ -101,14 +102,12 @@ function ManagedSessionsContent({
   onSelectSession,
   workspaceCwd,
   provider,
-  enabled,
   cancellationEnabled,
 }: {
   sessionId?: string;
   onSelectSession: (sessionId: string | undefined) => void;
   workspaceCwd?: string;
   provider: ManagedAgentProvider;
-  enabled: boolean;
   cancellationEnabled: boolean;
 }) {
   const { t } = useI18n();
@@ -116,16 +115,13 @@ function ManagedSessionsContent({
     () => getManagedClientId(provider.storageKey),
     [provider.storageKey],
   );
-  const detail = useManagedSession(
-    provider,
-    clientId,
-    enabled ? sessionId : undefined,
-  );
+  const detail = useManagedSession(provider, clientId, sessionId);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string>();
   const [listLoading, setListLoading] = useState(false);
   const [listRevision, setListRevision] = useState(0);
   const [error, setError] = useState<string>();
+  const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [outputTarget, setOutputTarget] = useState<{
@@ -148,6 +144,11 @@ function ManagedSessionsContent({
     readPending(pendingKey),
   );
   const pendingRef = useRef(pending);
+  const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
+    undefined,
+  );
+  const composerFormRef = useRef<HTMLFormElement | null>(null);
+  const sessionsNavRef = useRef<HTMLElement | null>(null);
   const lifetime = useRef<AbortController | undefined>(undefined);
   const listLifetime = useRef<AbortController | undefined>(undefined);
   const listBusy = useRef(false);
@@ -164,7 +165,7 @@ function ManagedSessionsContent({
   const answerNoticeId = useId();
   const approvals = useManagedActions(
     provider,
-    enabled ? sessionId : undefined,
+    sessionId,
     clientId,
     // Unknown while the summary reloads, so the shown approval is kept.
     detail.summary ? detail.summary.capabilities.actions === true : undefined,
@@ -176,6 +177,13 @@ function ManagedSessionsContent({
         ? toManagedPermissionRequest(approvals.action, messages)
         : null,
     [approvals.action, messages],
+  );
+  const cwd = useManagedCwdChange(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    detail.refreshSummary,
   );
   // The reason line below is mounted exactly when this holds, so the dialog can
   // point at it without ever leaving a dangling IDREF. A latch-only render has
@@ -194,18 +202,58 @@ function ManagedSessionsContent({
     return () => abort.abort();
   }, [pendingKey]);
 
+  // The Discard button unmounts itself, dropping focus to <body>: land it on
+  // the composer that just got the draft back. The move must wait for the
+  // clear to commit — the textarea is disabled while pending is set — and
+  // the composer can still be absent (a workspace-binding creator replaces
+  // the form) or disabled (the session cannot send), so fall back to the
+  // session list landmark rather than leave the user at <body>. The latch is
+  // scoped to the session whose discard armed it, and it dies as soon as
+  // focus sits somewhere the discard did not put it: a user who moved on is
+  // never pulled back. While the disablement can still lift — the summary
+  // unknown, or an admitted Turn gating sends for its whole life — the latch
+  // stays armed and retries when the summary changes.
+  useEffect(() => {
+    const armed = focusComposer.current;
+    if (!armed || pending) return;
+    if (armed.sessionId !== sessionId) {
+      focusComposer.current = undefined;
+      return;
+    }
+    const composer =
+      composerFormRef.current?.querySelector<HTMLTextAreaElement>(
+        'textarea:not([disabled])',
+      );
+    const parked = document.activeElement;
+    const ours = parked === document.body || parked === sessionsNavRef.current;
+    if (composer) {
+      focusComposer.current = undefined;
+      if (ours) composer.focus();
+      return;
+    }
+    if (!ours) {
+      focusComposer.current = undefined;
+      return;
+    }
+    sessionsNavRef.current?.focus();
+    // detail.summary is the re-arm trigger: a poll or clean pass lifts the
+    // disablement by delivering a new summary without touching the record.
+  }, [pending, sessionId, detail.summary]);
+
+  // Depend on the value the request actually sends: a provider that drops
+  // workspaceCwd must not refetch (and lose paged rows) on folder change.
+  const listCwd = provider.acceptsWorkspaceCwd ? workspaceCwd : undefined;
   useEffect(() => {
     const abort = new AbortController();
     listLifetime.current = abort;
     listBusy.current = false;
     setSessions([]);
     setNextCursor(undefined);
-    if (!enabled) return () => abort.abort();
     setListLoading(true);
     void provider
       .listSessions({
         clientId,
-        workspaceCwd: provider.acceptsWorkspaceCwd ? workspaceCwd : undefined,
+        workspaceCwd: listCwd,
         limit: 50,
         signal: abort.signal,
       })
@@ -224,7 +272,7 @@ function ManagedSessionsContent({
         if (!abort.signal.aborted) setListLoading(false);
       });
     return () => abort.abort();
-  }, [provider, clientId, enabled, workspaceCwd, listRevision]);
+  }, [provider, clientId, listCwd, listRevision]);
 
   const reloadSession = detail.reload;
   const refresh = useCallback(() => {
@@ -242,7 +290,7 @@ function ManagedSessionsContent({
     try {
       const page = await provider.listSessions({
         clientId,
-        workspaceCwd: provider.acceptsWorkspaceCwd ? workspaceCwd : undefined,
+        workspaceCwd: listCwd,
         cursor: nextCursor,
         limit: 50,
         signal: abort.signal,
@@ -267,7 +315,8 @@ function ManagedSessionsContent({
 
   async function submit() {
     const abort = lifetime.current;
-    if (!abort || abort.signal.aborted || busy || !enabled) return;
+    if (!abort || abort.signal.aborted || busy || cwd.isBlocked()) return;
+    setDiscarded(false);
     let attempt = pendingRef.current;
     if (!attempt) {
       if (!text.trim() || (sessionId && !detail.summary?.capabilities.canSend))
@@ -361,13 +410,33 @@ function ManagedSessionsContent({
     }
   }
 
-  if (!enabled) return <p role="status">{t('managed.unavailable')}</p>;
   const summary = detail.summary;
   const active =
     summary &&
     !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
+  // Cancel authority differs from submit authority: the creator may stop a
+  // running bound Turn after the Workspace stops admitting new work, so the
+  // control is not tied to the composer and the server's 409 is the gate.
+  const cancelButton =
+    cancellationEnabled &&
+    summary?.capabilities.canCancel &&
+    summary.activeTurnId ? (
+      <Button
+        type="button"
+        variant="outline"
+        disabled={busy}
+        onClick={() => void cancel()}
+      >
+        {t('managed.cancel')}
+      </Button>
+    ) : null;
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
+      {/* The uncertain-request row unmounts on the Discard click itself, so
+          a persistent region announces the outcome wherever focus lands. */}
+      <p role="status" className="sr-only">
+        {discarded ? t('managed.discarded') : ''}
+      </p>
       <div className="flex items-center justify-between gap-2">
         <Button
           variant="outline"
@@ -384,13 +453,24 @@ function ManagedSessionsContent({
           {t('managed.refresh')}
         </Button>
       </div>
-      {(error || detail.error) && (
-        <p role="alert" className="text-sm text-destructive">
-          {error || detail.error}
+      {/* One server condition can surface through both channels; announce
+          each distinct message once, keyed by the message so a standing
+          alert keeps its node when a duplicate of it stops rendering. */}
+      {[
+        ...new Set(
+          [detail.stoppedReason, detail.error, error].filter(
+            (message): message is string => Boolean(message),
+          ),
+        ),
+      ].map((message) => (
+        <p key={message} role="alert" className="text-sm text-destructive">
+          {message}
         </p>
-      )}
+      ))}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]">
         <nav
+          ref={sessionsNavRef}
+          tabIndex={-1}
           aria-label={t('managed.sessions')}
           className="flex max-h-48 flex-col gap-1 overflow-y-auto md:max-h-none"
         >
@@ -485,6 +565,30 @@ function ManagedSessionsContent({
                 {t('managed.workspaceDirectory')}:{' '}
                 {summary.workspace.cwdRelative}
               </p>
+              <ManagedSessionCwdControl
+                key={`${provider.storageKey}:${summary.sessionId}`}
+                summary={summary}
+                supported={Boolean(provider.cwdChange)}
+                cwd={cwd}
+                disabledReason={
+                  active ||
+                  pendingApproval ||
+                  busy ||
+                  pending?.sessionId === sessionId
+                    ? t('managed.cwd.busy')
+                    : undefined
+                }
+                onSubmit={(path, revision) => {
+                  if (
+                    pendingRef.current?.sessionId === sessionId ||
+                    busy ||
+                    active ||
+                    pendingApproval
+                  )
+                    return Promise.resolve();
+                  return cwd.submit(path, revision);
+                }}
+              />
               {!summary.capabilities.workspaceTurns && (
                 <p className="text-muted-foreground">
                   {t('managed.workspaceExecutionUnavailable')}
@@ -535,9 +639,41 @@ function ManagedSessionsContent({
             </div>
           )}
           {pending && !busy && (
-            <p role="status" className="text-sm text-muted-foreground">
-              {t('managed.uncertain')}
-            </p>
+            <div className="flex items-center gap-2" role="status">
+              <p className="text-sm text-muted-foreground">
+                {t('managed.uncertain')}
+              </p>
+              {/* Offered only where the handler can restore the draft:
+                  destroying the only copy from a foreign session would lose
+                  it for good. */}
+              {pending.sessionId === sessionId && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    // An escape from a permanently failing retry: reuse the
+                    // draft text without minting a new idempotency key.
+                    pendingRef.current = undefined;
+                    setPending(undefined);
+                    persistPending(pendingKey, undefined);
+                    // The pending record is client-scoped but the draft
+                    // belongs to the session it was written for: restore it
+                    // only there.
+                    if (pending.sessionId === sessionId) setText(pending.text);
+                    setError(undefined);
+                    // A create that committed server-side before an
+                    // unconfirmed failure is otherwise invisible until the
+                    // user happens to press Refresh.
+                    if (pending.sessionId === undefined)
+                      setListRevision((current) => current + 1);
+                    focusComposer.current = { sessionId };
+                    setDiscarded(true);
+                  }}
+                >
+                  {t('managed.discard')}
+                </Button>
+              )}
+            </div>
           )}
           {pendingApproval && (
             <div className="shrink-0" data-testid="managed-approval">
@@ -545,9 +681,11 @@ function ManagedSessionsContent({
                 request={pendingApproval}
                 variant="floating"
                 keyboardActive={false}
-                // Only the Session creator may answer; once the service says
-                // so, that is true of every approval this Session raises, so
-                // the latch is scoped to the Session rather than the Action.
+                // Answering needs the Session's owner or a Workspace
+                // operator; once the service refuses this viewer, that
+                // holds for every approval this Session raises — until an
+                // explicit retry re-probes, so the latch is scoped to the
+                // Session rather than the Action.
                 disabled={approvals.respondForbidden}
                 extraDescriptionId={
                   [
@@ -569,7 +707,14 @@ function ManagedSessionsContent({
                   role="status"
                   className="text-sm text-muted-foreground"
                 >
-                  {t('managed.approval.argumentsUnavailable')}
+                  {approvals.action?.inputPreview
+                    ? t(
+                        approvals.action.inputPreview.truncated
+                          ? 'managed.approval.previewTruncated'
+                          : 'managed.approval.previewComplete',
+                        { bytes: approvals.action.inputPreview.byteLength },
+                      )
+                    : t('managed.approval.argumentsUnavailable')}
                 </p>
               )}
             </div>
@@ -595,20 +740,30 @@ function ManagedSessionsContent({
               guard only bounds the latch: the reason describes a card, and
               once the Session has none there is nothing left to explain. */}
           {pendingApproval !== null && answerNoticeShown && (
-            <p
-              id={answerNoticeId}
-              // The first refusal is news; the latch that keeps every later
-              // approval of this Session disabled only restates it, so it is
-              // a status line rather than a second alert.
-              role={approvals.answerError !== undefined ? 'alert' : 'status'}
-              className="text-sm text-destructive"
-            >
-              {t(
-                approvals.respondForbidden
-                  ? 'managed.approval.forbidden'
-                  : 'managed.approval.failed',
+            <div className="flex items-center gap-2">
+              <p
+                id={answerNoticeId}
+                // The first refusal is news; the latch that keeps every
+                // later approval of this Session disabled only restates it,
+                // so it is a status line rather than a second alert.
+                role={approvals.answerError !== undefined ? 'alert' : 'status'}
+                className="text-sm text-destructive"
+              >
+                {t(
+                  approvals.respondForbidden
+                    ? 'managed.approval.forbidden'
+                    : 'managed.approval.failed',
+                )}
+              </p>
+              {approvals.respondForbidden && (
+                // The refusal came from the viewer's role row, which an
+                // operator can raise while the page stays open — unlike the
+                // load-error retry this renders without a `loadError`.
+                <Button variant="outline" size="sm" onClick={approvals.retry}>
+                  {t('managed.approval.retry')}
+                </Button>
               )}
-            </p>
+            </div>
           )}
           <ManagedSessionProgress
             summary={summary}
@@ -620,6 +775,7 @@ function ManagedSessionsContent({
           {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
           (!provider.workspaceBinding || (sessionId && summary)) ? (
             <form
+              ref={composerFormRef}
               className="flex shrink-0 flex-col gap-2"
               onSubmit={(event) => {
                 event.preventDefault();
@@ -646,22 +802,12 @@ function ManagedSessionsContent({
                       {t('managed.newRequired')}
                     </span>
                   )}
-                {cancellationEnabled &&
-                  summary?.capabilities.canCancel &&
-                  summary.activeTurnId && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() => void cancel()}
-                    >
-                      {t('managed.cancel')}
-                    </Button>
-                  )}
+                {cancelButton}
                 <Button
                   type="submit"
                   disabled={
                     busy ||
+                    cwd.blocked ||
                     (!pending &&
                       (!text.trim() ||
                         Boolean(sessionId && !summary?.capabilities.canSend)))
@@ -675,7 +821,11 @@ function ManagedSessionsContent({
                 </Button>
               </div>
             </form>
-          ) : null}
+          ) : (
+            cancelButton && (
+              <div className="flex shrink-0 justify-end">{cancelButton}</div>
+            )
+          )}
           {outputTarget &&
             outputTarget.sessionId === sessionId &&
             sessionId &&

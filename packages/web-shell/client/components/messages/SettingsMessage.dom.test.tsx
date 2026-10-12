@@ -595,6 +595,12 @@ describe('SettingsMessage user-scope editing', () => {
       await Promise.resolve();
     });
 
+    expect(setup.update).not.toHaveBeenCalled();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+        .click(),
+    );
     expect(setup.update).toHaveBeenCalledWith({
       apiKey: { operation: 'clear' },
     });
@@ -615,6 +621,13 @@ describe('SettingsMessage user-scope editing', () => {
     act(() => experimental?.click());
 
     act(() => switchButton(container).click());
+    expect(setup.update).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-live-settings-save]')!
+        .click(),
+    );
     expect(document.body.textContent).toContain(
       'download, verify, install, and open',
     );

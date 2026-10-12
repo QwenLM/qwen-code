@@ -22,6 +22,7 @@ import {
   type ToolResult,
   type ToolResultDisplay,
 } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
 import {
   ManagedToolRuntime,
   ManagedToolPreparationError,
@@ -272,6 +273,44 @@ describe('ManagedToolRuntime', () => {
       expect(tool.invocations[0].execute).not.toHaveBeenCalled();
       expect(hooks.post).not.toHaveBeenCalled();
       expect(hooks.failure).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['before', 'after'] as const)(
+    'settles a shared history rejection %s physical execution',
+    async (phase) => {
+      const gate = deferred<void>();
+      const refusal = new Error('Shared history refused execution.');
+      useSharedHistory({
+        prepareTurn: async () => {},
+        execute: async (operation) => {
+          await gate.promise;
+          if (phase === 'after') await operation();
+          throw refusal;
+        },
+      });
+      const ref = await prepare();
+      await runtime.preflight(ref);
+      const pending = runtime.execute(ref);
+      const outcome = pending.catch((error: unknown) => error);
+      expect(runtime.status(ref).state).toBe('executing');
+      expect(runtime.hasActiveWork()).toBe(true);
+      gate.resolve();
+      expect(await outcome).toBe(refusal);
+      expect(runtime.status(ref)).toMatchObject({
+        state: 'settled',
+        result: {
+          executionStatus: phase === 'before' ? 'not_started' : 'success',
+        },
+      });
+      expect(tool.invocations[0].execute).toHaveBeenCalledTimes(
+        phase === 'before' ? 0 : 1,
+      );
+      expect(runtime.hasActiveWork()).toBe(false);
+      expect(runtime.cancel(ref).state).toBe('settled');
+      await expect(runtime.execute(ref)).rejects.toBe(refusal);
+      await expect(runtime.releasePrepared()).resolves.toBeUndefined();
+      await expect(runtime.dispose()).resolves.toBeUndefined();
     },
   );
 
@@ -677,6 +716,156 @@ describe('ManagedToolRuntime', () => {
     expect(tool.invocations).toHaveLength(1025);
   });
 
+  it.each([
+    ['a replacement', { shouldProceed: true }, { value: 'rewritten' }],
+    ['an empty replacement', { shouldProceed: true }, {}],
+    ['an identical replacement', { shouldProceed: true }, input],
+    ['an ask replacement', { shouldProceed: false, blockType: 'ask' }, {}],
+  ])(
+    'refuses %s without running the tool',
+    async (_label, decision, updatedInput) => {
+      hooks.pre.mockResolvedValue({
+        ...decision,
+        additionalContext: 'ctx',
+        updatedInput,
+      });
+      tool.setup = (invocation) => {
+        invocation.getDefaultPermission.mockResolvedValue('ask');
+      };
+      const ref = await prepare();
+      await runtime.confirm(ref, ToolConfirmationOutcome.ProceedOnce);
+
+      const result = await runtime.preflight(ref);
+      expect(result).toEqual({
+        shouldProceed: false,
+        blockType: 'denied',
+        blockReason: expect.stringContaining('not supported'),
+        additionalContext: 'ctx',
+      });
+      expect(await runtime.preflight(ref)).toEqual(result);
+      await expect(
+        runtime.confirm(
+          ref,
+          ToolConfirmationOutcome.ProceedOnce,
+          undefined,
+          'preflight',
+        ),
+      ).rejects.toThrow('did not request');
+      expect(() => runtime.execute(ref)).toThrow('preflight');
+      expect(hooks.pre).toHaveBeenCalledTimes(1);
+      expect(tool.invocations[0].execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['denied', 'policy'],
+    ['stop', 'halt'],
+  ])(
+    'keeps a %s reason that comes with a replacement',
+    async (blockType, blockReason) => {
+      hooks.pre.mockResolvedValue({
+        shouldProceed: false,
+        blockType,
+        blockReason,
+        updatedInput: { value: 'rewritten' },
+      });
+      const ref = await prepare();
+      expect(await runtime.preflight(ref)).toEqual({
+        shouldProceed: false,
+        blockType,
+        blockReason,
+      });
+      expect(() => runtime.execute(ref)).toThrow('preflight');
+    },
+  );
+
+  it('refuses a real command hook replacement through the hook pipeline', async () => {
+    const { HookSystem } = await import('../hooks/hookSystem.js');
+    const { PermissionMode } = await import('../hooks/types.js');
+    const actual = await vi.importActual<
+      typeof import('../core/toolHookTriggers.js')
+    >('../core/toolHookTriggers.js');
+    hooks.pre.mockImplementation(actual.firePreToolUseHook);
+    const { mkdtemp, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const outputFile = join(
+      await mkdtemp(join(tmpdir(), 'managed-hook-')),
+      'output.json',
+    );
+    await writeFile(
+      outputFile,
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          updatedInput: { value: 'rewritten' },
+        },
+      }),
+    );
+    Object.assign(config, {
+      getAllowedHttpHookUrls: () => [],
+      getAllowPrivateNetworkHooks: () => false,
+      getSystemHooks: () => ({}),
+      getUserHooks: () => ({
+        PreToolUse: [
+          {
+            hooks: [
+              {
+                type: 'command',
+                command: `cat '${outputFile}'`,
+              },
+            ],
+          },
+        ],
+      }),
+      getProjectHooks: () => ({}),
+      getExtensions: () => [],
+      isTrustedFolder: () => true,
+      getTranscriptPath: () => '/tmp/transcript',
+      getWorkingDir: () => process.cwd(),
+      getSessionSourceType: () => undefined,
+      getSessionSourceId: () => undefined,
+      getUsageStatisticsEnabled: () => false,
+    });
+    const system = new HookSystem(config);
+    config.getHookSystem = () => system;
+    await system.initialize();
+    const owner = { runtimeId: system.runtimeId, sessionId, agentId: null };
+    const request = vi.fn(
+      async (
+        message: import('../confirmation-bus/types.js').HookExecutionRequest,
+      ) => ({
+        success: true,
+        output: await runWithHookExecutionOwner(message.owner, () =>
+          system.firePreToolUseEvent(
+            String(message.input['tool_name']),
+            message.input['tool_input'] as Record<string, unknown>,
+            String(message.input['tool_use_id']),
+            PermissionMode.Default,
+          ),
+        ),
+      }),
+    );
+    config.getMessageBus = () =>
+      ({ request, publish: vi.fn() }) as unknown as ReturnType<
+        Config['getMessageBus']
+      >;
+    const ref = await runWithHookExecutionOwner(owner, () => prepare());
+    const result = await runWithHookExecutionOwner(owner, () =>
+      runtime.preflight(ref),
+    );
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      shouldProceed: false,
+      blockType: 'denied',
+      blockReason: expect.stringContaining('not supported'),
+    });
+    expect(result).not.toHaveProperty('updatedInput');
+    expect(() => runtime.execute(ref)).toThrow('preflight');
+    expect(tool.invocations[0].execute).not.toHaveBeenCalled();
+  });
+
   it('runs the preflight hook once across the second confirmation bounce', async () => {
     hooks.pre.mockResolvedValue({ shouldProceed: false, blockType: 'ask' });
     const ref = await prepare();
@@ -977,6 +1166,110 @@ describe('ManagedToolRuntime', () => {
     });
     expect((await executing).executionStatus).toBe('cancelled');
     expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.post).not.toHaveBeenCalled();
+  });
+
+  it('preserves an explicit Shell cancellation when the tool also has an error', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    gate.resolve({
+      llmContent: 'Command failed and was cancelled.',
+      error: {
+        message: 'process terminated with signal',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: 'Command failed and was cancelled.',
+        output: '',
+        directory: '/scratch',
+        exitCode: null,
+        signal: 15,
+        pid: 123,
+        error: 'signal 15 (SIGTERM) received',
+        outcome: 'cancelled',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      },
+    });
+    const settled = await executing;
+    expect(runtime.status(ref)).toMatchObject({
+      state: 'settled',
+      cancelRequested: false,
+    });
+    expect(settled.executionStatus).toBe('cancelled');
+    expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.failure).toHaveBeenCalledWith(
+      undefined,
+      'test-tool-use-id',
+      'fixture_write',
+      { value: 'original' },
+      'process terminated with signal',
+      true,
+      'default',
+      undefined,
+      'call-1',
+      undefined,
+      undefined,
+    );
+    expect(hooks.post).not.toHaveBeenCalled();
+  });
+
+  it('classifies a timed-out Shell result carrying an error as error, not cancelled', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    gate.resolve({
+      llmContent: 'Command timed out.',
+      error: {
+        message: 'command exceeded its timeout',
+        type: ToolErrorType.EXECUTION_TIMEOUT,
+      },
+      returnDisplay: {
+        type: 'shell_result',
+        version: 1,
+        text: 'Command timed out.',
+        output: '',
+        directory: '/scratch',
+        exitCode: null,
+        signal: null,
+        pid: 123,
+        error: 'command exceeded its timeout',
+        outcome: 'timed_out',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      },
+    });
+    const settled = await executing;
+    expect(runtime.status(ref)).toMatchObject({
+      state: 'settled',
+      cancelRequested: false,
+    });
+    expect(settled.executionStatus).toBe('error');
+    expect(hooks.failure).toHaveBeenCalledTimes(1);
+    expect(hooks.failure).toHaveBeenCalledWith(
+      undefined,
+      'test-tool-use-id',
+      'fixture_write',
+      { value: 'original' },
+      'command exceeded its timeout',
+      false,
+      'default',
+      undefined,
+      'call-1',
+      undefined,
+      undefined,
+    );
     expect(hooks.post).not.toHaveBeenCalled();
   });
 

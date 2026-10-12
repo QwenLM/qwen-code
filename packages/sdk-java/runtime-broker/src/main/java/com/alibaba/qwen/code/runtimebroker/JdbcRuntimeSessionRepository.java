@@ -25,8 +25,17 @@ public final class JdbcRuntimeSessionRepository
         this.dataSource = JdbcRepositorySupport.requireDataSource(dataSource);
     }
 
-    boolean usesDataSource(DataSource source) {
+    public boolean usesDataSource(DataSource source) {
         return dataSource == source;
+    }
+
+    public RuntimeSessionRecord findByIdForUpdate(Connection connection,
+            RuntimeScope scope, String runtimeSessionId) throws SQLException {
+        if (connection == null || connection.getAutoCommit() || scope == null) {
+            throw new IllegalArgumentException("An active transaction and scope are required");
+        }
+        return selectSession(connection, scope,
+                BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"), true, 10);
     }
 
     static List<RuntimeSessionRecord> lockActiveSessions(Connection connection,
@@ -137,6 +146,37 @@ public final class JdbcRuntimeSessionRepository
     }
 
     @Override
+    public RuntimeSessionRecord findHistorical(String tenantId, String harnessSessionId, String runtimeSessionId) {
+        BrokerValues.requireId(tenantId, "tenantId");
+        BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<RuntimeSessionRecord> matches = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("SELECT " + SESSION_COLUMNS
+                    + " FROM qwen_runtime_session WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?")) {
+                statement.setString(1, tenantId);
+                statement.setString(2, harnessSessionId);
+                statement.setString(3, runtimeSessionId);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        var record = mapSession(rows);
+                        if (tenantId.equals(record.getSession().getScope().getTenantId())
+                                && harnessSessionId.equals(record.getSession().getHarnessSessionId())
+                                && runtimeSessionId.equals(record.getRuntimeSessionId())) {
+                            matches.add(record);
+                            if (matches.size() > 1) {
+                                throw new RuntimeBrokerException(409, "runtime_session_ambiguous",
+                                        "Historical Runtime Session is ambiguous", false);
+                            }
+                        }
+                    }
+                }
+            }
+            return matches.isEmpty() ? null : matches.getFirst();
+        });
+    }
+
+    @Override
     public RuntimeSessionRecord compareAndSet(RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement) {
         return JdbcRepositorySupport.transaction(dataSource,
@@ -235,11 +275,20 @@ public final class JdbcRuntimeSessionRepository
     static RuntimeSessionRecord selectSession(Connection connection,
             RuntimeScope scope, String runtimeSessionId, boolean forUpdate)
             throws SQLException {
+        return selectSession(connection, scope, runtimeSessionId, forUpdate, 0);
+    }
+
+    private static RuntimeSessionRecord selectSession(Connection connection,
+            RuntimeScope scope, String runtimeSessionId, boolean forUpdate,
+            int queryTimeout) throws SQLException {
         String sql = "SELECT " + SESSION_COLUMNS
                 + " FROM qwen_runtime_session WHERE scope_key = ? "
                 + "AND runtime_session_id = ?"
                 + (forUpdate ? " FOR UPDATE" : "");
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            if (queryTimeout > 0) {
+                statement.setQueryTimeout(queryTimeout);
+            }
             statement.setString(1, JdbcRepositorySupport.scopeKey(scope));
             statement.setString(2, runtimeSessionId);
             try (ResultSet result = statement.executeQuery()) {

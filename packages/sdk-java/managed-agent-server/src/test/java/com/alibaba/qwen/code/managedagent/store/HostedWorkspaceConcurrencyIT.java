@@ -90,8 +90,8 @@ class HostedWorkspaceConcurrencyIT {
                     + " storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES (?, 'workspace', 1, 'storage', 'Race', ?, ?, 'ACTIVE')", tenant,
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                    + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
             String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
                     "first", "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
@@ -259,6 +259,9 @@ class HostedWorkspaceConcurrencyIT {
         broker.setWorkspaceCwd(root.toString());
         broker.setProvisioner("local-process");
         broker.setDurableLocalProcess(LINUX);
+        // Linux brokers run the production-default combination; elsewhere the
+        // legacy combination keeps this IT runnable on developer hosts.
+        broker.setTrustedLocalRebootRecovery(LINUX);
         broker.setStateDirectory(state.toString());
         broker.setNodeExecutable(System.getProperty("node.executable", "node"));
         String bundle = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath().toString();

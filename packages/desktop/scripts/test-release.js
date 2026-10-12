@@ -45,6 +45,7 @@ try {
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
   testReleaseMatrixCoversUpdaterPlatforms();
+  testLinuxReleaseLegsShareGlibcFloor();
   testDesktopReleaseSigningWorkflow();
   testDesktopReleaseHardening();
   testRuntimeNodePtyTargetMapping();
@@ -332,6 +333,80 @@ function testReleaseMatrixCoversUpdaterPlatforms() {
     'every build matrix leg needs an updater feed entry, and every feed entry ' +
       'needs a leg that produces it',
   );
+}
+
+function testLinuxReleaseLegsShareGlibcFloor() {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
+    'utf8',
+  );
+  // The AppImage and .deb link against the glibc of the runner image that
+  // builds them, and the updater feed publishes whatever the matrix built.
+  // Both Linux legs therefore have to stay on the same Ubuntu generation:
+  // 22.04 gives glibc 2.35, which Ubuntu 22.04 and Debian 12 users can run,
+  // while 24.04 gives 2.39, which they cannot. A runner bump on one leg
+  // (`ubuntu-24.04-arm`, or an `ubuntu-latest` sweep) keeps every other check
+  // here green because the rust target does not change, and the artifact
+  // only refuses to start on the user's machine (#12877). The image floor is
+  // pinned here so that raising it is a deliberate edit of both legs and of
+  // this line, never a side effect of a runner modernisation.
+  const linuxImageFloor = 'ubuntu-22.04';
+  // `os:` only names the image when the job runs on it directly. The build
+  // job binds `runs-on` to the matrix field and runs no `container:`, and
+  // both facts are what make the pin below a statement about the glibc the
+  // artifacts link against rather than about a label nothing reads.
+  assert.match(
+    workflow,
+    /^ {4}runs-on: '\$\{\{ matrix\.os \}\}'$/m,
+    'the build job must run directly on the matrix `os:` image',
+  );
+  assert.doesNotMatch(
+    workflow,
+    /^ +container:/m,
+    'desktop-release.yml must not build inside a container: the glibc floor ' +
+      'is pinned to the runner image, so a container needs its own witness',
+  );
+  const legs = [];
+  for (const [, name, body] of workflow.matchAll(
+    /^ {10}- name: '([^']+)'[ \t]*\n((?: {12}\w+: '[^']*'[ \t]*\n)+)/gm,
+  )) {
+    const field = (key) =>
+      body.match(new RegExp(`^ {12}${key}: '([^']*)'[ \\t]*$`, 'm'))?.[1];
+    legs.push({ name, os: field('os'), rustTarget: field('rust_target') });
+  }
+  // The parity check above keys on `rust_target:` lines alone; this walk keys
+  // on whole matrix entries, so a shape drift that hides an `os:` from the
+  // entry regex has to surface as a count mismatch rather than as silence.
+  const targetLines = workflow.match(/^ +rust_target: '[^']+'\s*$/gm) ?? [];
+  assert.equal(
+    legs.length,
+    targetLines.length,
+    'every build matrix entry must be readable as a `- name:` block with its ' +
+      'own `os:` and `rust_target:` fields',
+  );
+  for (const leg of legs) {
+    assert.ok(
+      leg.os && leg.rustTarget,
+      `build matrix entry ${leg.name} must carry both \`os:\` and ` +
+        '`rust_target:` as adjacent quoted fields',
+    );
+  }
+  const linuxLegs = legs.filter((leg) =>
+    leg.rustTarget?.endsWith('-unknown-linux-gnu'),
+  );
+  assert.ok(
+    linuxLegs.length >= 2,
+    'the build matrix must declare both Linux legs',
+  );
+  for (const leg of linuxLegs) {
+    assert.ok(
+      leg.os === linuxImageFloor || leg.os === `${linuxImageFloor}-arm`,
+      `${leg.name} (${leg.rustTarget}) builds on '${leg.os}', but the Linux ` +
+        `artifacts must link against the glibc of ${linuxImageFloor}; raise ` +
+        'the floor for both Linux legs together, or keep this leg on the ' +
+        'pinned image',
+    );
+  }
 }
 
 function testDesktopReleaseSigningWorkflow() {

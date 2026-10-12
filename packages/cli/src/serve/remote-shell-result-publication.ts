@@ -324,6 +324,10 @@ export class RemoteShellResultPublisher {
   private readonly grants = new Map<string, InstalledPublication>();
   private readonly clients = new Map<string, PublicationClient>();
 
+  get hasInstalledPublication(): boolean {
+    return this.grants.size > 0;
+  }
+
   hasExecution(executionCallId: string): boolean {
     return this.grants.has(executionCallId);
   }
@@ -624,7 +628,11 @@ export class RemoteShellResultPublisher {
       throw new Error('Publication finish was not confirmed.');
   }
 
-  registerInstallRoute(app: Application, boot: ManagedContextBoot): void {
+  registerInstallRoute(
+    app: Application,
+    boot: ManagedContextBoot,
+    admissionOpen: () => boolean = () => true,
+  ): void {
     app.post(
       PUBLICATION_INSTALL_ROUTE.path,
       managedRuntimeNoStore,
@@ -632,6 +640,8 @@ export class RemoteShellResultPublisher {
       managedRuntimeJsonBody(PUBLICATION_INSTALL_ROUTE.requestBodyLimitBytes),
       (req: Request, res: Response) => {
         try {
+          if (!admissionOpen())
+            throw new Error('Publication admission is sealed.');
           this.install(req.body, boot);
           res.json({
             protocolVersion: 3,
