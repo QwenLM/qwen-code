@@ -54,6 +54,25 @@ description = "Multi-line test"`;
     expect(result).toContain('description: Multi-line test');
   });
 
+  it('should convert TOML saved with a UTF-8 BOM', () => {
+    // Windows editors write the BOM, and `@iarna/toml` rejects U+FEFF with
+    // `Unknown character "65279" at row 1, col 2`, so the command was dropped
+    // before it ever reached Markdown.
+    const tomlContent = `\uFEFFprompt = "BOM prompt"
+description = "BOM command"`;
+
+    const result = convertTomlToMarkdown(tomlContent);
+
+    expect(readDescriptionFromFrontmatter(result)).toBe('BOM command');
+    expect(result).toContain('BOM prompt');
+  });
+
+  it('should keep a BOM-like character that is not the leading one', () => {
+    const tomlContent = `prompt = "a\uFEFFb"`;
+
+    expect(convertTomlToMarkdown(tomlContent)).toBe('a\uFEFFb\n');
+  });
+
   it('should throw error for invalid TOML', () => {
     const invalidToml = 'this is not valid toml {[}]';
 
