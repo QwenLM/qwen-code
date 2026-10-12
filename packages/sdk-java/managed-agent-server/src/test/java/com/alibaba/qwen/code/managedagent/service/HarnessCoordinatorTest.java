@@ -30,6 +30,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.DaemonProtocolException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRefusedException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
@@ -2717,6 +2718,53 @@ class HarnessCoordinatorTest {
                 eq(turnId), anyString(), anyLong(), eq(false));
         verify(store, never()).failTurn(anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString());
+    }
+
+    // The reconcile gate on a terminal fail must read the row, not the
+    // claim-time record: a prior owner's admission that landed after the
+    // claim leaves the claim-time flag false while the row shows the mark
+    // and its epoch, and an immediate-terminal route must reconcile that
+    // execution before clearing the dispatch owner exactly like the
+    // budget-exhaustion route does (review round 12, R12-3; the epoch
+    // precondition itself is R6-3's).
+    @Test
+    void terminalFailReconcilesAnAdmissionPostedAfterTheClaim() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", false, 0);
+        // The durable record advanced past the claim: the submission and
+        // its recorded admission landed between the claim and the attach.
+        TurnRecord admitted = turn("tenant", "session", "turn", "prompt",
+                "epoch-1", 3, "RUNNING", true, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(admitted));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-old"))).thenReturn(true);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(mock(DaemonProtocolException.class));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        InOrder order = inOrder(store, harness);
+        order.verify(harness).cancel("tenant", "session");
+        order.verify(store).failTurn(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), eq("hosted_harness_protocol_error"),
+                anyString());
     }
 
     private static TurnRecord turn(String tenantId, String sessionId,

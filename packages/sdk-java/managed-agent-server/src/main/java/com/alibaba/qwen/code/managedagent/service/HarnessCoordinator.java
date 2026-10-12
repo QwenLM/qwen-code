@@ -243,8 +243,7 @@ public class HarnessCoordinator {
             terminal = runClaimed(claimed, leaseLost,
                     submissionAttempted, recoveryPath);
         } catch (HostedHarnessCapabilityMismatchException error) {
-            terminal = failTerminally(claimed, submissionAttempted.get(),
-                    error.getCode(),
+            terminal = failTerminally(claimed, error.getCode(),
                     "Hosted Harness capability policy changed.", error);
         } catch (HostedHarnessRecoveryDeclinedException error) {
             // An approval wait is not a durable verdict: the decision is
@@ -264,7 +263,7 @@ public class HarnessCoordinator {
                 String declineReason = error.getReason().length() > 1024
                         ? error.getReason().substring(0, 1024)
                         : error.getReason();
-                terminal = failTerminally(claimed, submissionAttempted.get(),
+                terminal = failTerminally(claimed,
                         "managed_runtime_recovery_blocked",
                         "The prior Harness generation parked a Turn this"
                                 + " Harness cannot take over ("
@@ -278,8 +277,7 @@ public class HarnessCoordinator {
             terminal = transientFailure(claimed,
                     submissionAttempted.get(), error, recoveryPath.get());
         } catch (DaemonProtocolException error) {
-            terminal = failTerminally(claimed, submissionAttempted.get(),
-                    "hosted_harness_protocol_error",
+            terminal = failTerminally(claimed, "hosted_harness_protocol_error",
                     "Hosted Harness returned an invalid protocol response.",
                     error);
         } catch (HarnessSessionRefusedException error) {
@@ -294,8 +292,7 @@ public class HarnessCoordinator {
             if (error.getStatusCode() >= 400
                     && error.getStatusCode() < 500
                     && error.getStatusCode() != 409) {
-                terminal = failTerminally(claimed, submissionAttempted.get(),
-                        "hosted_harness_rejected",
+                terminal = failTerminally(claimed, "hosted_harness_rejected",
                         "Hosted Harness rejected the Turn.", error);
             } else {
                 // Only a live predecessor's guardrails may stretch past
@@ -334,7 +331,7 @@ public class HarnessCoordinator {
             }
         } catch (RuntimeBrokerException error) {
             terminal = !submissionAttempted.get() && !error.isRetryable()
-                    ? failTerminally(claimed, false, error.getCode(),
+                    ? failTerminally(claimed, error.getCode(),
                             error.getMessage(), error)
                     : transientFailure(claimed, submissionAttempted.get(),
                             error, false);
@@ -359,8 +356,7 @@ public class HarnessCoordinator {
         // lease itself rather than by the pre-admission retry budget.
         recoveryPath.set(session.harnessBootId() != null);
         if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
-            return fail(claimed, submissionAttempted.get(),
-                    "workspace_unavailable",
+            return fail(claimed, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
         if ("CANCELLING".equals(claimed.status())
@@ -389,8 +385,7 @@ public class HarnessCoordinator {
         HarnessRuntimeRecovery runtimeRecovery = attachment.runtimeRecovery();
         if (runtimeRecovery != null
                 && runtimeRecovery.hasUnknownOutcome()) {
-            return fail(claimed, submissionAttempted.get(),
-                    "managed_runtime_recovery_blocked",
+            return fail(claimed, "managed_runtime_recovery_blocked",
                     "A prior tool execution has an unknown outcome; the"
                             + " Session was blocked without replaying it.");
         }
@@ -401,8 +396,7 @@ public class HarnessCoordinator {
             if (recoveringCancellation
                     ? !runtimeRecovery.isCancellationReady()
                     : !runtimeRecovery.isContinuationReady()) {
-                return fail(claimed, submissionAttempted.get(),
-                        "managed_runtime_recovery_incomplete",
+                return fail(claimed, "managed_runtime_recovery_incomplete",
                         "A prior tool execution is not ready for safe"
                                 + (recoveringCancellation
                                         ? " cancellation."
@@ -410,7 +404,7 @@ public class HarnessCoordinator {
             }
             if (attachment.eventEpoch() == null
                     || attachment.lastEventId() == null) {
-                return fail(claimed, submissionAttempted.get(),
+                return fail(claimed,
                         "managed_runtime_recovery_watermark_missing",
                         "Hosted Harness recovery did not return an event"
                                 + " watermark.");
@@ -425,7 +419,7 @@ public class HarnessCoordinator {
             if (!store.bindRecoveredHarness(session.tenantId(),
                     session.sessionId(), claimed.turnId(), owner,
                     session.harnessBootId(), attachment.bootId())) {
-                return fail(claimed, submissionAttempted.get(),
+                return fail(claimed,
                         "hosted_harness_recovery_generation_mismatch",
                         "Hosted Harness recovery generation changed.");
             }
@@ -550,7 +544,7 @@ public class HarnessCoordinator {
                 if (!store.bindRecoveredHarness(session.tenantId(),
                         session.sessionId(), claimed.turnId(), owner,
                         session.harnessBootId(), attachment.bootId())) {
-                    return fail(claimed, submissionAttempted.get(),
+                    return fail(claimed,
                             "hosted_harness_recovery_generation_mismatch",
                             "Hosted Harness recovery generation changed.");
                 }
@@ -626,12 +620,12 @@ public class HarnessCoordinator {
                         attachment.bootId());
             }
             if (!bound) {
-                // The lost bind/withdraw CAS proves another owner holds the
-                // Turn (R8-1), so there is no admitted execution left for
-                // this host to reconcile: no cancel before the terminal
-                // record.
-                return fail(claimed, false,
-                        "hosted_harness_generation_mismatch",
+                // The lost bind/withdraw CAS usually proves another owner
+                // holds the Turn (R8-1); fail() re-reads the row and its
+                // reconcile re-binds under this host's lease, so a recorded
+                // admission is cancelled only while this host still owns
+                // the dispatch.
+                return fail(claimed, "hosted_harness_generation_mismatch",
                         "Hosted Harness generation changed.");
             }
             requireLease(leaseLost);
@@ -1063,15 +1057,21 @@ public class HarnessCoordinator {
         }
     }
 
-    private boolean fail(TurnRecord turn, boolean submissionAttempted,
-            String code, String message) {
-        if (submissionAttempted) {
-            // The terminal record makes the admitted Turn unreachable:
-            // failTurn clears the dispatch owner and leaves the active
-            // states, so nothing could later cancel it or re-attach to
-            // journal its output. Reconcile first — best-effort cancel it
-            // through the Session's bound Harness, then record the failure.
-            cancelAdmittedTurnBeforeTerminalFail(turn);
+    private boolean fail(TurnRecord turn, String code, String message) {
+        // The terminal record makes an admitted Turn unreachable: failTurn
+        // clears the dispatch owner and leaves the active states, so
+        // nothing could later cancel it or re-attach to journal its
+        // output. Reconcile first — best-effort cancel it through the
+        // Session's bound Harness, then record the failure. The gate
+        // re-reads the row rather than trusting a caller's claim-time
+        // record: an admission that landed after the claim is exactly the
+        // execution the terminal record would strand (R4-1), and the
+        // claim-time flag otherwise differs per route (review round 12,
+        // R12-3).
+        TurnRecord current = store.findTurn(turn.tenantId(),
+                turn.sessionId(), turn.turnId()).orElse(turn);
+        if (current.submissionAttempted()) {
+            cancelAdmittedTurnBeforeTerminalFail(current);
         }
         store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
                 owner, code, message);
@@ -1081,14 +1081,13 @@ public class HarnessCoordinator {
     // Terminal failures leave the Turn row as their only trace; log the
     // underlying exception once so operators (and fault gates) see the
     // actual cause.
-    private boolean failTerminally(TurnRecord turn,
-            boolean submissionAttempted, String code, String message,
-            RuntimeException error) {
+    private boolean failTerminally(TurnRecord turn, String code,
+            String message, RuntimeException error) {
         LOG.warn("Managed Turn failed terminally tenant={} session={}"
                         + " turn={} code={} message={}",
                 turn.tenantId(), turn.sessionId(), turn.turnId(), code,
                 message, error);
-        return fail(turn, submissionAttempted, code, message);
+        return fail(turn, code, message);
     }
 
     private boolean transientFailure(TurnRecord turn,
@@ -1115,13 +1114,8 @@ public class HarnessCoordinator {
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
                     failureLabel(error), error);
-            // The cancel gate reads the re-read record, not the claim-time
-            // one this method already calls stale: a submission mark that
-            // landed after the claim is exactly the admission the terminal
-            // fail must reconcile first (review R4-1).
             if (error instanceof HarnessSessionRefusedException refusal) {
-                return fail(turn, current.submissionAttempted(),
-                        refusal.getCode(),
+                return fail(turn, refusal.getCode(),
                         "Hosted Harness refused to open the Session before"
                                 + " Turn admission.");
             }
@@ -1138,14 +1132,13 @@ public class HarnessCoordinator {
                 // refusal above. Without that mark the same code arrives
                 // from the open-LOAD path, whose reviewed exhaustion
                 // answer is the generic unavailable.
-                return fail(turn, current.submissionAttempted(), http.getErrorCode().length() > 128
+                return fail(turn, http.getErrorCode().length() > 128
                         ? http.getErrorCode().substring(0, 128)
                         : http.getErrorCode(),
                         "Hosted Harness refused the Turn before Turn"
                                 + " admission.");
             }
-            return fail(turn, current.submissionAttempted(),
-                    "hosted_harness_unavailable",
+            return fail(turn, "hosted_harness_unavailable",
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.");
         }
@@ -1166,16 +1159,15 @@ public class HarnessCoordinator {
             // their own code — the generic one would name a component that
             // did not fail.
             if (error instanceof HarnessSessionRefusedException refusal) {
-                return fail(turn, true, refusal.getCode(),
+                return fail(turn, refusal.getCode(),
                         "Hosted Harness refused to open the Session after"
                                 + " Turn admission.");
             }
             if (error instanceof RuntimeBrokerException brokerError) {
-                return fail(turn, true, brokerError.getCode(),
+                return fail(turn, brokerError.getCode(),
                         brokerError.getMessage());
             }
-            return fail(turn, true,
-                    "hosted_harness_unavailable_after_admission",
+            return fail(turn, "hosted_harness_unavailable_after_admission",
                     "Hosted Harness remained unavailable after Turn"
                             + " admission.");
         }

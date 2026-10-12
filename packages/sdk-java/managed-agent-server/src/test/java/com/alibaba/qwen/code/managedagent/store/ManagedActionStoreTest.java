@@ -594,6 +594,13 @@ class ManagedActionStoreTest {
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         admitThroughWorkspaceRole(sessionId);
+        // The resurrect arm now also certifies the bound Session's
+        // execution facts (review round 12, R12-2), so the creator keeps
+        // its own grant while the role arm is exercised.
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?,"
+                        + " 'workspace', ?, 'OWNER')",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"));
         jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
                         + " action_id, state, options_json, created_at)"
                         + " VALUES (?, ?, ?, 'requested', ?, 0)",
@@ -643,6 +650,84 @@ class ManagedActionStoreTest {
                             .isEqualTo(HttpStatus.FORBIDDEN);
                     assertThat(refusal.getCode())
                             .isEqualTo("action_forbidden");
+                });
+        assertThat(state(sessionId)).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT receipt_id FROM"
+                        + " managed_agent_operation WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = 'op-action'",
+                String.class, TENANT, sessionId)).isEqualTo("rcpt-1");
+    }
+
+    // The resurrect arm re-arms a delivery, so it must certify delivery
+    // exactly like a fresh admission: a bound Session whose creator-keyed
+    // execution facts lapsed (the creator lost its Workspace grant) gets
+    // the fresh path's 409 instead of a PENDING row the arbiter can never
+    // reach, and the recorded failure keeps its re-admissibility for when
+    // the facts are restored (review round 12, R12-2).
+    @Test
+    void aReplayedFailedResponseIsNotReadmittedOnceTheExecutionFactsLapsed()
+            throws Exception {
+        ManagedAgentStore agents = agents();
+        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
+        String sessionId = agents.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        admitThroughWorkspaceRole(sessionId);
+        // The caller answers through the owner-identity arm, so the
+        // execution facts stand only while the creator's own grant does.
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?,"
+                        + " 'workspace', ?, 'OWNER')",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"));
+        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
+                        + " action_id, state, options_json, created_at)"
+                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
+                TENANT, sessionId, ACTION_ID,
+                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
+                        + "\"expiresAt\":9999999999999}");
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, receipt_id, attempt_count,"
+                        + " budget_exempt_attempt, available_at, created_at,"
+                        + " updated_at, completed_at, action_id,"
+                        + " response_json, error_code) VALUES (?, ?,"
+                        + " 'op-action', 'ACTION_RESPONSE', 'digest',"
+                        + " 'idem-key', 'digest', 'FAILED', 'JAVA_DURABLE',"
+                        + " 'CONFIRMED', 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0,"
+                        + " 0, ?, ?, 'action_response_delivery_failed')",
+                TENANT, sessionId, ACTION_ID,
+                "{\"optionId\":\"allow\",\"inputRevision\":1,"
+                        + "\"policyRevision\":\"p/1\"}");
+        var body = new ObjectMapper().readTree("{\"optionId\":\"allow\","
+                + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}");
+
+        // The owner arm admits the resurrect while the facts stand.
+        var readmitted = actions.admit(TENANT, sessionId, "owner", "digest",
+                "idem-key", "digest", ACTION_ID, body, now.get());
+        assertThat(readmitted.replayed()).isTrue();
+        assertThat(readmitted.operation().state()).isEqualTo("PENDING");
+
+        jdbc.update("UPDATE managed_agent_operation SET state = 'FAILED',"
+                        + " delivery_state = 'CONFIRMED', receipt_id ="
+                        + " 'rcpt-1', error_code ="
+                        + " 'action_response_delivery_failed', attempt_count ="
+                        + " 10, completed_at = 0 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND operation_id = 'op-action'",
+                TENANT, sessionId);
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?"
+                        + " AND workspace_id = 'workspace'", TENANT);
+
+        assertThatThrownBy(() -> actions.admit(TENANT, sessionId, "owner",
+                "digest", "idem-key", "digest", ACTION_ID, body, now.get()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> {
+                    var refusal = (ApiException) error;
+                    assertThat(refusal.getStatus())
+                            .isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(refusal.getCode())
+                            .isEqualTo("workspace_unavailable");
                 });
         assertThat(state(sessionId)).isEqualTo("FAILED");
         assertThat(jdbc.queryForObject("SELECT receipt_id FROM"

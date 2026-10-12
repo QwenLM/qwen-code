@@ -495,6 +495,20 @@ public class ManagedActionStore {
                             ownerRow, actorKey)) {
                         throw forbidden();
                     }
+                    // Re-arming a delivery certifies delivery exactly like
+                    // a fresh admission, so the same execution-facts gate
+                    // applies: a bound Session whose creator-keyed facts
+                    // lapsed gets the fresh path's 409 instead of a
+                    // PENDING row the arbiter can never reach (review
+                    // round 12, R12-2). The read-only heal below arms no
+                    // delivery and needs no gate.
+                    if (ownerRow.workspaceId() != null
+                            && !sessions.hasExecutionRegistryFacts(tenantId,
+                                    sessionId)) {
+                        throw new ApiException(HttpStatus.CONFLICT,
+                                "workspace_unavailable",
+                                "Hosted Workspace execution is not available.");
+                    }
                     jdbc.update("UPDATE managed_agent_operation SET state ="
                                     + " 'PENDING', delivery_state ="
                                     + " 'PENDING', error_code = NULL,"

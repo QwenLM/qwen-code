@@ -46,10 +46,13 @@ public class MessageMaterializer {
         // exactly-full window.
         List<MaterializationTarget> targets =
                 store.findMaterializationTargets(TARGET_LIMIT + 1);
+        boolean saturated = targets.size() > TARGET_LIMIT;
         // A session that stopped being a target (caught up or deleted)
         // never fails again; drop its entries so both maps track only live
-        // failures. The probe row past the limit is live too.
-        if (!failures.isEmpty()) {
+        // failures. A saturated window is truncated, though, so absence
+        // there means "crowded out by the deferral rotation", not "gone" —
+        // the streak must survive it (review round 12, R12-1).
+        if (!failures.isEmpty() && !saturated) {
             Set<String> live = new HashSet<>();
             for (MaterializationTarget target : targets) {
                 live.add(target.tenantId() + ":" + target.sessionId());
@@ -57,7 +60,6 @@ public class MessageMaterializer {
             failures.keySet().removeIf(key -> !live.contains(key));
             surfaced.removeIf(key -> !live.contains(key));
         }
-        boolean saturated = targets.size() > TARGET_LIMIT;
         for (MaterializationTarget target
                 : targets.subList(0, Math.min(TARGET_LIMIT, targets.size()))) {
             String key = target.tenantId() + ":" + target.sessionId();
