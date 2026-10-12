@@ -3041,6 +3041,154 @@ it('retains a complete main reply when a later background tool-only execution en
   ).toBe(false);
 });
 
+it('retains the main reply when a background task ack follows the notification marker', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    {
+      id: 'marker',
+      role: 'system',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      content: 'shell',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'shell',
+        startedAt: 100,
+      },
+    },
+    makeAssistantMessage('ack'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'ack'),
+  ).toBe(false);
+});
+
+it('keeps the last ordinary reply final when no background marker is present', () => {
+  const rows = collapseItems(
+    groupParallelAgents([
+      makeUserMessage('u1'),
+      makeAssistantMessage('mid'),
+      makeAssistantMessage('last'),
+    ]),
+  );
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'last'),
+  ).toBe(true);
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'mid'),
+  ).toBe(false);
+});
+
+it('keeps the post-marker summary final for an agent completion', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('launch-ack'),
+    {
+      id: 'marker',
+      role: 'system',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      content: 'agent',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'agent',
+        sourceTurnId: 'u1',
+        startedAt: 100,
+      },
+    },
+    makeThinkingMessage('bg-thinking'),
+    makeAssistantMessage('summary'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'summary',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'launch-ack',
+    ),
+  ).toBe(false);
+});
+
+it('keeps the reply final when further work follows the shell marker', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    {
+      id: 'marker',
+      role: 'system',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      content: 'shell',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'shell',
+        startedAt: 100,
+      },
+    },
+    makeAgentToolGroup('more-work'),
+    makeAssistantMessage('reply'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'reply'),
+  ).toBe(true);
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(false);
+});
+
+it('keeps the reply final when the user steers after the shell marker', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    {
+      id: 'marker',
+      role: 'system',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      content: 'shell',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'shell',
+        startedAt: 100,
+      },
+    },
+    {
+      id: 'steering',
+      role: 'system',
+      source: 'mid_turn_message_injected',
+      variant: 'info',
+      content: 'Verify',
+    },
+    makeAssistantMessage('reply'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'reply'),
+  ).toBe(true);
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(false);
+});
+
 describe('background completion markers', () => {
   it.each(['agent', 'shell', 'peer'] as const)(
     'folds a %s result marker even when it is the only step',

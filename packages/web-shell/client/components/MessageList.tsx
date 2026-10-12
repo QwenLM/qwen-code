@@ -770,20 +770,68 @@ function isFinalContentCandidate(
   );
 }
 
-function findFinalAnswerIndex(
+function isBackgroundTurnMarker(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'system' &&
+    item.message.source === 'background_notification_turn_started'
+  );
+}
+
+/**
+ * A background shell command's completion notification usually only triggers
+ * a bookkeeping ack from the model — nothing left to act on. Such an ack is
+ * not the turn's deliverable when it follows the marker with nothing but
+ * thoughts in between (no further work, no user steering) and the turn already
+ * produced an answer before the marker. Agent/peer completions carry a result
+ * the parent synthesizes into its reply, so they are never treated as acks,
+ * and a post-marker reply that is followed by work or user input is a real
+ * continuation and stays a candidate.
+ */
+function isShellCompletionAck(
+  items: readonly DisplayItem[],
+  index: number,
+  markers: readonly number[],
+  hasMainAnswer: boolean,
+): boolean {
+  const item = items[index]!;
+  if (!hasMainAnswer) return false;
+  if (!(item.type === 'message' && item.message.role === 'assistant'))
+    return false;
+  let marker = -1;
+  for (const m of markers) {
+    if (m < index) marker = m;
+    else break;
+  }
+  if (marker === -1) return false;
+  const markerItem = items[marker]!;
+  if (
+    !(
+      markerItem.type === 'message' &&
+      markerItem.message.backgroundTurn?.kind === 'shell'
+    )
+  ) {
+    return false;
+  }
+  for (let i = marker + 1; i < index; i++) {
+    const between = items[i]!;
+    if (!(between.type === 'message' && between.message.role === 'thinking')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function scanFinalAnswerIndex(
   items: readonly DisplayItem[],
   start: number,
   end: number,
-  includeBackgroundNotifications = true,
+  includeBackgroundNotifications: boolean,
 ): number {
   let hasLaterWork = false;
   for (let i = end; i > start; i--) {
     const item = items[i]!;
-    if (
-      item.type === 'message' &&
-      item.message.role === 'system' &&
-      item.message.source === 'background_notification_turn_started'
-    ) {
+    if (isBackgroundTurnMarker(item)) {
       hasLaterWork = false;
     } else if (isExecutionWorkStep(item)) {
       hasLaterWork = true;
@@ -791,6 +839,42 @@ function findFinalAnswerIndex(
       !hasLaterWork &&
       isFinalContentCandidate(item, includeBackgroundNotifications)
     ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function findFinalAnswerIndex(
+  items: readonly DisplayItem[],
+  start: number,
+  end: number,
+  includeBackgroundNotifications = true,
+): number {
+  const markers: number[] = [];
+  for (let i = start + 1; i <= end; i++) {
+    if (isBackgroundTurnMarker(items[i]!)) markers.push(i);
+  }
+  const hasMainAnswer =
+    markers.length > 0 &&
+    scanFinalAnswerIndex(
+      items,
+      start,
+      markers[0] - 1,
+      includeBackgroundNotifications,
+    ) !== -1;
+  let hasLaterWork = false;
+  for (let i = end; i > start; i--) {
+    const item = items[i]!;
+    if (isBackgroundTurnMarker(item)) {
+      hasLaterWork = false;
+    } else if (isExecutionWorkStep(item)) {
+      hasLaterWork = true;
+    } else if (
+      !hasLaterWork &&
+      isFinalContentCandidate(item, includeBackgroundNotifications)
+    ) {
+      if (isShellCompletionAck(items, i, markers, hasMainAnswer)) continue;
       return i;
     }
   }
