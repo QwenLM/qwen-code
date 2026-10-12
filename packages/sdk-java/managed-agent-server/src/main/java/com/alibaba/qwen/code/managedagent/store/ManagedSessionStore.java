@@ -47,6 +47,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Repository
 public class ManagedSessionStore {
@@ -66,6 +68,7 @@ public class ManagedSessionStore {
     private final JdbcTemplate jdbc;
     private ToolPublicationObjectStore publicationObjects;
     private ManagedToolResultStore toolResults;
+    private JournalEventTransport journalEventTransport;
     private WriterCredentialPolicy credentials = WriterCredentialPolicy.unbound();
     private final ManagedExtensionRecordStore extensionRecords;
     private final ManagedActionStore actions;
@@ -233,6 +236,13 @@ public class ManagedSessionStore {
     @Autowired(required = false)
     public void setToolResults(ManagedToolResultStore toolResults) {
         this.toolResults = toolResults;
+    }
+
+    // Present only when the journal event transport is enabled; absent by
+    // default so a flag-off deployment stays byte-identical (design MQ2b).
+    @Autowired(required = false)
+    public void setJournalEventTransport(JournalEventTransport transport) {
+        this.journalEventTransport = transport;
     }
 
     // The policy bean is unconditional, so required injection fails closed
@@ -670,10 +680,33 @@ public class ManagedSessionStore {
         if (toolResults != null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
+        publishJournalAfterCommit(validated.recordBytes());
         return new CommitReceipt(revision, request.transactionId(),
                 request.commandId(), request.operation(),
                 request.firstSequence(), request.lastSequence(),
                 request.lastSequence(), request.commitDigest(), false);
+    }
+
+    // The authoritative-journal wire (design 2026-10-04-managed-agent-event-transport,
+    // MQ2b): hands the committed journal record to the transport only after the
+    // transaction is durable, and never from a replayed commit (those return
+    // before this point). A no-op when no transport is enabled.
+    private void publishJournalAfterCommit(byte[] recordBytes) {
+        JournalEventTransport transport = journalEventTransport;
+        if (transport == null) {
+            return;
+        }
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            transport.publishCommitted(recordBytes);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        transport.publishCommitted(recordBytes);
+                    }
+                });
     }
 
     @Transactional(readOnly = true)
