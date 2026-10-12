@@ -19597,11 +19597,24 @@ describe('Hosted Harness Runtime turn takeover', () => {
         ).toString(),
       );
     };
+    // Park and outbound both durable before the "crash": the cancel then
+    // settles a committed entry, never a call that had not sent yet.
     await vi.waitFor(
       async () => {
         expect((await latestCheckpointState())?.continuation.phase).toBe(
           'await_command',
         );
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          key,
+        );
+        expect(
+          journal.events.some(
+            (event) =>
+              event.kind === 'domain.committed' &&
+              event.payload['domain'] === 'session_command',
+          ),
+        ).toBe(true);
       },
       { timeout: 10_000 },
     );
@@ -19658,6 +19671,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
         status: { state: 'executing' },
       },
     ]);
+    // The member's Turn never held the mount: its resume must not claim
+    // the Workspace it shares with its lead.
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
     const continued = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
     )
@@ -19685,6 +19703,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(JSON.stringify(transcript.body)).toContain(
       'The command was cancelled before it ran; it never left.',
     );
+    expect(acquire).not.toHaveBeenCalled();
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );

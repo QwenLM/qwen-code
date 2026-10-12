@@ -21,6 +21,7 @@ import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js
 import type { HarnessCommandWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   HostedSessionCommandSession,
@@ -1241,6 +1242,18 @@ it.each([
     ).toHaveLength(1);
   },
 );
+
+// A cancelled takeover of a Turn parked on a command wait owes its runs
+// the recovery cancel's journal answers and fold: a plain settle would
+// leave the checkpoint parked and refuse the next Turn's model start.
+it('routes a parked command wait to the recovery cancel, never the plain settle', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  await parkCalls([{ callId: 'call-cut', toolName: 'task_create' }]);
+  await expect(parkNeedsNoRuntimeSettlement(session)).resolves.toBe(false);
+});
 
 // A budget refusal is a normal local answer, so it owes the parked wait
 // its fold: a durable wait left behind turns the Turn's next call into a

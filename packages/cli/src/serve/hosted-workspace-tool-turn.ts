@@ -5182,9 +5182,9 @@ export class HostedWorkspaceToolTurn {
    * checkpoint still owes, with what is left of the bound measured from
    * the entry's own commit. A restart lost the Turn's in-memory mount,
    * so the lease the checkpoint's flag names comes back first, and the
-   * journaled set keeps a replayed fold silent — the consume and the
-   * resolve are themselves replay-safe and must still run so the wait
-   * leaves its consumed marker.
+   * journaled set keeps a replayed fold silent — the resolve still runs
+   * so the wait advances. A call already answered never consumes: what
+   * it read is the journaled answer, which may predate the reply.
    */
   async resumeCommandWaitRuns(
     runs: readonly HarnessCommandWaitRun[],

@@ -1547,6 +1547,11 @@ export async function parkNeedsNoRuntimeSettlement(
   // settlement: the faithful cancel is the abandoned-wait fold, never a
   // settle that would orphan the ledger.
   if (harnessCheckpointIsAgentWait(checkpoint)) return false;
+  // So does one parked at a member's command wait (H4e-b3): only the
+  // recovery cancel folds its runs, each answered by its own journal; a
+  // plain settle would leave the checkpoint parked and refuse the next
+  // Turn's model start.
+  if (harnessCheckpointIsCommandWait(checkpoint)) return false;
   if (
     !(checkpoint.tools?.items ?? []).every(
       (item) => item.state === 'settled' && item.consumed,
@@ -7638,12 +7643,20 @@ export function registerHostedHarnessSessionRoutes(
           }
           if (
             continueAuthorization.authorization.status === 'runnable' &&
-            continueAuthorization.authorization.checkpoint.agentWait !== null
+            (continueAuthorization.authorization.checkpoint.agentWait !==
+              null ||
+              (continueAuthorization.authorization.checkpoint.commandWait !==
+                null &&
+                !continueAuthorization.authorization.checkpoint.commandWait
+                  .holdsWorkspaceMount))
           ) {
             // An agent-wait resume has no Runtime results to consume and
             // must NOT claim the Workspace mount in advance of any tool
             // work: the unconditional acquire would make the parent refuse
-            // its own later foreground agent call (R2-3). The pending
+            // its own later foreground agent call (R2-3). A command wait is
+            // the same unless its Turn held the mount, which its resume arm
+            // took back already: a member shares its lead's Workspace, and
+            // a mount it never held is not its to claim. The pending
             // file-history obligation dies with the Turn the terminal
             // record will close, exactly like the interrupted settle.
             const savedHistory = await readHostedFileHistory(session.managed);
