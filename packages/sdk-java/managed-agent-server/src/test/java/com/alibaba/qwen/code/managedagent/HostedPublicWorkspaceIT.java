@@ -192,8 +192,13 @@ class HostedPublicWorkspaceIT {
     }
 
     private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication WHERE tenant_id = ? AND session_id = ?"
-                + " AND producer_phase = 'REFERENCED'", Integer.class, tenant, session)).isPositive();
+        var output = jdbc.queryForList("SELECT resource_id, byte_length FROM qwen_managed_session_resource r"
+                + " WHERE tenant_id = ? AND session_id = ? AND kind = 'managed-tool-result-content'"
+                + " AND state = 'PUBLISHED' AND storage_kind = 'MYSQL_INLINE' AND LOCATE('G0_SHELL_STDOUT', inline_bytes) > 0"
+                + " AND NOT EXISTS (SELECT 1 FROM qwen_managed_session_resource_ref f"
+                + " WHERE f.session_scope_key = r.session_scope_key AND f.resource_id = r.resource_id)", tenant, session);
+        assertThat(output).as("the public Shell captured real stdout before deletion").isNotEmpty();
+        long outputBytes = output.stream().mapToLong(row -> ((Number) row.get("byte_length")).longValue()).sum();
         String companion = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code", "input", List.of(),
                 "workspace", Map.of("workspace_id", workspace, "cwd_relative", "child")),
                 "companion-" + workspace, "actor", 202).path("id").asText();
@@ -211,9 +216,21 @@ class HostedPublicWorkspaceIT {
                 + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", Integer.class, tenant, session, operation)).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_session_retirement WHERE tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session)).isEqualTo(1);
-        await().atMost(Duration.ofSeconds(90)).untilAsserted(() -> assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM qwen_tool_publication WHERE tenant_id = ? AND session_id = ? AND retention_state <> 'COLLECTED'",
-                Integer.class, tenant, session)).isZero());
+        await().atMost(Duration.ofSeconds(90)).untilAsserted(() -> {
+            var ledgers = jdbc.queryForList("SELECT collected_at, collected_bytes FROM qwen_managed_session_resource_collection"
+                    + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+            assertThat(ledgers).hasSize(1);
+            var collected = ledgers.getFirst();
+            assertThat(collected.get("collected_at")).isNotNull();
+            assertThat(((Number) collected.get("collected_bytes")).longValue()).isGreaterThanOrEqualTo(outputBytes);
+            for (var resource : output) {
+                var stored = jdbc.queryForMap("SELECT state, inline_bytes, byte_length FROM qwen_managed_session_resource"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", tenant, session, resource.get("resource_id"));
+                assertThat(stored.get("state")).isEqualTo("COLLECTED");
+                assertThat(stored.get("inline_bytes")).isNull();
+                assertThat(stored.get("byte_length")).isEqualTo(resource.get("byte_length"));
+            }
+        });
         assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, tenant, companion)).isEqualTo("ACTIVE");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_session_retirement WHERE tenant_id = ? AND session_id = ?",
@@ -1026,6 +1043,20 @@ class HostedPublicWorkspaceIT {
                 + (shell && "deny".equals(shellDecision) ? "auto-edit" : "default"));
         if (shell) arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
         if (shellLifecycleV2) {
+            arguments.add("--qwen.managed-agent.tool-publication.enabled=true");
+            arguments.add("--qwen.managed-agent.tool-publication.oss-endpoint=https://oss-cn-hangzhou.aliyuncs.com");
+            arguments.add("--qwen.managed-agent.tool-publication.oss-region=cn-hangzhou");
+            arguments.add("--qwen.managed-agent.tool-publication.oss-bucket=private-test-bucket");
+            arguments.add("--qwen.managed-agent.tool-publication.service-base-url=http://127.0.0.1:" + port);
+            arguments.add("--qwen.managed-agent.tool-publication.execution-bytes=1073741824");
+            arguments.add("--qwen.managed-agent.tool-publication.session-bytes=1073741824");
+            arguments.add("--qwen.managed-agent.tool-publication.tenant-bytes=1073741824");
+            arguments.add("--qwen.managed-agent.tool-publication.active-captures=4");
+            arguments.add("--qwen.managed-agent.tool-publication.entry-concurrency=4");
+            arguments.add("--qwen.managed-agent.tool-publication.operation-timeout=10s");
+            arguments.add("--qwen.managed-agent.tool-publication.claim-timeout=5s");
+            arguments.add("--qwen.managed-agent.tool-publication.verification-bytes-per-second=1048576");
+            arguments.add("--qwen.managed-agent.tool-publication.max-verification-timeout=20m");
             arguments.add("--qwen.managed-agent.tool-publication.gc-enabled=true");
             arguments.add("--qwen.managed-agent.tool-publication.deletion-grace=0s");
         }
@@ -1037,7 +1068,21 @@ class HostedPublicWorkspaceIT {
             arguments.add(prefix + "root=" + roots.get(i));
         }
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
-                .initializers(context -> context.getBeanFactory().registerSingleton("g0Authentication", authentication()))
+                .initializers(context -> {
+                    context.getBeanFactory().registerSingleton("g0Authentication", authentication());
+                    if (shellLifecycleV2) {
+                        var acl = new com.aliyun.oss.model.AccessControlList();
+                        acl.setCannedACL(com.aliyun.oss.model.CannedAccessControlList.Private);
+                        var oss = org.mockito.Mockito.mock(com.aliyun.oss.OSS.class, invocation -> switch (invocation.getMethod().getName()) {
+                            case "getBucketVersioning" -> new com.aliyun.oss.model.BucketVersioningConfiguration();
+                            case "getBucketAcl" -> acl;
+                            case "shutdown" -> null;
+                            case "toString" -> "inline-capture-oss-fixture";
+                            default -> throw new AssertionError("Unexpected OSS access in inline capture fixture: " + invocation.getMethod().getName());
+                        });
+                        context.addBeanFactoryPostProcessor(beanFactory -> beanFactory.registerSingleton("toolPublicationOss", oss));
+                    }
+                })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
     }
