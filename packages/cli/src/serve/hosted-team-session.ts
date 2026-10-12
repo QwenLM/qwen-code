@@ -15,6 +15,8 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
+import { memberPlanModeRequired } from './hosted-member-chain.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type {
   CommittedExtensionOperation,
   ManagedSessionActor,
@@ -43,6 +45,19 @@ import {
   teamTaskRevisionBody,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
+import {
+  HostedChildChains,
+  givenWorkThisTurn,
+  hasCompletedRun,
+  hostedMemberView,
+  hostedNeverStarted,
+  isEndedMember,
+  isRunningMember,
+  neverStartedAction,
+  neverStartedClause,
+  outboundChildMessages,
+  type HostedMemberView,
+} from './hosted-member-chain.js';
 
 // H4e-b1 of #12827: the lead Session's team funnel. The lead alone writes
 // its team: the roster and lifecycle (team_state) and the board
@@ -50,7 +65,10 @@ import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.j
 // committing through one serial chain under command ids derived from the
 // tool call, so a replayed call finds what it committed and adds nothing
 // twice. Members are H4b child agents; this funnel only names them. See
-// docs/design/2026-10-10-managed-agent-team-lead-runtime.md.
+// docs/design/2026-10-10-managed-agent-team-lead-runtime.md. H4e-b2 reads
+// each member through its continuation chain: the roster names the
+// chain's first run, and the member is the chain's head (see
+// docs/design/2026-10-11-managed-agent-team-mailbox.md).
 
 /** The narrow authority/resource pair a HostedTeamSession commits through. */
 export interface HostedTeamStore {
@@ -84,11 +102,23 @@ export interface HostedTeamStore {
 /** A model-facing refusal: the call answers with it and commits nothing. */
 export class HostedTeamRefusal extends Error {}
 
-export type HostedTeamMemberState =
-  | 'running'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
+/**
+ * The stop a lead tool requests of a member's head. A user's H4f cancel
+ * commits the same revision (H4e-b3 decision 10), so the lead's request
+ * goes through the child funnel, never through this funnel's store: the
+ * two funnels each own their writes chain. A lane whose Shell profile
+ * suppresses child agents attaches no such funnel; the team surface
+ * there is read-only, and a member it may carry refuses shutdowns. The
+ * command id a `request_shutdown` stop commits under names the call that
+ * asked, so an interrupted turn's recovery tells it apart from someone
+ * else's stop.
+ */
+export interface HostedTeamStops {
+  requestStop(
+    childRunId: string,
+    evidence?: { readonly operation: string; readonly commandId: string },
+  ): Promise<void>;
+}
 
 /** The Legacy board tools' schema bounds, in characters. */
 const SUBJECT_CHARS = 200;
@@ -119,7 +149,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'team_delete',
     description:
-      "Delete this Session's team. Refused while a member is still running: a running member cannot be stopped from here, so wait until task_list shows every member ended.",
+      "Delete this Session's team. Refused while a member is still running: stop it first with request_shutdown and wait until task_list shows it ended.",
     parametersJsonSchema: {
       type: 'object',
       properties: {},
@@ -127,9 +157,25 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
     },
   },
   {
+    name: 'request_shutdown',
+    description:
+      'Stop a team member: its current run settles as if its task were cancelled, and it is not asked. A member that already finished is not touched: it takes no work unless you send it some. Delete the team with team_delete once task_list shows every member ended.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        to: {
+          type: 'string',
+          description: 'The name of the team member to stop.',
+        },
+      },
+      required: ['to'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'task_create',
     description:
-      'Create a pending task on the team board. Members are not told about board changes; give a member its work in its launch prompt, or send_message it, while it runs, with the task id that task_list shows beside its name (task_…).',
+      'Create a pending task on the team board. Members are not told about board changes: give a member its work in its launch prompt or with send_message to its name, which continues a member that has finished.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -160,7 +206,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_update',
     description:
-      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader" or a member that is still running; a member that has finished can be newly set as the owner only of a completed task, and a task whose owner has ended moves to another open status only with a new owner. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update.',
+      'Update a board task: status, owner, subject, description, active form, metadata and dependencies. Set status to "deleted" to remove it. A task in progress needs an owner: "leader", a member that is still running and not being stopped, or a member you gave work with send_message earlier in this turn. A member that completed work can otherwise be the owner only of a completed task, so a task whose owner has finished moves to another open status only with a new owner or new work sent first. Dependencies only grow, and a completed or deleted blocker stops blocking. Members are not told about the update: to give a member new work, send_message it the work by name first, then update the task in the same turn.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -215,7 +261,7 @@ export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
     name: 'task_list',
     description:
-      'List the team board, optionally filtered, followed by each member with the state of its run (and why a failed or cancelled run ended) and, while it runs, the task id send_message takes.',
+      'List the team board, optionally filtered, followed by each member with the state of its current run, which is its newest one that did not fail to start (and why a failed or cancelled run ended), its task id while it can still take work, and a newer continuation that never started, with the messages that did not reach it. Address a member with send_message to its name.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -258,6 +304,7 @@ const ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = {
     'addBlockedBy',
   ],
   task_list: ['status', 'owner', 'blockedBy'],
+  request_shutdown: ['to'],
 };
 
 function lineError(
@@ -357,6 +404,8 @@ export function hostedTeamArgumentError(
       if (args[key] !== undefined && typeof args[key] !== 'string')
         return `${key} must be a string.`;
   }
+  if (toolName === 'request_shutdown' && typeof args['to'] !== 'string')
+    return 'to must be a string.';
   return undefined;
 }
 
@@ -393,14 +442,6 @@ export function hostedTeamMembership(
   return membershipAmong(teams, childRunId, () => true);
 }
 
-/** The same entry, among the teams not yet deleted. */
-export function hostedOpenTeamMembership(
-  teams: ReadonlyArray<{ readonly record: unknown }>,
-  childRunId: string,
-): HostedTeamMembership | undefined {
-  return membershipAmong(teams, childRunId, isOpenTeam);
-}
-
 function membershipAmong(
   teams: ReadonlyArray<{ readonly record: unknown }>,
   childRunId: string,
@@ -416,21 +457,13 @@ function membershipAmong(
   return undefined;
 }
 
-function memberRunState(
-  child: ChildSessionRun | undefined,
-): HostedTeamMemberState {
-  if (child?.run.state === 'settled') return 'completed';
-  if (child?.run.state === 'failed' || child?.run.state === 'cancelled')
-    return child.run.state;
-  return 'running';
-}
-
 export class HostedTeamSession {
   private writes: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly store: HostedTeamStore,
     private readonly key: ManagedSessionKey,
+    private readonly stops?: HostedTeamStops,
   ) {}
 
   team(teamId: string): TeamState | undefined {
@@ -454,17 +487,35 @@ export class HostedTeamSession {
     );
   }
 
-  /** A member's liveness: the state of its child run. */
-  memberState(childRunId: string): HostedTeamMemberState {
-    return memberRunState(this.childRun(childRunId));
+  /**
+   * H4e-b2 decision 2: a member read through its continuation chain. The
+   * roster entry names the chain's first run; the member is the chain's
+   * head, the newest continuation that did not prove it never started.
+   * A caller reading several members passes one index for all of them.
+   */
+  memberView(
+    rootChildRunId: string,
+    chains: HostedChildChains = this.chains(),
+  ): HostedMemberView {
+    return hostedMemberView(chains, rootChildRunId);
   }
 
   /**
    * Whether a call committed any part of its team write before its Turn
    * died: the interrupted Turn's settlement must not answer such a call
-   * as one that never ran.
+   * as one that never ran. H4e-b3 decision 14's stop evidence is keyed to
+   * the call that requested it — `shutdown:${callKey}` — never to the
+   * member-head bit, so a stop someone else requested is not credited to
+   * a call that never ran, and the keyed evidence survives a continuation
+   * that later never started.
    */
   committedBy(toolName: string, callKey: string): boolean {
+    if (toolName === 'request_shutdown') {
+      return (
+        this.committed('commitChildRunRecord', `shutdown:${callKey}`) !==
+        undefined
+      );
+    }
     const commands: ReadonlyArray<readonly [string, string]> =
       toolName === 'team_create'
         ? [['createTeam', callKey]]
@@ -497,6 +548,12 @@ export class HostedTeamSession {
     toolName: string,
     args: Record<string, unknown>,
     callKey: string,
+    /**
+     * H4e-b2 decision 7: the current Turn's call-key prefix,
+     * `${promptKey}:`. The tool turn, the one production caller, always
+     * passes it; a caller outside a model Turn has no work given in one.
+     */
+    turnPrefix?: string,
   ): Promise<string> {
     return this.serial(() => {
       switch (toolName) {
@@ -507,9 +564,11 @@ export class HostedTeamSession {
         case 'task_create':
           return this.createTask(callKey, args);
         case 'task_update':
-          return this.updateTask(callKey, args);
+          return this.updateTask(callKey, args, turnPrefix);
         case 'task_list':
           return Promise.resolve(this.listTasks(args));
+        case 'request_shutdown':
+          return this.requestShutdown(callKey, args['to'] as string);
         default:
           throw new Error(`${toolName} is not a team tool.`);
       }
@@ -626,12 +685,16 @@ export class HostedTeamSession {
       throw new HostedTeamRefusal('No active team to delete.');
     let closing = team;
     if (closed === undefined) {
+      // H4e-b2: a continued member runs in its chain's head.
+      const chains = this.chains();
       const running = team.members
-        .filter((member) => this.memberState(member.childRunId) === 'running')
+        .filter((member) =>
+          isRunningMember(hostedMemberView(chains, member.childRunId)),
+        )
         .map((member) => member.name);
       if (running.length > 0)
         throw new HostedTeamRefusal(
-          `Team "${team.name}" still has running members: ${running.join(', ')}. A running member cannot be stopped from this Session yet; wait until task_list shows it ended, then delete the team.`,
+          `Team "${team.name}" still has running members: ${running.join(', ')}. Stop them with request_shutdown and wait until task_list shows them ended, then delete the team.`,
         );
       if (team.lifecycle === 'active') {
         closing = teamLifecycleBody(team, 'closing');
@@ -650,6 +713,84 @@ export class HostedTeamSession {
       `${callKey}:deleted`,
     );
     return `Team "${team.name}" deleted.`;
+  }
+
+  /**
+   * H4e-b3 decision 10: the lead stops a member. A running head takes the
+   * same stop a user's H4f cancel commits — the member is never asked —
+   * and the child result relay's stop arm settles it. Every answer reads
+   * the head's state, so a re-driven call answers its committed stop
+   * instead of committing a second one. A finished head is not touched:
+   * it takes no work unless the lead sends it some.
+   */
+  private async requestShutdown(
+    callKey: string,
+    rawName: string,
+  ): Promise<string> {
+    const team = this.openTeam();
+    if (team === undefined)
+      throw new HostedTeamRefusal('No active team. Create a team first.');
+    const name = sanitizeName(rawName);
+    if (!name)
+      throw new HostedTeamRefusal(
+        `Teammate name "${rawName}" sanitizes to an empty string. Choose a name with at least one alphanumeric character.`,
+      );
+    const member = team.members.find((each) => each.name === name);
+    if (member === undefined)
+      throw new HostedTeamRefusal(
+        `"${name}" is not a member of team "${team.name}".`,
+      );
+    let view = hostedMemberView(this.chains(), member.childRunId);
+    if (isRunningMember(view) && !view.stopping && view.head !== undefined) {
+      // A lane without the child funnel has nothing to stop through, and
+      // can only carry members read-only; refusing here costs the merge
+      // shape that attaches the surface without the funnel.
+      if (this.stops === undefined)
+        throw new HostedTeamRefusal(
+          `${name} cannot be stopped from this Session.`,
+        );
+      try {
+        // The stop commits on the child funnel's chain, so a settlement
+        // can beat the view it just read: the run ends without a stop
+        // landing, and the winner's answer reads from the new state
+        // rather than crashing as a conflict.
+        await this.stops.requestStop(view.head.childRunId, {
+          operation: 'commitChildRunRecord',
+          commandId: `shutdown:${callKey}`,
+        });
+        return `${name} is being stopped. Delete the team once task_list shows it ended.`;
+      } catch (cause) {
+        if (!(cause instanceof ManagedSessionConflictError)) throw cause;
+        view = hostedMemberView(this.chains(), member.childRunId);
+        if (view.state === 'running' && !view.stopping) throw cause;
+      }
+    }
+    if (view.stoppingBeforeStart)
+      return `${name} is already being stopped, before its latest continuation started: it may end without starting, and ${name} then goes back to its predecessor run. Check task_list once it settles; do not read the member as ended on this stop alone.`;
+    if (view.stopping)
+      return `${name} is already being stopped. Delete the team once task_list shows it ended.`;
+    if (view.state === 'completed' && !view.stopRequestedCompletion)
+      return `${name} has finished: it takes no work unless you send it some, so nothing needed stopping. Its run was not touched.`;
+    const ended = view.stopRequestedCompletion
+      ? 'completed after a stop was requested'
+      : view.state === 'cancelled'
+        ? 'was cancelled'
+        : `has ${view.state}`;
+    return `${name} ${ended}; there is nothing left to stop.`;
+  }
+
+  /**
+   * H4e-b3 decision 9's composition rule, read through the open team:
+   * whether a continuation of this member composes in plan mode.
+   */
+  memberPlanMode(member: HostedTeamMembership): boolean {
+    const team = this.team(member.teamId);
+    if (team === undefined) return false;
+    return memberPlanModeRequired(
+      team,
+      this.store.authority.extensionRecordsInDomain('team_plan'),
+      member.name,
+    );
   }
 
   private async createTask(
@@ -689,6 +830,7 @@ export class HostedTeamSession {
   private async updateTask(
     callKey: string,
     args: Record<string, unknown>,
+    turnPrefix: string | undefined,
   ): Promise<string> {
     const team = this.openTeam();
     if (team === undefined)
@@ -719,7 +861,16 @@ export class HostedTeamSession {
           ? null
           : sanitizeName(args['owner'] as string);
     if (!replaying)
-      this.validateUpdate(team, board, number, args, owner, blocks, blockedBy);
+      this.validateUpdate(
+        team,
+        board,
+        number,
+        args,
+        owner,
+        blocks,
+        blockedBy,
+        turnPrefix,
+      );
     for (const place of pending) {
       const target = board.get(place === 0 ? number : blocks[place - 1]!)!;
       // Re-read: an earlier place of this call may have revised it.
@@ -741,12 +892,46 @@ export class HostedTeamSession {
     }
     const task = this.task(board.get(number)!.taskId);
     if (deleting) return `Task #${number} deleted.`;
-    const notified = team.members.find((each) => each.name === owner);
-    const notice =
-      notified !== undefined &&
-      this.memberState(notified.childRunId) === 'running'
-        ? ` "${owner}" was not notified: members learn of board changes only once the team mailbox lands, so give a member its work in its launch prompt, or send_message it, while it runs, with the task id that task_list shows beside its name (task_…).`
-        : '';
+    // H4e-b2 decision 7: the board is a record, never a delivery. The
+    // answer never asks for a send outright: the launch prompt or a send
+    // earlier in the Turn may already have given this work, and when such
+    // a send exists it says so. A call that restates its task's owner and
+    // status is not checked again, so the answer reads the member itself:
+    // work that never arrived is asked for again, and a member that has
+    // ended is never pointed to a send.
+    let notice = '';
+    const member =
+      owner != null && owner !== MANAGED_TEAM_LEADER
+        ? team.members.find((each) => each.name === owner)
+        : undefined;
+    if (member !== undefined && task.status !== 'completed') {
+      const chains = this.chains();
+      const view = hostedMemberView(chains, member.childRunId);
+      const recorded = ` "${owner}" was not notified: task_update records the board only.`;
+      if (isEndedMember(view)) {
+        notice = `${recorded} ${owner} cannot take more work: it ${view.stopping ? 'is being stopped' : view.stopRequestedCompletion ? 'completed after a stop was requested' : `has ${view.state}`}.`;
+      } else if (view.neverStarted !== undefined) {
+        const neverStarted = hostedNeverStarted(
+          view.neverStarted,
+          this.messagesTo(view.neverStarted.childRunId),
+        );
+        notice = `${recorded} Its latest continuation ${neverStartedClause(neverStarted)}. ${neverStartedAction(neverStarted, member.name)}.`;
+      } else if (
+        turnPrefix !== undefined &&
+        givenWorkThisTurn(
+          chains,
+          member.childRunId,
+          outboundChildMessages(
+            this.store.authority.extensionRecordsInDomain('session_message'),
+          ),
+          turnPrefix,
+        )
+      ) {
+        notice = `${recorded} A send_message earlier in this turn gave ${owner} work; if it did not carry this task, give it with send_message to "${owner}".`;
+      } else {
+        notice = `${recorded} If ${owner} does not already have this work, give it with send_message to "${owner}".`;
+      }
+    }
     return (
       `Task #${number} updated (status: ${task.status}` +
       (task.owner ? `, owner: ${task.owner}` : '') +
@@ -763,6 +948,7 @@ export class HostedTeamSession {
     owner: string | null | undefined,
     blocks: readonly number[],
     blockedBy: readonly number[],
+    turnPrefix: string | undefined,
   ): void {
     const live = (each: number) => {
       const task = board.get(each);
@@ -816,14 +1002,14 @@ export class HostedTeamSession {
     // call moves the task to another open status, so a member that ended
     // never lands on open work.
     if (owner != null && owner !== task.owner)
-      this.assertOwner(team, owner, status === 'completed');
+      this.assertOwner(team, owner, status === 'completed', turnPrefix);
     else if (
       (owner === undefined || owner === task.owner) &&
       task.owner !== null &&
       status !== task.status &&
       status !== 'completed'
     )
-      this.assertOwner(team, task.owner, false, number);
+      this.assertOwner(team, task.owner, false, turnPrefix, number);
     if (
       status === 'in_progress' &&
       (owner === undefined ? task.owner : owner) === null
@@ -911,32 +1097,63 @@ export class HostedTeamSession {
           (open.length > 0 ? ` (blocked by ${open.join(', ')})` : '')
         );
       });
+    const chains = this.chains();
     return [
       ...(lines.length > 0 ? lines : ['No tasks found.']),
       '',
       `--- Team "${team.name}" members ---`,
       ...(team.members.length > 0
-        ? team.members.map((member) => {
-            // A failed or cancelled run says why, so the lead can tell a
-            // member the host never started (an isolated member whose
-            // Workspace was not prepared) from one that failed its work.
-            // Only a running member shows its task id: once a member of an
-            // open team has finished, send_message refuses to continue it.
-            const state = this.memberState(member.childRunId);
-            const reason =
-              state === 'failed' || state === 'cancelled'
-                ? this.childRun(member.childRunId)?.stopReason
-                : undefined;
-            return (
-              `${member.name}: ${state}` +
-              (reason ? ` (${reason})` : '') +
-              (state === 'running'
-                ? ` — ${managedChildTaskId(this.key.sessionId, member.childRunId)}`
-                : '')
-            );
-          })
+        ? team.members.map((member) => this.rosterLine(member, chains))
         : ['No members yet.']),
     ].join('\n');
+  }
+
+  /**
+   * One member's roster line, read from its chain head (H4e-b2 decision 2).
+   * A failed or cancelled head says why, so the lead can tell a member the
+   * host never started (an isolated member whose Workspace was not
+   * prepared) from one that failed its work. The head's task id shows only
+   * while the member can still take work. A continuation that never started
+   * says so, with how many messages to it never arrived — a failed child
+   * sends no notification, so this line is how the lead learns of it — but
+   * not its own task id, which names no live run: the head's reaches the
+   * member.
+   */
+  private rosterLine(
+    member: { readonly name: string; readonly childRunId: string },
+    chains: HostedChildChains,
+  ): string {
+    const view = this.memberView(member.childRunId, chains);
+    const head = view.head;
+    const label = view.stopping
+      ? 'running (stopping)'
+      : view.stopRequestedCompletion
+        ? 'completed (stop requested)'
+        : view.state;
+    const reason =
+      (view.state === 'failed' || view.state === 'cancelled') && head
+        ? head.stopReason
+        : null;
+    const reachable =
+      head !== undefined &&
+      ((view.state === 'running' && !view.stopping) || view.continuable);
+    const note =
+      view.neverStarted === undefined
+        ? ''
+        : ` (its latest continuation ${neverStartedClause(
+            hostedNeverStarted(
+              view.neverStarted,
+              this.messagesTo(view.neverStarted.childRunId),
+            ),
+          )})`;
+    return (
+      `${member.name}: ${label}` +
+      (reason ? ` (${reason})` : '') +
+      (reachable
+        ? ` — ${managedChildTaskId(this.key.sessionId, head.childRunId)}`
+        : '') +
+      note
+    );
   }
 
   private activeTeam(): TeamState {
@@ -951,15 +1168,29 @@ export class HostedTeamSession {
   }
 
   /**
-   * An owner is the leader or a member whose run has not ended. A member
-   * whose run completed may also be named on a task the call leaves
-   * completed: a one-shot member usually finishes before the lead's next
-   * call lands, and the board should still record who did the work.
+   * An owner is the leader or a member that can hold the work. H4e-b2 reads
+   * the member's chain head (decision 2) and decision 7's notion of work
+   * given in this Turn:
+   * - a running member may own any task, and so may a member that an
+   *   earlier call of this Turn gave work — a continuation of its chain that
+   *   did not prove it never started, or a message to it that was not
+   *   cancelled or rejected — even when it has completed since: the relay
+   *   settles a child while the lead's Turn runs, so one batch cannot keep
+   *   it running until task_update lands;
+   * - a completed member may otherwise own only a task the call leaves
+   *   completed, so the board records who did the work (#13846), and so
+   *   may an ended member any run of whose chain completed;
+   * - a member that failed, was cancelled, is stopping, or completed after
+   *   a stop request has ended: it never lands on open work.
+   * No refusal claims which task a past send carried, since no record ties
+   * a send to a task, and none offers to skip a send for work that never
+   * arrived.
    */
   private assertOwner(
     team: TeamState,
     owner: string,
     completing: boolean,
+    turnPrefix: string | undefined,
     keptOn?: number,
   ): void {
     if (owner === MANAGED_TEAM_LEADER) return;
@@ -968,23 +1199,91 @@ export class HostedTeamSession {
       throw new HostedTeamRefusal(
         `"${owner}" is not a member of team "${team.name}". An owner is "leader" or a member name.`,
       );
-    const state = this.memberState(member.childRunId);
-    if (state === 'running' || (state === 'completed' && completing)) return;
-    const ended =
-      state === 'completed'
-        ? 'has finished'
-        : state === 'cancelled'
+    const chains = this.chains();
+    const view = hostedMemberView(chains, member.childRunId);
+    const kept = keptOn !== undefined;
+    // "Member X has finished", or for a kept owner "Member X cannot keep
+    // task #N open: it has finished".
+    const who = (state: string) =>
+      kept
+        ? `Member "${owner}" cannot keep task #${keptOn} open: it ${state}`
+        : `Member "${owner}" ${state}`;
+    const unassign = kept ? ', or set owner "" to unassign it' : '';
+    if (isEndedMember(view)) {
+      // A run of the chain that completed may have done this task's work,
+      // so the member may still be recorded on the task the call completes,
+      // whatever a later run did — a head that settled after a stop request
+      // among them.
+      if (completing && hasCompletedRun(chains, member.childRunId)) return;
+      if (view.stopRequestedCompletion)
+        throw new HostedTeamRefusal(
+          `${who('completed after a stop was requested, so it cannot be continued')}. If it did this task's work, set status "completed" with this owner; otherwise launch a new member for it${unassign}.`,
+        );
+      // A continuation stopped before it attached may end without
+      // starting, which hands the member back to its predecessor.
+      if (view.stoppingBeforeStart)
+        throw new HostedTeamRefusal(
+          `${who('is being stopped before its latest continuation started')}. If that continuation ends without starting, the member can take work again: check task_list once it settles${kept ? ', set owner "" to unassign the task, or assign "leader"' : ''}.`,
+        );
+      const ended = view.stopping
+        ? 'is being stopped'
+        : view.state === 'cancelled'
           ? 'was cancelled'
-          : `has ${state}`;
-    if (keptOn !== undefined)
+          : `has ${view.state}`;
+      // No run of it completed, so it did no task's work.
+      if (completing)
+        throw new HostedTeamRefusal(
+          `Member "${owner}" ${ended} without completing a run, so it did not do this task's work. Record the member that did it, or "leader".`,
+        );
       throw new HostedTeamRefusal(
-        `Member "${owner}" ${ended} and cannot keep task #${keptOn} open. Set owner "" to unassign it, or assign "leader" or a running member.`,
+        kept
+          ? `${who(ended)}. Launch a new member for this work, set owner "" to unassign it, or assign "leader".`
+          : `Member "${owner}" ${ended} and cannot own a task. Launch a new member for this work.`,
       );
+    }
+    if (view.state === 'running' || completing) return;
+    // The head's newest continuation never started, so the newest work
+    // sent to the member did not arrive, whatever an earlier send of this
+    // Turn gave: no later started run exists, or it would be the head.
+    // One cancelled at a user's request is resent only if still wanted.
+    if (view.neverStarted !== undefined) {
+      const neverStarted = hostedNeverStarted(
+        view.neverStarted,
+        this.messagesTo(view.neverStarted.childRunId),
+      );
+      throw new HostedTeamRefusal(
+        `${who(`has finished, and its latest continuation ${neverStartedClause(neverStarted)}`)}. ${neverStartedAction(neverStarted, owner)}, then update the task in the same turn${unassign}.`,
+      );
+    }
+    if (
+      turnPrefix !== undefined &&
+      givenWorkThisTurn(
+        chains,
+        member.childRunId,
+        outboundChildMessages(
+          this.store.authority.extensionRecordsInDomain('session_message'),
+        ),
+        turnPrefix,
+      )
+    )
+      return;
     throw new HostedTeamRefusal(
-      state === 'completed'
-        ? `Member "${owner}" has finished, so it can own only a completed task. If it did this task's work, set status "completed" with this owner; otherwise assign "leader" or a running member.`
-        : `Member "${owner}" ${state === 'cancelled' ? 'was cancelled' : `has ${state}`} and cannot own a task.`,
+      `${who('has finished')}. If it already did this task's work, from its launch prompt or a message you sent it, set status "completed" with this owner once its report is in. Otherwise give it the work with send_message to "${owner}" first, which continues it, and then update the task in the same turn${unassign}.`,
     );
+  }
+
+  /** The lead's child Session runs, indexed for one call. */
+  private chains(): HostedChildChains {
+    return new HostedChildChains(
+      this.store.authority.extensionRecordsInDomain('child_run'),
+    );
+  }
+
+  /** The lead's messages to one child run. */
+  private messagesTo(childRunId: string) {
+    return outboundChildMessages(
+      this.store.authority.extensionRecordsInDomain('session_message'),
+    ).filter((message) => message.childRunId === childRunId);
   }
 
   private tasksOf(teamId: string): TeamTask[] {

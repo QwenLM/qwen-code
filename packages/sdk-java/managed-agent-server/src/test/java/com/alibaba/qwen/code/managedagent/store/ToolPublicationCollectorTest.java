@@ -190,6 +190,46 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         assertThat(objects.deleted).isEmpty();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"VERIFIED", "CANDIDATE", "QUARANTINED"})
+    void failedPrefixAllowsCollectionOnlyWithVerifiedObjects(String objectState) {
+        jdbc.update("INSERT INTO qwen_tool_publication_operation"
+                + " (scope_key, publication_id, operation_id, request_digest, slot_key, state, claim_epoch,"
+                + " deadline, created_at, execution_mode, verification_ready, failure_status, failure_code)"
+                + " VALUES (?, 'pub-1', 'failed-prefix', ?, 'prefix:stdout', 'FAILED', 1,"
+                + " CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), 'ASYNC', TRUE, 403, 'managed_tool_publication_storage_denied')",
+                scope, "b".repeat(64));
+        addObject("one", "failed-prefix/exact-key", null);
+        addObject("inline", null, new byte[] {8});
+        jdbc.update("UPDATE qwen_tool_publication_object SET state = ? WHERE scope_key = ? AND slot_key = 'one'",
+                objectState, scope);
+        var objects = new DeletingObjects();
+        objects.bytes.put("failed-prefix/exact-key", new byte[] {7});
+        retire();
+        if (!"VERIFIED".equals(objectState)) {
+            assertThat(blocker()).isEqualTo("object_unverified");
+            assertThat(collector(objects).runOnce()).isFalse();
+            assertThat(held()).isEqualTo(3000);
+            assertThat(objects.deleted).isEmpty();
+            assertThat(objects.bytes.get("failed-prefix/exact-key")).containsExactly((byte) 7);
+            assertThat(jdbc.queryForObject("SELECT inline_bytes FROM qwen_tool_publication_object"
+                    + " WHERE scope_key = ? AND slot_key = 'inline'", byte[].class, scope)).containsExactly((byte) 8);
+            return;
+        }
+        assertThat(blocker()).isNull();
+        assertThat(collector(objects).runOnce()).isTrue();
+        assertThat(state()).isEqualTo("COLLECTED");
+        assertThat(held()).isZero();
+        assertThat(jdbc.queryForObject("SELECT capture_used_bytes + producer_used_bytes + admission_used_bytes"
+                + " FROM qwen_tool_publication WHERE scope_key = ?", Long.class, scope)).isZero();
+        assertThat(objects.deleted).containsExactly("failed-prefix/exact-key");
+        assertThat(objects.bytes).isEmpty();
+        assertThat(jdbc.queryForList("SELECT inline_bytes FROM qwen_tool_publication_object WHERE scope_key = ?",
+                byte[].class, scope)).containsOnly((byte[]) null);
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication_operation WHERE scope_key = ?",
+                String.class, scope)).isEqualTo("FAILED");
+    }
+
     @Test
     void dueProtectedPublicationRechecksEvidenceInsteadOfTrustingItsStoredBlocker() {
         addObject("one", "protected/exact-key", null);

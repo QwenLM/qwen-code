@@ -15,8 +15,11 @@ public final class ApiModels {
     private ApiModels() {
     }
 
+    // The per-block cap is enforced in ManagedAgentService, counted in
+    // code points to match the published schema's maxLength; @Size counts
+    // UTF-16 units and would disagree on astral-plane text.
     public record InputBlock(@NotBlank String type,
-            @NotBlank @Size(max = 1_000_000) String text) {
+            @NotBlank String text) {
     }
 
     public record CreateSessionRequest(
@@ -80,12 +83,14 @@ public final class ApiModels {
             @JsonProperty("session_close") boolean sessionClose,
             @JsonProperty("session_archive") boolean sessionArchive,
             @JsonProperty("session_unarchive") boolean sessionUnarchive,
-            @JsonProperty("session_delete") boolean sessionDelete) {
+            @JsonProperty("session_delete") boolean sessionDelete,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell) {
     }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
             boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
-            boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange) {
+            boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -341,7 +346,7 @@ public final class ApiModels {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WebShellTurn(String turnId, String sessionId,
             String status, long submittedAt, Long completedAt,
-            String errorCode, Map<String, Object> usage) {
+            String errorCode) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
