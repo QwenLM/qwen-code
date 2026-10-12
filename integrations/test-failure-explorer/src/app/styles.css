@@ -92,7 +92,7 @@ textarea {
   max-height: 640px;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: hidden auto;
   font-size: 12px;
   line-height: 1.45;
 }
@@ -236,7 +236,7 @@ summary {
   display: grid;
   grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
   flex: 1;
-  min-height: 0;
+  min-height: 300px;
   border-top: 1px solid var(--border);
 }
 .list-pane,
