@@ -278,10 +278,18 @@ public class WorkspaceProfileLifecycleVerifier {
 
     private JsonNode verifyManifest(OperationRecord operation, JsonNode ref, ToolExecutionRecord execution) {
         JsonNode manifest = ToolPublicationContract.parseToolResult("manifest", read(operation, ref), 2 * 1024 * 1024);
+        Object invocationDigest = execution.getReference().get("argsDigest");
+        if (Integer.valueOf(3).equals(execution.getReference().get("runtimeProtocol"))
+                && "deferred".equals(execution.getReference().get("dispatchMode"))) {
+            invocationDigest = execution.getReference().get("inputDigest");
+            if (!(invocationDigest instanceof String digest) || !digest.matches("[0-9a-f]{64}")) {
+                unsettled();
+            }
+        }
         if (!"process_pipes".equals(manifest.path("captureScope").asText())
                 || !"complete_required".equals(manifest.path("capturePolicy").asText())
                 || !java.util.Objects.equals(execution.getReference().get("callId"), manifest.path("callId").asText())
-                || !java.util.Objects.equals(execution.getReference().get("argsDigest"), manifest.path("invocationDigest").asText())
+                || !java.util.Objects.equals(invocationDigest, manifest.path("invocationDigest").asText())
                 || !operation.tenantId().equals(manifest.path("tenantId").asText())
                 || !operation.sessionId().equals(manifest.path("sessionId").asText())
                 || !execution.getTurnId().equals(manifest.path("turnId").asText())

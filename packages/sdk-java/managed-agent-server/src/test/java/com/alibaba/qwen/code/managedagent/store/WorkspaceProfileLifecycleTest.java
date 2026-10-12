@@ -121,24 +121,34 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"complete", "capture_failed", "wrong_identity", "missing_seal", "open", "receipt", "publication"})
+    @ValueSource(strings = {"complete", "capture_failed", "wrong_identity", "missing_seal", "open", "receipt", "publication",
+            "deferred_v3", "deferred_v3_input", "wrong_digest", "missing_input_digest", "invalid_input_digest"})
     void verifiesPublishedForegroundCaptureAndRejectsMissingOrChangedEvidence(String mode) throws Exception {
         boolean captureFailed = "capture_failed".equals(mode);
         boolean publication = "publication".equals(mode);
+        boolean legacy = !publication && !mode.startsWith("deferred_v3");
         var f = fixture();
         var binding = f.bindings.findOrCreate(new RuntimeProvisionRequest(f.scope(), f.session));
         var ledger = new JdbcToolExecutionRepository(f.jdbc.getDataSource());
         var reference = new java.util.HashMap<String, Object>(Map.of("sessionId", "original-owner", "promptId", "turn-1", "callId", "runtime-call", "argsDigest", "sha256:" + "a".repeat(64)));
+        reference.put("dispatchMode", legacy ? "deferred" : "deferred_v3");
+        if (legacy) {
+            reference.put("runtimeProtocol", 3);
+            if (!"missing_input_digest".equals(mode)) reference.put("inputDigest", "invalid_input_digest".equals(mode) ? "invalid" : "b".repeat(64));
+        } else {
+            reference.put("payloadDigest", "sha256:" + "c".repeat(64));
+            if ("deferred_v3_input".equals(mode)) reference.put("inputDigest", "b".repeat(64));
+        }
         if (publication) reference.put("publicationId", "pub-1");
         ledger.findOrCreate(ToolExecutionRecord.prepared("call-1", "call-1", binding.getBindingId(), binding.getGeneration(),
-                f.session, "original-owner", "turn-1", "runtime-call", "sha256:" + "a".repeat(64),
+                f.session, "original-owner", "turn-1", "runtime-call", "sha256:" + (legacy ? "a" : "c").repeat(64),
                 reference));
         var execution = ledger.claimDispatch("call-1", "dispatcher", Duration.ofSeconds(30));
         ledger.compareAndSet(execution, execution.withResult(Map.of("executionStatus", "success"), 0, java.time.Instant.now()),
                 "dispatcher", execution.getDispatchGeneration());
         var manifest = f.json.createObjectNode().put("toolResult", "managed-tool-result/1").put("type", "manifest")
                 .put("tenantId", "tenant").put("sessionId", f.session).put("turnId", "turn-1").put("executionCallId", "call-1")
-                .put("callId", "runtime-call").put("invocationDigest", "sha256:" + "a".repeat(64)).put("bindingGeneration", "1")
+                .put("callId", "runtime-call").put("invocationDigest", legacy && !"wrong_digest".equals(mode) ? "b".repeat(64) : "sha256:" + "a".repeat(64)).put("bindingGeneration", "1")
                 .put("captureId", "capture-1").put("revision", 1).put("executionStatus", "success")
                 .put("captureScope", "process_pipes").put("capturePolicy", "complete_required")
                 .put("captureStatus", captureFailed ? "unavailable" : "complete")
@@ -222,7 +232,7 @@ class WorkspaceProfileLifecycleTest {
             String sealId = ToolPublicationContract.sha256(f.json.writeValueAsBytes(java.util.List.of("capture-1", "stdout", "seal")));
             f.jdbc.update("DELETE FROM qwen_managed_session_resource WHERE resource_id = ?", sealId);
         }
-        if (java.util.List.of("wrong_identity", "missing_seal", "open", "receipt").contains(mode)) {
+        if (java.util.List.of("wrong_identity", "missing_seal", "open", "receipt", "wrong_digest", "missing_input_digest", "invalid_input_digest").contains(mode)) {
             assertThatThrownBy(verify::run).isInstanceOf(ApiException.class);
             return;
         }
@@ -242,15 +252,17 @@ class WorkspaceProfileLifecycleTest {
         var binding = f.bindings.findOrCreate(new RuntimeProvisionRequest(f.scope(), f.session));
         var ledger = new JdbcToolExecutionRepository(f.jdbc.getDataSource());
         var reference = Map.<String, Object>of("sessionId", "original-owner", "promptId", "turn-1", "callId", "runtime-call",
-                "argsDigest", "sha256:" + "a".repeat(64));
+                "argsDigest", "sha256:" + "a".repeat(64), "dispatchMode", "deferred_v3", "payloadDigest", "sha256:" + "c".repeat(64));
         var start = ledger.findOrCreate(ToolExecutionRecord.prepared("call-1", "call-1", binding.getBindingId(), binding.getGeneration(),
-                f.session, "original-owner", "turn-1", "runtime-call", "sha256:" + "a".repeat(64), reference));
+                f.session, "original-owner", "turn-1", "runtime-call", "sha256:" + "c".repeat(64), reference));
         ledger.settlePrepared(start, Map.of("executionStatus", "success"), java.time.Instant.now());
         var processReference = new java.util.HashMap<>(reference);
+        processReference.remove("payloadDigest");
+        processReference.put("argsDigest", "sha256:" + "c".repeat(64));
         processReference.put("dispatchMode", "background_v3_process");
         processReference.put("processOf", "call-1");
         var process = ledger.findOrCreate(ToolExecutionRecord.prepared("call-1:process", "call-1:process", binding.getBindingId(), binding.getGeneration(),
-                f.session, "original-owner", "turn-1", "runtime-call", "sha256:" + "a".repeat(64), processReference));
+                f.session, "original-owner", "turn-1", "runtime-call", "sha256:" + "c".repeat(64), processReference));
         boolean signal = "signalled".equals(mode) || "stop_requested".equals(mode);
         var evidence = signal ? Map.<String, Object>of("exitSignal", "SIGTERM") : Map.<String, Object>of("exitCode", 0);
         ledger.settlePrepared(process, Map.of("state", "exited", "executionStatus", signal ? "error" : "success", "evidence", evidence),

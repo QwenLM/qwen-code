@@ -38,6 +38,8 @@ After original RuntimeSession drain, settle stdout/stderr capture, publication m
 
 For foreground inline capture, the receipt outcome is `REFERENCED`, while the indirectly referenced manifest, pages and segments may remain `PUBLISHED`. Verify the original journal source and retained outcome, then check the manifest's original execution identity, stream digests and seals. A blocked capture still requires its manifest evidence even when `resultRef` is null. O2 publication outcomes use `TOOL_PUBLICATION`: perform the existing object/receipt verification before the final transaction, then recheck the publication phase, quarantine flag and exact admission, receipt sequence and revision inside that transaction. The MCP inline-record reader is not an output reader.
 
+The manifest invocation digest follows the original execution protocol. Only a saved `runtimeProtocol: 3` with `dispatchMode: deferred` uses its bare `inputDigest`; a missing or invalid digest blocks cleanup. Its `argsDigest` hashes the complete request and cannot substitute for the input digest. Deferred v3/O2 and H3 start invocations retain their original `argsDigest` comparison; background process holds do not replace the start invocation's identity. Do not select the digest merely by field presence or strip a hash prefix.
+
 A stopped worker does not prove missing output was published. Unknown output remains blocked; do not rerun Shell, start a new capture or rebuild a Monitor to fabricate settlement. A known capture failure is retained as a failure rather than rewritten as successful output.
 
 ## MCP slice

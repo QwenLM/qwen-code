@@ -38,6 +38,8 @@ prepare 禁止新 Monitor wake 和通知产生，不提前宣称物理停止；�
 
 前台 inline capture 的 receipt outcome 为 `REFERENCED`，间接引用的 manifest、page 和 segment 可以仍为 `PUBLISHED`。先验证原 journal 来源和保留的 outcome，再检查 manifest 的原执行身份、stream 摘要与封口证据。capture 被阻塞时，即使 `resultRef` 为 null，仍须验证其 manifest。O2 publication outcome 使用 `TOOL_PUBLICATION`：在最终事务前执行已有对象/receipt 验证，再在事务内复核 publication phase、quarantine 标记和精确的 admission、receipt sequence 与 revision。MCP inline record 读取器不能用作输出读取器。
 
+manifest 的 invocation digest 遵循原执行协议。仅持久记录为 `runtimeProtocol: 3` 且 `dispatchMode: deferred` 时使用原始裸 `inputDigest`；摘要缺失或格式无效时阻塞清理。该记录的 `argsDigest` 对完整请求求摘要，不能替代输入摘要。Deferred v3/O2 与 H3 start invocation 继续比较原 `argsDigest`，后台 process hold 不能替代 start invocation 的身份。不能只按字段是否存在选择摘要，也不能通过剥掉 hash 前缀猜测。
+
 worker 已停止不能证明缺失输出已发布。未知输出继续阻塞；禁止重跑 Shell、新建 capture 或 Monitor rebuild 来补造完成。已知 capture 失败保留为失败，不改成成功输出。
 
 ## MCP 切片
