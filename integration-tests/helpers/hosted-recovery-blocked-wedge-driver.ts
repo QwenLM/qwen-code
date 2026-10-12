@@ -178,7 +178,6 @@ class WedgeDaemon {
           QWEN_MODEL: 'hosted-wedge',
           QWEN_SANDBOX: 'false',
           NO_COLOR: '1',
-          QWEN_MANAGED_SESSION_TEST_DOMAINS: 'child_run,monitor_run',
         },
       },
     );
@@ -1021,8 +1020,9 @@ try {
       if (forge) {
         // Arm 3 (refusal-edges-live) fires here: the turn's own reserve is
         // captured OPEN and not yet settled, so replaying the very same
-        // publicationId with only its digests forged reaches the
-        // digest-consistency refusal — and its 400 reason must say so.
+        // publicationId with only its digests forged hits the broker
+        // execution identity check before any payload validation — the
+        // 400 reason must name it.
         const source = reserveBodies.get(entry.sessionId);
         const headers = reserveHeaders.get(entry.sessionId);
         if (!source || !headers)
@@ -1043,9 +1043,9 @@ try {
         evidence.push(
           `edge ${forge.family} forged-digest replay on captured reserve -> ${response.status} ${text.slice(0, 240)}`,
         );
-        if (response.status !== 400 || !/digest/i.test(text))
+        if (response.status !== 400 || !/identity conflicts/i.test(text))
           throw new Error(
-            `${forge.family} forged-digest replay must refuse with 400 naming the digest, got ${response.status}: ${text.slice(0, 240)}`,
+            `${forge.family} forged-digest replay must refuse with 400 naming the execution identity conflict, got ${response.status}: ${text.slice(0, 240)}`,
           );
       }
       const status = await waitTurnEndsBlocked(entry, 120_000);
@@ -1115,8 +1115,9 @@ try {
     // bytes at identification, so each family replays its captured OPEN
     // reserve with the same publicationId and only its
     // requestDigest/argsDigest forged, fired before the blocked settlement;
-    // the 400 refusal reason must name the digest (unit fixtures cover the
-    // field-shape refusals).
+    // the 400 refusal reason must name the broker execution identity
+    // conflict — forged digests are stopped at that check before payload
+    // validation (unit fixtures cover the field-shape refusals).
 
     // Arm 4 — foreground reserve on the same v3 lane: off-Linux the worker
     // declines it just like the detached families (no cgroup root, no

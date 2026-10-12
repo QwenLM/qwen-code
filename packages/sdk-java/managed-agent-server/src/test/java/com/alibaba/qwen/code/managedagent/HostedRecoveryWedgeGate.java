@@ -55,10 +55,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * <p>Collector-less: run through the {@code hosted-harness-gates} profile
  * ({@code mvn -Phosted-harness-gates -Dmysql.url=... -Dnode.executable=...}),
  * which includes the {@code Hosted*Gate} test classes and sets the probe
- * flag. The daemon admits the H3 domains only because the driver passes the
- * test-only {@code QWEN_MANAGED_SESSION_TEST_DOMAINS=child_run,monitor_run}
- * switch to it; no bundle patch is needed. Run with
- * -Dqwen.wedge.control=true for the no-fault control run.
+ * flag. The H3 domains are enabled upstream (#13856), so no bundle patch
+ * or test switch is needed. Run with -Dqwen.wedge.control=true for the
+ * no-fault control run.
  */
 class HostedRecoveryWedgeGate {
 

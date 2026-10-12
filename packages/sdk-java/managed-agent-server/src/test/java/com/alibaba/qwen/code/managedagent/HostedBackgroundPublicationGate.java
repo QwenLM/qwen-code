@@ -34,11 +34,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * instead of the removed 400.
  *
  * <p>Arms (production binaries in-process: MariaDB + embedded broker + real
- * hosted-harness daemon running the bundled CLI with the test-only switch
- * {@code QWEN_MANAGED_SESSION_TEST_DOMAINS=child_run,monitor_run}, honored
- * only by the two turn-admission checks; fake model; no cgroup v2 on this
- * host, so the ephemeral lane declines every shell-typed start
- * {@code not_started}):
+ * hosted-harness daemon running the bundled CLI with the H3 domains enabled
+ * upstream (#13856); fake model; no cgroup v2 on this host, so the
+ * ephemeral lane declines every shell-typed start {@code not_started}):
  *
  * <ul>
  * <li>background-reserve: admitted background start reserves and the grant
@@ -58,8 +56,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * <li>refusal-edges-live: per-family raw negatives replayed against the
  * captured OPEN grant with only its digests forged — shape-level negatives
  * can't be emitted by the turn and the digest-bound protocol admits no
- * spoofing; each replay answers 400 whose refusal reason names the digest,
- * mirrored by the unit fixture corpus for the field-shape refusals.
+ * spoofing; each replay answers 400 whose refusal names the broker
+ * execution identity conflict, since forged digests are stopped at that
+ * check before payload validation; the unit fixture corpus pins the
+ * field-shape refusals.
  * <li>foreground (v3 lane): reserve OPEN + close NOT_STARTED +
  * recovery-blocked — off-Linux the ephemeral lane declines all shell-typed
  * executions alike; byte-level foreground regression is held by
