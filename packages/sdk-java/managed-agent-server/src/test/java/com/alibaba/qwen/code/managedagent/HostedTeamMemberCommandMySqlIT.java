@@ -293,19 +293,16 @@ class HostedTeamMemberCommandMySqlIT {
                                     + " 'LEASED', 'BLOCKED')", tenant))
                             .isEmpty();
                     // close_debt means the member's result was delivered
-                    // and only her workspace close is owed — reachable
-                    // only where the workspace close cannot run (the
-                    // macOS durable-local-process opt-out); nowhere else
-                    // may it appear, so Linux asserts the strict set.
-                    String accepted = System.getProperty("os.name")
-                            .startsWith("Mac")
-                            ? "('done','orphaned','unknown','close_debt')"
-                            : "('done','orphaned','unknown')";
+                    // and only her Workspace close is owed — the only
+                    // terminal shape that path can take anywhere this
+                    // fixture's runtime broker keeps workspace execution
+                    // off, macOS and CI alike.
                     assertThat(jdbc.queryForList(
                             "SELECT child_run_id, state FROM"
                                     + " qwen_managed_child_result_relay WHERE"
-                                    + " tenant_id = ? AND state NOT IN "
-                                    + accepted, tenant)).isEmpty();
+                                    + " tenant_id = ? AND state NOT IN"
+                                    + " ('done','orphaned','unknown',"
+                                    + " 'close_debt')", tenant)).isEmpty();
                     assertThat(jdbc.queryForList(
                             "SELECT session_id, status FROM managed_agent_turn"
                                     + " WHERE tenant_id = ? AND status NOT IN"
