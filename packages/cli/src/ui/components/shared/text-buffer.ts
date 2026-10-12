@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { appEvents, AppEvent } from '../../../utils/events.js';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -2596,6 +2597,7 @@ export function useTextBuffer({
           encoding: 'utf8',
           mode: 0o600,
         });
+        appEvents.emit(AppEvent.TerminalReleased);
         setRawMode?.(false);
 
         debugLogger.warn(
@@ -2632,6 +2634,7 @@ export function useTextBuffer({
             rawErr,
           );
         }
+        appEvents.emit(AppEvent.TerminalAcquired);
         try {
           // recursive+force handles leftover swap files (.swp) from vim/neovim.
           // On Windows, EPERM/EBUSY from locked files may still cause a partial

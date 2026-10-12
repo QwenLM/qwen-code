@@ -599,6 +599,7 @@ export const useLlmStream = (
     onSubmissionSettled?: () => void;
   } | null>,
 ) => {
+  const [turnCancellationRevision, setTurnCancellationRevision] = useState(0);
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeInteractionPromptIdRef = useRef<string | undefined>(undefined);
@@ -1375,6 +1376,7 @@ export const useLlmStream = (
     // would race with stream chunks that haven't re-rendered yet.
     const pendingItemAtCancel = pendingHistoryItemRef.current;
     turnCancelledRef.current = true;
+    setTurnCancellationRevision((revision) => revision + 1);
     submissionLeaseGenerationRef.current += 1;
     setSubmissionInFlight(false);
     const foregroundAbortController = abortControllerRef.current;
@@ -2239,6 +2241,7 @@ export const useLlmStream = (
         return;
       }
 
+      setTurnCancellationRevision((revision) => revision + 1);
       lastPromptErroredRef.current = false;
       // Persist any streamed reasoning (collapsed) above the cancelled answer.
       commitPendingThought(userMessageTimestamp);
@@ -5527,6 +5530,7 @@ export const useLlmStream = (
       );
 
       if (allToolsCancelled && pendingDuplicateResponses.length === 0) {
+        setTurnCancellationRevision((revision) => revision + 1);
         if (llmClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
@@ -6797,6 +6801,7 @@ export const useLlmStream = (
 
   return {
     streamingState,
+    turnCancellationRevision,
     submitQuery,
     initError,
     pendingHistoryItems,

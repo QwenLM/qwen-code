@@ -1,3 +1,4 @@
+import { appEvents, AppEvent } from '../../utils/events.js';
 import { useCallback } from 'react';
 import { useStdin } from 'ink';
 import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
@@ -63,6 +64,7 @@ export function useLaunchEditor() {
       // Temporarily disable raw mode for editor
       const wasRaw = stdin?.isRaw ?? false;
       try {
+        appEvents.emit(AppEvent.TerminalReleased);
         setRawMode?.(false);
 
         // On Windows, .cmd and .bat files need shell: true
@@ -81,6 +83,7 @@ export function useLaunchEditor() {
         }
       } finally {
         if (wasRaw) setRawMode?.(true);
+        appEvents.emit(AppEvent.TerminalAcquired);
       }
     },
     [settings.merged.general?.preferredEditor, setRawMode, stdin],

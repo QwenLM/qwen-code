@@ -58,6 +58,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
 import fs from 'node:fs';
 import pathMod from 'node:path';
+import { appEvents, AppEvent } from '../../../utils/events.js';
 import { useTextBuffer } from './text-buffer.js';
 
 const viewport = { height: 5, width: 40 };
@@ -73,6 +74,37 @@ describe('openInExternalEditor', () => {
     mockSpawnSync.mockReturnValue({ status: 0, error: null });
     mockGetExternalEditorCommand.mockReturnValue(null);
   });
+
+  it.each([0, 1])(
+    'releases the terminal before spawn and reacquires after status %s',
+    async (status) => {
+      const events: string[] = [];
+      const release = () => events.push('release');
+      const acquire = () => events.push('acquire');
+      appEvents.on(AppEvent.TerminalReleased, release);
+      appEvents.on(AppEvent.TerminalAcquired, acquire);
+      mockSpawnSync.mockImplementation(() => {
+        events.push('spawn');
+        return { status, error: null };
+      });
+      try {
+        const { result } = renderHook(() =>
+          useTextBuffer({
+            initialText: 'hello',
+            viewport,
+            isValidPath: () => false,
+          }),
+        );
+        await act(async () => {
+          await result.current.openInExternalEditor();
+        });
+        expect(events).toEqual(['release', 'spawn', 'acquire']);
+      } finally {
+        appEvents.removeListener(AppEvent.TerminalReleased, release);
+        appEvents.removeListener(AppEvent.TerminalAcquired, acquire);
+      }
+    },
+  );
 
   it('should create temp file in private mkdtemp directory', async () => {
     const { result } = renderHook(() =>

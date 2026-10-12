@@ -8520,6 +8520,47 @@ describe('useLlmStream', () => {
     );
   });
 
+  it('exposes provider cancellation to terminal status consumers', async () => {
+    const client = new MockedLlmClientClass(mockConfig);
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield { type: ServerLlmEventType.UserCancelled };
+      })(),
+    );
+    const { result } = renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+    await act(async () => {
+      await result.current.submitQuery(
+        'cancelled turn',
+        SendMessageType.UserQuery,
+        'cancelled-status',
+      );
+    });
+    expect(result.current.turnCancellationRevision).toBe(1);
+    expect(result.current.streamingState).toBe(StreamingState.Idle);
+  });
+
   it('should handle all tool calls being cancelled', async () => {
     const cancelledToolCalls: TrackedToolCall[] = [
       {
@@ -8612,6 +8653,7 @@ describe('useLlmStream', () => {
     });
 
     await waitFor(() => {
+      expect(result.current.turnCancellationRevision).toBe(1);
       expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['1']);
       expect(client.addHistory).toHaveBeenCalledWith({
         role: 'user',

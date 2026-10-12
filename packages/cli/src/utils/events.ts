@@ -13,6 +13,8 @@ export type StartupIdeConnectionStatus =
   | { state: 'failed'; message: string };
 
 export enum AppEvent {
+  TerminalReleased = 'terminal-released',
+  TerminalAcquired = 'terminal-acquired',
   OpenDebugConsole = 'open-debug-console',
   LogError = 'log-error',
   OauthDisplayMessage = 'oauth-display-message',
