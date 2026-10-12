@@ -218,6 +218,10 @@ class SessionLifecycleCoordinatorTest {
         final List<Map<String, Object>> operations = new CopyOnWriteArrayList<>();
         final List<String> closed = new CopyOnWriteArrayList<>();
         final AtomicBoolean flap;
+        /** What a committed child operation does to the parent's records. */
+        volatile java.util.function.Consumer<Map<String, Object>> applied =
+                ignored -> {
+                };
         private final boolean available;
 
         CascadingHarness(boolean available, boolean flap) {
@@ -270,6 +274,7 @@ class SessionLifecycleCoordinatorTest {
             if (flap.getAndSet(false)) {
                 throw new RuntimeException("journal write flap");
             }
+            applied.accept(body);
         }
     }
 
@@ -460,6 +465,111 @@ class SessionLifecycleCoordinatorTest {
                 assertThat(harness.closed).contains(world.child, world.session);
             } finally {
                 coordinator.stopRenewals();
+            }
+        }
+    }
+
+    // #13753 I2: the cascade asks a worktree child's Workspace to discard
+    // and never waits for the discard to run: the row keeps its own
+    // retries. A row that already settled, or whose merge already runs,
+    // owes nothing; a request that falters re-arms the parent's close.
+    @Test
+    void theCascadeDiscardsAWorktreeChildsWorkspaceWithoutWaiting() {
+        for (String start : List.of("shared", "ready", "merging",
+                "faltering", "faltering-closed")) {
+            World world = closingWorld("worktree-" + start + "-");
+            liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
+            if ("faltering-closed".equals(start)) {
+                // Nothing else is owed: only the discard holds the close.
+                world.jdbc.update("UPDATE managed_agent_session SET status ="
+                        + " 'CLOSED' WHERE session_id = ?", world.child);
+            }
+            var workspaces = new com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore(
+                    world.jdbc, new DataSourceTransactionManager(
+                            world.jdbc.getDataSource()));
+            if (!"shared".equals(start)) {
+                workspaces.admit("tenant", world.session, "run-1", world.store
+                        .requireSession("tenant", world.session).workspace(), 1L);
+            }
+            world.jdbc.update("UPDATE qwen_managed_child_workspace SET state = ?,"
+                    + " finish_request = ? WHERE child_run_id = 'run-1'",
+                    start.startsWith("faltering") ? "ready" : start,
+                    "merging".equals(start) ? "merge" : null);
+            var faltered = new AtomicBoolean(start.startsWith("faltering"));
+            var cascadeWorkspaces = Mockito.spy(workspaces);
+            Mockito.doAnswer(call -> {
+                if (faltered.get()) {
+                    throw new IllegalStateException("store down");
+                }
+                return call.callRealMethod();
+            }).when(cascadeWorkspaces).requestFinish(Mockito.anyString(),
+                    Mockito.anyString(), Mockito.anyString(), Mockito.anyString(),
+                    Mockito.anyLong());
+            var harness = new CascadingHarness(true, false);
+            // A committed close_scope settles the run, as the parent's
+            // record funnel would: the re-armed close no longer finds it.
+            harness.applied = body -> {
+                if ("close_scope".equals(body.get("kind"))) {
+                    world.jdbc.update("UPDATE qwen_managed_session_extension_record"
+                            + " SET task_state = 'cancelled' WHERE record_id = ?",
+                            body.get("childRunId"));
+                }
+            };
+            try (var executor = Executors.newSingleThreadExecutor()) {
+                var coordinator = new SessionLifecycleCoordinator(world.store,
+                        new ManagedSessionStore(world.jdbc), harness,
+                        warmer(true, false), world.relayStore, new ObjectMapper(),
+                        admissions(world.store, warmer(true, false)),
+                        brokerProvider(null), executor,
+                        Clock.systemUTC(), world.properties, cascadeWorkspaces);
+                try {
+                    if (faltered.get()) {
+                        // While the request falters the close stays owed,
+                        // even once everything else has settled.
+                        await().atMost(Duration.ofSeconds(5)).until(() -> {
+                            coordinator.dispatch("tenant", world.session,
+                                    world.operation);
+                            return "CLOSED".equals(world.store.requireSession(
+                                    "tenant", world.child).status());
+                        });
+                        await().during(Duration.ofSeconds(1))
+                                .atMost(Duration.ofSeconds(4)).until(() -> {
+                                    coordinator.dispatch("tenant", world.session,
+                                            world.operation);
+                                    return !"COMPLETED".equals(world.store
+                                            .findOperation("tenant", world.session,
+                                                    world.operation)
+                                            .orElseThrow().state());
+                                });
+                        assertThat(harness.closed).doesNotContain(world.session);
+                        faltered.set(false);
+                    }
+                    redispatchUntil(coordinator, world, "COMPLETED");
+                    if ("shared".equals(start)) {
+                        // A run without a row is only looked up.
+                        Mockito.verify(cascadeWorkspaces, Mockito.never())
+                                .requestFinish(Mockito.anyString(),
+                                        Mockito.anyString(), Mockito.anyString(),
+                                        Mockito.anyString(), Mockito.anyLong());
+                        assertThat(harness.closed).contains(world.session);
+                        continue;
+                    }
+                    var row = workspaces.find("tenant", world.session, "run-1");
+                    assertThat(row.finishRequest()).as(start).isEqualTo(
+                            "merging".equals(start) ? "merge" : "discard");
+                    // Nothing ran here: the child Workspace scan owns it.
+                    assertThat(row.state()).as(start).isEqualTo(
+                            "merging".equals(start) ? "merging" : "ready");
+                    assertThat(harness.closed).as(start).contains(world.session);
+                    if (start.startsWith("faltering")) {
+                        Mockito.verify(cascadeWorkspaces, Mockito.atLeast(2))
+                                .requestFinish(Mockito.anyString(),
+                                        Mockito.anyString(), Mockito.anyString(),
+                                        Mockito.anyString(), Mockito.anyLong());
+                    }
+                } finally {
+                    coordinator.stopRenewals();
+                }
             }
         }
     }

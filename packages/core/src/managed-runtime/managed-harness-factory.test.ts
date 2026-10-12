@@ -117,7 +117,24 @@ async function settleTurnComplete(
 ): Promise<void> {
   const resultRef = await session.resources.publish(
     'managed-turn-result',
-    Buffer.from('{"state":"completed"}', 'utf8'),
+    Buffer.from(
+      JSON.stringify({
+        uuid: `rec-${turnId}`,
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-09-01T00:00:00.000Z',
+        type: 'system',
+        subtype: 'turn_result',
+        cwd: '/workspace',
+        version: 'test',
+        systemPayload: {
+          promptId: turnId,
+          state: 'completed',
+          stopReason: 'end_turn',
+        },
+      }),
+      'utf8',
+    ),
   );
   await session.authority.commitTurnComplete(
     command('settleTurn', `settle-${turnId}`),

@@ -22,6 +22,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import jakarta.annotation.PreDestroy;
@@ -36,6 +37,7 @@ import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.APPLY
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.BLOCKED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.CONFLICTED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARD;
+import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARD_PINNED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARDED;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARDING;
 import static com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.FAILED;
@@ -66,6 +68,8 @@ public class ChildWorkspaceService {
     static final int MAX_ATTEMPTS = 16;
     /** The storage is held by a tool turn: look again soon, at no cost. */
     static final long BUSY_DELAY_MS = 1_000;
+    /** A finish waits for the bound child Session to close: look again, at no cost. */
+    static final long CHILD_CLOSE_DELAY_MS = 5_000;
     private static final long MAX_BACKOFF_MS = 60_000;
     private static final int MAX_STEPS = 8;
     /** How long past its claim a resumable step's hold waits on a host that runs no steps. */
@@ -130,6 +134,25 @@ public class ChildWorkspaceService {
     }
 
     /**
+     * Admits the preparation of one child run's Workspace without running
+     * any of it: the scan drives the Git steps (#13753 I2), so a caller on
+     * a shared worker thread never waits on Git. Answers the row as it
+     * stands.
+     */
+    public Row request(String tenantId, String parentSessionId, String childRunId) {
+        if (warmer.childWorkspaces() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "child_workspace_unsupported",
+                    "This host cannot create a child Workspace.");
+        }
+        SessionRecord parent = sessions.requireSession(tenantId, parentSessionId);
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
+            throw new ApiException(HttpStatus.CONFLICT, "child_parent_unavailable",
+                    "The parent Session cannot admit a child.");
+        }
+        return store.admit(tenantId, parentSessionId, childRunId, parent.workspace(), clock.get());
+    }
+
+    /**
      * Asks a child Workspace to finish by {@code merge} or {@code discard}
      * (decision 8) and drives the steps it can. The answer is the row as
      * those steps left it; a finish the host cannot run yet stays owed.
@@ -138,8 +161,18 @@ public class ChildWorkspaceService {
         return drive(store.requestFinish(tenantId, parentSessionId, childRunId, finish, clock.get()));
     }
 
+    /** Records a finish request without running it; the scan runs it (#13753 I2). */
+    public Row requestFinish(String tenantId, String parentSessionId, String childRunId, String finish) {
+        return store.requestFinish(tenantId, parentSessionId, childRunId, finish, clock.get());
+    }
+
     public Row find(String tenantId, String parentSessionId, String childRunId) {
         return store.find(tenantId, parentSessionId, childRunId);
+    }
+
+    /** Whether this host runs the steps; elsewhere a row waits for a host that does. */
+    public boolean capable() {
+        return warmer.childWorkspaces() != null;
     }
 
     @Scheduled(scheduler = "childWorkspaceScheduler", fixedDelayString =
@@ -179,9 +212,17 @@ public class ChildWorkspaceService {
         return switch (row.state()) {
             case PREPARING, MERGING, APPLYING, APPLIED, DISCARDING -> true;
             case READY -> row.finishRequest() != null;
-            case CONFLICTED, BLOCKED, FAILED -> DISCARD.equals(row.finishRequest());
+            case CONFLICTED, BLOCKED, FAILED -> isDiscard(row.finishRequest());
             default -> false;
         };
+    }
+
+    /** Whether a recorded finish is a discard — asked plainly, or recorded as
+     * the pin-keeping form of a discard that replaced an unstarted merge. The
+     * predicate only classifies: a compare-and-set matches the request's own
+     * text, so the value is never rewritten. */
+    private static boolean isDiscard(String finish) {
+        return DISCARD.equals(finish) || DISCARD_PINNED.equals(finish);
     }
 
     Row drive(Row row) {
@@ -228,14 +269,13 @@ public class ChildWorkspaceService {
     private void step(ChildWorkspaceProvider provider, Row claimed) {
         switch (claimed.state()) {
             case PREPARING -> {
-                if (DISCARD.equals(claimed.finishRequest())) {
+                if (isDiscard(claimed.finishRequest())) {
                     advance(claimed, DISCARDING, columns());
                 } else {
                     prepareStep(provider, claimed);
                 }
             }
-            case READY -> advance(claimed, MERGE.equals(claimed.finishRequest()) ? MERGING : DISCARDING,
-                    columns());
+            case READY -> startFinish(claimed);
             case MERGING -> mergeStep(provider, claimed);
             case APPLYING -> applyStep(provider, claimed);
             case APPLIED -> appliedStep(provider, claimed);
@@ -243,6 +283,24 @@ public class ChildWorkspaceService {
             case CONFLICTED, BLOCKED, FAILED -> advance(claimed, DISCARDING, columns());
             default -> throw new IllegalStateException("A " + claimed.state() + " child Workspace owes no step");
         }
+    }
+
+    /**
+     * Leaves ready for the requested finish, once no child Session bound
+     * to the run is still open: a finish never removes a directory under a
+     * running Session (#13753 I2). Until then the row looks again later,
+     * at no cost.
+     */
+    private void startFinish(Row claimed) {
+        if (!store.childSessionsClosed(claimed)) {
+            store.retry(claimed, owner, false, clock.get() + CHILD_CLOSE_DELAY_MS,
+                    "The child Session bound to this Workspace is not closed.", clock.get());
+            return;
+        }
+        // A discard that replaced the merge since the claim, or a claim
+        // that moved on, fails the compare-and-set: the row is read again.
+        String finish = claimed.finishRequest();
+        store.startFinish(claimed, owner, MERGE.equals(finish) ? MERGING : DISCARDING, finish, clock.get());
     }
 
     private void prepareStep(ChildWorkspaceProvider provider, Row claimed) {
@@ -301,8 +359,7 @@ public class ChildWorkspaceService {
             ChildWorktreeGit.Repository repository = git.open(root, claimed.repositoryRelative());
             String result = claimed.resultCommit();
             if (result == null) {
-                result = git.result(root, repository, id, claimed.baseCommit());
-                git.pin(root, repository, id, "result", result);
+                result = pinResult(git, root, repository, claimed);
                 advance(claimed, MERGING, columns("result_commit", result));
             }
             ChildWorktreeGit.Merge merge = git.merge(root, repository, claimed.baseCommit(), result);
@@ -363,17 +420,66 @@ public class ChildWorkspaceService {
         advance(applied, MERGED, columns("outcome_code", "merged"));
     }
 
+    /**
+     * The child's result, taken and pinned under `result` — the layout the
+     * receipt's `resultRef` and the operator's
+     * refs/qwen/child-workspaces/&lt;id&gt;/result both name. The caller
+     * keeps the repository it opened: a merge goes on to use it.
+     */
+    private static String pinResult(ChildWorktreeGit git, Path root,
+            ChildWorktreeGit.Repository repository, Row claimed) {
+        String result = git.result(root, repository, claimed.childWorkspaceId(),
+                claimed.baseCommit());
+        git.pin(root, repository, claimed.childWorkspaceId(), "result", result);
+        return result;
+    }
+
     private void discardStep(ChildWorkspaceProvider provider, Row claimed) {
         // A merge that landed and then ended blocked keeps no result pin:
         // its work is in the parent's tree.
         boolean merged = "merged".equals(claimed.outcomeCode());
+        AtomicReference<String> pinFailure = new AtomicReference<>();
         held(provider, claimed, root -> {
-            provider.git().discard(root, claimed.repositoryRelative(), claimed.childWorkspaceId(),
-                    claimed.resultCommit() != null && !merged);
+            ChildWorktreeGit git = provider.git();
+            String result = claimed.resultCommit();
+            if (result == null && !merged && DISCARD_PINNED.equals(claimed.finishRequest())) {
+                // The discard replaced the merge of a child that completed:
+                // its result is pinned first, as a conflict's is, so the
+                // work is kept although it does not land. The pin never
+                // holds the discard back: a result that cannot be taken (a
+                // worktree or repository that is gone, broken or unsafe, or
+                // a failure that outlasts the retries) leaves an ordinary
+                // discard, which is what the discard was before the pin.
+                try {
+                    ChildWorktreeGit.Repository repository = git.open(root, claimed.repositoryRelative());
+                    result = pinResult(git, root, repository, claimed);
+                } catch (ChildWorkspaceException error) {
+                    if (error.retryable() && claimed.attempts() + 1 < MAX_ATTEMPTS) {
+                        throw error;
+                    }
+                    LOG.warn("child workspace discard goes on without the result pin"
+                                    + " tenant={} parent={} run={} code={} failure={}",
+                            claimed.tenantId(), claimed.parentSessionId(),
+                            claimed.childRunId(), error.code(), error.getMessage(), error);
+                    pinFailure.set(error.getMessage());
+                    result = null;
+                }
+                if (result != null) {
+                    advance(claimed, DISCARDING, columns("result_commit", result));
+                }
+            }
+            git.discard(root, claimed.repositoryRelative(), claimed.childWorkspaceId(),
+                    result != null && !merged);
             return null;
         });
-        advance(claimed, DISCARDED, columns("outcome_code",
-                claimed.outcomeCode() == null ? "discarded" : claimed.outcomeCode()));
+        java.util.Map<String, Object> discarded = columns("outcome_code",
+                claimed.outcomeCode() == null ? "discarded" : claimed.outcomeCode());
+        if (pinFailure.get() != null) {
+            // The row itself records that a pin was owed and could not be
+            // written: on a non-retryable failure nothing else names the loss.
+            discarded.put("last_error", truncate(pinFailure.get()));
+        }
+        advance(claimed, DISCARDED, discarded);
     }
 
     private Row find(Row row) {
@@ -465,12 +571,15 @@ public class ChildWorkspaceService {
      * Ends the row. A discard that cannot finish clears the discard
      * request with it: {@code blocked} must not lead straight back into
      * the discard that just failed, so only a new request retries it. A
-     * merge that already landed keeps {@code merged} as its outcome, with
+     * merge that already landed keeps {@code merged} as its outcome, and
+     * one that already ended keeps its outcome too (#13753 I2: a result's
+     * receipt reports it, and a replayed commit must read the same), with
      * the cleanup's failure as the last error.
      */
     private void end(Row latest, String state, String code, String message) {
         boolean landed = APPLIED.equals(latest.state()) || "merged".equals(latest.outcomeCode());
-        java.util.Map<String, Object> columns = columns("outcome_code", landed ? "merged" : code,
+        String outcome = landed ? "merged" : latest.outcomeCode() != null ? latest.outcomeCode() : code;
+        java.util.Map<String, Object> columns = columns("outcome_code", outcome,
                 "last_error", truncate(message));
         if (DISCARDING.equals(latest.state())) {
             columns.put("finish_request", null);

@@ -76,6 +76,7 @@ public class SessionLifecycleCoordinator {
     private final ChildResultRelayStore childScopes;
     private final ObjectMapper objectMapper;
     private final ChildLifecycleAdmissions childCloses;
+    private final com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore childWorkspaces;
     private final ObjectProvider<RuntimeBrokerService> brokerProviders;
     private final ExecutorService executor;
     private final Clock clock;
@@ -107,6 +108,22 @@ public class SessionLifecycleCoordinator {
             ObjectProvider<RuntimeBrokerService> brokerProviders,
             ExecutorService executor,
             Clock clock, ManagedAgentProperties properties) {
+        this(store, sessionStore, harness, runtimeWarmer, childScopes,
+                objectMapper, childCloses, brokerProviders, executor, clock,
+                properties, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public SessionLifecycleCoordinator(AgentStateStore store,
+            ManagedSessionStore sessionStore, HarnessConnector harness,
+            RuntimeWarmer runtimeWarmer, ChildResultRelayStore childScopes,
+            ObjectMapper objectMapper,
+            ChildLifecycleAdmissions childCloses,
+            ObjectProvider<RuntimeBrokerService> brokerProviders,
+            ExecutorService executor,
+            Clock clock, ManagedAgentProperties properties,
+            com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore childWorkspaces) {
+        this.childWorkspaces = childWorkspaces;
         this.store = store;
         this.sessionStore = sessionStore;
         this.harness = harness;
@@ -380,6 +397,46 @@ public class SessionLifecycleCoordinator {
     }
 
     /**
+     * #13753 I2: a worktree child's Workspace is discarded with it. The
+     * request is durable and runs once the child Session is closed, so the
+     * parent's close never waits for the discard to run; a refusal meaning
+     * the row already settled (merged, discarded, a merge already running)
+     * owes nothing. False only when the request itself is owed.
+     */
+    private boolean discardChildWorkspace(String tenantId, String sessionId,
+            String childRunId) {
+        if (childWorkspaces == null) {
+            return true;
+        }
+        try {
+            if (childWorkspaces.find(tenantId, sessionId, childRunId) == null) {
+                return true;
+            }
+            childWorkspaces.requestFinish(tenantId, sessionId, childRunId,
+                    com.alibaba.qwen.code.managedagent.store.ChildWorkspaceStore.DISCARD,
+                    clock.millis());
+            return true;
+        } catch (com.alibaba.qwen.code.managedagent.api.ApiException refused) {
+            if (java.util.Set.of("child_workspace_conflict",
+                    "child_workspace_finishing", "child_workspace_not_found")
+                    .contains(refused.getCode())) {
+                return true;
+            }
+            LOG.warn("Managed Session close cascade's child Workspace"
+                            + " discard faltered tenant={} session={}"
+                            + " childRun={} — debt owed; failure={}",
+                    tenantId, sessionId, childRunId, refused.getMessage());
+            return false;
+        } catch (RuntimeException error) {
+            LOG.warn("Managed Session close cascade's child Workspace"
+                            + " discard faltered tenant={} session={}"
+                            + " childRun={} — debt owed; failure={}",
+                    tenantId, sessionId, childRunId, error.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * H4b close cascade (reference design §12): after the admission
      * barriers seal new work and before the Harness closes, every
      * non-terminal child run of the closing Session takes its durable stop
@@ -515,6 +572,11 @@ public class SessionLifecycleCoordinator {
                                 + " debt owed; failure={}", tenantId,
                         sessionId, scope.childRunId(), error.getMessage());
             }
+            boolean discardOwed = !discardChildWorkspace(tenantId, sessionId,
+                    scope.childRunId());
+            if (discardOwed) {
+                journalDebt = true;
+            }
             if (childSessionId != null) {
                 String status = childScopes.sessionStatus(tenantId,
                         childSessionId);
@@ -571,6 +633,11 @@ public class SessionLifecycleCoordinator {
                     journalDebt = true;
                     continue;
                 }
+            }
+            if (discardOwed) {
+                // The settled run would leave the live scopes the re-armed
+                // close walks, and its discard with them (#13753 I2).
+                continue;
             }
             Map<String, Object> closeScope = new LinkedHashMap<>();
             closeScope.put("operationId", UUID.randomUUID().toString());
