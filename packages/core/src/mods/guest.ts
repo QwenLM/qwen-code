@@ -14,7 +14,7 @@ export const MOD_GUEST_FACTORY = String.raw`
   const hasOwn = Object.hasOwn;
   const hooks = [];
   const runs = new Map();
-  const events = ['session.start', 'session.end', 'command.run', 'command.register', 'ui.log'];
+  const events = ['session.start', 'session.end', 'command.run', 'command.register', 'ui.log', 'tool.call', 'tool.check'];
   let registering = false;
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const frozen = value => {
