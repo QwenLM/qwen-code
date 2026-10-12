@@ -215,7 +215,7 @@ public final class WorkspaceCsiPhysicalStore {
                 && source.configuration().scope().podName().equals(placement.get("podName"))
                 && placement.get("image").toString().endsWith("@sha256:" + source.configuration().imageDigest()));
         var value = new LinkedHashMap<String, Object>();
-        value.put("format", "qwen-csi-physical-plan/2");
+        value.put("format", "qwen-csi-physical-plan/3");
         value.put("retirementId", authority.retirementId());
         value.put("bindingId", binding.getBindingId());
         value.put("physicalKey", intent.physicalKey());
@@ -225,6 +225,7 @@ public final class WorkspaceCsiPhysicalStore {
         value.put("bootSha256", WorkspaceCsiRuntimeIdentity.digest(WorkspaceCsiRuntimeIdentity.boot(binding)));
         value.put("drainedInventorySha256", hash(drained.inventory().bytes()));
         value.put("ownershipReleaseInventorySha256", hash(WorkspaceCsiPhysicalReleaseImage.expected(drained.inventory()).bytes()));
+        value.put("historicalReleaseInventorySha256", hash(WorkspaceCsiPhysicalHistoryImage.expected(drained.inventory()).bytes()));
         value.put("identitySha256", hash(WorkspaceCsiApplicationImage.sole(drained.inventory(), "managed_workspace_csi_retirement").cell("identity_json").bytes()));
         value.put("baselineSha256", hash(WorkspaceCsiApplicationImage.baseline(authority.frozenBytes()).bytes()));
         value.put("frozenRequestSha256", hash(authority.frozenBytes()));

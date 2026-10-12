@@ -405,7 +405,7 @@ class WorkspaceCsiNodeSourceStoreTest {
 
     private void prepareProtocolFixture() throws Exception {
         byte[] raw;
-        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v2.fixture.json")) {
+        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v3.fixture.json")) {
             raw = Base64.getDecoder().decode(json.readTree(input).path("bytesBase64").textValue());
         }
         var input = ByteBuffer.wrap(raw);
@@ -743,15 +743,28 @@ class WorkspaceCsiNodeSourceStoreTest {
         changed.put("ownershipReleaseInventorySha256", "b".repeat(64));
         assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(saved.version(), saved.bytes(), saved.sha256(), changed, original))
                 .isInstanceOf(IllegalArgumentException.class);
+        var changedHistory = ((ObjectNode) expected).deepCopy();
+        changedHistory.put("historicalReleaseInventorySha256", "c".repeat(64));
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(saved.version(), saved.bytes(), saved.sha256(), changedHistory, original))
+                .isInstanceOf(IllegalArgumentException.class);
         var oldPlan = ((ObjectNode) expected).deepCopy();
         oldPlan.put("format", "qwen-csi-physical-plan/1");
         oldPlan.remove("ownershipReleaseInventorySha256");
+        oldPlan.remove("historicalReleaseInventorySha256");
         var old = WorkspaceCsiPhysicalProgress.planned(WorkspaceCsiApplicationJson.encode(oldPlan));
         byte[] retained = old.bytes();
         assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(old.version(), old.bytes(), old.sha256(), expected, original))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThat(old.bytes()).isEqualTo(retained);
         assertThat(old.version()).isEqualTo(1);
+        var previousPlan = ((ObjectNode) expected).deepCopy();
+        previousPlan.put("format", "qwen-csi-physical-plan/2");
+        previousPlan.remove("historicalReleaseInventorySha256");
+        var previous = WorkspaceCsiPhysicalProgress.planned(WorkspaceCsiApplicationJson.encode(previousPlan));
+        var previousBytes = previous.bytes();
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalProgress.restore(previous.version(), previous.bytes(), previous.sha256(), expected, original))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(previous.bytes()).isEqualTo(previousBytes);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_csi_physical", Integer.class)).isZero();
     }
 
@@ -801,7 +814,8 @@ class WorkspaceCsiNodeSourceStoreTest {
     }
 
     private byte[] physicalPlan() {
-        return WorkspaceCsiApplicationJson.encode(Map.of("format", "qwen-csi-physical-plan/2", "ownershipReleaseInventorySha256", "a".repeat(64),
+        return WorkspaceCsiApplicationJson.encode(Map.of("format", "qwen-csi-physical-plan/3", "ownershipReleaseInventorySha256", "a".repeat(64),
+                "historicalReleaseInventorySha256", "d".repeat(64),
                 "retirementId", "d672a3e1-c0bf-4aca-9c28-16e9bed5ef08", "bindingId", binding.getBindingId(),
                 "physicalKey", registration.physicalKey(), "namespace", registration.namespace(),
                 "podName", configuration.scope().podName(), "podUid", podUid));

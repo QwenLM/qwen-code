@@ -18,7 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const journalVersion = "qwen-k2-node-source/2"
+const journalVersion = "qwen-k2-node-source/3"
 const maxRecordBytes = 64 << 10
 const maxJournalBytes = 64 << 20
 const maxJournalRecords = 65536
@@ -62,6 +62,9 @@ type custodyObservation struct {
 	StartTicks   uint64 `json:"startTicks"`
 	CgroupDevice uint64 `json:"cgroupDevice"`
 	CgroupInode  uint64 `json:"cgroupInode"`
+	Coverage     string `json:"coverage"`
+	ParentDevice uint64 `json:"parentDevice"`
+	ParentInode  uint64 `json:"parentInode"`
 	Populated    bool   `json:"populated"`
 	Terminal     bool   `json:"terminal"`
 }
@@ -202,7 +205,9 @@ func validateBody(b journalBody) error {
 	}
 	if wantCustody {
 		c := b.Custody
-		if !bounded(s.ContainerID) || c.PID == 0 || c.StartTicks == 0 || c.CgroupInode == 0 || (b.Kind == "ORIGINAL_STOPPED" && (c.Populated || !c.Terminal)) {
+		if !bounded(s.ContainerID) || c.PID == 0 || c.StartTicks == 0 || c.CgroupInode == 0 || c.Coverage != parentCoverage ||
+			c.ParentDevice != c.CgroupDevice || c.ParentInode == 0 || c.ParentInode == c.CgroupInode ||
+			(b.Kind == "ORIGINAL_STOPPED" && (c.Populated || !c.Terminal)) {
 			return errors.New("invalid original custody observation")
 		}
 		r := b.Runtime

@@ -84,7 +84,9 @@ type kernelCustody struct {
 	procID    kernelObject
 	security  *processSecurity
 	directory int
+	parent    int
 	events    int
+	eventsID  kernelObject
 	initial   custodyObservation
 	path      string
 	closed    bool
@@ -180,7 +182,7 @@ func openOriginalCustody(original runtimeObservation) (_ *kernelCustody, err err
 	if original.PID == 0 || original.State != "created" && original.State != "running" {
 		return nil, errors.New("original process must be observed before termination")
 	}
-	c := &kernelCustody{pidfd: -1, process: -1, directory: -1, events: -1}
+	c := &kernelCustody{pidfd: -1, process: -1, directory: -1, parent: -1, events: -1}
 	defer func() {
 		if err != nil {
 			c.close()
@@ -207,6 +209,10 @@ func openOriginalCustody(original runtimeObservation) (_ *kernelCustody, err err
 		return nil, err
 	}
 	c.path = path
+	parentPath, err := originalPodParent(path, original.PodUID, original.ContainerID)
+	if err != nil {
+		return nil, err
+	}
 	c.pidfd, err = unix.PidfdOpen(int(original.PID), 0)
 	if err != nil {
 		return nil, errors.New("original pidfd could not be retained")
@@ -225,15 +231,36 @@ func openOriginalCustody(original runtimeObservation) (_ *kernelCustody, err err
 	if err != nil {
 		return nil, errors.New("original cgroup directory could not be retained")
 	}
-	c.events, err = unix.Openat(c.directory, "cgroup.events", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	c.parent, err = unix.Openat2(root, parentPath, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
+	if err != nil {
+		return nil, errors.New("original Pod parent directory could not be retained")
+	}
+	c.events, err = unix.Openat(c.parent, "cgroup.events", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, errors.New("original cgroup events could not be retained")
+	}
+	c.eventsID, err = policyObject(c.events)
+	if err != nil || policyKind(c.events, unix.CGROUP2_SUPER_MAGIC, unix.S_IFREG) != nil {
+		return nil, errors.New("original parent events is not a retained kernel object")
 	}
 	var stat unix.Stat_t
 	if err = unix.Fstat(c.directory, &stat); err != nil {
 		return nil, errors.New("original cgroup identity unavailable")
 	}
 	c.initial = custodyObservation{PID: original.PID, StartTicks: ticks, CgroupDevice: uint64(stat.Dev), CgroupInode: stat.Ino}
+	if err = unix.Fstat(c.parent, &stat); err != nil || uint64(stat.Dev) != c.initial.CgroupDevice || stat.Ino == 0 || stat.Ino == c.initial.CgroupInode {
+		return nil, errors.New("original Pod parent must be a distinct same-filesystem object")
+	}
+	c.initial.Coverage, c.initial.ParentDevice, c.initial.ParentInode = parentCoverage, uint64(stat.Dev), stat.Ino
+	actualParent, err := unix.Openat2(c.directory, "..", &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC, Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
+	if err != nil {
+		return nil, errors.New("original leaf parent is unavailable")
+	}
+	parentObject, parentErr := policyObject(actualParent)
+	closeErr := unix.Close(actualParent)
+	if parentErr != nil || closeErr != nil || parentObject != (kernelObject{Device: c.initial.ParentDevice, Inode: c.initial.ParentInode}) {
+		return nil, errors.New("retained parent does not own the original leaf")
+	}
 	afterTicks, afterPath, identityErr := c.processIdentity()
 	if identityErr != nil || afterTicks != ticks || afterPath != path {
 		err = errors.New("original process changed during custody binding")
@@ -263,6 +290,10 @@ func (c *kernelCustody) observe() (custodyObservation, error) {
 	if unix.Fstat(c.directory, &stat) != nil || uint64(stat.Dev) != c.initial.CgroupDevice || stat.Ino != c.initial.CgroupInode {
 		return fail()
 	}
+	if unix.Fstat(c.parent, &stat) != nil || uint64(stat.Dev) != c.initial.ParentDevice || stat.Ino != c.initial.ParentInode ||
+		policyKind(c.parent, unix.CGROUP2_SUPER_MAGIC, unix.S_IFDIR) != nil || stat.Nlink == 0 {
+		return fail()
+	}
 	object, err := policyObject(c.process)
 	if err != nil || object != c.procID || policyKind(c.process, unix.PROC_SUPER_MAGIC, unix.S_IFDIR) != nil {
 		return fail()
@@ -280,6 +311,10 @@ func (c *kernelCustody) observe() (custodyObservation, error) {
 		}
 	}
 	var raw [1025]byte
+	events, err := policyObject(c.events)
+	if err != nil || events != c.eventsID || policyKind(c.events, unix.CGROUP2_SUPER_MAGIC, unix.S_IFREG) != nil {
+		return fail()
+	}
 	n, err := unix.Pread(c.events, raw[:], 0)
 	if err != nil || n == 0 || n == len(raw) {
 		return fail()
@@ -305,7 +340,7 @@ func (c *kernelCustody) close() error {
 	}
 	c.closed = true
 	var err error
-	for _, fd := range []int{c.events, c.directory, c.process, c.pidfd} {
+	for _, fd := range []int{c.events, c.parent, c.directory, c.process, c.pidfd} {
 		if fd >= 0 {
 			err = errors.Join(err, unix.Close(fd))
 		}

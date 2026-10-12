@@ -589,6 +589,92 @@ class WorkspaceCsiApplicationInventoryTest {
         }
     }
 
+    @Test
+    void historicalImagePreservesOriginalReleasedRowsWithoutTheSharedHolder() throws Exception {
+        var fixture = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
+        var released = WorkspaceCsiPhysicalReleaseImage.expected(fixture);
+        var history = WorkspaceCsiPhysicalHistoryImage.expected(fixture);
+        assertThat(history.table("managed_workspace_execution_lease").rows()).isEmpty();
+        assertThat(WorkspaceCsiApplicationImage.sole(history, "qwen_runtime_binding").text("binding_state")).isEqualTo("RELEASED");
+        assertThat(WorkspaceCsiApplicationImage.sole(history, "qwen_runtime_binding_slot").cell("active_binding_id").isNull()).isTrue();
+        for (var table : released.tables()) {
+            if (table.name().equals("managed_workspace_execution_lease")) {
+                continue;
+            }
+            var original = table.rows().stream().filter(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL).toList();
+            var retained = history.table(table.name()).rows().stream()
+                    .filter(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.ORIGINAL).toList();
+            assertThat(retained).hasSameSizeAs(original);
+            for (int index = 0; index < original.size(); index++) {
+                assertThat(retained.get(index).bytes()).isEqualTo(original.get(index).bytes());
+            }
+        }
+        assertThat(history.table("managed_workspace_registry").rows()).hasSize(1);
+        assertThat(history.table("managed_workspace_registry").rows().getFirst().cell("display_name").isNull()).isTrue();
+        assertThat(history.table("managed_workspace_access").rows()).isEmpty();
+        assertThat(fixture.table("managed_workspace_execution_lease").rows()).hasSize(1);
+        assertThat(WorkspaceCsiApplicationImage.sole(fixture, "qwen_runtime_binding").text("binding_state")).isEqualTo("DRAINING");
+    }
+
+    @Test
+    void historicalImagePinsOriginalBytesAndRequiredContextButExcludesDisplayAndHolderCells() throws Exception {
+        var fixture = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
+        var expected = WorkspaceCsiPhysicalHistoryImage.expected(fixture).bytes();
+        var changed = ownershipCellFixture(fixture, "managed_workspace_execution_lease", "mount_host_id", "later-host");
+        assertThat(WorkspaceCsiPhysicalHistoryImage.expected(changed).bytes()).isEqualTo(expected);
+        var tables = new java.util.ArrayList<>(fixture.tables());
+        var registry = fixture.table("managed_workspace_registry");
+        int registryIndex = tables.indexOf(registry);
+        var row = registry.rows().getFirst();
+        var values = new java.util.LinkedHashMap<String, byte[]>();
+        row.fields().forEach((name, cell) -> values.put(name, cell.bytes()));
+        values.put("display_name", "later-name".getBytes(StandardCharsets.UTF_8));
+        var renamed = WorkspaceCsiApplicationInventory.expectedRow(registry.name(), values, row.membership());
+        values.put("workspace_id", "unrelated-workspace".getBytes(StandardCharsets.UTF_8));
+        var unrelated = WorkspaceCsiApplicationInventory.expectedRow(registry.name(), values, row.membership());
+        var rows = new java.util.ArrayList<>(List.of(renamed, unrelated));
+        rows.sort(WorkspaceCsiApplicationInventory::compareKeys);
+        tables.set(registryIndex, new WorkspaceCsiApplicationInventory.Table(registry.name(), registry.columns(), registry.primaryKey(), rows));
+        assertThat(WorkspaceCsiPhysicalHistoryImage.expected(WorkspaceCsiApplicationInventory.expectedImage(tables)).bytes()).isEqualTo(expected);
+        changed = ownershipCellFixture(fixture, "managed_agent_session", "title", "changed-original");
+        assertThat(WorkspaceCsiPhysicalHistoryImage.expected(changed).bytes()).isNotEqualTo(expected);
+        values.put("workspace_id", row.text("workspace_id").getBytes(StandardCharsets.UTF_8));
+        values.put("policy_ref", "changed-policy".getBytes(StandardCharsets.UTF_8));
+        tables.set(registryIndex,
+                new WorkspaceCsiApplicationInventory.Table(registry.name(), registry.columns(), registry.primaryKey(),
+                        List.of(WorkspaceCsiApplicationInventory.expectedRow(registry.name(), values, row.membership()))));
+        var invalid = WorkspaceCsiApplicationInventory.expectedImage(tables);
+        assertThatThrownBy(() -> WorkspaceCsiPhysicalHistoryImage.expected(invalid)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void historicalImageRefusesMissingRequiredContextOrForgedMembership() throws Exception {
+        var fixture = WorkspaceCsiApplicationInventory.expectedImage(inspect().tables());
+        for (String name : List.of("managed_workspace_registry", "qwen_runtime_placement_guard", "qwen_tool_publication_tenant")) {
+            var table = fixture.table(name);
+            var tables = new java.util.ArrayList<>(fixture.tables());
+            int tableIndex = tables.indexOf(table);
+            tables.set(tableIndex, new WorkspaceCsiApplicationInventory.Table(name, table.columns(), table.primaryKey(), List.of()));
+            var missing = WorkspaceCsiApplicationInventory.expectedImage(tables);
+            assertThatThrownBy(() -> WorkspaceCsiPhysicalHistoryImage.expected(missing)).isInstanceOf(IllegalArgumentException.class);
+            var row = table.rows().getFirst();
+            var values = new java.util.LinkedHashMap<String, byte[]>();
+            row.fields().forEach((field, cell) -> values.put(field, cell.bytes()));
+            tables.set(tableIndex,
+                    new WorkspaceCsiApplicationInventory.Table(name, table.columns(), table.primaryKey(),
+                            List.of(WorkspaceCsiApplicationInventory.expectedRow(name, values, WorkspaceCsiApplicationInventory.Membership.OTHER))));
+            var forged = WorkspaceCsiApplicationInventory.expectedImage(tables);
+            assertThatThrownBy(() -> WorkspaceCsiPhysicalHistoryImage.expected(forged)).isInstanceOf(IllegalArgumentException.class);
+            if (row.cell("tenant_key") != null) {
+                values.put("tenant_key", "e".repeat(64).getBytes(StandardCharsets.UTF_8));
+                tables.set(tableIndex, new WorkspaceCsiApplicationInventory.Table(name, table.columns(), table.primaryKey(),
+                        List.of(WorkspaceCsiApplicationInventory.expectedRow(name, values, row.membership()))));
+                var wrongKey = WorkspaceCsiApplicationInventory.expectedImage(tables);
+                assertThatThrownBy(() -> WorkspaceCsiPhysicalHistoryImage.expected(wrongKey)).isInstanceOf(IllegalArgumentException.class);
+            }
+        }
+    }
+
     private static WorkspaceCsiApplicationInventory.Snapshot ownershipCellFixture(
             WorkspaceCsiApplicationInventory.Snapshot fixture, String tableName, String field, String value) {
         var table = fixture.table(tableName);

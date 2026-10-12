@@ -9,12 +9,14 @@ import (
 	"sync"
 	"time"
 
+	containers "github.com/containerd/containerd/api/services/containers/v1"
 	tasks "github.com/containerd/containerd/api/services/tasks/v1"
 	tasktypes "github.com/containerd/containerd/api/types/task"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
@@ -41,16 +43,17 @@ type runtimeObservation struct {
 }
 
 type gatewayOriginal struct {
-	task        registeredTask
-	containerID string
-	sandboxID   string
-	pid         uint32
-	terminal    *runtimeObservation
-	blocked     bool
-	wait        <-chan gatewayWaitResult
-	waitCancel  context.CancelFunc
-	waitDone    <-chan struct{}
-	outcome     *runtimeObservation
+	task           registeredTask
+	containerID    string
+	sandboxID      string
+	pid            uint32
+	terminal       *runtimeObservation
+	blocked        bool
+	wait           <-chan gatewayWaitResult
+	waitCancel     context.CancelFunc
+	waitDone       <-chan struct{}
+	outcome        *runtimeObservation
+	metadataSHA256 string
 }
 
 type gatewayWaitResult struct {
@@ -61,6 +64,7 @@ type gatewayWaitResult struct {
 type runtimeReadGateway struct {
 	mu          sync.Mutex
 	tasks       tasks.TasksClient
+	containers  containers.ContainersClient
 	cri         cri.RuntimeServiceClient
 	originals   map[string]*gatewayOriginal
 	coordinator string
@@ -125,6 +129,9 @@ func (g *runtimeReadGateway) observe(parent context.Context, arm string) (runtim
 	defer cancel()
 	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("containerd-namespace", "k8s.io"))
 	result, err := g.readOriginal(ctx, original)
+	if err == nil && result.ContainerID != "" {
+		err = g.verifyMetadata(ctx, original, result)
+	}
 	if err != nil || ctx.Err() != nil || g.lifetime.Err() != nil || original.pid != 0 && result.PID != original.pid || original.terminal != nil && result != *original.terminal {
 		original.blocked = true
 		if original.waitCancel != nil {
@@ -143,6 +150,39 @@ func (g *runtimeReadGateway) observe(parent context.Context, arm string) (runtim
 		original.terminal = &result
 	}
 	return result, nil
+}
+
+func (g *runtimeReadGateway) verifyMetadata(ctx context.Context, original *gatewayOriginal, observed runtimeObservation) error {
+	if g.containers == nil {
+		return errors.New("original container metadata reader is unavailable")
+	}
+	reply, err := g.containers.Get(ctx, &containers.GetContainerRequest{ID: observed.ContainerID})
+	if grpcstatus.Code(err) == codes.NotFound && original.metadataSHA256 != "" && original.outcome != nil && observed == *original.outcome {
+		return nil
+	}
+	if err != nil || reply.GetContainer() == nil {
+		return errors.New("original container metadata is unavailable")
+	}
+	c := reply.Container
+	if c.ID != observed.ContainerID || c.Runtime == nil || c.Runtime.Name != "io.containerd.runc.v2" || c.Spec == nil ||
+		c.Spec.TypeUrl != "types.containerd.io/opencontainers/runtime-spec/1/Spec" || len(c.Spec.Value) == 0 ||
+		c.Image == "" || c.Snapshotter == "" || c.SnapshotKey == "" || c.CreatedAt == nil || c.CreatedAt.CheckValid() != nil ||
+		c.Labels["io.kubernetes.pod.uid"] != original.task.PodUID || c.Labels["io.kubernetes.pod.namespace"] != original.task.Namespace ||
+		c.Labels["io.kubernetes.pod.name"] != original.task.PodName || c.Labels["io.kubernetes.container.name"] != "runtime" ||
+		c.Labels["io.cri-containerd.kind"] != "container" || proto.Size(c) > 1<<20 {
+		return errors.New("original container metadata identity differs")
+	}
+	current := proto.Clone(c).(*containers.Container)
+	// UpdatedAt is mutable bookkeeping; every input and identity byte stays pinned.
+	current.UpdatedAt = nil
+	raw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(current)
+	if err != nil || len(raw) > 1<<20 || original.metadataSHA256 != "" && digest(raw) != original.metadataSHA256 {
+		return errors.New("original container metadata changed")
+	}
+	if original.metadataSHA256 == "" {
+		original.metadataSHA256 = digest(raw)
+	}
+	return nil
 }
 
 func (g *runtimeReadGateway) startWait(original *gatewayOriginal) error {

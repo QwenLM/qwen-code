@@ -208,7 +208,7 @@ public final class CsiNodeSourceJournal {
     private static void validate(JsonNode r) {
         String kind = text(r, "kind");
         var expected = new ArrayList<>(List.of("version", "incarnation", "sequence", "previous", "kind"));
-        require("qwen-k2-node-source/2".equals(text(r, "version"))
+        require("qwen-k2-node-source/3".equals(text(r, "version"))
                 && text(r, "incarnation").matches("[0-9a-f]{32}")
                 && text(r, "previous").matches("[0-9a-f]{64}") && text(r, "hash").matches("[0-9a-f]{64}"));
         if ("SOURCE_START".equals(kind)) {
@@ -357,12 +357,17 @@ public final class CsiNodeSourceJournal {
 
     private static void custody(JsonNode r) {
         JsonNode c = r.path("custody"), task = r.path("runtime"), scope = r.path("scope");
-        fields(c, List.of("pid", "startTicks", "cgroupDevice", "cgroupInode", "populated", "terminal"));
+        fields(c, List.of("pid", "startTicks", "cgroupDevice", "cgroupInode", "coverage", "parentDevice", "parentInode", "populated", "terminal"));
         require(integer(c, "pid", 0xffffffffL) > 0 && c.path("populated").isBoolean() && c.path("terminal").isBoolean());
         for (String f : List.of("startTicks", "cgroupInode")) {
             unsigned(c, f, true);
         }
         unsigned(c, "cgroupDevice", false);
+        unsigned(c, "parentDevice", false);
+        unsigned(c, "parentInode", true);
+        require("retained-pod-parent/1".equals(text(c, "coverage"))
+                && c.path("parentDevice").bigIntegerValue().equals(c.path("cgroupDevice").bigIntegerValue())
+                && !c.path("parentInode").bigIntegerValue().equals(c.path("cgroupInode").bigIntegerValue()));
         fields(task, List.of("version", "armId", "podUid", "containerId", "sandboxId", "imageDigest", "pid", "state",
                 "exitStatus", "exitedAtNano"));
         require("qwen-k2-runtime-read/1".equals(text(task, "version")) && !text(scope, "containerId").isEmpty());
@@ -452,7 +457,7 @@ public final class CsiNodeSourceJournal {
                     require(intent != null && stopped == null && text(intent, "intentHash").equals(text(r, "intentHash")));
                     dependency(r, "begin", opened, records);
                     dependency(r, "publish", publish, records);
-                    for (String f : List.of("pid", "startTicks", "cgroupDevice", "cgroupInode")) {
+                    for (String f : List.of("pid", "startTicks", "cgroupDevice", "cgroupInode", "coverage", "parentDevice", "parentInode")) {
                         require(opened.path("custody").path(f).asText().equals(r.path("custody").path(f).asText()));
                     }
                     for (String f : List.of("sandboxId", "imageDigest")) {

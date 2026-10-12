@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	containers "github.com/containerd/containerd/api/services/containers/v1"
 	tasks "github.com/containerd/containerd/api/services/tasks/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -158,7 +159,7 @@ func runGateway(ctx context.Context, path string) error {
 	if _, err = rand.Read(incarnation[:]); err != nil {
 		return errors.New("gateway incarnation unavailable")
 	}
-	gateway := &runtimeReadGateway{tasks: tasks.NewTasksClient(conn), cri: cri.NewRuntimeServiceClient(conn), lifetime: ctx, connection: conn, coordinator: cfg.CoordinatorPrincipal, source: cfg.SourcePrincipal, identity: &gatewayIdentity{Version: "qwen-k2-runtime-identity/1", Incarnation: hex.EncodeToString(incarnation[:]), BootID: boot, Peer: process.identity}}
+	gateway := &runtimeReadGateway{tasks: tasks.NewTasksClient(conn), containers: containers.NewContainersClient(conn), cri: cri.NewRuntimeServiceClient(conn), lifetime: ctx, connection: conn, coordinator: cfg.CoordinatorPrincipal, source: cfg.SourcePrincipal, identity: &gatewayIdentity{Version: "qwen-k2-runtime-identity/1", Incarnation: hex.EncodeToString(incarnation[:]), BootID: boot, Peer: process.identity}}
 	err = serveControl(ctx, cfg.listenerConfig, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		current, err := bootID()
 		if err != nil || current != boot || process.verify() != nil {

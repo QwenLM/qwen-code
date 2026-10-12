@@ -24,9 +24,9 @@ class CsiNodeSourceJournalTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Test
-    void consumesV2ProtocolFixtureWithoutChangingBodyOrder() throws Exception {
+    void consumesV3ProtocolFixtureWithoutChangingBodyOrder() throws Exception {
         Fixture fixture = fixture();
-        assertEquals("74aedf48e4f310732cb719ba539795b83ef6fbed57c74473ced291bf9b77cb4c",
+        assertEquals("ef8ff2ef7fe3456d08f45837c4258b92181674dc6a569fa79523e1fde2f84c6f",
                 CsiNativeActivationProof.sha256(fixture.bytes()));
         var stream = CsiNodeSourceJournal.read(fixture.bytes(), fixture.head());
         assertEquals(fixture.head(), stream.head());
@@ -79,6 +79,23 @@ class CsiNodeSourceJournalTest {
     @Test
     void rejectsHashValidStopWithDifferentRetainedCgroup() throws Exception {
         rejects(7, r -> ((ObjectNode) r.path("custody")).put("cgroupInode", 999));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"changed-parent", "leaf-as-parent", "different-filesystem", "leaf-coverage", "missing-parent", "unknown"})
+    void refusesHashValidInvalidParentCoverage(String fault) throws Exception {
+        rejects(7, r -> {
+            var custody = (ObjectNode) r.path("custody");
+            switch (fault) {
+                case "changed-parent" -> custody.put("parentInode", 999);
+                case "leaf-as-parent" -> custody.set("parentInode", custody.path("cgroupInode"));
+                case "different-filesystem" -> custody.put("parentDevice", 999);
+                case "leaf-coverage" -> custody.put("coverage", "retained-leaf/1");
+                case "missing-parent" -> custody.remove("parentInode");
+                case "unknown" -> custody.put("qualified", true);
+                default -> throw new AssertionError(fault);
+            }
+        });
     }
 
     @Test
@@ -227,12 +244,14 @@ class CsiNodeSourceJournalTest {
     }
 
     @Test
-    void historicalV1CannotGrantV2Evidence() throws Exception {
-        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v1.fixture.json")) {
-            var value = JSON.readTree(input);
-            byte[] bytes = Base64.getDecoder().decode(value.path("bytesBase64").textValue());
-            var head = new CsiNodeSourceJournal.Cursor(value.path("head").path("sequence").longValue(), value.path("head").path("hash").textValue());
-            assertThrows(IllegalArgumentException.class, () -> CsiNodeSourceJournal.read(bytes, head));
+    void historicalLeafFormatsCannotGrantParentCoverage() throws Exception {
+        for (String version : List.of("v1", "v2")) {
+            try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-" + version + ".fixture.json")) {
+                var value = JSON.readTree(input);
+                byte[] bytes = Base64.getDecoder().decode(value.path("bytesBase64").textValue());
+                var head = new CsiNodeSourceJournal.Cursor(value.path("head").path("sequence").longValue(), value.path("head").path("hash").textValue());
+                assertThrows(IllegalArgumentException.class, () -> CsiNodeSourceJournal.read(bytes, head));
+            }
         }
     }
 
@@ -285,7 +304,7 @@ class CsiNodeSourceJournalTest {
     }
 
     private static Fixture fixture() throws Exception {
-        try (var input = CsiNodeSourceJournalTest.class.getResourceAsStream("/contracts/k2-node-source-v2.fixture.json")) {
+        try (var input = CsiNodeSourceJournalTest.class.getResourceAsStream("/contracts/k2-node-source-v3.fixture.json")) {
             JsonNode value = JSON.readTree(input);
             return new Fixture(Base64.getDecoder().decode(value.path("bytesBase64").textValue()),
                     new CsiNodeSourceJournal.Cursor(value.path("head").path("sequence").longValue(),

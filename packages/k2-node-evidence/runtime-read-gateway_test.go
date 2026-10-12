@@ -7,12 +7,15 @@ import (
 	"testing"
 	"time"
 
+	containers "github.com/containerd/containerd/api/services/containers/v1"
 	tasks "github.com/containerd/containerd/api/services/tasks/v1"
 	tasktypes "github.com/containerd/containerd/api/types/task"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
@@ -33,6 +36,8 @@ type gatewayFixture struct {
 	listedUID                 string
 	nilListMetadata           bool
 	cancelRead                context.CancelFunc
+	metadata                  *containers.Container
+	metadataError             codes.Code
 }
 
 type gatewayTaskFixture struct {
@@ -43,9 +48,33 @@ type gatewayCriFixture struct {
 	cri.RuntimeServiceClient
 	fixture *gatewayFixture
 }
+type gatewayMetadataFixture struct {
+	containers.ContainersClient
+	fixture *gatewayFixture
+}
 
 var gatewayTask = registeredTask{ArmID: "owned-arm", Namespace: "owned-evidence", PodName: "worker", PodUID: "original-uid", ImageDigest: strings.Repeat("c", 64)}
 var gatewayCID, gatewaySID = strings.Repeat("a", 64), strings.Repeat("b", 64)
+
+func (w *gatewayMetadataFixture) Get(ctx context.Context, request *containers.GetContainerRequest, _ ...grpc.CallOption) (*containers.GetContainerResponse, error) {
+	f := w.fixture
+	f.request(ctx)
+	if request.ID != gatewayCID {
+		f.t.Error("unexpected original container metadata request")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.metadataError != codes.OK {
+		return nil, grpcstatus.Error(f.metadataError, "metadata read error")
+	}
+	if f.absent {
+		return nil, grpcstatus.Error(codes.NotFound, "original metadata removed")
+	}
+	if f.metadata == nil {
+		return &containers.GetContainerResponse{}, nil
+	}
+	return &containers.GetContainerResponse{Container: proto.Clone(f.metadata).(*containers.Container)}, nil
+}
 
 func (f *gatewayFixture) request(ctx context.Context) {
 	f.t.Helper()
@@ -169,7 +198,12 @@ func newGatewayFixture(t *testing.T) (*runtimeReadGateway, *gatewayFixture, cont
 	ctx, cancel := context.WithCancel(context.Background())
 	stamp := timestamppb.New(time.Unix(1710000000, 123456))
 	f := &gatewayFixture{t: t, state: tasktypes.Status_CREATED, criState: cri.ContainerState_CONTAINER_CREATED, pid: 12345, image: "sha256:" + gatewayTask.ImageDigest, stamp: stamp, finishedAt: stamp.AsTime().UnixNano(), exited: make(chan struct{}), started: make(chan struct{}), waitDone: make(chan struct{})}
-	g := &runtimeReadGateway{tasks: &gatewayTaskFixture{fixture: f}, cri: &gatewayCriFixture{fixture: f}, lifetime: ctx}
+	f.metadata = &containers.Container{ID: gatewayCID, Image: "opaque-original-image", Snapshotter: "overlayfs", SnapshotKey: gatewayCID,
+		Runtime: &containers.Container_Runtime{Name: "io.containerd.runc.v2", Options: &anypb.Any{TypeUrl: "synthetic-runtime-options", Value: []byte{1}}},
+		Spec:    &anypb.Any{TypeUrl: "types.containerd.io/opencontainers/runtime-spec/1/Spec", Value: []byte(`{"synthetic":"current-metadata-only"}`)}, CreatedAt: stamp,
+		Labels: map[string]string{"io.kubernetes.pod.uid": gatewayTask.PodUID, "io.kubernetes.pod.namespace": gatewayTask.Namespace,
+			"io.kubernetes.pod.name": gatewayTask.PodName, "io.kubernetes.container.name": "runtime", "io.cri-containerd.kind": "container"}}
+	g := &runtimeReadGateway{tasks: &gatewayTaskFixture{fixture: f}, containers: &gatewayMetadataFixture{fixture: f}, cri: &gatewayCriFixture{fixture: f}, lifetime: ctx}
 	t.Cleanup(func() {
 		cancel()
 		if err := g.close(); err != nil {
@@ -197,6 +231,100 @@ func gatewayRunning(t *testing.T, g *runtimeReadGateway, f *gatewayFixture) {
 	f.mu.Unlock()
 	if r, err := g.observe(context.Background(), gatewayTask.ArmID); err != nil || r.State != "running" {
 		t.Fatalf("running original task: %+v %v", r, err)
+	}
+}
+
+func TestGatewayRefusesInvalidContainerMetadataBeforeEstablishingWait(t *testing.T) {
+	faults := map[string]func(*runtimeReadGateway, *gatewayFixture){
+		"missing-reader":    func(g *runtimeReadGateway, _ *gatewayFixture) { g.containers = nil },
+		"missing-container": func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata = nil },
+		"not-found":         func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadataError = codes.NotFound },
+		"unavailable":       func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadataError = codes.Unavailable },
+		"foreign-id":        func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.ID = gatewaySID },
+		"foreign-uid":       func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.Labels["io.kubernetes.pod.uid"] = "other" },
+		"foreign-namespace": func(_ *runtimeReadGateway, f *gatewayFixture) {
+			f.metadata.Labels["io.kubernetes.pod.namespace"] = "other"
+		},
+		"foreign-name": func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.Labels["io.kubernetes.pod.name"] = "other" },
+		"extra-process": func(_ *runtimeReadGateway, f *gatewayFixture) {
+			f.metadata.Labels["io.kubernetes.container.name"] = "sidecar"
+		},
+		"sandbox": func(_ *runtimeReadGateway, f *gatewayFixture) {
+			f.metadata.Labels["io.cri-containerd.kind"] = "sandbox"
+		},
+		"missing-runtime":     func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.Runtime = nil },
+		"other-runtime":       func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.Runtime.Name = "other" },
+		"missing-spec":        func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.Spec = nil },
+		"other-spec-type":     func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.Spec.TypeUrl = "other" },
+		"empty-spec":          func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.Spec.Value = nil },
+		"missing-image":       func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.Image = "" },
+		"missing-snapshotter": func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.Snapshotter = "" },
+		"missing-snapshot":    func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.SnapshotKey = "" },
+		"missing-created-at":  func(_ *runtimeReadGateway, f *gatewayFixture) { f.metadata.CreatedAt = nil },
+		"invalid-created-at": func(_ *runtimeReadGateway, f *gatewayFixture) {
+			f.metadata.CreatedAt = &timestamppb.Timestamp{Seconds: -999999999999}
+		},
+		"oversized-spec": func(_ *runtimeReadGateway, f *gatewayFixture) {
+			f.metadata.Spec.Value = []byte(strings.Repeat("x", 1<<20))
+		},
+	}
+	for name, mutate := range faults {
+		t.Run(name, func(t *testing.T) {
+			g, f, _ := newGatewayFixture(t)
+			mutate(g, f)
+			if _, err := g.observe(context.Background(), gatewayTask.ArmID); err == nil {
+				t.Fatal("accepted invalid original metadata")
+			}
+			if f.waitCalls != 0 || g.originals[gatewayTask.ArmID].metadataSHA256 != "" {
+				t.Fatal("invalid metadata established an original wait or pin")
+			}
+		})
+	}
+}
+
+func TestGatewayPinsAllCurrentContainerInputsAndRefusesRepair(t *testing.T) {
+	for name, mutate := range map[string]func(*containers.Container){
+		"spec":            func(c *containers.Container) { c.Spec.Value = []byte(`{"changed":true}`) },
+		"runtime-options": func(c *containers.Container) { c.Runtime.Options.Value = []byte{2} },
+		"image":           func(c *containers.Container) { c.Image = "other-image" },
+		"snapshotter":     func(c *containers.Container) { c.Snapshotter = "other" },
+		"snapshot":        func(c *containers.Container) { c.SnapshotKey = "other" },
+		"created-at":      func(c *containers.Container) { c.CreatedAt.Seconds++ },
+		"extra-label":     func(c *containers.Container) { c.Labels["new-input"] = "other" },
+		"extension": func(c *containers.Container) {
+			c.Extensions = map[string]*anypb.Any{"new": {TypeUrl: "other", Value: []byte{1}}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g, f, _ := newGatewayFixture(t)
+			gatewayRunning(t, g, f)
+			original := proto.Clone(f.metadata).(*containers.Container)
+			pin := g.originals[gatewayTask.ArmID].metadataSHA256
+			f.mu.Lock()
+			mutate(f.metadata)
+			f.mu.Unlock()
+			if _, err := g.observe(context.Background(), gatewayTask.ArmID); err == nil {
+				t.Fatal("accepted changed original container inputs")
+			}
+			f.mu.Lock()
+			f.metadata = original
+			f.mu.Unlock()
+			if _, err := g.observe(context.Background(), gatewayTask.ArmID); err == nil || g.originals[gatewayTask.ArmID].metadataSHA256 != pin {
+				t.Fatal("repaired a blocked original or replaced its input pin")
+			}
+		})
+	}
+}
+
+func TestGatewayAllowsOnlyMetadataUpdateTimestampBookkeeping(t *testing.T) {
+	g, f, _ := newGatewayFixture(t)
+	gatewayRunning(t, g, f)
+	pin := g.originals[gatewayTask.ArmID].metadataSHA256
+	f.mu.Lock()
+	f.metadata.UpdatedAt = timestamppb.New(time.Unix(1710000001, 0))
+	f.mu.Unlock()
+	if value, err := g.observe(context.Background(), gatewayTask.ArmID); err != nil || value.State != "running" || g.originals[gatewayTask.ArmID].metadataSHA256 != pin {
+		t.Fatal("bookkeeping changed the complete original input pin")
 	}
 }
 

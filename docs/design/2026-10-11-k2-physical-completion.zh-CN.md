@@ -24,7 +24,9 @@ Record 上限 16 MiB，plan 64 KiB，每个 journal prefix 与 HTTP reply 1 MiB�
 
 Plan 从已验证的原 request、binding、registration/reservation、handle/boot、application baseline/freeze/cut/finalizer 和完整十九列 PUBLISHED source association 派生，固定 source identity/incarnation、node、ARM/BOUND/publication prefixes、Pod UID、原 image/container、target 和全部依赖 cursors。Revision 使用十进制字符串，exact serialized source configuration 用 Base64 保存，unsigned kernel start values 不经过 floating point 或 signed long 转换；原 strict configuration decoder 验证恢复后的 bytes。
 
-当前 nested plan 为 `qwen-csi-physical-plan/2`。其中 `ownershipReleaseInventorySha256` 固定下文三个 ownership row 变化之后的精确 application inventory 期望像。投影从私有验证的 DRAINED inventory 开始，检查原 binding/slot/holder 关联及 checked counters，保留其余所有行、字段、键与 membership；不执行 SQL 写入，也不授予物理权限。第四行 physical progress record 及最终回执需要 qualified evidence，不能预先计算其结果。本候选拒绝已保存的 version-one plan；应使用其原 binary 完成，不改写原 bytes、hash 或 stop-intent 依赖。
+当前 nested plan 为 `qwen-csi-physical-plan/3`。其中 `ownershipReleaseInventorySha256` 固定下文三个 ownership row 变化之后的精确 application inventory 期望像。投影从私有验证的 DRAINED inventory 开始，检查原 binding/slot/holder 关联及 checked counters，保留其余所有行、字段、键与 membership；不执行 SQL 写入，也不授予物理权限。第四行 physical progress record 及最终回执需要 qualified evidence，不能预先计算其结果。本候选拒绝已保存的 version-one 和 version-two plan；应使用其原 binary 完成，不改写原 bytes、hash 或 stop-intent 依赖。
+
+Plan 还固定 `historicalReleaseInventorySha256`，它从该 ownership 投影结果派生确定性的原历史读取集合期望像。除共享 physical holder 外，保留所有 ORIGINAL 行的完整内容，排除 OTHER 行与无关 context。原 tenant placement/retention 身份，以及原 workspace generation/storage/config/policy/state 仍被固定；workspace display name 不属于此读取集合。Context 列掩码固定在代码中，以 canonical 字节表示，调用者不能选择。投影保留 catalogue schema、typed key 与原行的每个 cell，包括空的原 request slot 和 released binding。这是历史 reader 的期望像前置项，不是 SQL reader、release receipt 或物理 capability。
 
 读取时除核对已保存 hash，还要求 saved plan bytes 等于已验证 expected plan 的精确编码。JSON 值相同但 whitespace、字段顺序或 escaping 改变，也必须拒绝，不能在重试时据此建立新 plan hash 或 stop-intent 依赖。
 
@@ -42,13 +44,13 @@ Kubernetes client 必须暴露准备好的 immutable request，保存实际有�
 
 ## Source evidence 与部署资格
 
-Physical verifier 要求 saved publication 的 exact raw-prefix extension、未变化的 source identity/incarnation、original scope，以及全部原 ARM/BOUND/custody/publication records。STOP_INTENT 必须绑定 plan；ORIGINAL_STOPPED 必须绑定持续持有的原 task、pidfd/cgroup identities、custody、publication、intent。UNPUBLISH_BEGIN/OK 必须显式依赖该 durable stop 和原 publication，并保持同一 pinned caller/backend chain。缺少 custody/publication 的晚到 intent、BLOCKED scope、gap、replacement process 或变更依赖均拒绝完成。
+Physical verifier 要求 saved publication 的 exact raw-prefix extension、未变化的 source identity/incarnation、original scope，以及全部原 ARM/BOUND/custody/publication records。当前 journal/3 reader 要求显式 retained Pod-parent coverage、不同的 parent inode，以及与原 leaf/PID/start tuple 一起保持同 filesystem 的原身份。合成 v3 fixture 和 cross build 不资格化 native parent lifetime 或首次执行。STOP_INTENT 必须绑定 plan；ORIGINAL_STOPPED 必须绑定持续持有的原 task、pidfd/cgroup identities、custody、publication、intent。UNPUBLISH_BEGIN/OK 必须显式依赖该 durable stop 和原 publication，并保持同一 pinned caller/backend chain。缺少 custody/publication 的晚到 intent、BLOCKED scope、gap、replacement process 或变更依赖均拒绝完成。
 
 Protocol decoding、认证 transport 与 ResourceGuard corroboration 不等于 deployment qualification。Qualification 必须消费实际经过审阅的 executable/configuration/namespace/LSM facts、出生即 nondelegated confinement、Pod CREATE/gate/binding/exec/ephemeral/DELETE actor 限制、独占 frontend/registrar/backend 接线，以及未变化的 runtime/plugin/boot。当前没有完整安装 contract 的生产消费者；operator boolean、自签 statement、test fixture 或 journal hash 不能授予权限。实际 consumer 与安装资格化前，progress recording 保持 DRAINING holder，release 关闭。
 
 [原 ACK 部署候选](../../deploy/k2-evidence/ack-existing-cluster/README.zh-CN.md) 提供本地 renderer，以及新隔离 Node 的已知 CSI addon 排除、冷安装和撤销顺序，保留原 DaemonSet 与共享节点。本地表达式求值通过 20 个请求映射案例；实际 API schema/defaulting、执行、policy 修改权限与完整 Pod/host confinement 仍待完成。此组件不能授予物理 capability。
 
-同一目录现可为专用 namespace 输出三个受限 worker 访问守卫：明确拒绝额外进程与驱逐入口，只允许 scheduler 绑定到隔离 Node，以及只允许 coordinator 使用原 UID/RV 正常删除。它们尚未覆盖出生 CREATE、仅允许 gate 的精确 UPDATE、直接 kubelet/runtime/static-Pod 入口或准入配置的写入者。安装 consumer 授予释放之前，仍须建立这些边界并验证实际 API 准入。
+同一目录可为专用 namespace 输出五个 worker 访问守卫：精确的原 gated CREATE、coordinator-only gate removal、明确拒绝额外进程与驱逐入口、只允许 scheduler 绑定到隔离 Node，以及只允许 coordinator 使用原 UID/RV 正常删除。CREATE/gate 规则枚举固定的 API schema，但实际 typechecking、准入执行与 actor 仍未资格化。这些规则不覆盖直接 kubelet/runtime/static-Pod 入口或准入配置写入者，也不单独证明 runtime 从出生起受限；安装 consumer 授予释放前仍须建立这些边界。
 
 ## 原子释放与单调计数
 
@@ -73,11 +75,17 @@ Release 后 live application guard 无法读取旧回执：原 slot 已清空，
 
 历史验证保留 original intent/freeze/cut/finalizer、PUBLISHED association、physical plan/attempts/proofs/qualification、原 released binding/slot、terminal native rows 与原 Runtime Session/executions。验证必要的 placement/retention/context identity，但不将 current shared holder、无关 context 或 new-owner bytes 与旧 global snapshot 比较。损坏或不支持的 retained receipt 拒绝重放，不从当前 volume observation 重建。
 
+使用新建的十秒只读 REPEATABLE_READ 事务，全部读取在同一 Connection 上，不使用 FOR UPDATE，也不初始化 context。不能放宽 live application authority 使其接纳 RELEASED：该入口要求原 slot 仍 active，而其 physical catalog 有意包含全部同 physical-key 行。历史 companion query 改按原 retirement/binding 定位，后续 owner 的 companion row 不得变成原历史行。复用固定 typed catalog 与 decoder，即使期望空表也核 schema；读取完整原 key 和强引用闭包。只查期望 key 无法发现新增 execution、native tail 或孤立 ref。共享 physical key、volume marker、tenant/storage，以及没有原 Session 的 scope 不能作为此闭包的根；锚定原 scope 的未知或矛盾引用仍拒绝。
+
+Retained writer hash 必须在 frozen baseline head、frozen envelope、terminal transaction 和最终 SEALED head 中一致，再通过同一 credential policy 与 constant-time hash 比较匹配所提供的原 token。比较固定 history image 前，先重建完整原 application/native/finalizer 语义；image 算术本身不能验证 receipt。公开重放与内部旧 lineage 分类共用结构 validator，凭据层不同。内部分类不向新 owner 索取旧 writer token，也不返回旧 receipt 或秘密。
+
 下一 owner 的 live inventory 必须在 generic physical-key/JSON mention expansion 前分类旧 lineage。只有完整验证的 immutable qualified RELEASED outcome 能确定 historical/OTHER membership。保留旧 proof rows 于 explicit catalog，不忽略它们，也不接受 phase flag；覆盖旧 retirement/source/binding/slot/execution/native rows 与跨 tenant aliases。Proof 缺失或损坏阻断复用；新 owner 获取 fresh reservation、ARM、Pod、custody，不能借任何旧 proof。
+
+复用还须验证 current holder 精确等于最新 qualified released outcome，包括 checked counter 和六个空 ownership 字段。在取得写锁前发现候选历史 tenant，按确定 tenant 顺序获取 placement/retention roots，再按声明顺序锁 slots/bindings/aliases/holder/proofs，并重新核完整候选集合。不能持有新 tenant 的 physical holder 后再获取旧 tenant 的 placement 锁。公开历史 snapshot 独立于这些写锁。完整 consumer 与四行 writer 实现前，保留初始周期门槛。
 
 ## 实施与验证顺序
 
-Ownership 投影已独立编译，并使用此前封存的真实 application DRAINED tuple 验证：投影前重建的 digest 与原 production plan 完全一致。62 表、847 列、236 行中，精确改变三行、十一个单元，其余字段、键、membership 以及已释放的 Runtime Session 全部保留。独立 Java 覆盖 64 个不同 image 案例，并另用独立 binary codec 比较。另一个四案例 codec probe 复现了原实现接受 whitespace 改变但 JSON 值相同、重算 hash 匹配的 plan bytes，随后确认精确字节修复会拒绝这种变化，原 control 仍有效。最新 Java 定向验证通过 82 项测试及静态检查。这些结果只覆盖 image 数学与该 plan-byte 修复，不授予 live Store 事务中的 plan/2、任何物理释放、历史重放、复用或公开选择资格。
+Ownership 投影已独立编译，并使用此前封存的真实 application DRAINED tuple 验证：投影前重建的 digest 与原 production plan 完全一致。62 表、847 列、236 行中，精确改变三行、十一个单元，其余字段、键、membership 以及已释放的 Runtime Session 全部保留。独立 Java 覆盖 64 个不同 image 案例，并另用独立 binary codec 比较。另一个四案例 codec probe 复现了原实现接受 whitespace 改变但 JSON 值相同、重算 hash 匹配的 plan bytes，随后确认精确字节修复会拒绝这种变化，原 control 仍有效。该 ownership 投影 revision 的 Java 定向验证通过 82 项测试及静态检查。这些结果只覆盖 image 数学与该 plan-byte 修复，不授予 live Store 事务中的 plan/2、任何物理释放、历史重放、复用或公开选择资格。
 
 封存的 `1169bfd7` 候选独立验收覆盖 21 个真实 MySQL Store 窗口、11 个使用实际认证 TLS source client 和实际 Kubernetes HTTP client 的完整 coordinator 窗口，以及三个原 Main plan/status/replay 进程。实际 Hosted 文件工具和原应用退役先生成 DRAINED，再推进物理进度。完整 typed 比较确认其余 63 表不变；真实 physical CAS 零行导致整个事务回滚。未知 DELETE 保留 attempt，同 RV 的 coordinator 重试新增 DELETE 为零，替换身份拒绝，后续 source observation 保存 STOPPED/UNPUBLISHED 而不释放 ownership。Status 与 plan replay 是 SQL no-op，零新增 RPC。Observer 原失败保留，分别用后续 attempt 修正。Source identity/publication 与 API 服务仍是夹具；这些检查不授予实际 ACK stop/unpublish、合格 release、复用或公开选择结果。
 
