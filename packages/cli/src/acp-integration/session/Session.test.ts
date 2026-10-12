@@ -18850,9 +18850,172 @@ describe('Session', () => {
           ],
         });
 
-        expect(textParts(firstSentMessage())).toContain(expected);
+        expect(textParts(firstSentMessage())).toEqual([
+          'Summarize the attached resource.',
+          expected,
+        ]);
       },
     );
+
+    it.each([
+      {
+        label: 'ordinary reference',
+        uri: 'resource://notes',
+        name: 'notes.md',
+        description: 'Quarterly reference notes.',
+      },
+      {
+        label: 'collaboration request',
+        uri: 'session://00000000-0000-4000-8000-000000000001',
+        name: 'Planning',
+        description:
+          'Collaboration request from Planning.\nReturn the conclusion.',
+      },
+      {
+        label: 'collaboration reply',
+        uri: 'session://00000000-0000-4000-8000-000000000002',
+        name: 'Research',
+        description: 'Collaboration result from Research. No reply requested.',
+      },
+    ])(
+      'includes non-file resource link descriptions as reference context: $label',
+      async ({ uri, name, description }) => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        const link = {
+          type: 'resource_link' as const,
+          uri,
+          name,
+          description,
+          title: 'TITLE_ONLY_SENTINEL',
+          _meta: {
+            'application.reference': {
+              version: 1,
+              contextId: 'META_ONLY_SENTINEL',
+            },
+            'qwen.daemon.attachmentContext': 'META_CONTEXT_ONLY_SENTINEL',
+          },
+        };
+        const originalLink = structuredClone(link);
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [link, { type: 'text', text: 'The original user question.' }],
+        });
+
+        expect(textParts(firstSentMessage())).toEqual([
+          `Resource link: ${uri}\nDescription: ${description}`,
+          `@${uri} (original filename: ${JSON.stringify(name)})`,
+          'The original user question.',
+        ]);
+        expect(link).toEqual(originalLink);
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'The original user question.',
+          undefined,
+          {
+            displayText: 'The original user question.',
+            hookContext: '',
+            resourceLinks: [originalLink],
+          },
+          expect.stringContaining('test-session-id########'),
+          undefined,
+        );
+      },
+    );
+
+    it.each([undefined, null, '', ' \n\t '])(
+      'keeps resource links without usable descriptions unchanged (%j)',
+      async (description) => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'The original user question.' },
+            {
+              type: 'resource_link',
+              uri: 'resource://notes',
+              name: 'notes.md',
+              ...(description === undefined ? {} : { description }),
+              _meta: { instruction: 'META_ONLY_SENTINEL' },
+            },
+          ],
+        });
+
+        expect(textParts(firstSentMessage())).toEqual([
+          'The original user question.',
+          '@resource://notes (original filename: "notes.md")',
+        ]);
+      },
+    );
+
+    it('keeps multiple resource link descriptions separate and in reference order', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          {
+            type: 'resource_link',
+            uri: 'resource://first',
+            name: 'first.md',
+            description: ' First line.\n第二行。 ',
+          },
+          {
+            type: 'resource_link',
+            uri: 'resource://second',
+            name: 'second.md',
+            description: 'Second reference.',
+          },
+          { type: 'text', text: 'The original user question.' },
+        ],
+      });
+
+      expect(textParts(firstSentMessage())).toEqual([
+        'Resource link: resource://first\nDescription:  First line.\n第二行。 ',
+        'Resource link: resource://second\nDescription: Second reference.',
+        '@resource://first (original filename: "first.md")',
+        '@resource://second (original filename: "second.md")',
+        'The original user question.',
+      ]);
+    });
+
+    it('includes resource link descriptions once in custom command reference context', async () => {
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: [{ text: 'The expanded user instruction.' }],
+        resolvedCommand: { name: 'inspect', kind: CommandKind.FILE },
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: '/inspect' },
+          {
+            type: 'resource_link',
+            uri: 'resource://notes',
+            name: 'notes.md',
+            description: 'Reference notes.',
+          },
+        ],
+      });
+
+      expect(textParts(firstSentMessage())).toEqual([
+        '@resource://notes (original filename: "notes.md")',
+        'Resource link: resource://notes\nDescription: Reference notes.',
+        'The expanded user instruction.',
+      ]);
+    });
 
     it('keeps SSH workspace file references for remote tools without reading local files', async () => {
       const tempDir = await fs.realpath(
@@ -18880,11 +19043,15 @@ describe('Session', () => {
               uri: `file://${localImage}`,
               name: 'image.png',
               mimeType: 'image/png',
+              description: 'FILE_DESCRIPTION_ONLY_SENTINEL',
             },
           ],
         });
         expect(readManyFilesSpy).not.toHaveBeenCalled();
         expect(textParts(firstSentMessage())).toContain(`@${localImage}`);
+        expect(textParts(firstSentMessage()).join('\n')).not.toContain(
+          'FILE_DESCRIPTION_ONLY_SENTINEL',
+        );
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
@@ -18936,6 +19103,7 @@ describe('Session', () => {
               uri: `file://${imagePath}`,
               mimeType: 'image/png',
               name: 'image.png',
+              description: 'FILE_DESCRIPTION_ONLY_SENTINEL',
             },
           ],
         });
@@ -18952,6 +19120,9 @@ describe('Session', () => {
         const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
           ?.parts as Part[];
         expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
+        expect(textParts(bridgeParts).join('\n')).not.toContain(
+          'FILE_DESCRIPTION_ONLY_SENTINEL',
+        );
         expect(textParts(firstSentMessage())).toContain('[file image]');
       } finally {
         readManyFilesSpy.mockRestore();

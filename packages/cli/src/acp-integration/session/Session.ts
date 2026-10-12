@@ -17417,21 +17417,26 @@ export class Session implements SessionContext {
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const attachmentParts: Part[] = [];
+    const resourceLinkDescriptionParts: Part[] = [];
     const extensionMentions = new Map<string, string>();
     const mcpServerMentions = new Map<string, string>();
     const textPathSpecsToRead = new Map<string, string>();
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
-    const finish = (parts: Part[]) =>
-      options.deferBridgeConversions
-        ? parts
+    const finish = (parts: Part[]) => {
+      const contextualizedParts = options.promptLast
+        ? [...resourceLinkDescriptionParts, ...parts]
+        : [...parts, ...resourceLinkDescriptionParts];
+      return options.deferBridgeConversions
+        ? contextualizedParts
         : this.#applyBridgeConversionsIfNeeded(
-            parts,
+            contextualizedParts,
             message,
             abortSignal,
             options.onFullTurnModel,
           );
+    };
 
     const parts = message.map((part) => {
       const attachmentContext =
@@ -17507,6 +17512,14 @@ export class Session implements SessionContext {
               },
             };
           } else {
+            if (
+              typeof part.description === 'string' &&
+              part.description.trim().length > 0
+            ) {
+              resourceLinkDescriptionParts.push({
+                text: `Resource link: ${part.uri}\nDescription: ${part.description}`,
+              });
+            }
             return {
               text: part.name
                 ? `@${part.uri} (original filename: ${JSON.stringify(part.name)})`
