@@ -277,6 +277,7 @@ import {
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
+import { isUnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 import {
   getConversationDirectoryName,
   hasVerifiableInode,
@@ -487,6 +488,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_SEND_NOW_METHOD,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
@@ -886,21 +888,6 @@ function managedQuarantineSummary(reason: Error): string {
     entries.push('a ledger it could not read held the unproven stop');
   }
   return entries.join('; ');
-}
-
-/**
- * The structural half of the serve side's LedgerSweepUnprovenError, which the
- * acp-integration boundary forbids importing here.
- */
-function isUnprovenSweepReport(
-  failure: unknown,
-): failure is { workFile: string; remaining: unknown[] } {
-  return (
-    typeof failure === 'object' &&
-    failure !== null &&
-    typeof (failure as { workFile?: unknown }).workFile === 'string' &&
-    Array.isArray((failure as { remaining?: unknown }).remaining)
-  );
 }
 
 function getSessionWriterError(error: unknown):
@@ -9632,6 +9619,7 @@ class QwenAgent implements Agent {
   private isSessionScopedExtMethod(method: string): boolean {
     return (
       method === PROMPT_CANCEL_METHOD ||
+      method === MID_TURN_SEND_NOW_METHOD ||
       method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD ||
       method.startsWith('qwen/control/session/') ||
       method.startsWith('qwen/status/session/') ||
@@ -9781,6 +9769,17 @@ class QwenAgent implements Agent {
         targetedCalls.forEach((call) => call.controller.abort());
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
+      }
+      case MID_TURN_SEND_NOW_METHOD: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        this.sessions.get(sessionId)?.sendMidTurnInputNow();
+        return {};
       }
       case TODO_STOP_GUARD_QUEUE_RELEASE_METHOD: {
         const sessionId = params['sessionId'];

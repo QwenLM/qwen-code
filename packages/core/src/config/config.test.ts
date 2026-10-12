@@ -112,6 +112,7 @@ import {
   clearAutoMemoryRootCache,
   getAutoMemoryIndexPath,
   getUserAutoMemoryIndexPath,
+  getTeamAutoMemoryRoot,
 } from '../memory/paths.js';
 import {
   rebuildTeamAutoMemoryIndex,
@@ -7449,6 +7450,38 @@ describe('Server Config (config.ts)', () => {
     expect(config.getAutoMemoryContext()).toContain(
       '[Project Memory](project.md)',
     );
+  });
+
+  it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {
+    const config = makeConfig({ enableTeamMemory: true });
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    loadProjectRules();
+    const projectEntry = '- [Project](project.md) — PROJECT_ENTRY';
+    const userEntry = '- [User](user.md) — USER_ENTRY';
+    const teamEntry = '- [Team](team.md) — TEAM_ENTRY';
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+      mockAutoMemoryIndexRead(projectEntry),
+    );
+    vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce(
+      mockAutoMemoryIndexRead(userEntry),
+    );
+    vi.mocked(rebuildTeamAutoMemoryIndex).mockResolvedValueOnce(teamEntry);
+
+    await config.refreshHierarchicalMemory();
+
+    for (const [indexPath, entry] of [
+      [getAutoMemoryIndexPath(config.getProjectRoot()), projectEntry],
+      [getUserAutoMemoryIndexPath(), userEntry],
+      [
+        path.join(getTeamAutoMemoryRoot(config.getProjectRoot()), 'MEMORY.md'),
+        teamEntry,
+      ],
+    ]) {
+      expect(config.getAutoMemoryContext()).toContain(
+        `## ${indexPath}\n\n${entry}`,
+      );
+      expect(config.getAutoMemoryPrompt()).not.toContain(entry);
+    }
   });
 
   it('keeps policy stable through first save, update, no-op and deletion', async () => {

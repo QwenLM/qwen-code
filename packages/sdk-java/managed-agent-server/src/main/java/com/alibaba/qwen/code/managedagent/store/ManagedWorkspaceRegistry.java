@@ -28,8 +28,9 @@ public class ManagedWorkspaceRegistry {
     }
 
     /**
-     * Whether the actor created this Workspace-bound Session. Its later Turns
-     * run under the creator's grants, so only the creator may submit them.
+     * Whether the actor created this Workspace-bound Session. The create
+     * command is the owner of record for Sessions written before V40; later
+     * Turns still run under the creator's grants.
      */
     public boolean createdSession(String tenantId, String actorId,
             String sessionId) {
@@ -50,38 +51,17 @@ public class ManagedWorkspaceRegistry {
                 Integer.class, tenantId, sessionId, tenantId, key).isEmpty();
     }
 
-    /** The batch twin of createdSession for a page of Session ids. */
-    public java.util.Set<String> createdSessions(String tenantId,
-            String actorId, List<String> sessionIds) {
-        if (actorId == null || actorId.isEmpty() || sessionIds.isEmpty()) {
-            return java.util.Set.of();
-        }
-        byte[] key;
-        try {
-            key = actorKey(tenantId, actorId);
-        } catch (IllegalArgumentException error) {
-            return java.util.Set.of();
-        }
-        String marks = String.join(", ",
-                java.util.Collections.nCopies(sessionIds.size(), "?"));
-        List<Object> arguments = new java.util.ArrayList<>(
-                sessionIds.size() + 3);
-        arguments.add(tenantId);
-        arguments.addAll(sessionIds);
-        arguments.add(tenantId);
-        arguments.add(key);
-        return new java.util.HashSet<>(jdbc.queryForList(
-                "SELECT session_id FROM managed_workspace_create_command"
-                        + " WHERE tenant_id = ? AND session_id IN (" + marks
-                        + ")"
-                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND actor_id = ?",
-                String.class, arguments.toArray()));
-    }
-
-    public boolean canRead(String tenantId, String actorId,
-            String workspaceId) {
+    /**
+     * Whether the actor owns this Session: the recorded owner
+     * ({@code owner_actor_key}) when one is set — the handover's own
+     * keying, so a transferred Session answers only its new owner. With
+     * no owner record, a Session with a create command answers its
+     * command actor — H4b child Sessions register the parent cascade's
+     * synthetic one — and only a command-less, pre-V40 row falls back to
+     * {@code creator_actor_key}.
+     */
+    public boolean isSessionOwner(String tenantId, String actorId,
+            String sessionId) {
         if (actorId == null || actorId.isEmpty()) {
             return false;
         }
@@ -91,16 +71,65 @@ public class ManagedWorkspaceRegistry {
         } catch (IllegalArgumentException error) {
             return false;
         }
-        return !jdbc.queryForList("SELECT 1 FROM managed_workspace_access"
-                + " WHERE tenant_id = ? AND workspace_id = ?"
-                + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
-                + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
-                + " 'OWNER')",
-                Integer.class, tenantId, workspaceId, tenantId, workspaceId,
-                key).isEmpty();
+        List<byte[]> owners = jdbc.queryForList(
+                "SELECT owner_actor_key FROM managed_agent_session WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                byte[].class, tenantId, sessionId);
+        if (!owners.isEmpty() && owners.getFirst() != null) {
+            return java.util.Arrays.equals(owners.getFirst(), key);
+        }
+        List<String> commands = jdbc.queryForList(
+                "SELECT 1 FROM managed_workspace_create_command WHERE"
+                        + " tenant_id = ? AND session_id = ? LIMIT 1",
+                String.class, tenantId, sessionId);
+        if (!commands.isEmpty()) {
+            return createdSession(tenantId, actorId, sessionId);
+        }
+        List<byte[]> creators = jdbc.queryForList(
+                "SELECT creator_actor_key FROM managed_agent_session WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                byte[].class, tenantId, sessionId);
+        return !creators.isEmpty() && creators.getFirst() != null
+                && java.util.Arrays.equals(creators.getFirst(), key);
+    }
+
+    /**
+     * The actor's role on the Workspace; {@link WorkspaceAccess#NONE} for no
+     * grant row or an actor id the registry key cannot encode.
+     */
+    public WorkspaceAccess accessOf(String tenantId, String actorId,
+            String workspaceId) {
+        if (actorId == null || actorId.isEmpty()) {
+            return WorkspaceAccess.NONE;
+        }
+        byte[] key;
+        try {
+            key = actorKey(tenantId, actorId);
+        } catch (IllegalArgumentException error) {
+            return WorkspaceAccess.NONE;
+        }
+        List<String> roles = jdbc.queryForList(
+                "SELECT role FROM managed_workspace_access"
+                        + " WHERE tenant_id = ? AND workspace_id = ?"
+                        + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                        + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
+                        + " = CAST(CONCAT(?, '!') AS BINARY(513))"
+                        + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
+                        + " 'OWNER')",
+                String.class, tenantId, workspaceId, tenantId, workspaceId,
+                key);
+        // An out-of-enum stored value (only reachable by an out-of-band
+        // write past V53's CHECK) fails closed exactly like a revoked
+        // grant, never into valueOf's IllegalArgumentException.
+        return roles.isEmpty() ? WorkspaceAccess.NONE
+                : WorkspaceAccess.valueOf(roles.getFirst());
+    }
+
+    /** The read half of {@link #accessOf}: one grant read per decision. */
+    public boolean canRead(String tenantId, String actorId,
+            String workspaceId) {
+        return accessOf(tenantId, actorId, workspaceId).canRead();
     }
 
     public List<WorkspaceSummary> listReadable(String tenantId,
@@ -326,7 +355,8 @@ public class ManagedWorkspaceRegistry {
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                        + " AND actor_id = ? FOR UPDATE",
+                        + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
+                        + " 'OWNER') FOR UPDATE",
                 (result, row) -> new AccessRow(WorkspaceAccess.valueOf(
                         result.getString("role"))), tenantId,
                 workspaceId, tenantId, workspaceId, key);
