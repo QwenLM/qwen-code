@@ -7030,6 +7030,104 @@ describe('createAcpSessionBridge', () => {
     },
   );
 
+  it('preserves completed request lifecycles before transcript persistence', async () => {
+    const handle = makeChannel({
+      promptImpl: async (params) => {
+        for (const executionId of ['request-one', 'request-two']) {
+          for (const phase of ['started', 'ended'] as const) {
+            await handle.agentConnection.sessionUpdate({
+              sessionId: params.sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: '' },
+                _meta: {
+                  executionLifecycle: {
+                    v: 1,
+                    kind: 'request',
+                    executionId,
+                    sessionId: params.sessionId,
+                    promptId: 'prompt',
+                    model: 'model',
+                    phase,
+                    startedAt: 1,
+                    ...(phase === 'ended'
+                      ? { endedAt: 2, durationMs: 1, outcome: 'success' }
+                      : {}),
+                  },
+                },
+              },
+            });
+          }
+        }
+        await handle.agentConnection.sessionUpdate({
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'final visible answer' },
+          },
+        });
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+          throw new Error(`unexpected ${method}`);
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'two requests' }],
+      });
+      const memory = bridge.getSessionReplaySnapshot(session.sessionId)!;
+      expect(
+        memory.compactedTurns.some((event) => event.type === 'turn_complete'),
+      ).toBe(true);
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        liveReplayMode: 'summary',
+        historyPageSize: 100,
+      });
+      expect(refreshed.compactedReplay).toEqual([]);
+      expect(refreshed.liveJournal).toEqual([]);
+      expect(refreshed.lifecycleReplayIncomplete).toBe(false);
+      expect(refreshed.lastEventId).toBe(memory.lastEventId);
+      for (const executionId of ['request-one', 'request-two']) {
+        for (const phase of ['started', 'ended']) {
+          expect(refreshed.lifecycleReplay).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                data: expect.objectContaining({
+                  _meta: expect.objectContaining({
+                    executionLifecycle: expect.objectContaining({
+                      executionId,
+                      phase,
+                    }),
+                  }),
+                }),
+              }),
+            ]),
+          );
+        }
+      }
+      expect(JSON.stringify(refreshed.lifecycleReplay)).not.toContain(
+        'final visible answer',
+      );
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('refreshes an attached load from a bounded persisted page', async () => {
     const handle = makeChannel({
       loadSessionImpl: () => ({
