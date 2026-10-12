@@ -124,7 +124,8 @@ agent 读取客户端 `initialize` 能力上的厂商 `_meta` 键
 ## 兼容性与发布
 
 - **由能力门控。** 仅当客户端未声明 `qwen.askUserQuestion` 时才启用扁平化。
-  Qwen 自有界面保持现有载荷逐字节不变。
+  Qwen 自有界面看到的选项集合与改动前相同；只多出下方那项始终开启的内容投影，而这类
+  界面并不读取它。
 - **内容投影始终开启。** 它是增量的；从 `_meta` 渲染自有问题卡片的 Qwen 界面会
   忽略额外的文本块。
 - **Qwen Live 版本错配。** Live 的退出机制只保护包含该键的 Live 构建。Live 与 CLI
@@ -172,6 +173,14 @@ agent 读取客户端 `initialize` 能力上的厂商 `_meta` 键
   `toPermissionOptions`、`resolvePermissionOutcome`、
   `buildPermissionRequestContent`、`interactionMetaFields`。
 - `packages/cli/src/acp-integration/session/Session.ts` — 权限参数构造与答案回读。
+- `packages/cli/src/acp-integration/session/SubAgentTracker.ts` — 第二个、独立的
+  权限请求生产者；第 4 节的答案恢复路径经由它自己的请求/响应循环。
+- `packages/cli/src/external-agents/acp-subagent-executor.ts` — 仓库内唯一必须通过
+  `_meta.toolName` 识别 Qwen 封装问题的 ACP 客户端；第 3 节约束其 routed-question
+  guard。
+- `packages/core/src/utils/invocation-context.ts` —
+  `ASK_USER_QUESTION_CAPABILITY_META_KEY` 所在处；该能力键与 channel-base、Qwen Live
+  的副本由跨包测试保持一致。
 - `packages/core/src/tools/askUserQuestion.ts` — `getConfirmationDetails`、
   `onConfirm`、答案格式化。
 - 先例：`docs/design/2026-08-25-acp-workspace-event-capability.md`、

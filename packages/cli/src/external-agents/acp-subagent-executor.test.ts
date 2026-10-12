@@ -109,6 +109,12 @@ connection = new AgentSideConnection(() => ({
       permissionCount++;
       return {stopReason: result[0] && result[0].outcome.outcome === 'cancelled' ? 'cancelled' : 'end_turn'};
     }
+    if (scenario === 'qwen-tool-name') {
+      await send({sessionUpdate:'tool_call',toolCallId:'qwen-1',title:'Shell',kind:'execute',status:'in_progress',rawInput:{command:'ls'},_meta:{toolName:'run_shell_command'}});
+      await send({sessionUpdate:'tool_call_update',toolCallId:'qwen-1',status:'completed'});
+      await send({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'done'}});
+      return {stopReason:'end_turn'};
+    }
     if (scenario === 'env') {
       await send({sessionUpdate:'agent_message_chunk',content:{type:'text',text:JSON.stringify(['QWEN_SERVER_TOKEN','QWEN_DAEMON_TOKEN','QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN','QWEN_CODE_PRIVATE_ACP_CAPABILITY'].map(k => process.env[k] ?? null))}});
       return {stopReason:'end_turn'};
@@ -430,6 +436,20 @@ describe.skipIf(process.platform === 'win32')('real ACP subprocess', () => {
     const duration = executor.getExecutionSummary().totalDurationMs;
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(executor.getExecutionSummary().totalDurationMs).toBe(duration);
+  });
+  it('reports one tool name for a Qwen-framed call across its readers', async () => {
+    const options = params('qwen-tool-name');
+    const results = vi.fn();
+    options.eventEmitter!.on(AgentEventType.TOOL_RESPONSES_FINALIZED, results);
+    const executor = await create(options);
+    await executor.execute(context());
+    const functionResponse =
+      results.mock.calls[0]![0].responses[0].responseParts[0].functionResponse;
+    // Both the event name (toolNames map) and the response name (reported on
+    // the update frame) must read `_meta.toolName`, or the same call would be
+    // auditable under two different names.
+    expect(functionResponse.name).toBe('run_shell_command');
+    expect(functionResponse.response.toolName).toBe('run_shell_command');
   });
   it.each(['no-mode', 'mode-error', 'init-exit', 'session-exit'])(
     'fails creation for %s',

@@ -394,12 +394,43 @@ describe('permissionUtils', () => {
     });
 
     it('projects every question and choice into the tool call content', () => {
-      expect(buildPermissionRequestContent(confirmation())).toEqual([
+      const twoQuestions = {
+        type: 'ask_user_question' as const,
+        title: 'Question',
+        questions: [
+          {
+            header: 'Library',
+            question: 'Which library should we use?',
+            options: [
+              { label: 'Alpha', description: 'First choice.' },
+              { label: 'Beta', description: 'Second choice.' },
+            ],
+          },
+          {
+            header: 'Scope',
+            question: 'How far should this go?',
+            options: [
+              { label: 'Local', description: 'This repo only.' },
+              { label: 'Global', description: 'Everywhere.' },
+            ],
+          },
+        ],
+        onConfirm: async () => undefined,
+      };
+      // Two questions, so a loop that only ever projects the first is caught.
+      expect(buildPermissionRequestContent(twoQuestions)).toEqual([
         {
           type: 'content',
           content: {
             type: 'text',
             text: 'Library\nWhich library should we use?\n• Alpha — First choice.\n• Beta — Second choice.',
+          },
+        },
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: 'Scope\nHow far should this go?\n• Local — This repo only.\n• Global — Everywhere.',
           },
         },
       ]);

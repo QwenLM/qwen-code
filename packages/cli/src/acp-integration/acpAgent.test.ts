@@ -4435,17 +4435,23 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   );
 
   it.each([
-    [true, true],
-    [false, false],
+    [true, true, false],
+    [false, false, false],
+    // An agent-host session is read-only, but this capability is a wire-format
+    // concern, so the gate must still honor it (R2-1).
+    [true, true, true],
   ])(
-    'gates structured ask_user_question support on client capability %s',
-    async (supported, expected) => {
+    'gates structured ask_user_question support on client capability %s (agent host: %s)',
+    async (supported, expected, agentHost) => {
       const innerConfig = await setupSessionMocks('ask-user-question-session');
-      const agentPromise = runAcpAgent(
-        mockConfig,
-        makeSessionSettings(),
-        mockArgv,
-      );
+      // An agent-host session is only admitted from a trusted parent, so that
+      // arm boots the same way as the other trusted-capability tests.
+      const trustedParent = 'trusted-capability';
+      const agentPromise = agentHost
+        ? runAcpAgent(mockConfig, makeSessionSettings(), mockArgv, {
+            privateParentCapability: trustedParent,
+          })
+        : runAcpAgent(mockConfig, makeSessionSettings(), mockArgv);
       await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
       const agent = capturedAgentFactory!({
         get closed() {
@@ -4455,10 +4461,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       try {
         await agent.initialize({
           clientCapabilities: { _meta: { 'qwen.askUserQuestion': supported } },
+          ...(agentHost
+            ? {
+                _meta: {
+                  'qwen-code/private-parent-capability': trustedParent,
+                },
+              }
+            : {}),
         });
         await agent.newSession({
           cwd: '/tmp',
           mcpServers: [],
+          ...(agentHost
+            ? {
+                _meta: {
+                  [SESSION_SOURCE_META_KEY]: {
+                    sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+                  },
+                },
+              }
+            : {}),
         });
         if (expected) {
           expect(

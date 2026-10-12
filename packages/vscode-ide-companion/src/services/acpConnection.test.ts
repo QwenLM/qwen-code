@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Readable, Writable } from 'node:stream';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
   ContentBlock,
@@ -24,7 +25,11 @@ vi.mock('child_process', async (importOriginal) => {
   return { ...actual, spawn: spawnMock, execFile: execFileMock };
 });
 
-import { AcpConnection, buildAcpClientCapabilities } from './acpConnection.js';
+import {
+  AcpConnection,
+  buildAcpClientCapabilities,
+  resolveAskUserQuestionOptionId,
+} from './acpConnection.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 
 type MockChild = {
@@ -150,6 +155,84 @@ describe('AcpConnection initialize capabilities', () => {
       fs: { readTextFile: true, writeTextFile: true },
     });
   });
+});
+
+describe('resolveAskUserQuestionOptionId', () => {
+  it('votes the webview choice when the peer offered it', () => {
+    expect(
+      resolveAskUserQuestionOptionId(
+        [{ optionId: 'proceed_once' }, { optionId: 'cancel' }],
+        'proceed_once',
+      ),
+    ).toBe('proceed_once');
+  });
+
+  it('falls back to proceed_once when the webview chose an unoffered id', () => {
+    expect(
+      resolveAskUserQuestionOptionId([{ optionId: 'proceed_once' }], 'stale'),
+    ).toBe('proceed_once');
+  });
+
+  it('refuses to vote when the peer offers neither, so the turn is not aborted', () => {
+    // A flattened question offers `ask:q0:oN`, not `proceed_once`; echoing an
+    // unoffered id makes the agent throw and discard the typed answers.
+    expect(
+      resolveAskUserQuestionOptionId(
+        [{ optionId: 'ask:q0:o0' }, { optionId: 'cancel' }],
+        'proceed_once',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('treats a missing option list as offering nothing', () => {
+    expect(
+      resolveAskUserQuestionOptionId(undefined, 'proceed_once'),
+    ).toBeUndefined();
+  });
+});
+
+describe('AcpConnection handshake wiring', () => {
+  it('writes the structured-question capability on the initialize request it sends', async () => {
+    const written: string[] = [];
+    const exitListeners: Array<
+      (code: number | null, signal: string | null) => void
+    > = [];
+    // A real Writable so the SDK's ndjson stream actually serializes into it.
+    const stdin = new Writable({
+      write(chunk, _encoding, callback) {
+        written.push(String(chunk));
+        callback();
+      },
+    });
+    const child = createMockChild({
+      stdin,
+      stdout: new Readable({ read() {} }),
+      stderr: new Readable({ read() {} }),
+      on: (event: string, listener: (...args: unknown[]) => void) => {
+        if (event === 'exit') {
+          exitListeners.push(
+            listener as (code: number | null, signal: string | null) => void,
+          );
+        }
+        return child;
+      },
+    });
+    spawnMock.mockReturnValue(child);
+    const conn = new AcpConnection() as unknown as {
+      connect: (cliEntryPath: string) => Promise<void>;
+    };
+
+    // Deliberately not stubbing setupChildProcessHandlers: the point is to drive
+    // the real handshake, so a reverted capability call site turns this red.
+    const pending = conn.connect(process.execPath).catch(() => undefined);
+    // The handler settles for 1s before wiring the SDK and sending initialize.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    for (const listener of exitListeners) listener(0, null);
+    await pending;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(written.join('')).toContain('"qwen.askUserQuestion":true');
+  }, 20_000);
 });
 
 describe('AcpConnection readTextFile error mapping', () => {

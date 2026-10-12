@@ -146,8 +146,9 @@ reconstructed from the selected option id.
 ## Compatibility and rollout
 
 - **Capability-gated.** Flattening is enabled only when the client does not
-  advertise `qwen.askUserQuestion`. Qwen-owned surfaces keep the current payload
-  byte-for-byte.
+  advertise `qwen.askUserQuestion`. A Qwen-owned surface keeps the same option
+  set it saw before; only the always-on content projection below is added, and
+  such surfaces do not read it.
 - **Content projection is always on.** It is additive; a Qwen surface that
   renders its own question card from `_meta` ignores the extra text block.
 - **Qwen Live version skew.** The Live opt-out protects only a Live build that
@@ -208,6 +209,15 @@ reconstructed from the selected option id.
   `buildPermissionRequestContent`, `interactionMetaFields`.
 - `packages/cli/src/acp-integration/session/Session.ts` — permission parameter
   construction and answer read-back.
+- `packages/cli/src/acp-integration/session/SubAgentTracker.ts` — the second,
+  independent producer of permission requests; the answer-recovery path in
+  section 4 runs through its own request/respond loop.
+- `packages/cli/src/external-agents/acp-subagent-executor.ts` — the one in-repo
+  ACP client that must recognise a Qwen-framed question by
+  `_meta.toolName`; section 3 constrains its routed-question guard.
+- `packages/core/src/utils/invocation-context.ts` — where
+  `ASK_USER_QUESTION_CAPABILITY_META_KEY` lives; the capability key is shared
+  with the channel-base and Qwen Live copies by a cross-package test.
 - `packages/core/src/tools/askUserQuestion.ts` — `getConfirmationDetails`,
   `onConfirm`, answer formatting.
 - Precedents: `docs/design/2026-08-25-acp-workspace-event-capability.md`,

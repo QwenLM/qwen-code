@@ -65,6 +65,29 @@ export function buildAcpClientCapabilities(): {
 }
 
 /**
+ * Picks the option id to vote for a question approval: the webview's choice
+ * when the peer offered it, else `proceed_once`. Returns undefined when neither
+ * is on offer — voting an id the peer did not offer makes the agent throw
+ * "unoffered option" and abort the turn with the user's typed answers
+ * discarded. Mirrors the daemon twin's strict resolution.
+ */
+export function resolveAskUserQuestionOptionId(
+  options: ReadonlyArray<{ optionId: string }> | undefined,
+  preferredOptionId: string | undefined,
+): string | undefined {
+  const offered = Array.isArray(options) ? options : [];
+  if (
+    preferredOptionId &&
+    offered.some((option) => option.optionId === preferredOptionId)
+  ) {
+    return preferredOptionId;
+  }
+  return offered.some((option) => option.optionId === 'proceed_once')
+    ? 'proceed_once'
+    : undefined;
+}
+
+/**
  * ACP Connection Handler for VSCode Extension
  *
  * External API preserved for backward compatibility.
@@ -290,23 +313,10 @@ export class AcpConnection {
               if (outcome === 'cancelled') {
                 return { outcome: { outcome: 'cancelled' } };
               }
-              // Never vote an id the peer did not offer. If the capability is
-              // dropped or renamed the CLI flattens the question, `proceed_once`
-              // is absent, and an unvalidated literal would throw
-              // "unoffered option" and abort the turn with the typed answers
-              // discarded. Mirrors the daemon twin's strict resolution.
-              const offeredOptions = Array.isArray(permissionData.options)
-                ? permissionData.options
-                : [];
-              const selectedOptionId =
-                optionId &&
-                offeredOptions.some((option) => option.optionId === optionId)
-                  ? optionId
-                  : offeredOptions.some(
-                        (option) => option.optionId === 'proceed_once',
-                      )
-                    ? 'proceed_once'
-                    : undefined;
+              const selectedOptionId = resolveAskUserQuestionOptionId(
+                permissionData.options,
+                optionId,
+              );
               if (selectedOptionId === undefined) {
                 logger.log(
                   '[ACP] AskUserQuestion option not advertised; cancelling',

@@ -52,6 +52,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Resolves the tool name a peer reports for a call. Peers frame it
+ * differently: Claude Code nests it under `_meta.claudeCode.toolName`, while a
+ * Qwen peer stamps `_meta.toolName` and carries `kind: 'think'` for a question.
+ * Every reader in this file must agree, or one call would present two names —
+ * a permission request under the Qwen name and its tool call/result under the
+ * Claude-shaped fallback.
+ */
+function resolvePeerToolName(tool: {
+  _meta?: Record<string, unknown> | null;
+  kind?: string | null;
+}): string {
+  const claudeMeta = tool._meta?.['claudeCode'];
+  if (isRecord(claudeMeta) && typeof claudeMeta['toolName'] === 'string') {
+    return claudeMeta['toolName'];
+  }
+  const qwenToolName = tool._meta?.['toolName'];
+  if (typeof qwenToolName === 'string') return qwenToolName;
+  return tool.kind ?? 'external_tool';
+}
+
 const EXTERNAL_ACTION_PROMPT_MAX = 300;
 
 function stripControlChars(value: string): string {
@@ -960,11 +981,7 @@ class AcpSubagentExecutor implements SubagentExecutor {
       ),
     };
     this.tools.set(callId, tool);
-    const meta = tool._meta?.['claudeCode'];
-    const reportedName =
-      isRecord(meta) && typeof meta['toolName'] === 'string'
-        ? meta['toolName']
-        : (tool.kind ?? 'external_tool');
+    const reportedName = resolvePeerToolName(tool);
     const name = this.toolNames.get(callId) ?? reportedName;
     if (!previous) {
       this.toolNames.set(callId, name);
@@ -1031,11 +1048,7 @@ class AcpSubagentExecutor implements SubagentExecutor {
    */
   private flushOpenTools(): void {
     for (const [callId, tool] of this.tools) {
-      const meta = tool._meta?.['claudeCode'];
-      const reportedName =
-        isRecord(meta) && typeof meta['toolName'] === 'string'
-          ? meta['toolName']
-          : (tool.kind ?? 'external_tool');
+      const reportedName = resolvePeerToolName(tool);
       const name = this.toolNames.get(callId) ?? reportedName;
       this.toolFailed++;
       const response = {
@@ -1077,19 +1090,9 @@ class AcpSubagentExecutor implements SubagentExecutor {
     };
     const runtime = this.params.runtimeContext;
     const callId = params.toolCall.toolCallId;
-    const claudeMeta = params.toolCall._meta?.['claudeCode'];
-    const qwenToolName = params.toolCall._meta?.['toolName'];
-    // Peers frame the tool name differently: Claude Code nests it under
-    // `_meta.claudeCode.toolName`, while a Qwen peer puts it at
-    // `_meta.toolName` and carries `kind: 'think'` for a question. Both must
-    // resolve here, or the routed-question denial below cannot recognise a
-    // Qwen peer's question and would answer it by selecting the first option.
-    const name =
-      isRecord(claudeMeta) && typeof claudeMeta['toolName'] === 'string'
-        ? claudeMeta['toolName']
-        : typeof qwenToolName === 'string'
-          ? qwenToolName
-          : (params.toolCall.kind ?? 'external_tool');
+    // The routed-question denial below compares against this name, so it must
+    // resolve the peer's own framing rather than Claude Code's alone.
+    const name = resolvePeerToolName(params.toolCall);
     // Turn-level and request-integrity states: the turn is already over, the
     // request is not ours, or it cannot be answered safely (no options, or
     // ambiguous duplicate option IDs). ACP `cancelled` is the right response —
