@@ -143,7 +143,7 @@ class HostedTeamLeadMySqlIT {
                 .contains("#2 [pending] — Audit B").contains("alice: running").contains("bob: running");
         assertThat(toolAnswer("lead-delete-running")).contains("Team \"review\" still has running members:")
                 .contains("alice").contains("bob");
-        assertThat(toolAnswer("lead-own-bob-open")).contains("has finished, so it can own only a completed task");
+        assertThat(toolAnswer("lead-own-bob-open")).contains("Member \"bob\" has finished. If it already did this task's work");
         assertThat(toolAnswer("lead-list-final")).contains("#1 [completed] @alice — Audit A")
                 .contains("#2 [completed] @bob — Audit B").contains("alice: completed").contains("bob: completed");
         assertThat(toolAnswer("lead-delete-final")).contains("Team \"review\" deleted.");
@@ -396,7 +396,8 @@ class HostedTeamLeadMySqlIT {
                             plan.add(Step.calls(call("lead-done-alice", "task_update",
                                     Map.of("taskId", "1", "status", "completed"))));
                         } else {
-                            // A member that finished may own its task only as completed.
+                            // A member that finished, and was given no work in this
+                            // turn, may own its task only as completed (H4e-b2).
                             plan.add(Step.calls(call("lead-own-bob-open", "task_update",
                                     Map.of("taskId", "2", "owner", "bob", "status", "in_progress"))));
                             plan.add(Step.calls(call("lead-own-bob-done", "task_update",
@@ -637,15 +638,9 @@ class HostedTeamLeadMySqlIT {
     private String createLead(String marker) throws Exception {
         TransactionTemplate transaction = new TransactionTemplate(spring.getBean(PlatformTransactionManager.class));
         ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
-        String session = transaction.execute(status -> {
-            var created = store.insertWorkspaceSessionCommand(tenant, "actor", "create-" + marker, DIGEST,
-                    "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace-0", "child"));
-            // No public route creates a Shell-laned Session: set the profile
-            // before anything can read the row.
-            jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-shell/1'"
-                    + " WHERE tenant_id = ? AND session_id = ?", tenant, created.sessionId());
-            return created.sessionId();
-        });
+        String session = transaction.execute(status -> store.insertInternalTeamLeadSessionCommand(
+                tenant, "actor", "create-" + marker, DIGEST, null,
+                new WorkspaceSelection("workspace-0", "child")).sessionId());
         leadSession = session;
         waiting().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofSeconds(1)).ignoreExceptions().untilAsserted(() ->
                 request("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type",

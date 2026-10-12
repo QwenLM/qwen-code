@@ -53,6 +53,7 @@ export interface ClaudePluginConfig {
   repository?: string;
   license?: string;
   keywords?: string[];
+  dependencies?: unknown;
   commands?: string | string[];
   agents?: string | string[];
   skills?: string | string[];
@@ -1069,6 +1070,8 @@ export function mergeClaudeConfigs(
     merged.repository = marketplacePlugin.repository;
   if (marketplacePlugin.license) merged.license = marketplacePlugin.license;
   if (marketplacePlugin.keywords) merged.keywords = marketplacePlugin.keywords;
+  if (marketplacePlugin.dependencies !== undefined)
+    merged.dependencies = marketplacePlugin.dependencies;
   if (marketplacePlugin.commands) merged.commands = marketplacePlugin.commands;
   if (marketplacePlugin.agents) merged.agents = marketplacePlugin.agents;
   if (marketplacePlugin.skills) merged.skills = marketplacePlugin.skills;

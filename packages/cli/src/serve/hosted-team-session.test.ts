@@ -19,10 +19,15 @@ import {
   parseTeamTask,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import {
+  HostedChildChains,
+  hostedOpenTeamChainMember,
+} from './hosted-member-chain.js';
+import { sessionMessageInputId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import {
   HostedTeamRefusal,
   HostedTeamSession,
-  hostedOpenTeamMembership,
   hostedTeamArgumentError,
   hostedTeamMembership,
   type HostedTeamStore,
@@ -257,18 +262,23 @@ describe('members', () => {
     await settle('run-alice');
     const records = () =>
       session.authority.extensionRecordsInDomain('team_state');
+    // H4e-b2: the open-team answer reads the run's chain root.
+    const openMember = () =>
+      hostedOpenTeamChainMember(
+        records(),
+        new HostedChildChains(
+          session.authority.extensionRecordsInDomain('child_run'),
+        ),
+        'run-alice',
+      );
     const alice = { teamName: 'review', name: 'alice' };
-    expect(hostedOpenTeamMembership(records(), 'run-alice')).toMatchObject(
-      alice,
-    );
+    expect(openMember()).toMatchObject({ name: 'alice' });
     await stopDeleteAtClosing('prompt:del');
     expect(teams.openTeam()?.lifecycle).toBe('closing');
-    expect(hostedOpenTeamMembership(records(), 'run-alice')).toMatchObject(
-      alice,
-    );
+    expect(openMember()).toMatchObject({ name: 'alice' });
     await teams.run('team_delete', {}, 'prompt:del');
     expect(teams.openTeam()).toBeUndefined();
-    expect(hostedOpenTeamMembership(records(), 'run-alice')).toBeUndefined();
+    expect(openMember()).toBeUndefined();
     expect(hostedTeamMembership(records(), 'run-alice')).toMatchObject(alice);
     expect(hostedTeamMembership(records(), 'run-bob')).toBeUndefined();
   });
@@ -411,7 +421,7 @@ describe('the board', () => {
         teams.run('task_update', { taskId: '1', owner: 'bob' }, 'prompt:u3'),
       ),
     ).toBe(
-      'Member "bob" has finished, so it can own only a completed task. If it did this task\'s work, set status "completed" with this owner; otherwise assign "leader" or a running member.',
+      'Member "bob" has finished. If it already did this task\'s work, from its launch prompt or a message you sent it, set status "completed" with this owner once its report is in. Otherwise give it the work with send_message to "bob" first, which continues it, and then update the task in the same turn.',
     );
     const assigned = await teams.run(
       'task_update',
@@ -422,7 +432,7 @@ describe('the board', () => {
       'Task #1 updated (status: in_progress, owner: alice).',
     );
     expect(assigned).toContain(
-      '"alice" was not notified: members learn of board changes only once the team mailbox lands, so give a member its work in its launch prompt, or send_message it, while it runs, with the task id that task_list shows beside its name (task_…).',
+      '"alice" was not notified: task_update records the board only. If alice does not already have this work, give it with send_message to "alice".',
     );
     expect(
       await refusal(
@@ -545,7 +555,7 @@ describe('the board', () => {
         ),
       ),
     ).toBe(
-      'Member "alice" has finished, so it can own only a completed task. If it did this task\'s work, set status "completed" with this owner; otherwise assign "leader" or a running member.',
+      'Member "alice" has finished. If it already did this task\'s work, from its launch prompt or a message you sent it, set status "completed" with this owner once its report is in. Otherwise give it the work with send_message to "alice" first, which continues it, and then update the task in the same turn.',
     );
     expect(
       await teams.run(
@@ -572,7 +582,7 @@ describe('the board', () => {
           ),
         ),
       ).toBe(
-        'Member "alice" has finished and cannot keep task #1 open. Set owner "" to unassign it, or assign "leader" or a running member.',
+        'Member "alice" cannot keep task #1 open: it has finished. If it already did this task\'s work, from its launch prompt or a message you sent it, set status "completed" with this owner once its report is in. Otherwise give it the work with send_message to "alice" first, which continues it, and then update the task in the same turn, or set owner "" to unassign it.',
       );
     // Naming the same owner again is still keeping it.
     expect(
@@ -599,7 +609,9 @@ describe('the board', () => {
           'prompt:failed',
         ),
       ),
-    ).toBe('Member "bob" has failed and cannot own a task.');
+    ).toBe(
+      'Member "bob" has failed without completing a run, so it did not do this task\'s work. Record the member that did it, or "leader".',
+    );
     await children.requestStop('run-carol');
     await children.settleCancelled('run-carol', { started: false });
     expect(
@@ -610,7 +622,9 @@ describe('the board', () => {
           'prompt:cancelled',
         ),
       ),
-    ).toBe('Member "carol" was cancelled and cannot own a task.');
+    ).toBe(
+      'Member "carol" was cancelled without completing a run, so it did not do this task\'s work. Record the member that did it, or "leader".',
+    );
     await teams.run(
       'task_update',
       { taskId: '3', status: 'completed' },
@@ -867,7 +881,7 @@ describe('the board', () => {
     ).toEqual(['prompt:call-team#1']);
   });
 
-  it('lists the board with filters and the roster with run states, stop reasons and running task ids', async () => {
+  it('lists the board with filters and the roster with run states, stop reasons and reachable task ids', async () => {
     await createTeam();
     await addMember('alice');
     await addMember('bob');
@@ -902,9 +916,10 @@ describe('the board', () => {
         '#2 [pending] — fix',
         '',
         '--- Team "review" members ---',
-        // Only a running member shows the task id send_message takes.
+        // A member that can still take work, running or continuable,
+        // shows its chain head's task id (H4e-b2 decision 2).
         `alice: running — ${children.taskIdOf('run-alice')}`,
-        'bob: completed',
+        `bob: completed — ${children.taskIdOf('run-bob')}`,
         // A failed run says why; a member the host never started reads
         // differently from one that failed its work.
         'carol: failed (creation_failed)',
@@ -1008,4 +1023,586 @@ it('rebuilds the team and its board from a reopened journal', async () => {
   expect(await reopened.run('task_list', {}, 'prompt:list')).toContain(
     '#1 [pending] — audit',
   );
+});
+
+// H4e-b2 decision 2: a member is its continuation chain; the roster names
+// the chain's first run and the member reads as its head.
+describe('members through their continuation chains', () => {
+  /** A send that continues or messages a member's chain, keyed by a call. */
+  function sendTo(childRunId: string, text: string, callKey: string) {
+    return children.sendToChild({
+      taskId: children.taskIdOf(childRunId),
+      text,
+      messageId: `msg_${callKey.replace(':', '_')}`,
+      continuationRunId: callKey,
+      executionCallId: callKey,
+      closing: false,
+    });
+  }
+
+  async function line(name: string): Promise<string> {
+    const listing = await teams.run('task_list', {}, 'turn:list');
+    return listing.split('\n').find((each) => each.startsWith(`${name}: `))!;
+  }
+
+  it('reads a member from its chain head, through a continuation that never started', async () => {
+    await createTeam();
+    await addMember('alice');
+    await settle('run-alice');
+    expect(await sendTo('run-alice', 'fix it', 'turn-1:c1')).toMatchObject({
+      kind: 'continuation',
+    });
+    expect(teams.memberView('run-alice').head?.childRunId).toBe('turn-1:c1');
+    expect(await line('alice')).toBe(
+      `alice: running — ${children.taskIdOf('turn-1:c1')}`,
+    );
+    expect(
+      await refusal(teams.run('team_delete', {}, 'turn:delete')),
+    ).toContain('still has running members: alice');
+    await settle('turn-1:c1');
+    // The next continuation is committed and messaged, then never starts.
+    await sendTo('run-alice', 'and the docs', 'turn-2:c2');
+    expect(
+      await sendTo('turn-2:c2', 'also the changelog', 'turn-2:m1'),
+    ).toMatchObject({ kind: 'message' });
+    await children.settleFailed('turn-2:c2', {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+    expect(teams.memberView('run-alice').head?.childRunId).toBe('turn-1:c1');
+    expect(await line('alice')).toBe(
+      `alice: completed — ${children.taskIdOf('turn-1:c1')} (its latest continuation never started (creation_failed), so the work it carried did not arrive, nor did 1 message sent to it)`,
+    );
+    await teams.run(
+      'task_create',
+      { subject: 'docs', description: 'docs' },
+      'turn:create',
+    );
+    // The work the never-started continuation carried did not arrive, so
+    // the refusal has no branch that skips the send — even in its Turn.
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'alice' },
+          'turn-2:own',
+          'turn-2:',
+        ),
+      ),
+    ).toBe(
+      'Member "alice" has finished, and its latest continuation never started (creation_failed), so the work it carried did not arrive, nor did 1 message sent to it. Send that work and those messages again with send_message to "alice", then update the task in the same turn.',
+    );
+  });
+
+  it('shows stop requests and keeps a stopped member off open work', async () => {
+    await createTeam();
+    await addMember('bob');
+    await teams.run(
+      'task_create',
+      { subject: 'audit', description: 'audit' },
+      'turn:create',
+    );
+    await children.requestStop('run-bob');
+    expect(await line('bob')).toBe('bob: running (stopping)');
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'bob' },
+          'turn:own-stopping',
+        ),
+      ),
+    ).toBe(
+      'Member "bob" is being stopped and cannot own a task. Launch a new member for this work.',
+    );
+    await settle('run-bob');
+    expect(await line('bob')).toBe('bob: completed (stop requested)');
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'bob' },
+          'turn:own-stopped',
+        ),
+      ),
+    ).toBe(
+      'Member "bob" completed after a stop was requested, so it cannot be continued. If it did this task\'s work, set status "completed" with this owner; otherwise launch a new member for it.',
+    );
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '1', status: 'completed', owner: 'bob' },
+        'turn:done',
+      ),
+    ).toBe('Task #1 updated (status: completed, owner: bob).');
+  });
+
+  it('records a member that this Turn gave work, by a continuation or a message', async () => {
+    await createTeam();
+    await addMember('alice');
+    await addMember('bob');
+    await settle('run-alice');
+    for (const subject of ['fix', 'test'])
+      await teams.run(
+        'task_create',
+        { subject, description: subject },
+        `turn:create-${subject}`,
+      );
+    // A continuation from turn-1 gave alice work: it is recorded whether
+    // the continuation still runs or has completed since.
+    await sendTo('run-alice', 'fix #1', 'turn-1:c1');
+    await settle('turn-1:c1');
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '1', status: 'in_progress', owner: 'alice' },
+        'turn-1:own',
+        'turn-1:',
+      ),
+    ).toContain(
+      'Task #1 updated (status: in_progress, owner: alice). "alice" was not notified: task_update records the board only. A send_message earlier in this turn gave alice work; if it did not carry this task, give it with send_message to "alice".',
+    );
+    // A message from turn-1 to running bob, handed over and read: bob is
+    // recorded after it completed.
+    const messages = new HostedSessionMessageSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      children,
+      undefined,
+    );
+    await sendTo('run-bob', 'test #2', 'turn-1:m1');
+    await children.dispatchStarted('run-bob', {
+      dispatchId: 'dispatch-run-bob',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach('run-bob', 'session-run-bob');
+    await messages.handover('msg_turn-1_m1', 'session-run-bob');
+    await messages.accepted(
+      'msg_turn-1_m1',
+      sessionMessageInputId('msg_turn-1_m1'),
+    );
+    await children.settleCompleted('run-bob', {
+      result: Buffer.from('done', 'utf8'),
+      receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+      messageCount: 1,
+    });
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '2', status: 'in_progress', owner: 'bob' },
+        'turn-1:own-bob',
+        'turn-1:',
+      ),
+    ).toContain('Task #2 updated (status: in_progress, owner: bob).');
+    // A later Turn gave neither any work: one conditional refusal, which
+    // never claims which task a past send carried.
+    await teams.run(
+      'task_update',
+      { taskId: '2', status: 'pending', owner: '' },
+      'turn-2:park',
+      'turn-2:',
+    );
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '2', status: 'in_progress', owner: 'bob' },
+          'turn-2:own-bob',
+          'turn-2:',
+        ),
+      ),
+    ).toBe(
+      'Member "bob" has finished. If it already did this task\'s work, from its launch prompt or a message you sent it, set status "completed" with this owner once its report is in. Otherwise give it the work with send_message to "bob" first, which continues it, and then update the task in the same turn.',
+    );
+  });
+
+  it('keeps a stopped member off open work even after this Turn gave it work', async () => {
+    await createTeam();
+    await addMember('alice');
+    await settle('run-alice');
+    await teams.run(
+      'task_create',
+      { subject: 'fix', description: 'fix' },
+      'turn:create',
+    );
+    await sendTo('run-alice', 'fix #1', 'turn-1:c1');
+    await children.requestStop('turn-1:c1');
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'alice' },
+          'turn-1:own',
+          'turn-1:',
+        ),
+      ),
+    ).toBe(
+      // Stopped before it attached, the continuation may still end without
+      // starting, which hands alice back to her first run.
+      'Member "alice" is being stopped before its latest continuation started. If that continuation ends without starting, the member can take work again: check task_list once it settles.',
+    );
+    await children.dispatchStarted('turn-1:c1', {
+      dispatchId: 'dispatch-turn-1:c1',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach('turn-1:c1', 'session-turn-1:c1');
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'alice' },
+          'turn-1:own-attached',
+          'turn-1:',
+        ),
+      ),
+    ).toBe(
+      'Member "alice" is being stopped and cannot own a task. Launch a new member for this work.',
+    );
+    await children.settleCompleted('turn-1:c1', {
+      result: Buffer.from('done', 'utf8'),
+      receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+    });
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'alice' },
+          'turn-1:own-again',
+          'turn-1:',
+        ),
+      ),
+    ).toContain('completed after a stop was requested');
+  });
+
+  it('keeps a finished owner on a task this Turn gave it work for', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'fix', description: 'fix' },
+      'turn:create',
+    );
+    await teams.run(
+      'task_update',
+      { taskId: '1', status: 'in_progress', owner: 'alice' },
+      'turn:own',
+    );
+    await settle('run-alice');
+    await sendTo('run-alice', 'and the tests', 'turn-3:c1');
+    await settle('turn-3:c1');
+    // Moving the kept owner's task to another open status: accepted in
+    // the Turn that gave the work, refused in a later one.
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '1', status: 'pending' },
+        'turn-3:park',
+        'turn-3:',
+      ),
+    ).toContain('Task #1 updated (status: pending, owner: alice).');
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress' },
+          'turn-4:resume',
+          'turn-4:',
+        ),
+      ),
+    ).toContain('cannot keep task #1 open: it has finished');
+  });
+
+  it('does not count a message of this Turn that was cancelled', async () => {
+    await createTeam();
+    await addMember('bob');
+    await teams.run(
+      'task_create',
+      { subject: 'test', description: 'test' },
+      'turn:create',
+    );
+    const messages = new HostedSessionMessageSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      children,
+      undefined,
+    );
+    await sendTo('run-bob', 'test it', 'turn-1:m1');
+    await messages.settle('msg_turn-1_m1', 'cancelled');
+    await children.dispatchStarted('run-bob', {
+      dispatchId: 'dispatch-run-bob',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach('run-bob', 'session-run-bob');
+    await children.settleCompleted('run-bob', {
+      result: Buffer.from('done', 'utf8'),
+      receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+      messageCount: 1,
+    });
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'bob' },
+          'turn-1:own',
+          'turn-1:',
+        ),
+      ),
+    ).toContain('Member "bob" has finished. If it already did');
+  });
+
+  it('does not count a message of this Turn that its target rejected', async () => {
+    await createTeam();
+    await addMember('bob');
+    await teams.run(
+      'task_create',
+      { subject: 'test', description: 'test' },
+      'turn:create',
+    );
+    const messages = new HostedSessionMessageSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      children,
+      undefined,
+    );
+    await sendTo('run-bob', 'test it', 'turn-1:m1');
+    await children.dispatchStarted('run-bob', {
+      dispatchId: 'dispatch-run-bob',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach('run-bob', 'session-run-bob');
+    await messages.handover('msg_turn-1_m1', 'session-run-bob');
+    await messages.settle('msg_turn-1_m1', 'rejected');
+    await children.settleCompleted('run-bob', {
+      result: Buffer.from('done', 'utf8'),
+      receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+      messageCount: 1,
+    });
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'bob' },
+          'turn-1:own',
+          'turn-1:',
+        ),
+      ),
+    ).toContain('Member "bob" has finished. If it already did');
+  });
+
+  it('does not count the launch of this Turn as work given', async () => {
+    // Decision 7 counts sends: a member launched and finished in this Turn
+    // did the work its launch prompt carried, which the lead records as
+    // completed once the report is in.
+    await createTeam();
+    await addMember('carol', 'turn-1:carol');
+    await settle('turn-1:carol');
+    await teams.run(
+      'task_create',
+      { subject: 'test', description: 'test' },
+      'turn:create',
+    );
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'carol' },
+          'turn-1:own',
+          'turn-1:',
+        ),
+      ),
+    ).toContain('Member "carol" has finished. If it already did');
+  });
+
+  it('records an ended member on the task the call completes when a run of its chain completed', async () => {
+    // #13846 records who did the work: alice's first run did task #1, so a
+    // later continuation that failed, or one being stopped, does not take
+    // that away.
+    await createTeam();
+    await addMember('alice');
+    await addMember('bob');
+    for (const subject of ['audit', 'fix'])
+      await teams.run(
+        'task_create',
+        { subject, description: subject },
+        `turn:create-${subject}`,
+      );
+    await settle('run-alice');
+    await settle('run-bob');
+    await sendTo('run-alice', 'more', 'turn-1:c1');
+    await children.dispatchStarted('turn-1:c1', {
+      dispatchId: 'dispatch-turn-1:c1',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach('turn-1:c1', 'session-turn-1:c1');
+    await children.settleFailed('turn-1:c1', {
+      stopReason: 'child_failed',
+      reason: null,
+      started: true,
+    });
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '1', status: 'completed', owner: 'alice' },
+        'turn-2:done',
+        'turn-2:',
+      ),
+    ).toBe('Task #1 updated (status: completed, owner: alice).');
+    await sendTo('run-bob', 'more', 'turn-1:c2');
+    await children.dispatchStarted('turn-1:c2', {
+      dispatchId: 'dispatch-turn-1:c2',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach('turn-1:c2', 'session-turn-1:c2');
+    await children.requestStop('turn-1:c2');
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '2', status: 'completed', owner: 'bob' },
+        'turn-2:done-bob',
+        'turn-2:',
+      ),
+    ).toBe('Task #2 updated (status: completed, owner: bob).');
+    // Open work still needs a member that can take it.
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress' },
+          'turn-2:reopen',
+          'turn-2:',
+        ),
+      ),
+    ).toBe(
+      'Member "alice" cannot keep task #1 open: it has failed. Launch a new member for this work, set owner "" to unassign it, or assign "leader".',
+    );
+  });
+
+  it('answers an update that restates its owner by what the member can take', async () => {
+    await createTeam();
+    await addMember('alice');
+    await addMember('bob');
+    for (const subject of ['fix', 'test'])
+      await teams.run(
+        'task_create',
+        { subject, description: subject },
+        `turn:create-${subject}`,
+      );
+    await settle('run-alice');
+    // The send and the owner land together, then the continuation never
+    // starts: restating the owner is not checked again, so the answer must
+    // not suggest the work may already be there.
+    await sendTo('run-alice', 'fix #1', 'turn-1:c1');
+    await teams.run(
+      'task_update',
+      { taskId: '1', status: 'in_progress', owner: 'alice' },
+      'turn-1:own',
+      'turn-1:',
+    );
+    await children.settleFailed('turn-1:c1', {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+    expect(
+      await teams.run(
+        'task_update',
+        {
+          taskId: '1',
+          status: 'in_progress',
+          owner: 'alice',
+          description: 'fix it now',
+        },
+        'turn-1:restate',
+        'turn-1:',
+      ),
+    ).toBe(
+      'Task #1 updated (status: in_progress, owner: alice). "alice" was not notified: task_update records the board only. Its latest continuation never started (creation_failed), so the work it carried did not arrive. Send that work again with send_message to "alice".',
+    );
+    // A member that ended is never pointed to a send.
+    await teams.run(
+      'task_update',
+      { taskId: '2', status: 'in_progress', owner: 'bob' },
+      'turn-1:own-bob',
+      'turn-1:',
+    );
+    await children.settleFailed('run-bob', {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+    expect(
+      await teams.run(
+        'task_update',
+        { taskId: '2', owner: 'bob', description: 'test it now' },
+        'turn-1:restate-bob',
+        'turn-1:',
+      ),
+    ).toBe(
+      'Task #2 updated (status: in_progress, owner: bob). "bob" was not notified: task_update records the board only. bob cannot take more work: it has failed.',
+    );
+  });
+
+  it('counts only work given to the member itself', async () => {
+    await createTeam();
+    await addMember('alice');
+    await addMember('bob');
+    await teams.run(
+      'task_create',
+      { subject: 'fix', description: 'fix' },
+      'turn:create',
+    );
+    await settle('run-alice');
+    await settle('run-bob');
+    // This Turn gave bob work, not alice.
+    await sendTo('run-bob', 'fix #1', 'turn-1:c1');
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'alice' },
+          'turn-1:own',
+          'turn-1:',
+        ),
+      ),
+    ).toContain('Member "alice" has finished. If it already did');
+  });
+
+  it('refuses team_delete while a member is being stopped', async () => {
+    await createTeam();
+    await addMember('alice');
+    await children.requestStop('run-alice');
+    expect(
+      await refusal(teams.run('team_delete', {}, 'turn:delete')),
+    ).toContain('still has running members: alice');
+  });
+
+  it('asks again for the work of a continuation a user cancelled before it started only if still wanted', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'fix', description: 'fix' },
+      'turn:create',
+    );
+    await settle('run-alice');
+    await sendTo('run-alice', 'fix #1', 'turn-1:c1');
+    await children.requestStop('turn-1:c1');
+    await children.settleCancelled('turn-1:c1', { started: false });
+    expect(await line('alice')).toBe(
+      `alice: completed — ${children.taskIdOf('run-alice')} (its latest continuation was cancelled before it started (stop_requested), so the work it carried did not arrive)`,
+    );
+    expect(
+      await refusal(
+        teams.run(
+          'task_update',
+          { taskId: '1', status: 'in_progress', owner: 'alice' },
+          'turn-2:own',
+          'turn-2:',
+        ),
+      ),
+    ).toBe(
+      'Member "alice" has finished, and its latest continuation was cancelled before it started (stop_requested), so the work it carried did not arrive. If that work is still wanted, send it again with send_message to "alice", then update the task in the same turn.',
+    );
+  });
 });
