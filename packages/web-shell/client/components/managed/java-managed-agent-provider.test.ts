@@ -10,6 +10,90 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('reads tasks without identity scope but only exposes cancellation with a product scope', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse({ data: [], hasMore: false }));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    expect(provider.tasks).toBeDefined();
+    expect(provider.tasks!.cancel).toBeUndefined();
+    expect(
+      createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        productScope: '  ',
+      }).tasks!.cancel,
+    ).toBeUndefined();
+    const abort = new AbortController();
+    await provider.tasks!.list('s1', {
+      clientId: 'client',
+      cursor: 'opaque',
+      limit: 50,
+      signal: abort.signal,
+    });
+    expect(String(fetchImpl.mock.calls[0][0])).toContain('/tasks/query');
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
+      sessionId: 's1',
+      cursor: 'opaque',
+      limit: 50,
+    });
+    expect(fetchImpl.mock.calls[0][1]?.signal).toBe(abort.signal);
+  });
+
+  it('preserves the task cancel key and validates operation identity and type', async () => {
+    const operation = {
+      operationId: 'op1',
+      sessionId: 's1',
+      taskId: 'task1',
+      type: 'task_cancel',
+      status: 'pending',
+      replayed: false,
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(operation));
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    expect(
+      await provider.tasks!.cancel!.submit('s1', 'task1', {
+        clientId: 'client',
+        idempotencyKey: 'original',
+      }),
+    ).toEqual(operation);
+    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual(
+      expect.objectContaining({
+        sessionId: 's1',
+        taskId: 'task1',
+        idempotencyKey: 'original',
+      }),
+    );
+    expect(
+      await provider.tasks!.cancel!.query('s1', 'task1', 'op1', {
+        clientId: 'client',
+      }),
+    ).toEqual(operation);
+    fetchImpl.mockImplementation(async () =>
+      jsonResponse({ ...operation, taskId: 'different' }),
+    );
+    await expect(
+      provider.tasks!.cancel!.query('s1', 'task1', 'op1', {
+        clientId: 'client',
+      }),
+    ).rejects.toThrow('identity mismatch');
+    fetchImpl.mockImplementation(async () =>
+      jsonResponse({ ...operation, type: 'cancel' }),
+    );
+    await expect(
+      provider.tasks!.cancel!.query('s1', 'task1', 'op1', {
+        clientId: 'client',
+      }),
+    ).rejects.toThrow('identity mismatch');
+  });
   it('uses the exact cwd request and key and queries its accepted operation', async () => {
     const operation = {
       operationId: 'op-cwd',
@@ -1007,10 +1091,15 @@ describe('createJavaManagedAgentProvider', () => {
 
     expect(
       (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
-    ).toEqual({ canSend: true, canCancel: false, workspaceTurns: true });
+    ).toEqual({
+      canSend: true,
+      canCancel: false,
+      workspaceTurns: true,
+      tasks: true,
+    });
     expect(
       (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
-    ).toEqual({ canSend: false, canCancel: false });
+    ).toEqual({ canSend: false, canCancel: false, tasks: true });
   });
 
   it.each([true, false])(
@@ -1044,6 +1133,7 @@ describe('createJavaManagedAgentProvider', () => {
       ).toEqual({
         canSend: false,
         canCancel: true,
+        tasks: true,
         ...(workspaceTurns ? { workspaceTurns: true } : {}),
       });
     },
@@ -1084,10 +1174,20 @@ describe('createJavaManagedAgentProvider', () => {
       });
       expect(
         (await provider.getSession('shell-1', { clientId: 'c' })).capabilities,
-      ).toEqual({ canSend: enabled, canCancel: false, workspaceTurns: true });
+      ).toEqual({
+        canSend: enabled,
+        canCancel: false,
+        workspaceTurns: true,
+        tasks: true,
+      });
       expect(
         (await provider.getSession('shell-1', { clientId: 'c' })).capabilities,
-      ).toEqual({ canSend: false, canCancel: true, workspaceTurns: true });
+      ).toEqual({
+        canSend: false,
+        canCancel: true,
+        workspaceTurns: true,
+        tasks: true,
+      });
     },
   );
 

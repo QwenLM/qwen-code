@@ -177,6 +177,43 @@ export class JavaManagedAgentClient {
     return this.post('/actions/query', request, signal);
   }
 
+  listTasks(
+    request: Schemas['WebShellTaskQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellTaskPage']>(
+      '/tasks/query',
+      request,
+      signal,
+    );
+  }
+
+  getTask(request: Schemas['WebShellTaskGetRequest'], signal?: AbortSignal) {
+    return this.post<Schemas['WebShellTask']>('/tasks/get', request, signal);
+  }
+
+  listTaskEvents(
+    request: Schemas['WebShellTaskEventQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellTaskEventPage']>(
+      '/tasks/events/query',
+      request,
+      signal,
+    );
+  }
+
+  cancelTask(
+    request: Schemas['WebShellTaskCancelRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellCommandOperation']>(
+      '/tasks/cancel',
+      request,
+      signal,
+    );
+  }
+
   respondAction(
     request: Schemas['WebShellActionRespondRequest'],
     signal?: AbortSignal,

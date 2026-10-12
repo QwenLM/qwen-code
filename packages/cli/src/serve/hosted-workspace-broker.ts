@@ -12,7 +12,7 @@ import type {
   RawFileHistoryOperation,
   HostedFileHistoryState,
 } from './hosted-file-history-protocol.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type {
@@ -71,6 +71,7 @@ export function isHostedFileHistoryRefusal(
 
 export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
+  private leaseAcquired = false;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -83,6 +84,10 @@ export class HostedWorkspaceBroker {
 
   get runtimeSessionId(): string {
     return this.identity.runtimeSessionId;
+  }
+
+  get acquired(): boolean {
+    return this.leaseAcquired;
   }
 
   constructor(
@@ -139,7 +144,8 @@ export class HostedWorkspaceBroker {
   }
 
   async warm(): Promise<void> {
-    await this.request('/runtimes:warm', {});
+    const response = await this.request('/runtimes:warm', {});
+    if (response['runtime'] !== undefined) this.readRuntime(response);
   }
 
   async authorizeLifecycle(): Promise<void> {
@@ -160,9 +166,15 @@ export class HostedWorkspaceBroker {
           }
         : {}),
     });
+    if (response['acquired'] !== true)
+      throw new Error('Runtime did not acquire the Session.');
+    this.readRuntime(response);
+    this.leaseAcquired = true;
+  }
+
+  private readRuntime(response: Record<string, unknown>): void {
     const scope = object(response['scope']);
     if (
-      response['acquired'] !== true ||
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
       scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST
@@ -624,16 +636,27 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async release(options?: { readonly drain?: boolean }): Promise<void> {
+  async release(
+    options?:
+      | { bindingId: string; generation: string; readonly drain?: boolean }
+      | { readonly drain?: boolean },
+  ): Promise<void> {
+    const expected = options && 'bindingId' in options ? options : undefined;
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release`,
-      // #13856: the drain arm stops the Session's live background holds
-      // before releasing; a routine release is refused
-      // `runtime_session_held` while a run is provably live.
-      options?.drain === true ? { drain: true } : {},
+      {
+        ...(expected
+          ? {
+              cleanupBindingId: expected.bindingId,
+              cleanupGeneration: expected.generation,
+            }
+          : {}),
+        ...(options?.drain === true ? { drain: true } : {}),
+      },
     );
     if (response['released'] !== true)
       throw new Error('Runtime Session release is unconfirmed.');
+    this.leaseAcquired = false;
   }
 
   private async request(
@@ -708,4 +731,19 @@ export class HostedWorkspaceBroker {
       throw new Error('Runtime Broker response identity changed.');
     return parsed;
   }
+}
+
+/**
+ * The Broker admits only path-safe Runtime Session ids, while a wake
+ * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
+ * such an id is mapped to a stable path-safe digest instead of being
+ * refused at acquire. The mapped form is path-safe itself, so layering
+ * this over an id that was already mapped stays idempotent.
+ */
+export function hostedRuntimeSessionId(promptId: string): string {
+  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
+    promptId !== '.' &&
+    !promptId.includes('..')
+    ? promptId
+    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
 }
