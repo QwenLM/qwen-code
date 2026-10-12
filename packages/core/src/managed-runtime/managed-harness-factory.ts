@@ -268,6 +268,17 @@ export interface ManagedHarnessHandle {
     options?: { readonly timedOut?: boolean },
   ): Promise<HarnessCheckpointV1 | null>;
   /**
+   * Stamps decision 4's durable lock on the parked command wait's group
+   * at detection time — before its first tool result commits. A crash in
+   * the window between the result and its fold keeps the group's stamp
+   * either way, so a replacement owner refuses the next command; the
+   * evidence of that refusal is structural, never a scan of journaled
+   * text. No-op where the open durable wait is not a command wait, and
+   * never folds any run. Restating it on an already-stamped group is a
+   * silent replay.
+   */
+  markCommandWaitTimeout(): Promise<HarnessCheckpointV1 | null>;
+  /**
    * Commits safety point C: an admitted Runtime tool as `await_runtime` with
    * `durable_wait`. The original executionCallId is dispatched at most once.
    */
@@ -1127,6 +1138,51 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         `harness:${checkpoint.continuation.phase}:${this.activation.activationId}:${commandId}:${identity.coveredSequence}`,
         checkpoint,
         advanced ? null : HARNESS_DURABLE_WAIT_BOUNDARY,
+      );
+      return checkpoint;
+    });
+  }
+
+  async markCommandWaitTimeout(): Promise<HarnessCheckpointV1 | null> {
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const latest = this.authority.latestCheckpoint;
+      if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY) {
+        return null;
+      }
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      if (previous.continuation.phase !== 'await_command') {
+        return null;
+      }
+      if (
+        previous.commandWait === null ||
+        previous.commandWait.timedOut === true
+      ) {
+        return previous;
+      }
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint: HarnessCheckpointV1 = {
+        ...previous,
+        commandWait: {
+          ...previous.commandWait,
+          timedOut: true,
+        },
+        identity: {
+          ...previous.identity,
+          checkpointId: identity.checkpointId,
+          coveredSequence: identity.coveredSequence,
+          previousCheckpointId: identity.previousCheckpointId,
+        },
+        resume: {
+          ...previous.resume,
+          throughSequence: identity.coveredSequence,
+        },
+      };
+      await this.commitHarnessCheckpoint(
+        `harness:await_command:${this.activation.activationId}:timedout:${identity.coveredSequence}`,
+        checkpoint,
+        HARNESS_DURABLE_WAIT_BOUNDARY,
       );
       return checkpoint;
     });

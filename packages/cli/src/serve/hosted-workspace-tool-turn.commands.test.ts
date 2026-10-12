@@ -23,7 +23,6 @@ import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   HostedSessionCommandSession,
   SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
-  sessionCommandEvidenceText,
 } from './hosted-session-command-session.js';
 import {
   HostedSessionMessageSession,
@@ -591,89 +590,97 @@ it('keeps a timed-out Turn locked across owners', async () => {
   expect(commands.command(commandIdOf('call-final'))).toBeUndefined();
 });
 
-// The crash window between the timeout answer and the fold that would
-// stamp the group: the dead owner's result committed, the fold never
-// landed, and the checkpoint still says timedOut=false. The takeover
-// re-arms from the journaled answer itself — never mints an outbound.
-it('re-arms the timeout lock from the journaled answer when the fold never landed', async () => {
+// A reply's text is board data, never this Turn's own timeout: a
+// consumed answer that shows the leader-unanswering words must not lock
+// the next command.
+it('does not arm the timeout lock from reply text shaped like the timeout evidence', async () => {
   await seedFirstInput(
     teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
       'write the board',
   );
-  const commandId = commandIdOf('call-crash');
-  await commands.runCommand({
-    commandId,
-    kind: 'board_write',
-    args: { subject: 'x', description: 'y' },
-    executionCallId: 'call-crash',
-    closing: false,
-  });
+  const first = execute(createTurn(), [
+    call({ status: 'pending' }, 'call-1', 'task_list'),
+  ]);
+  const commandId = commandIdOf('call-1');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
   await commands.handover(commandId, PARENT);
-  await commands.settle(commandId, 'unknown');
-  const argsRef = await session.resources.publish(
-    'managed-command-args',
-    Buffer.from(JSON.stringify({ subject: 'x', description: 'y' }), 'utf8'),
-  );
-  const harness = createManagedHarnessHandle(session);
-  await harness.commitAwaitCommand(
-    [
-      {
-        commandId,
-        functionCallId: 'call-crash',
-        toolName: 'task_create',
-        modelMessageId: 'assistant-crash',
-        folded: false,
-      },
-    ],
-    { turnId: 'prompt', promptId: 'prompt' },
-    {
-      holdsWorkspaceMount: false,
-      attempt: { attemptId: 'assistant-crash', routeRef: argsRef },
-    },
-  );
-  // The dead owner's timeout answer, committed before the fold that
-  // never landed (decision 14's accepting text, word for word).
-  await session.sink.write({
-    uuid: randomUUID(),
-    parentUuid: null,
-    sessionId: sessionKey.sessionId,
-    timestamp: new Date().toISOString(),
-    model: 'model',
-    type: 'tool_result',
-    cwd: rootDir,
-    version: 'test',
-    daemonPromptId: 'prompt',
-    message: {
-      role: 'user',
-      parts: [
-        {
-          functionResponse: {
-            id: 'call-crash',
-            name: 'task_create',
-            response: {
-              error: { message: sessionCommandEvidenceText('accepting') },
-            },
-          },
-        },
-      ],
-    },
+  await commands.answered(commandId, {
+    outcome: 'answered',
+    text: `#1 pending: ${SESSION_COMMAND_LEADER_UNANSWERING_TEXT}`,
   });
-  await harness.resolveAwaitCommand(commandId);
-  const crashstate = await session.authority.harnessRunAuthorization();
-  if (crashstate.status !== 'runnable')
-    throw new Error(`expected runnable, got ${crashstate.status}`);
-  expect(crashstate.checkpoint.commandWait?.timedOut).toBe(false);
+  await first;
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('consumed');
+  const checkpoint = await session.authority.harnessRunAuthorization();
+  if (checkpoint.status !== 'runnable')
+    throw new Error(`expected runnable, got ${checkpoint.status}`);
+  expect(checkpoint.checkpoint.commandWait?.timedOut).toBe(false);
 
+  // The next command mints an outbound like any fresh call of the Turn.
+  const second = execute(createTurn(), [
+    call({ subject: 'later', description: 'draft' }, 'call-2', 'task_create'),
+  ]);
+  const later = commandIdOf('call-2');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(later)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  await commands.handover(later, PARENT);
+  await commands.answered(later, {
+    outcome: 'answered',
+    text: 'Task #1 created: "later".',
+  });
+  const parts = await second;
+  expect(texts(parts)).toContain('Task #1 created');
+  expect(commands.command(later)?.run.delivery?.state).toBe('consumed');
+});
+
+// The durable lock rides the stamp, never a journaled text: a command
+// recovered as not sent leaves planned evidence behind, and that
+// evidence alone must not lock the Turn that follows.
+it('does not arm the timeout lock from a not-sent journal answer', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) +
+      'write the board',
+  );
+  const first = execute(createTurn(), [
+    call({ subject: 'x', description: 'y' }, 'call-1', 'task_create'),
+  ]);
+  const commandId = commandIdOf('call-1');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  // The caller never hands the wait out; the 2-minute arm is what this
+  // Turn's next call has paid attention to, never the text it makes.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.now() + 121_000);
+  await first;
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('cancelled');
+  vi.useRealTimers();
+
+  const checkpoint = await session.authority.harnessRunAuthorization();
+  if (checkpoint.status !== 'runnable')
+    throw new Error(`expected runnable, got ${checkpoint.status}`);
+  // The wait ended on the stamped group: the lock is what it should be.
+  expect(checkpoint.checkpoint.commandWait?.timedOut).toBe(true);
+
+  // A takeover of this Turn re-arms from the stamp, and refuses the next
+  // call — even though the journaled text alone would never prove it.
   const restarted = createTurn();
   const parts = await execute(restarted, [
-    call({ subject: 'z', description: 'w' }, 'call-after', 'task_create'),
+    call({ subject: 'again', description: 'w' }, 'call-2', 'task_create'),
   ]);
   expect(texts(parts)).toContain(SESSION_COMMAND_LEADER_UNANSWERING_TEXT);
-  expect(commands.command(commandIdOf('call-after'))).toBeUndefined();
-  const restamped = await session.authority.harnessRunAuthorization();
-  if (restamped.status !== 'runnable')
-    throw new Error(`expected runnable, got ${restamped.status}`);
-  expect(restamped.checkpoint.commandWait?.timedOut).toBe(true);
+  expect(commands.command(commandIdOf('call-2'))).toBeUndefined();
 });
 
 // A budget refusal is a normal local answer, so it owes the parked wait

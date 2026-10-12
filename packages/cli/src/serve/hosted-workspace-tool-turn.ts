@@ -4520,34 +4520,11 @@ export class HostedWorkspaceToolTurn {
     if (this.commandTimedOut) return;
     const authorization =
       await this.session.authority.harnessRunAuthorization();
-    if (authorization.status !== 'runnable') return;
-    if (authorization.checkpoint.commandWait?.timedOut === true) {
+    if (
+      authorization.status === 'runnable' &&
+      authorization.checkpoint.commandWait?.timedOut === true
+    )
       this.commandTimedOut = true;
-      return;
-    }
-    // The lock's own evidence is the journaled timeout answer, committed
-    // before the fold that would carry the stamp into the group. A crash
-    // between the two leaves the group unstamped — the recovering owner
-    // re-arms from this prompt's journaled evidence instead of letting
-    // the next command mint a fresh outbound.
-    const texts = [
-      SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
-      sessionCommandEvidenceText('planned'),
-      sessionCommandEvidenceText('accepting'),
-    ];
-    const projected = await this.session.sink.project();
-    for (const entry of projected) {
-      if (entry.daemonPromptId !== this.promptId) continue;
-      if (entry.type !== 'tool_result') continue;
-      if (
-        texts.every(
-          (text) => !JSON.stringify(entry.message?.parts ?? []).includes(text),
-        )
-      )
-        continue;
-      this.commandTimedOut = true;
-      return;
-    }
   }
 
   private async acceptSessionCommand(
@@ -4679,6 +4656,10 @@ export class HostedWorkspaceToolTurn {
       }
       if (Date.now() >= deadline) {
         this.commandTimedOut = true;
+        // The lock is stamped at detection time — before this Turn's next
+        // commit, so a crash in the settle/tool_result window between the
+        // accepting-to-unknown write and its answer can never un-lock it.
+        await this.harness.markCommandWaitTimeout();
         const parts = await this.answerCommandByJournal(
           commands,
           request,
@@ -4910,6 +4891,10 @@ export class HostedWorkspaceToolTurn {
         }
         if (Date.now() >= deadline) {
           this.commandTimedOut = true;
+          // The lock is stamped at detection time — before the journal
+          // arm's next commit, so a crash between the settle and the
+          // tool_result write can never un-lock it.
+          await this.harness.markCommandWaitTimeout();
           await this.answerCommandByJournal(
             commands,
             request,

@@ -1981,6 +1981,29 @@ describe('command wait', () => {
     await session.close();
   });
 
+  it('stamps the timeout lock at detection time without folding any run', async () => {
+    const session = await open(await createWorkspace());
+    const { handle, turn } = await modelOutputCommittedTurn(session);
+    await handle.commitAwaitCommand(
+      [
+        commandWaitRun('cmd_1'),
+        commandWaitRun('cmd_2', { functionCallId: 'fc-2' }),
+      ],
+      turn,
+      { holdsWorkspaceMount: false },
+    );
+    const stamped = await handle.markCommandWaitTimeout();
+    expect(stamped?.commandWait?.timedOut).toBe(true);
+    expect(stamped?.commandWait?.runs.every((run) => !run.folded)).toBe(true);
+    expect(stamped?.continuation.phase).toBe('await_command');
+    // Restating on an already-stamped group answers the same checkpoint.
+    const restated = await handle.markCommandWaitTimeout();
+    expect(restated?.identity.checkpointId).toBe(
+      stamped?.identity.checkpointId,
+    );
+    await session.close();
+  });
+
   it('resolves nothing outside the command wait', async () => {
     const session = await open(await createWorkspace());
     const { handle } = await modelOutputCommittedTurn(session);
