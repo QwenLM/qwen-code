@@ -84,12 +84,42 @@ export function broadcastMessageId(params: {
     .slice(0, 32)}`;
 }
 
+/**
+ * Decision 8 (b3c): the message id of one member message's recipient. The
+ * lead alone mints it while it executes a `member_message` command:
+ * `msgc_` + 32 hex of sha256(`leadSessionId \0 commandId \0 position`),
+ * where `position` is the recipient's 1-based roster position. Digesting
+ * the command id lets a re-driven `execute` probe which positions the
+ * first run already sent, exactly as H4e-b2's broadcast recovery does.
+ */
+export function memberMessageId(params: {
+  readonly leadSessionId: string;
+  readonly commandId: string;
+  readonly position: number;
+}): string {
+  return `msgc_${createHash('sha256')
+    .update(`${params.leadSessionId}\0${params.commandId}\0${params.position}`)
+    .digest('hex')
+    .slice(0, 32)}`;
+}
+
+/** The id prefix under which only a lead's member messages live (decision 8). */
+export const MEMBER_MESSAGE_ID_PREFIX = 'msgc_';
+
+/**
+ * Decision 8's bounds: member messages share H4d-b's 8 in flight and 64
+ * per run on the recipient's head with the lead's own messages, and take
+ * at most 4 in flight and 16 in all per receiving run, so the lead always
+ * keeps room for its own.
+ */
+export const HOSTED_MEMBER_MESSAGE_IN_FLIGHT = 4;
+export const HOSTED_MEMBER_MESSAGE_PER_RUN = 16;
+
 const PREAMBLE_BODY_HEAD =
   'You are a member of this team. Your parent, the agent that launched you, is the team leader. Your result is your answer to the last instruction you receive: if another message from the leader arrives after you have answered, your answer to it becomes your whole result, so answer it in full and repeat anything from your earlier answers the leader still needs. To ask the leader something, use send_message with to "parent"; its reply reaches you after you have answered, as your next instruction. ';
 
 const PREAMBLE_TAIL_NO_COMMANDS =
   "You cannot message other members or edit the team's task board.";
-const PREAMBLE_TAIL_WITH_COMMANDS = 'You cannot message other members.';
 
 /**
  * H4e-b3 decision 5: what the body adds for a plan-mode run, in the
@@ -97,17 +127,18 @@ const PREAMBLE_TAIL_WITH_COMMANDS = 'You cannot message other members.';
  * does not declare.
  */
 const PLAN_MODE_BODY =
-  ' You are in plan mode until the leader approves your plan: your calls may only read, and the decision arrives as your next instruction.';
+  'You are in plan mode until the leader approves your plan: your calls may only read, and the decision arrives as your next instruction.';
 
 /**
  * Decision 5: the fixed text every instruction of a member's chain opens
  * with. Names are sanitized to `[a-z0-9-]`, so they need no escaping.
  * H4e-b3 decision 5: the open tag carries `plan-mode="required"` while
  * the member's runs are plan-required (decision 9's composition rule).
- * The wording near the end also follows what the build declares: once
- * the `session_command` domain is enabled, the member may touch the
- * board, so the closing sentence no longer forbids it. The build
- * carries member messages (b3c) before the messaging sentence lifts.
+ * The wording near the end also follows what the member can do: with
+ * `session_command` disabled the member can neither message other
+ * members nor edit the task board, and the body says so; with it
+ * enabled this build carries both the board commands (b3b) and member
+ * messages (b3c), so the closing sentence lifts entirely.
  */
 export function teamMemberPreamble(
   member: {
@@ -124,12 +155,9 @@ export function teamMemberPreamble(
     commandsEnabled = false;
   }
   const attribute = planMode ? ' plan-mode="required"' : '';
-  const body =
-    PREAMBLE_BODY_HEAD +
-    (commandsEnabled
-      ? PREAMBLE_TAIL_WITH_COMMANDS
-      : PREAMBLE_TAIL_NO_COMMANDS) +
-    (planMode ? PLAN_MODE_BODY : '');
+  let body = PREAMBLE_BODY_HEAD;
+  if (!commandsEnabled) body += PREAMBLE_TAIL_NO_COMMANDS;
+  if (planMode) body += (commandsEnabled ? '' : ' ') + PLAN_MODE_BODY;
   return `<team-member name="${member.name}" team="${member.teamName}"${attribute}>\n${body}\n</team-member>\n\n`;
 }
 
@@ -227,6 +255,34 @@ export function firstInputOpensWithMemberPreamble(firstInput: string): boolean {
     return PREAMBLE_FORM.test(firstInput.slice(wrapped[0].length));
   }
   return PREAMBLE_FORM.test(firstInput);
+}
+
+const PREAMBLE_IDENTITY_FORM =
+  /^<team-member name="([a-z0-9]+(?:-[a-z0-9]+)*)" team="([a-z0-9]+(?:-[a-z0-9]+)*)"(?: plan-mode="required")?>\n[^<]*\n<\/team-member>\n\n/;
+
+/**
+ * Decision 8 (b3c): who a run's first input says the member is — the name
+ * and team its preamble block carries, cut the same way {@link
+ * firstInputOpensWithMemberPreamble} cuts. The tool turn's local refusals
+ * (self-addressing, `"leader"`) need the name before anything is sent.
+ */
+export function memberPreambleIdentity(
+  firstInput: string,
+): { readonly name: string; readonly team: string } | undefined {
+  const parse = (
+    text: string,
+  ): { readonly name: string; readonly team: string } | undefined => {
+    const match = PREAMBLE_IDENTITY_FORM.exec(text);
+    return match === null ? undefined : { name: match[1]!, team: match[2]! };
+  };
+  const marker = 'Your next instruction:';
+  const at = firstInput.lastIndexOf(marker);
+  if (at >= 0) {
+    return parse(firstInput.slice(at + marker.length).replace(/^\s+/, ''));
+  }
+  const wrapped = /^\[[\s\S]*?\]\n\n/.exec(firstInput);
+  if (wrapped !== null) return parse(firstInput.slice(wrapped[0].length));
+  return parse(firstInput);
 }
 
 /**
@@ -438,8 +494,12 @@ export function hostedNeverStarted(
     predecessorChildRunId: run.predecessorChildRunId,
     reason: neverStartedReason(run),
     cancelled: run.run.state === 'cancelled',
+    // b3c: a member message's sender is another member, so the
+    // never-started note never tells the lead to send it again (decision 8).
     lostMessages: messages.filter(
-      (message) => message.childRunId === run.childRunId,
+      (message) =>
+        message.childRunId === run.childRunId &&
+        !message.messageId.startsWith(MEMBER_MESSAGE_ID_PREFIX),
     ).length,
   };
 }

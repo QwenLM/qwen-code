@@ -28,6 +28,9 @@ import {
 } from './hosted-child-agent-session.js';
 import {
   HostedSessionMessageSession,
+  memberMessageContent,
+  memberMessageNotificationText,
+  parseMemberMessageContent,
   SessionMessageNotReadyError,
   sessionMessageNotificationText,
   withSessionMessageConsumption,
@@ -1036,5 +1039,110 @@ describe('team members over Session messages (H4e-b2)', () => {
       await expect(
         parent.children.admit({ ...params, ...differs }),
       ).rejects.toThrow(ManagedSessionConflictError);
+  });
+});
+
+describe('member messages (b3c decision 8)', () => {
+  it('composes and parses the member-message content', () => {
+    const content = memberMessageContent('alice', 'check task 3');
+    expect(content).toBe(
+      '<member-message from="alice">\ncheck task 3\n</member-message>',
+    );
+    expect(parseMemberMessageContent(content)).toEqual({
+      from: 'alice',
+      text: 'check task 3',
+    });
+    // Only the fixed header anchored at the start counts.
+    expect(parseMemberMessageContent('text\n' + content)).toBeUndefined();
+    expect(
+      parseMemberMessageContent('<member-message from="alice">\nno footer'),
+    ).toBeUndefined();
+  });
+
+  it('says who wrote and how to answer, through the leader in plan mode', () => {
+    const normal = memberMessageNotificationText({
+      messageId: `msgc_${'a1'.repeat(16)}`,
+      member: 'alice',
+      text: 'check task 3',
+      planMode: false,
+    });
+    expect(normal).toContain('<from>member alice</from>');
+    expect(normal).toContain(
+      'To answer alice, use send_message with to "alice"; then answer the leader\u0027s last instruction in full.',
+    );
+    expect(normal).toContain('check task 3');
+    const plan = memberMessageNotificationText({
+      messageId: `msgc_${'a1'.repeat(16)}`,
+      member: 'alice',
+      text: 'check task 3',
+      planMode: true,
+    });
+    expect(plan).toContain('<from>member alice</from>');
+    expect(plan).toContain(
+      'To answer alice while your run is in plan mode, use send_message with to "parent"',
+    );
+  });
+
+  it("renders a member message with who wrote it on the recipient's side", async () => {
+    const child = await side(CHILD, {
+      parentSessionId: PARENT,
+      parentChildRunId: 'run-1',
+    });
+    const content = memberMessageContent('alice', 'check task 3');
+    const messageId = `msgc_${'a1b2c3d4'.repeat(4)}`;
+    expect(
+      await child.messages.receive({
+        messageId,
+        route: 'to_child',
+        childRunId: 'run-1',
+        senderSessionId: PARENT,
+        content: Buffer.from(content),
+        contentDigest: sha256(content),
+      }),
+    ).toBe(`${messageId}:message`);
+    const text = JSON.parse(
+      (
+        await child.session.resources.read(
+          inputs(child.session)[0]!.payload['contentRef'] as never,
+        )
+      ).toString('utf8'),
+    ) as { text: string };
+    expect(text.text).toContain('<from>member alice</from>');
+    expect(text.text).toContain(
+      'To answer alice, use send_message with to "alice"',
+    );
+    expect(text.text).toContain('check task 3');
+    expect(text.text).not.toContain('<member-message from=');
+    expect(text.text).not.toContain('<from>parent</from>');
+  });
+
+  it("renders a member-id message without the header as the leader's form", async () => {
+    const child = await side(CHILD, {
+      parentSessionId: PARENT,
+      parentChildRunId: 'run-1',
+    });
+    // Only the lead mints msgc_ ids, so a body mismatched to one is a
+    // fault to fall back on, never a rendering branch of its own.
+    const content = 'the lead asks you to check task 3';
+    const messageId = `msgc_${'e5f6a1b2'.repeat(4)}`;
+    expect(
+      await child.messages.receive({
+        messageId,
+        route: 'to_child',
+        childRunId: 'run-1',
+        senderSessionId: PARENT,
+        content: Buffer.from(content),
+        contentDigest: sha256(content),
+      }),
+    ).toBe(`${messageId}:message`);
+    const text = JSON.parse(
+      (
+        await child.session.resources.read(
+          inputs(child.session)[0]!.payload['contentRef'] as never,
+        )
+      ).toString('utf8'),
+    ) as { text: string };
+    expect(text.text).toContain('<from>parent</from>');
+    expect(text.text).toContain(content);
   });
 });

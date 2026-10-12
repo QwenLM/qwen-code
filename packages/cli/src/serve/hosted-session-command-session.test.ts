@@ -16,12 +16,23 @@ import {
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import {
+  isChildSessionRun,
+  parseChildRun,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { parseSessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
+import { sessionMessageInputId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   HostedSessionCommandSession,
   SessionCommandBlockedError,
   SessionCommandRefusalError,
 } from './hosted-session-command-session.js';
+import {
+  HostedSessionMessageSession,
+  memberMessageContent,
+} from './hosted-session-message-session.js';
+import { memberMessageId } from './hosted-member-chain.js';
 import { HostedTeamSession } from './hosted-team-session.js';
 
 // H4e-b3: `session_command` is enabled for real, so this suite drives the
@@ -164,6 +175,95 @@ async function leadWithTeam(): Promise<
     joined: true,
   });
   return { ...lead, teams };
+}
+
+/**
+ * b3c: the lead with further named members admitted, joined and running.
+ * Positions follow join order: `bob` is always position 1 (LEAF_RUN).
+ */
+async function leadWithMembers(
+  names: readonly string[],
+): Promise<Side & { readonly teams: HostedTeamSession }> {
+  const lead = await leadWithTeam();
+  for (const [index, name] of names.entries()) {
+    const childRunId = `run-${name}`;
+    const sessionId = randomUUID();
+    await lead.children.admit({
+      completion: 'sent',
+      childRunId,
+      ownerScopeId: PARENT,
+      rootSessionId: PARENT,
+      description: `work of ${name}`,
+      prompt: 'help out',
+      definition: DEFINITION,
+      workingDirectory: '.',
+      workspaceMode: 'shared',
+      executionCallId: childRunId,
+    } as never);
+    await lead.children.dispatchStarted(childRunId, {
+      dispatchId: `dispatch-${childRunId}`,
+      runtime: { runtimeBindingId: `binding-${index + 2}`, generation: '1' },
+    });
+    await lead.children.attach(childRunId, sessionId);
+    const member = lead.teams.admitMember(name);
+    expect(await lead.teams.join({ ...member, childRunId })).toEqual({
+      joined: true,
+    });
+  }
+  return lead;
+}
+
+/** The `msgc_` id of one roster position's message of one command. */
+function memberMessageIdOf(commandId: string, position: number): string {
+  return memberMessageId({
+    leadSessionId: PARENT,
+    commandId,
+    position,
+  });
+}
+
+/** The lead's outbound messages to one member's run, parsed. */
+function sentToHead(
+  lead: Side,
+  childRunId: string,
+): ReadonlyArray<ReturnType<typeof parseSessionMessage>> {
+  return lead.session.authority
+    .extensionRecordsInDomain('session_message')
+    .map((entry) => parseSessionMessage(entry.record))
+    .filter(
+      (message) =>
+        message.direction === 'outbound' && message.childRunId === childRunId,
+    );
+}
+
+/** The Session a child run attached as — the target its messages must name. */
+function attachedSessionOf(lead: Side, childRunId: string): string {
+  const record = lead.session.authority.extensionRecord(
+    'child_run',
+    childRunId,
+  );
+  const run = record === undefined ? undefined : parseChildRun(record.record);
+  if (
+    run === undefined ||
+    !isChildSessionRun(run) ||
+    run.childSessionId === null
+  ) {
+    throw new Error(`Child run ${childRunId} has not attached.`);
+  }
+  return run.childSessionId;
+}
+
+/** The lead's relay verbs for its own outbound messages (H4d-b). */
+function leadRelay(lead: Side): HostedSessionMessageSession {
+  return new HostedSessionMessageSession(
+    {
+      authority: lead.session.authority,
+      resources: lead.session.resources,
+    } as never,
+    lead.session.authority.sessionHeader.sessionKey,
+    lead.children,
+    undefined,
+  );
 }
 
 const TASK_LIST_ARGS = { status: 'pending' } as const;
@@ -557,19 +657,329 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(lead.commands.command(commandId)).toBeUndefined();
   });
 
-  it('refuses the kinds a later batch owns and commits the refusal', async () => {
+  it('refuses the kind a later batch owns and commits the refusal', async () => {
     const lead = await leadWithTeam();
     const commandId = commandIdOf('call-15');
+    const reply = await lead.commands.execute(lead.teams, {
+      commandId,
+      kind: 'plan_submit',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { plan: 'wait for the review' },
+    });
+    expect(reply.outcome).toBe('refused');
+    expect(reply.text).toContain('not accepted yet');
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
+  });
+
+  it('sends a member message to a running member and replays from the receipt', async () => {
+    const lead = await leadWithMembers(['alice']);
+    const commandId = commandIdOf('call-msg-1');
+    const params = {
+      commandId,
+      kind: 'member_message' as const,
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: 'alice', message: 'look at task 2' },
+    };
+    const reply = await lead.commands.execute(lead.teams, params);
+    expect(reply).toEqual({
+      outcome: 'answered',
+      text: 'Message sent to alice.\n- alice: sent.',
+    });
+    const sent = sentToHead(lead, 'run-alice');
+    expect(sent).toHaveLength(1);
+    const message = sent[0]!;
+    expect(message.messageId).toBe(memberMessageIdOf(commandId, 2));
+    expect(message.direction).toBe('outbound');
+    expect(message.run.delivery?.state).toBe('planned');
+    expect(message.run.executionCallId).toBe(commandId);
+    expect(
+      (await lead.session.resources.read(message.contentRef!)).toString('utf8'),
+    ).toBe('<member-message from="bob">\nlook at task 2\n</member-message>');
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
+    const again = await lead.commands.execute(lead.teams, params);
+    expect(again).toEqual(reply);
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(1);
+  });
+
+  it('fans a member message out with "*", the sender never a recipient', async () => {
+    const lead = await leadWithMembers(['alice', 'carol']);
+    const commandId = commandIdOf('call-msg-2');
     const reply = await lead.commands.execute(lead.teams, {
       commandId,
       kind: 'member_message',
       childRunId: LEAF_RUN,
       senderSessionId: CHILD,
-      args: { to: 'alice', text: 'hi' },
+      args: { to: '*', message: 'sync at noon' },
+    });
+    expect(reply).toEqual({
+      outcome: 'answered',
+      text: 'Message sent to every other member of team "review".\n- alice: sent.\n- carol: sent.',
+    });
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(1);
+    expect(sentToHead(lead, 'run-carol')).toHaveLength(1);
+    expect(sentToHead(lead, LEAF_RUN)).toHaveLength(0);
+    expect(
+      lead.session.authority.extensionRecordsInDomain('session_message'),
+    ).toHaveLength(2);
+  });
+
+  it('names what a finished or ended recipient cannot take', async () => {
+    const lead = await leadWithMembers(['alice', 'carol']);
+    await lead.children.settleCompleted('run-alice', {
+      result: Buffer.from('done'),
+      receipt: Buffer.from('{}'),
+      messageCount: 0,
+    });
+    await lead.children.settleCancelled('run-carol', { started: true });
+    const commandId = commandIdOf('call-msg-3');
+    const reply = await lead.commands.execute(lead.teams, {
+      commandId,
+      kind: 'member_message',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: '*', message: 'wrap up' },
+    });
+    expect(reply).toEqual({
+      outcome: 'refused',
+      text: 'The message reached no member of team "review":\n- alice: not reached: it has finished; the leader may give it more work, a peer cannot.\n- carol: not reached: it has ended.',
+    });
+    expect(
+      lead.session.authority.extensionRecordsInDomain('session_message'),
+    ).toHaveLength(0);
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
+  });
+
+  it('refuses the stranger, the reserved names and the sender itself', async () => {
+    const lead = await leadWithMembers(['alice']);
+    for (const [to, text] of [
+      ['zed', '"zed" is not a member of team "review". Members: bob, alice.'],
+      [
+        'leader',
+        '"leader" is not a member of team "review". Members: bob, alice.',
+      ],
+      [
+        'parent',
+        '"parent" is not a member of team "review". Members: bob, alice.',
+      ],
+      ['bob', 'A member cannot send a message to itself.'],
+    ] as const) {
+      const reply = await lead.commands.execute(lead.teams, {
+        commandId: commandIdOf(`call-msg-4-${to}`),
+        kind: 'member_message',
+        childRunId: LEAF_RUN,
+        senderSessionId: CHILD,
+        args: { to, message: 'hi' },
+      });
+      expect(reply).toEqual({ outcome: 'refused', text });
+    }
+    expect(
+      lead.session.authority.extensionRecordsInDomain('session_message'),
+    ).toHaveLength(0);
+    const only = await leadWithTeam();
+    const reply = await only.commands.execute(only.teams, {
+      commandId: commandIdOf('call-msg-4-star'),
+      kind: 'member_message',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: '*', message: 'hi' },
+    });
+    expect(reply).toEqual({
+      outcome: 'refused',
+      text: 'Team "review" has no other members to message.',
+    });
+  });
+
+  it('refuses the argument shape and the byte bound', async () => {
+    const lead = await leadWithMembers(['alice']);
+    for (const args of [
+      {},
+      { to: 'alice' },
+      { to: 'alice', message: '  ' },
+      { to: '', message: 'hi' },
+    ]) {
+      const reply = await lead.commands.execute(lead.teams, {
+        commandId: commandIdOf(`call-msg-5-${JSON.stringify(args)}`),
+        kind: 'member_message',
+        childRunId: LEAF_RUN,
+        senderSessionId: CHILD,
+        args,
+      });
+      expect(reply).toEqual({
+        outcome: 'refused',
+        text: 'A member message takes a nonempty "to" and "message".',
+      });
+    }
+    const reply = await lead.commands.execute(lead.teams, {
+      commandId: commandIdOf('call-msg-5-big'),
+      kind: 'member_message',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: 'alice', message: 'x'.repeat(33 * 1024) },
     });
     expect(reply.outcome).toBe('refused');
-    expect(reply.text).toContain('not accepted yet');
+    expect(reply.text).toContain('byte_limit');
+  });
+
+  it('probes the sends an earlier execution committed and sends only the rest', async () => {
+    const lead = await leadWithMembers(['alice', 'carol']);
+    const commandId = commandIdOf('call-msg-6');
+    // A first execution died after sending to alice and before its receipt.
+    await lead.children.sendToRunningMember({
+      rootChildRunId: 'run-alice',
+      content: Buffer.from(memberMessageContent('bob', 'sync at noon'), 'utf8'),
+      messageId: memberMessageIdOf(commandId, 2),
+      executionCallId: commandId,
+    });
+    const reply = await lead.commands.execute(lead.teams, {
+      commandId,
+      kind: 'member_message',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: '*', message: 'sync at noon' },
+    });
+    expect(reply).toEqual({
+      outcome: 'answered',
+      text: 'Message sent to every other member of team "review".\n- alice: sent.\n- carol: sent.',
+    });
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(1);
+    expect(sentToHead(lead, 'run-carol')).toHaveLength(1);
     expect(lead.commands.command(commandId)?.direction).toBe('inbound');
+  });
+
+  it('reports the sends of a team that changed before re-execution', async () => {
+    const lead = await leadWithMembers(['alice']);
+    const commandId = commandIdOf('call-msg-7');
+    await lead.children.sendToRunningMember({
+      rootChildRunId: 'run-alice',
+      content: Buffer.from(memberMessageContent('bob', 'hi'), 'utf8'),
+      messageId: memberMessageIdOf(commandId, 2),
+      executionCallId: commandId,
+    });
+    // The settlement holds while the message owes its handover (H4d-b):
+    // hand it over and mark it accepted first.
+    const relay = leadRelay(lead);
+    const messageId = memberMessageIdOf(commandId, 2);
+    await relay.handover(messageId, attachedSessionOf(lead, 'run-alice'));
+    await relay.accepted(messageId, sessionMessageInputId(messageId));
+    await lead.children.settleCompleted('run-alice', {
+      result: Buffer.from('done'),
+      receipt: Buffer.from('{}'),
+      messageCount: 1,
+    });
+    await lead.children.settleCompleted(LEAF_RUN, {
+      result: Buffer.from('done bob'),
+      receipt: Buffer.from('{}'),
+      messageCount: 0,
+    });
+    await lead.teams.run('team_delete', {}, 'prompt:delete-team');
+    const reply = await lead.commands.execute(lead.teams, {
+      commandId,
+      kind: 'member_message',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: '*', message: 'hi' },
+    });
+    expect(reply).toEqual({
+      outcome: 'answered',
+      text: 'The message was sent to 1 member before its team changed; nothing more was sent.',
+    });
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
+  });
+
+  it('bounds member messages beside the shared edge limits', async () => {
+    const lead = await leadWithMembers(['alice']);
+    // 4 member messages in flight on alice's head fill decision 8's sub-cap.
+    for (let i = 0; i < 4; i += 1) {
+      const route = await lead.children.sendToRunningMember({
+        rootChildRunId: 'run-alice',
+        content: Buffer.from(memberMessageContent('bob', `note ${i}`), 'utf8'),
+        messageId: memberMessageIdOf(commandIdOf(`cap-4-${i}`), 2),
+        executionCallId: commandIdOf(`cap-4-${i}`),
+      });
+      expect(route).toEqual({ kind: 'sent' });
+    }
+    const capped = await lead.commands.execute(lead.teams, {
+      commandId: commandIdOf('cap-4-next'),
+      kind: 'member_message',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: 'alice', message: 'one more' },
+    });
+    expect(capped).toEqual({
+      outcome: 'refused',
+      text: 'The message was not sent:\n- alice: not reached: it has 4 member messages still on their way (count_limit); try again in a later run.',
+    });
+    // Drain the 4 member messages (accepted is not in flight any more),
+    // then pile 8 plain H4d-b sends: the shared in-flight cap fires next.
+    const relay = leadRelay(lead);
+    for (let i = 0; i < 4; i += 1) {
+      const messageId = memberMessageIdOf(commandIdOf(`cap-4-${i}`), 2);
+      await relay.handover(messageId, attachedSessionOf(lead, 'run-alice'));
+      await relay.accepted(messageId, sessionMessageInputId(messageId));
+    }
+    for (let i = 0; i < 8; i += 1) {
+      await lead.children.sendToChild({
+        taskId: lead.children.taskIdOf('run-alice'),
+        text: `plain ${i}`,
+        messageId: `msg_plain_${i}`,
+        continuationRunId: `cont_plain_${i}`,
+        executionCallId: `plain-${i}`,
+        closing: false,
+      });
+    }
+    const shared = await lead.commands.execute(lead.teams, {
+      commandId: commandIdOf('cap-8-next'),
+      kind: 'member_message',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: 'alice', message: 'again' },
+    });
+    expect(shared).toEqual({
+      outcome: 'refused',
+      text: 'The message was not sent:\n- alice: not reached: it has 8 messages still on their way to it (count_limit); try again in a later run.',
+    });
+  });
+
+  it('holds the 16-in-all member cap once the edge drained', async () => {
+    const lead = await leadWithMembers(['alice']);
+    const store = {
+      authority: lead.session.authority,
+      resources: lead.session.resources,
+    };
+    const messages = new HostedSessionMessageSession(
+      store as never,
+      lead.session.authority.sessionHeader.sessionKey,
+      lead.children,
+      undefined,
+    );
+    // 16 member messages land and their turns settle: in flight drains,
+    // the per-run total still counts.
+    for (let i = 0; i < 16; i += 1) {
+      const messageId = memberMessageIdOf(commandIdOf(`cap-16-${i}`), 2);
+      const route = await lead.children.sendToRunningMember({
+        rootChildRunId: 'run-alice',
+        content: Buffer.from(memberMessageContent('bob', `note ${i}`), 'utf8'),
+        messageId,
+        executionCallId: commandIdOf(`cap-16-${i}`),
+      });
+      expect(route).toEqual({ kind: 'sent' });
+      await messages.handover(messageId, attachedSessionOf(lead, 'run-alice'));
+      await messages.accepted(messageId, sessionMessageInputId(messageId));
+      await messages.settle(messageId, 'consumed');
+    }
+    const reply = await lead.commands.execute(lead.teams, {
+      commandId: commandIdOf('cap-16-next'),
+      kind: 'member_message',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: 'alice', message: 'one more' },
+    });
+    expect(reply).toEqual({
+      outcome: 'refused',
+      text: 'The message was not sent:\n- alice: not reached: it has received the 16 member messages one run may hold (budget_exhausted).',
+    });
   });
 
   it("answers a re-execution from the command's own committed writes", async () => {
