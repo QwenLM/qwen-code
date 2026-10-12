@@ -2,9 +2,14 @@ package com.alibaba.qwen.code.daemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -126,16 +131,103 @@ class JsonSupportTest {
         assertEquals("0", JsonSupport.encode(new BigDecimal("1E-400")));
         assertThrows(IllegalArgumentException.class,
                 () -> JsonSupport.encode(new BigDecimal("1E+400")));
-        // The subnormal band is the exception: the double's own short form
-        // is the ECMAScript digits, which the double path would corrupt.
-        assertEquals("5e-324",
-                JsonSupport.encode(new BigDecimal("5E-324")));
+        assertThrows(IllegalArgumentException.class,
+                () -> JsonSupport.encode(BigInteger.TWO.pow(1100)));
+    }
+
+    /**
+     * Subnormals are ordinary doubles to JSON.stringify: whatever literal
+     * or type carried one, the output is the shortest digits of the double
+     * the script side holds — never the literal's own digits, and never a
+     * refusal (Node: JSON.stringify(Number("3E-324")) is "5e-324").
+     */
+    @Test
+    void encodeRendersSubnormalsAsTheShortestDigitsOfTheirDouble() {
+        for (String literal : new String[] {"3E-324", "4.9E-324", "5E-324",
+                "7E-324"}) {
+            assertEquals("5e-324", JsonSupport.encode(new BigDecimal(literal)),
+                    literal);
+        }
+        assertEquals("5e-324", JsonSupport.encode(Double.MIN_VALUE));
+        assertEquals("-5e-324", JsonSupport.encode(-Double.MIN_VALUE));
+        assertEquals("1.1e-308", JsonSupport.encode(
+                new BigDecimal("1.10000000000000000001E-308")));
+        assertEquals("1.5e-308", JsonSupport.encode(1.5e-308));
+        assertEquals("2.225073858507201e-308",
+                JsonSupport.encode(Math.nextDown(Double.MIN_NORMAL)));
+    }
+
+    /**
+     * Doubles whose shortest round-trip form needs all seventeen digits:
+     * JDK 11–18 `Double.toString` emits an extra digit for some of them
+     * (8.5834334893786225E18 where the shortest form is
+     * 8.583433489378622E18), so the encoder must not lean on it. Expected
+     * strings are Node's JSON.stringify of the same double.
+     */
+    @Test
+    void encodeRendersDigitsIndependentlyOfTheJdk() {
+        assertEquals("8583433489378622000",
+                JsonSupport.encode(Double.longBitsToDouble(0x43ddc79ed205e6afL)));
+        assertEquals("-1975991724385561900",
+                JsonSupport.encode(Double.longBitsToDouble(0xc3bb6c22010b1cedL)));
+        assertEquals("8583433489378622000",
+                JsonSupport.encode(new BigDecimal("8583433489378622000")));
+        assertEquals("392234277478662800",
+                JsonSupport.encode(392234277478662780L));
+        assertEquals("2422889551725347000",
+                JsonSupport.encode(2422889551725346800L));
+        assertEquals("1.7976931348623157e+308",
+                JsonSupport.encode(Double.MAX_VALUE));
+    }
+
+    /**
+     * The generated oracle: canonical-doubles.txt holds JSON.stringify's
+     * output for every binade's power of two and its lower neighbour (the
+     * asymmetric rounding intervals), random subnormals, random values in
+     * each notation band, and uniform bit patterns — regenerate it with
+     * canonical-doubles.mjs beside it. Each double is checked as a Double
+     * and as the BigDecimal a parser would hand over for that text.
+     */
+    @Test
+    void encodeMatchesJsonStringifyOverTheGeneratedOracle() throws Exception {
+        int checked = 0;
+        List<String> mismatches = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                JsonSupportTest.class.getResourceAsStream("canonical-doubles.txt"),
+                StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                int space = line.indexOf(' ');
+                double value = Double.longBitsToDouble(
+                        Long.parseUnsignedLong(line.substring(0, space), 16));
+                String expected = line.substring(space + 1);
+                String asDouble = JsonSupport.encode(value);
+                String asDecimal = JsonSupport.encode(new BigDecimal(expected));
+                if (!expected.equals(asDouble) || !expected.equals(asDecimal)) {
+                    mismatches.add(line + " double=" + asDouble
+                            + " decimal=" + asDecimal);
+                }
+                checked++;
+            }
+        }
+        assertTrue(checked > 10000, "oracle lines read: " + checked);
+        assertEquals(List.of(), mismatches.subList(0,
+                Math.min(20, mismatches.size())),
+                mismatches.size() + " of " + checked + " differ");
     }
 
     @Test
-    void encodeRefusesSubnormalDoublesBeforeTheDigestCanWedge() {
-        assertThrows(IllegalArgumentException.class,
-                () -> JsonSupport.encode(Double.MIN_VALUE));
+    void builderRefusesNumbersWithNoJsonForm() {
+        for (Number value : new Number[] {
+                new BigDecimal("1E+400"),
+                BigInteger.TWO.pow(1100).negate()
+        }) {
+            Map<String, Object> block = Map.of("type", "custom", "value", value);
+            assertThrows(IllegalArgumentException.class,
+                    () -> PromptRequest.builder().addContent(block));
+        }
+        PromptRequest.builder().addContent(
+                Map.of("type", "custom", "value", Double.MIN_VALUE));
     }
 
     @Test
@@ -153,6 +245,9 @@ class JsonSupportTest {
                         + "\\\\" + "\\\"" + "\"",
                 JsonSupport.encode("new\nline\t\b\f\r\\\""));
         assertEquals("\"café 中 😀\"", JsonSupport.encode("café 中 😀"));
+        // C0 controls without a short escape take lowercase \\u00xx.
+        assertEquals("\"\\u0001\\u001f\\u000b\"",
+                JsonSupport.encode(String.valueOf(new char[] {1, 0x1f, 0x0b})));
     }
 
     @Test

@@ -9,6 +9,8 @@ import com.fasterxml.jackson.core.io.JsonEOFException;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -16,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 final class JsonSupport {
+    private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();
     private static final JsonFactory STRICT_JSON = JsonFactory.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .build();
@@ -123,7 +126,11 @@ final class JsonSupport {
                     // destroyed (replaced with U+FFFD/'?') when the digest
                     // step encodes this string as UTF-8.
                     if (code < 0x20 || (code >= 0xD800 && code <= 0xDFFF)) {
-                        out.append(String.format("\\u%04x", code));
+                        out.append("\\u")
+                                .append(HEX_DIGITS[(code >> 12) & 0xF])
+                                .append(HEX_DIGITS[(code >> 8) & 0xF])
+                                .append(HEX_DIGITS[(code >> 4) & 0xF])
+                                .append(HEX_DIGITS[code & 0xF]);
                     } else {
                         out.appendCodePoint(code);
                     }
@@ -134,12 +141,15 @@ final class JsonSupport {
 
     /**
      * A JSON number with JSON.stringify's numeric grammar. ECMAScript has
-     * only Number (IEEE 754 double): integers print exactly when |x| < 2^53
-     * and round through the double beyond it; a non-integer prints plain
-     * when 1e-6 ≤ |x| < 1e21, otherwise shortest-round-trip exponent
-     * notation. Longs and BigIntegers therefore render through the same
-     * double the JS side would hold — an exact decimal printout past 2^53
-     * never matches `JSON.stringify`.
+     * only Number (IEEE 754 double), so every Java number renders through
+     * the double the script side would hold: an integer prints exactly when
+     * |x| < 2^53, everything else as ECMAScript's Number::toString — the
+     * shortest decimal that round-trips to that double. A BigDecimal (what
+     * Jackson yields for a fractional literal) and a Long or BigInteger
+     * past 2^53 take the same route, so `3E-324` and `Double.MIN_VALUE`
+     * both print `5e-324`: one string per double, whatever type carried it.
+     * Only a non-finite value (NaN, an infinity, or a decimal past the
+     * double range) has no JSON form.
      */
     private static void writeCanonicalNumber(Number value, StringBuilder out) {
         if (value instanceof Byte || value instanceof Short
@@ -147,90 +157,99 @@ final class JsonSupport {
             out.append(value.longValue());
             return;
         }
-        if (value instanceof BigDecimal) {
-            // The decimal the script side could hold is the double the
-            // parser read — an exact printout of more digits never matches
-            // `JSON.stringify` (12345678901234567890.5 prints as
-            // 12345678901234567000), and a past-range decimal renders as
-            // digits where every peer either refuses or prints 0. Render
-            // through that double, except in the subnormal band where the
-            // double's own rendering is the one Java cannot reproduce and
-            // the decimal's digits are the ECMAScript short form
-            // (`5e-324`), which the double path would corrupt to `4.9e-324`.
-            double asDouble = value.doubleValue();
-            if (!Double.isFinite(asDouble)) {
-                throw new IllegalArgumentException(
-                        "JSON numbers must be finite: " + value);
-            }
-            if (asDouble == 0
-                    || Math.abs(asDouble) >= 1.1125369292536007e-308) {
-                writeCanonicalDecimal(
-                        BigDecimal.valueOf(asDouble).stripTrailingZeros(),
-                        out);
-            } else {
-                writeCanonicalDecimal(
-                        ((BigDecimal) value).stripTrailingZeros(), out);
-            }
-            return;
-        }
         double number = value.doubleValue();
         if (!Double.isFinite(number)) {
             throw new IllegalArgumentException(
                     "JSON numbers must be finite: " + value);
         }
-        // Subnormal doubles carry Java's minimum-two-digit `Double.toString`
-        // form where ECMAScript prints the shortest one (`5e-324`): the
-        // BigDecimal digit path cannot reconcile them, so they are refused
-        // here rather than digested into a cross-language wedge. JSON
-        // parses never produce them — Jackson yields BigDecimal for
-        // fractional literals — and model-produced args at this scale are
-        // not a lawful prompt payload to begin with.
-        if (number != 0 && Math.abs(number) < 1.1125369292536007e-308) {
-            throw new IllegalArgumentException(
-                    "JSON number outside the canonical range: " + value);
-        }
         if (number == Math.rint(number)
                 && Math.abs(number) < 9.007199254740992e15) {
+            // Integral and exact: the long is the whole decimal, and `-0`
+            // prints `0` as JSON.stringify prints it.
             out.append((long) number);
             return;
         }
-        writeCanonicalDecimal(
-                BigDecimal.valueOf(number).stripTrailingZeros(), out);
+        writeShortestDouble(number, out);
     }
 
     /**
-     * Renders a scale-stripped BigDecimal with JSON.stringify's notation:
-     * a plain decimal when the ECMAScript Number the value names is in
-     * [1e-6, 1e21), otherwise the shortest exponent form with no '+', no
-     * redundant exponent zeros and no trailing coefficient zeros.
+     * ECMAScript Number::toString(x) for a finite nonzero double, derived
+     * from the double's exact binary value rather than from
+     * `Double.toString`, whose shortest-digit guarantee only exists from
+     * JDK 19 while this artifact runs on Java 11. For each digit count
+     * k = 1..17 only the two k-digit neighbours of the exact value can be
+     * candidates (any k-digit decimal that round-trips lies between one of
+     * them and x); the first k with a round-tripping neighbour wins, the
+     * closer one when both do and the even one on a tie, as the
+     * specification asks.
      */
-    private static void writeCanonicalDecimal(BigDecimal value,
+    private static void writeShortestDouble(double number,
             StringBuilder out) {
-        if (value.signum() == 0) {
-            out.append('0');
-            return;
+        double magnitude = Math.abs(number);
+        BigDecimal exact = new BigDecimal(magnitude);
+        BigDecimal shortest = null;
+        for (int digits = 1; digits <= 17 && shortest == null; digits++) {
+            BigDecimal below = exact.round(
+                    new MathContext(digits, RoundingMode.FLOOR));
+            BigDecimal above = exact.round(
+                    new MathContext(digits, RoundingMode.CEILING));
+            boolean belowRoundTrips = below.doubleValue() == magnitude;
+            boolean aboveRoundTrips = above.doubleValue() == magnitude;
+            if (belowRoundTrips && aboveRoundTrips) {
+                int closer = exact.subtract(below)
+                        .compareTo(above.subtract(exact));
+                if (closer < 0) {
+                    shortest = below;
+                } else if (closer > 0) {
+                    shortest = above;
+                } else {
+                    shortest = below.unscaledValue().testBit(0)
+                            ? above : below;
+                }
+            } else if (belowRoundTrips) {
+                shortest = below;
+            } else if (aboveRoundTrips) {
+                shortest = above;
+            }
         }
-        double asDouble = value.doubleValue();
-        double magnitude = Math.abs(asDouble);
-        if (magnitude >= 1e-6 && magnitude < 1e21) {
-            out.append(value.toPlainString());
-            return;
+        if (shortest == null) {
+            // Unreachable: seventeen significant digits round-trip every
+            // double.
+            throw new IllegalStateException(
+                    "No round-trip decimal for " + number);
         }
-        String coefficient = value.unscaledValue().abs().toString();
-        int exponent = coefficient.length() - 1 - value.scale();
-        if (value.signum() < 0) {
+        BigDecimal stripped = shortest.stripTrailingZeros();
+        String digits = stripped.unscaledValue().toString();
+        int length = digits.length();
+        // x = digits × 10^(point − length); `point` is the specification's n.
+        int point = length - stripped.scale();
+        if (number < 0) {
             out.append('-');
         }
-        out.append(coefficient.charAt(0));
-        if (coefficient.length() > 1) {
-            out.append('.').append(coefficient.substring(1));
+        if (length <= point && point <= 21) {
+            out.append(digits);
+            for (int zeros = point - length; zeros > 0; zeros--) {
+                out.append('0');
+            }
+        } else if (0 < point && point <= 21) {
+            out.append(digits, 0, point).append('.')
+                    .append(digits, point, length);
+        } else if (-6 < point && point <= 0) {
+            out.append("0.");
+            for (int zeros = -point; zeros > 0; zeros--) {
+                out.append('0');
+            }
+            out.append(digits);
+        } else {
+            out.append(digits.charAt(0));
+            if (length > 1) {
+                out.append('.').append(digits, 1, length);
+            }
+            // ECMAScript always signs the exponent: `1e+21`, `5e-324`.
+            int exponent = point - 1;
+            out.append('e').append(exponent < 0 ? '-' : '+')
+                    .append(Math.abs(exponent));
         }
-        // ECMAScript always signs a positive exponent: `1e+21`, never `1e21`.
-        out.append('e');
-        if (exponent >= 0) {
-            out.append('+');
-        }
-        out.append(exponent);
     }
 
     /** One strict JSON value of any shape, as contract values. */
@@ -505,8 +524,12 @@ final class JsonSupport {
             }
             return Collections.unmodifiableList(copy);
         }
-        if ((value instanceof Double && !Double.isFinite((Double) value))
-                || (value instanceof Float && !Float.isFinite((Float) value))) {
+        // Every Number the encoder can render is accepted here and nothing
+        // else: a BigDecimal or BigInteger past the double range has no
+        // JSON form, so the builder refuses it instead of the request
+        // failing at send time.
+        if (value instanceof Number
+                && !Double.isFinite(((Number) value).doubleValue())) {
             throw new IllegalArgumentException("JSON numbers must be finite");
         }
         if (value == null || value instanceof String || value instanceof Number
