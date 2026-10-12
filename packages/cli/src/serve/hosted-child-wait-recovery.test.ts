@@ -1344,6 +1344,10 @@ describe('hosted child wait recovery (#13708)', () => {
     return new HostedTeamSession(
       { authority: session.authority, resources: session.resources },
       sessionKey,
+      new HostedChildAgentSession(
+        { authority: session.authority, resources: session.resources },
+        sessionKey,
+      ),
     );
   }
 
