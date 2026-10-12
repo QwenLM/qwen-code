@@ -16,6 +16,7 @@ import {
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { memberPlanModeRequired } from './hosted-member-chain.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type {
   CommittedExtensionOperation,
   ManagedSessionActor,
@@ -107,10 +108,16 @@ export class HostedTeamRefusal extends Error {}
  * goes through the child funnel, never through this funnel's store: the
  * two funnels each own their writes chain. A lane whose Shell profile
  * suppresses child agents attaches no such funnel; the team surface
- * there is read-only, and a member it may carry refuses shutdowns.
+ * there is read-only, and a member it may carry refuses shutdowns. The
+ * command id a `request_shutdown` stop commits under names the call that
+ * asked, so an interrupted turn's recovery tells it apart from someone
+ * else's stop.
  */
 export interface HostedTeamStops {
-  requestStop(childRunId: string): Promise<void>;
+  requestStop(
+    childRunId: string,
+    evidence?: { readonly operation: string; readonly commandId: string },
+  ): Promise<void>;
 }
 
 /** The Legacy board tools' schema bounds, in characters. */
@@ -496,22 +503,18 @@ export class HostedTeamSession {
   /**
    * Whether a call committed any part of its team write before its Turn
    * died: the interrupted Turn's settlement must not answer such a call
-   * as one that never ran. H4e-b3 decision 14: request_shutdown's evidence
-   * is the stop on the named member's head, never a call-derived command
-   * id, so the recovery passes the call's args.
+   * as one that never ran. H4e-b3 decision 14's stop evidence is keyed to
+   * the call that requested it — `shutdown:${callKey}` — never to the
+   * member-head bit, so a stop someone else requested is not credited to
+   * a call that never ran, and the keyed evidence survives a continuation
+   * that later never started.
    */
-  committedBy(
-    toolName: string,
-    callKey: string,
-    args?: Record<string, unknown>,
-  ): boolean {
+  committedBy(toolName: string, callKey: string): boolean {
     if (toolName === 'request_shutdown') {
-      if (args === undefined || typeof args['to'] !== 'string') return false;
-      const name = sanitizeName(args['to']);
-      const team = this.openTeam();
-      const member = team?.members.find((each) => each.name === name);
-      if (member === undefined) return false;
-      return this.chains().head(member.childRunId)?.stopRequested === true;
+      return (
+        this.committed('commitChildRunRecord', `shutdown:${callKey}`) !==
+        undefined
+      );
     }
     const commands: ReadonlyArray<readonly [string, string]> =
       toolName === 'team_create'
@@ -565,7 +568,7 @@ export class HostedTeamSession {
         case 'task_list':
           return Promise.resolve(this.listTasks(args));
         case 'request_shutdown':
-          return this.requestShutdown(args['to'] as string);
+          return this.requestShutdown(callKey, args['to'] as string);
         default:
           throw new Error(`${toolName} is not a team tool.`);
       }
@@ -720,7 +723,10 @@ export class HostedTeamSession {
    * instead of committing a second one. A finished head is not touched:
    * it takes no work unless the lead sends it some.
    */
-  private async requestShutdown(rawName: string): Promise<string> {
+  private async requestShutdown(
+    callKey: string,
+    rawName: string,
+  ): Promise<string> {
     const team = this.openTeam();
     if (team === undefined)
       throw new HostedTeamRefusal('No active team. Create a team first.');
@@ -734,7 +740,7 @@ export class HostedTeamSession {
       throw new HostedTeamRefusal(
         `"${name}" is not a member of team "${team.name}".`,
       );
-    const view = hostedMemberView(this.chains(), member.childRunId);
+    let view = hostedMemberView(this.chains(), member.childRunId);
     if (isRunningMember(view) && !view.stopping && view.head !== undefined) {
       // A lane without the child funnel has nothing to stop through, and
       // can only carry members read-only; refusing here costs the merge
@@ -743,8 +749,21 @@ export class HostedTeamSession {
         throw new HostedTeamRefusal(
           `${name} cannot be stopped from this Session.`,
         );
-      await this.stops.requestStop(view.head.childRunId);
-      return `${name} is being stopped. Delete the team once task_list shows it ended.`;
+      try {
+        // The stop commits on the child funnel's chain, so a settlement
+        // can beat the view it just read: the run ends without a stop
+        // landing, and the winner's answer reads from the new state
+        // rather than crashing as a conflict.
+        await this.stops.requestStop(view.head.childRunId, {
+          operation: 'commitChildRunRecord',
+          commandId: `shutdown:${callKey}`,
+        });
+        return `${name} is being stopped. Delete the team once task_list shows it ended.`;
+      } catch (cause) {
+        if (!(cause instanceof ManagedSessionConflictError)) throw cause;
+        view = hostedMemberView(this.chains(), member.childRunId);
+        if (view.state === 'running' && !view.stopping) throw cause;
+      }
     }
     if (view.stoppingBeforeStart)
       return `${name} is already being stopped, before its latest continuation started: it may end without starting, and ${name} then goes back to its predecessor run. Check task_list once it settles; do not read the member as ended on this stop alone.`;

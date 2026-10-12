@@ -17,6 +17,7 @@ import {
   hasPlanModeBlock,
   hostedCallKey,
   hostedPromptKey,
+  inputBodyText,
   isSentInstruction,
   memberPlanModeRequired,
   teamMemberPreamble,
@@ -177,6 +178,41 @@ describe('plan mode (H4e-b3a, decisions 5 and 9)', () => {
     expect(
       memberPlanModeRequired(teamLifecycleBody(team, 'deleted'), [], 'alice'),
     ).toBe(false);
+  });
+});
+
+describe('the text of an input body (H4e-b3a)', () => {
+  it('reads a bare {text} body and a body of content parts', () => {
+    expect(inputBodyText({ text: 'fix the tests' })).toBe('fix the tests');
+    expect(
+      inputBodyText([
+        { type: 'text', text: 'review this' },
+        { type: 'text', text: 'and that' },
+      ]),
+    ).toBe('review this\nand that');
+    expect(inputBodyText([{ type: 'text', text: 'only one' }])).toBe(
+      'only one',
+    );
+    // Parts without a text string do not mint one.
+    expect(
+      inputBodyText([
+        { type: 'image', url: 'data' },
+        { text: 42 },
+        'a bare string part',
+        null,
+        { type: 'text', text: 'kept' },
+      ]),
+    ).toBe('kept');
+  });
+
+  it('reads nothing where no part carries a text string', () => {
+    expect(inputBodyText(undefined)).toBeUndefined();
+    expect(inputBodyText(null)).toBeUndefined();
+    expect(inputBodyText('a bare string')).toBeUndefined();
+    expect(inputBodyText({})).toBeUndefined();
+    expect(inputBodyText({ text: 42 })).toBeUndefined();
+    expect(inputBodyText([])).toBeUndefined();
+    expect(inputBodyText([{ type: 'image', url: 'data' }])).toBeUndefined();
   });
 });
 

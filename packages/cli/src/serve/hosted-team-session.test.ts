@@ -13,6 +13,7 @@ import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import {
   parseTeamState,
@@ -1064,20 +1065,15 @@ describe('request_shutdown (H4e-b3a)', () => {
   it('commits the H4f stop on a running head, then reads it on replay', async () => {
     await createTeam();
     await addMember('alice');
-    expect(
-      teams.committedBy('request_shutdown', 'p:stop', { to: 'alice' }),
-    ).toBe(false);
     expect(teams.committedBy('request_shutdown', 'p:stop')).toBe(false);
     expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
       'alice is being stopped. Delete the team once task_list shows it ended.',
     );
     expect(children.record('run-alice')!.stopRequested).toBe(true);
-    expect(
-      teams.committedBy('request_shutdown', 'p:stop', { to: 'alice' }),
-    ).toBe(true);
-    expect(teams.committedBy('request_shutdown', 'p:stop', { to: 'bob' })).toBe(
-      false,
-    );
+    expect(teams.committedBy('request_shutdown', 'p:stop')).toBe(true);
+    // The stop evidence keys on the call, not the member: a call key that
+    // never ran has committed nothing.
+    expect(teams.committedBy('request_shutdown', 'p:other')).toBe(false);
     // A re-driven call answers its committed stop from the records.
     expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
       'alice is already being stopped. Delete the team once task_list shows it ended.',
@@ -1141,6 +1137,75 @@ describe('request_shutdown (H4e-b3a)', () => {
     expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
       'alice has failed; there is nothing left to stop.',
     );
+  });
+
+  it('does not credit a user cancel to a call that never ran', async () => {
+    await createTeam();
+    await addMember('alice');
+    // The H4f user cancel commits its stop under the revision-shaped id.
+    await children.requestStop('run-alice');
+    expect(teams.committedBy('request_shutdown', 'p:new')).toBe(false);
+    expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:new')).toBe(
+      'alice is already being stopped. Delete the team once task_list shows it ended.',
+    );
+    expect(teams.committedBy('request_shutdown', 'p:new')).toBe(false);
+  });
+
+  it('reads its keyed stop after the stopped continuation fell back', async () => {
+    await createTeam();
+    await addMember('alice');
+    await settle('run-alice');
+    await children.sendToChild({
+      taskId: children.taskIdOf('run-alice'),
+      text: 'more work',
+      messageId: 'msg_shut_more',
+      continuationRunId: 'shut:more',
+      executionCallId: 'shut:more',
+      closing: false,
+    });
+    expect(await teams.run('request_shutdown', { to: 'alice' }, 'p:stop')).toBe(
+      'alice is being stopped. Delete the team once task_list shows it ended.',
+    );
+    // The stopped continuation never starts and the head falls back, yet
+    // the keyed stop evidence still credits the call that requested it.
+    await children.settleCancelled('shut:more', { started: false });
+    expect(teams.committedBy('request_shutdown', 'p:stop')).toBe(true);
+  });
+
+  it('answers the settled head when its settlement outraced the stop', async () => {
+    await createTeam();
+    await addMember('alice');
+    const racing = new HostedTeamSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+      {
+        requestStop: async (childRunId) => {
+          // The settlement beat the stop commit to the head's revision.
+          await settle(childRunId);
+          throw new ManagedSessionConflictError('the revision raced');
+        },
+      },
+    );
+    expect(
+      await racing.run('request_shutdown', { to: 'alice' }, 'p:stop'),
+    ).toBe(
+      'alice has finished: it takes no work unless you send it some, so nothing needed stopping. Its run was not touched.',
+    );
+    expect(racing.committedBy('request_shutdown', 'p:stop')).toBe(false);
+  });
+
+  it('refuses a stop on a lane that carries no child funnel', async () => {
+    await createTeam();
+    await addMember('alice');
+    const funnelless = new HostedTeamSession(
+      { authority: session.authority, resources: session.resources },
+      sessionKey,
+    );
+    expect(
+      await refusal(
+        funnelless.run('request_shutdown', { to: 'alice' }, 'p:stop'),
+      ),
+    ).toBe('alice cannot be stopped from this Session.');
   });
 });
 

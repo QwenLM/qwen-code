@@ -1081,9 +1081,20 @@ export class HostedChildAgentSession {
   }
 
   /** A stop was requested of the owner; set once, never cleared. */
-  requestStop(childRunId: string): Promise<void> {
-    return this.revise(childRunId, (previous) =>
-      childStopRequestedBody(previous),
+  requestStop(
+    childRunId: string,
+    /**
+     * H4e-b3 b3a: evidence identifying the tool call that requested this
+     * stop, so an interrupted turn's recovery tells "my caller committed
+     * it" from someone else's. The default keeps the revision-shaped id
+     * the user-facing cancel paths use.
+     */
+    evidence?: { readonly operation: string; readonly commandId: string },
+  ): Promise<void> {
+    return this.revise(
+      childRunId,
+      (previous) => childStopRequestedBody(previous),
+      evidence,
     );
   }
 
@@ -1319,6 +1330,10 @@ export class HostedChildAgentSession {
   private revise(
     childRunId: string,
     step: (previous: ChildAgentRun) => ChildAgentRun,
+    evidence?: {
+      readonly operation?: string;
+      readonly commandId?: string;
+    },
   ): Promise<void> {
     const write = this.writes.then(async () => {
       const existing = this.store.authority.extensionRecord(
@@ -1336,8 +1351,9 @@ export class HostedChildAgentSession {
       if (isDeepStrictEqual(previousParsed, next)) return;
       await this.store.authority.commitExtensionRecord(
         {
-          operation: 'commitChildRunRecord',
-          commandId: `${childRunId}:${existing!.revision + 1}`,
+          operation: evidence?.operation ?? 'commitChildRunRecord',
+          commandId:
+            evidence?.commandId ?? `${childRunId}:${existing!.revision + 1}`,
           sessionKey: this.key,
           contentDigest: digest(next),
         },

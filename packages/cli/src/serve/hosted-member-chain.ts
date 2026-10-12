@@ -132,6 +132,35 @@ export function hasPlanModeBlock(text: string): boolean {
 }
 
 /**
+ * The text of an input's published body. The `/prompt` route stores its
+ * message as an array of content parts, while funnels writing their own
+ * inputs (child results, notifications, messages) store a bare `{text}`.
+ */
+export function inputBodyText(body: unknown): string | undefined {
+  if (Array.isArray(body)) {
+    const parts: string[] = [];
+    for (const part of body) {
+      const text =
+        typeof part === 'object' &&
+        part !== null &&
+        typeof (part as Record<string, unknown>)['text'] === 'string'
+          ? ((part as Record<string, unknown>)['text'] as string)
+          : undefined;
+      if (text !== undefined) parts.push(text);
+    }
+    return parts.length > 0 ? parts.join('\n') : undefined;
+  }
+  if (
+    typeof body === 'object' &&
+    body !== null &&
+    typeof (body as Record<string, unknown>)['text'] === 'string'
+  ) {
+    return (body as Record<string, unknown>)['text'] as string;
+  }
+  return undefined;
+}
+
+/**
  * Decision 9's composition rule: whether a member's next run composes in
  * plan mode — its roster entry is plan-required and the lead holds no
  * approved plan of that member of that team yet. `team_plan` stays

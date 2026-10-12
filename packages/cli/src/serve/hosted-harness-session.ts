@@ -148,7 +148,7 @@ import {
   monitorWakeNeedsRecovery,
   withChildAgentConsumption,
 } from './hosted-monitor-wake-turn.js';
-import { hasPlanModeBlock } from './hosted-member-chain.js';
+import { hasPlanModeBlock, inputBodyText } from './hosted-member-chain.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
@@ -338,12 +338,11 @@ interface HostedSession {
 }
 
 /**
- * H4e-b3 decisions 5/9: whether this run's first input carried an
- * unescaped `plan-mode="required"` preamble. Only a Session with a lineage
- * has a composed first input to read; a root Session's user prompt never
- * makes one. Re-derived at every load off the journal, so a build without
- * the composing release that reopens a b3d journal keeps the run
- * restricted (decision 5's rollback floor).
+ * H4e-b3 decisions 5/9: whether this run's first committed input carried
+ * an unescaped `plan-mode="required"` preamble. Only a Session with a
+ * lineage has a composed first input to read; a root Session's user
+ * prompt never makes one. The body's route shape is the `/prompt`
+ * array-of-parts, while funnel-written inputs carry a bare `{text}`.
  */
 async function hostedFirstInputPlanMode(
   managed: ManagedSession,
@@ -358,8 +357,29 @@ async function hostedFirstInputPlanMode(
   );
   const body = JSON.parse(
     (await managed.resources.read(ref)).toString('utf8'),
-  ) as Record<string, unknown>;
-  return typeof body['text'] === 'string' && hasPlanModeBlock(body['text']);
+  ) as unknown;
+  const text = inputBodyText(body);
+  return text !== undefined && hasPlanModeBlock(text);
+}
+
+/**
+ * H4e-b3a review finding: a member Session's plan mode settles only once
+ * its first input is durable — at Session create it has none committed
+ * yet, so the flag is answered lazily on every turn construction until a
+ * positive answer is cached. A root prompt never arms it.
+ */
+async function ensureMemberPlanMode(session: HostedSession): Promise<boolean> {
+  if (session.memberPlanMode === true || session.toolProfile === undefined)
+    return session.memberPlanMode === true;
+  const lineage = object(session.definition?.['lineage']);
+  if (
+    typeof lineage?.['parentSessionId'] !== 'string' ||
+    typeof lineage['parentChildRunId'] !== 'string'
+  )
+    return false;
+  const planMode = await hostedFirstInputPlanMode(session.managed);
+  if (planMode) session.memberPlanMode = true;
+  return planMode;
 }
 
 async function runHostedLifecycleHook(
@@ -2393,7 +2413,7 @@ async function executeHostedTurn(
                   childAgents: childAgentsOf(session),
                   messages: session.messages,
                   teams: session.teams,
-                  memberPlanMode: session.memberPlanMode === true,
+                  memberPlanMode: await ensureMemberPlanMode(session),
                 },
               )
             : undefined;
@@ -3402,16 +3422,9 @@ export function registerHostedHarnessSessionRoutes(
           }
         }
       }
-      // H4e-b3 decisions 5/9: a member run's plan mode, read off its first
-      // committed input; only a Session with a lineage has one to read.
-      if (
-        session.toolProfile &&
-        typeof savedLineage?.['parentSessionId'] === 'string' &&
-        typeof savedLineage['parentChildRunId'] === 'string'
-      )
-        session.memberPlanMode = await hostedFirstInputPlanMode(
-          session.managed,
-        );
+      // H4e-b3 decisions 5/9: a member run's plan mode is decided lazily by
+      // ensureMemberPlanMode at tool-turn construction — the first committed
+      // input may not exist yet while the Session assembles on create.
       if (
         session.toolProfile &&
         brokerOptions &&
@@ -6160,7 +6173,7 @@ export function registerHostedHarnessSessionRoutes(
             childAgents: childAgentsOf(session),
             messages: session.messages,
             teams: session.teams,
-            memberPlanMode: session.memberPlanMode === true,
+            memberPlanMode: await ensureMemberPlanMode(session),
           },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
