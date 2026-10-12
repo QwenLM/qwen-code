@@ -142,6 +142,9 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     // H4e-b1: a lead's team and its task board.
     'team_state',
     'team_task',
+    // H3 (#13856): the Monitor runtime, enabled after its physical
+    // acceptance pass; the hold semantics land with the gate.
+    'monitor_run',
   ];
 
 /**
@@ -177,38 +180,40 @@ export function assertManagedSessionScheduleSessionModeEnabled(
 }
 
 /**
- * The `child_run` body kinds a caller may actually submit today (H4b, and
- * the workflow runtime slice of #13803). `child_run` carries three
- * capabilities with independent enablement gates — H3's background Shell,
- * H4's child agent and H4's workflow — so it never joins the plain
- * enabled list as a whole: the shell kind stays disabled here until the H3
- * enablement gates clear, while `child_agent` and `workflow` are admitted.
- * The kind gate fires on every `child_run` revision commitment, so a kind
- * joins this list only together with the runtime whose verbs commit its
- * later revisions (relay, cascade, funnel). The Java store validates all
- * three kinds and, since H4a, deploys before any writer, keeping the
- * server-first order H1/H2 used.
+ * The `child_run` body kinds a caller may actually submit today.
+ * `child_run` carries three capabilities with independent enablement gates
+ * — H3's background Shell, H4's child agent and H4's workflow — so it never
+ * joins the plain enabled list as a whole. H4b admitted `child_agent`; the
+ * shell kind joined once H3's hold semantics and physical acceptance landed
+ * (#13856); the workflow kind joined with its runtime slice (#13803). The
+ * kind gate fires on every `child_run` revision commitment, so a kind joins
+ * this list only together with the runtime whose verbs commit its later
+ * revisions (relay, cascade, funnel). The Java store validates every kind
+ * ahead of any writer, keeping the server-first order H1/H2 used.
  */
 export const MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS = Object.freeze([
   'child_agent',
+  'shell',
   'workflow',
 ] as const);
 
 /**
  * The input sources a child run's completion notification carries — the
- * kinds of the gate above. Consumers spread this constant instead of
- * re-listing `'child_agent', 'workflow'` by hand.
+ * child Session kinds of the gate above. A background `shell` run is not a
+ * child Session and never posts an acceptance notification, so it stays
+ * off this list. Consumers spread this constant instead of re-listing
+ * `'child_agent', 'workflow'` by hand.
  */
-export const CHILD_NOTIFICATION_SOURCES =
-  MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS;
+export const CHILD_NOTIFICATION_SOURCES = Object.freeze([
+  'child_agent',
+  'workflow',
+] as const);
 
-/** True when an input's source names one of the child run kinds. */
+/** True when an input's source names one of the child Session kinds. */
 export function isChildNotificationSource(source: unknown): boolean {
   return (
     typeof source === 'string' &&
-    (MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]).includes(
-      source,
-    )
+    (CHILD_NOTIFICATION_SOURCES as readonly string[]).includes(source)
   );
 }
 export function assertManagedSessionChildRunKindEnabled(kind: string): void {

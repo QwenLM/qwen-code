@@ -252,11 +252,13 @@ function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
   );
 }
 
-// H3: background admissions exist only while the child_run domain is
-// enabled for commits; otherwise the turn keeps its foreground refusals.
+// H3: background admissions exist only while the child_run domain's shell
+// kind is enabled for commits; otherwise the turn keeps its foreground
+// refusals. The domain itself never joins the plain enabled list — its
+// admission is per kind — so this reads the kind gate (#13856).
 function childRunAdmissionsEnabled(): boolean {
   try {
-    assertManagedSessionDomainEnabled('child_run');
+    assertManagedSessionChildRunKindEnabled('shell');
     return true;
   } catch {
     return false;
@@ -449,13 +451,14 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   {
     name: 'run_shell_command',
     description:
-      'Run a foreground command in the saved Workspace working directory. Complete stdout and stderr are retained; the model receives a bounded preview. Background jobs are unavailable. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
+      'Run a command in the saved Workspace working directory. Complete stdout and stderr are retained; the model receives a bounded preview. With is_background the command runs detached: the call returns a durable handle at once, the process outlives the turn and holds its Runtime until it exits, and its output lands as a task Artifact. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
         command: { type: 'string' },
         timeout: { type: 'integer', minimum: 1, maximum: 600000 },
         description: { type: 'string' },
+        is_background: { type: 'boolean' },
       },
       required: ['command'],
       additionalProperties: false,
@@ -3654,7 +3657,15 @@ export class HostedWorkspaceToolTurn {
     // fresh accept starts it, and a replay after a restart — whose
     // journal already carries the receipt — must resume it, or the
     // watch's lines, terminal conditions and settle never arrive.
-    if (this.monitors!.record(executionCallId)?.stopReason === null) {
+    const monitorRecord = this.monitors!.record(executionCallId);
+    // A parked watch has stopReason null like a live one, but its quota or
+    // idle window already ended it as unproven — resuming it would commit a
+    // post-quota observation the record refuses, silently. Only a live
+    // record is resumed (#13856 R1-55).
+    if (
+      monitorRecord?.stopReason === null &&
+      monitorRecord.run.state !== 'recovery_blocked'
+    ) {
       await this.resumeMonitorWatch(executionCallId);
     }
     let ref: ManagedSessionDurableRef;
@@ -5315,6 +5326,17 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
+  // #13856: the broker refused the release because a live background run
+  // provably holds the Runtime — the designed hold, not a wedge. The turn
+  // settles clean and the Runtime Session stays owed to the close, which
+  // drains it; the busy path keeps the honesty contract untouched.
+  private held = false;
+
+  /** The turn ended with its Runtime Session held by a live run. */
+  get runtimeHeld(): boolean {
+    return this.held;
+  }
+
   async finish(): Promise<void> {
     if (this.uncertain)
       throw new HostedToolRecoveryRequiredError('Tool outcome is unknown.');
@@ -5326,6 +5348,15 @@ export class HostedWorkspaceToolTurn {
       if (!this.mcp && !this.hooks) await this.broker.release();
       this.acquired = false;
     } catch (cause) {
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 409 &&
+        cause.code === 'runtime_session_held'
+      ) {
+        this.held = true;
+        this.acquired = false;
+        return;
+      }
       this.uncertain = true;
       throw new HostedToolRecoveryRequiredError(cause);
     }
