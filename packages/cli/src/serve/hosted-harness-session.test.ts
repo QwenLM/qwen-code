@@ -24481,6 +24481,309 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
+  /**
+   * Parks a Turn that reached the Runtime with a committed-but-unanswered
+   * team_create: write_file executes and answers first, team_create's
+   * record commits and its tool_result write is killed — the drive dies
+   * recovery-blocked, stranding the committed call (R13-1's fixture). The
+   * task_create after the crash point never runs and commits nothing.
+   */
+  async function parkCrashedTeamTurn(): Promise<void> {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    acquireSpy = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockImplementation(async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+      '66666666-6666-4666-8666-666666666666',
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        captureBytes: 1024 * 1024,
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    let killed = false;
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      async function (this: ManagedSessionRecordSink, item) {
+        if (
+          !killed &&
+          item.type === 'tool_result' &&
+          JSON.stringify(item.message).includes('"team_create"')
+        ) {
+          killed = true;
+          throw new Error('Harness killed');
+        }
+        return originalWrite.call(this, item);
+      },
+    );
+    const team = {
+      name: 'team_create',
+      callId: 'call-0',
+      args: { team_name: 'review' },
+      isClientInitiated: false,
+      prompt_id: PROMPT_ID,
+    };
+    const later = {
+      name: 'task_create',
+      callId: 'call-2',
+      args: { subject: 'Audit', description: 'a' },
+      isClientInitiated: false,
+      prompt_id: PROMPT_ID,
+    };
+    state.model.mockImplementationOnce(
+      async ({ toolTurn, signal }) =>
+        toolTurn!.execute(
+          [CALL, team, later],
+          [CALL, team, later].map((call) => ({
+            functionCall: {
+              id: call.callId,
+              name: call.name,
+              args: call.args,
+            },
+          })),
+          'test-model',
+          signal,
+        ) as never,
+    );
+    const prompt = [{ type: 'text', text: 'a file and a team' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
+    vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
+    // The replacement's reconciliation reads the parked execution as
+    // settled; the stop proof is quick and quiet.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+  }
+
+  /** Reads the durable fold answer for call-0 from the transcript. */
+  async function readSiblingAnswer(
+    server: unknown,
+    clientId: string,
+  ): Promise<unknown> {
+    const transcript = await replacementHeaders(
+      supertest(server as never).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    return (
+      transcript.body.events as Array<{
+        type: string;
+        data?: {
+          record?: {
+            type?: string;
+            message?: {
+              parts?: Array<{
+                functionResponse?: { id?: string; response?: unknown };
+              }>;
+            };
+          };
+        };
+      }>
+    )
+      .filter(
+        (event) =>
+          event.type === 'managed_journal_event' &&
+          event.data?.record?.type === 'tool_result',
+      )
+      .flatMap((event) => event.data?.record?.message?.parts ?? [])
+      .find((part) => part.functionResponse?.id === 'call-0');
+  }
+
+  it('answers the committed sibling when the continue drive compensates a lost resume', async () => {
+    // R13-1: the continue route's compensating settle owes the same
+    // committed-sibling fold the cancel route runs — the drive's first
+    // project() read faults before the resume fold could run, and the
+    // durable settle would otherwise strand the committed team_create
+    // unanswered forever: the kept admission replays a retried continue
+    // without re-driving.
+    domainEnablement.childRun = true;
+    domainEnablement.teams = true;
+    try {
+      await parkCrashedTeamTurn();
+      const { server, loaded } = await loadReplacement(
+        false,
+        'hosted-workspace-shell/1',
+      );
+      expect(loaded.status).toBe(200);
+      const clientId = loaded.body.clientId as string;
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as { checkpointId: string; activationId: string };
+      // The drive's first projection read fails before any resume runs, so
+      // the compensating settle owns the fold as well as the terminal
+      // record.
+      vi.spyOn(
+        ManagedSessionRecordSink.prototype,
+        'project',
+      ).mockRejectedValueOnce(new Error('projection lost'));
+      const continued = await replacementHeaders(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(continued.status).toBe(200);
+      await vi.waitFor(
+        async () => {
+          const status = await replacementHeaders(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      // The fold's answer is durable: the committed team_create carries a
+      // functionResponse in the projection, answered by what committed.
+      const sibling = await readSiblingAnswer(server, clientId);
+      expect(sibling).toBeDefined();
+      expect(
+        JSON.stringify(
+          (sibling as { functionResponse?: { response?: unknown } })
+            ?.functionResponse?.response,
+        ),
+      ).toContain('committed its team change');
+      await replacementHeaders(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+    } finally {
+      domainEnablement.teams = false;
+      domainEnablement.childRun = false;
+    }
+  }, 30_000);
+
+  it('answers the committed sibling when the resume fold write fails and the drive settles', async () => {
+    // R13-1: the direct settle owes the fold too — the resume fold's
+    // answer write for the orphaned team_create fails raw (not
+    // recovery-classified), so the inner catch settles the Turn 'error'
+    // with the call still unanswered, and the direct settle's fold is the
+    // last chance to pair it before the durable record.
+    domainEnablement.childRun = true;
+    domainEnablement.teams = true;
+    try {
+      await parkCrashedTeamTurn();
+      const { server, loaded } = await loadReplacement(
+        false,
+        'hosted-workspace-shell/1',
+      );
+      expect(loaded.status).toBe(200);
+      const clientId = loaded.body.clientId as string;
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as { checkpointId: string; activationId: string };
+      // The resume fold's answer write for the orphaned team_create fails
+      // once, so the drive throws raw into the error settle with the
+      // answer still owed.
+      const originalWrite = ManagedSessionRecordSink.prototype.write;
+      let foldRefused = false;
+      vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+        async function (this: ManagedSessionRecordSink, item) {
+          if (
+            !foldRefused &&
+            item.type === 'tool_result' &&
+            JSON.stringify(item.message).includes('"team_create"')
+          ) {
+            foldRefused = true;
+            throw new Error('store refused the sibling answer');
+          }
+          return originalWrite.call(this, item);
+        },
+      );
+      const continued = await replacementHeaders(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(continued.status).toBe(200);
+      await vi.waitFor(
+        async () => {
+          const status = await replacementHeaders(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      const settled = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(settled.body.recoveryBlocked).toBe(false);
+      const transcript = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_error',
+            promptId: PROMPT_ID,
+          }),
+        ]),
+      );
+      const sibling = await readSiblingAnswer(server, clientId);
+      expect(sibling).toBeDefined();
+      expect(
+        JSON.stringify(
+          (sibling as { functionResponse?: { response?: unknown } })
+            ?.functionResponse?.response,
+        ),
+      ).toContain('committed its team change');
+      await replacementHeaders(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+    } finally {
+      domainEnablement.teams = false;
+      domainEnablement.childRun = false;
+    }
+  }, 30_000);
+
   it('owes the compensating retirement when its write fails, and a settled prompt retires it', async () => {
     await parkToolTurn();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({

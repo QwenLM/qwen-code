@@ -6956,6 +6956,31 @@ export function registerHostedHarnessSessionRoutes(
         }
         await toolTurn.finish();
         await harness.settleConsumedRuntimeContinuation();
+        // An interrupted drive can leave a call it committed — a team
+        // write, a background launch — without its answer: the fold owes
+        // it before the terminal record, or the durable settle strands
+        // the orphan and the next history's orphan repair retries the work
+        // under a new key. A fold refusal must not settle over unanswered
+        // calls, so the Turn stays re-drivable instead.
+        if (state !== 'completed') {
+          try {
+            await answerCommittedTurnCalls({
+              session: session.managed,
+              sessionId,
+              cwd: session.cwd,
+              promptId,
+              children: session.childAgents,
+              teams: session.teams,
+              messages: session.messages,
+            });
+          } catch (foldCause) {
+            session.blocked = true;
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness turn ${promptId} could not answer its committed calls: ${String(foldCause)}`,
+            );
+            return;
+          }
+        }
         await session.managed.sink.write(turnResultRecord(state));
         // A Turn that never resumes never reconciles its pending file
         // history either: retire the obligation after the terminal record
@@ -7003,6 +7028,29 @@ export function registerHostedHarnessSessionRoutes(
           session.blocked = true;
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,
+          );
+          return;
+        }
+        // The happy-path settle answers the drive's committed sibling calls
+        // before the terminal record; this compensating arm owes the same
+        // fold, or the durable settle strands a committed team/task call
+        // nobody ever answers. The fold gets its own try: a fold refusal is
+        // not an ambiguous terminal-write failure — the Turn stays
+        // re-drivable rather than settling over unanswered calls.
+        try {
+          await answerCommittedTurnCalls({
+            session: session.managed,
+            sessionId,
+            cwd: session.cwd,
+            promptId,
+            children: session.childAgents,
+            teams: session.teams,
+            messages: session.messages,
+          });
+        } catch (foldCause) {
+          session.blocked = true;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness turn ${promptId} could not answer its committed calls: ${String(foldCause)}`,
           );
           return;
         }
