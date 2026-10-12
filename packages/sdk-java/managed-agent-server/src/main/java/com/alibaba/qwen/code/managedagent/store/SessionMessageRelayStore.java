@@ -164,7 +164,11 @@ public class SessionMessageRelayStore {
     }
 
     /** Whether an older command of the same sender is still unclassified:
-     * one sender's commands pass strictly in order. */
+     * one sender's commands pass strictly in order. The open window is
+     * the outbound's planned/accepting span on an unclassified row — a
+     * terminal record never blocks again, whatever row state its last
+     * step left, and a terminal row never blocks again, whatever the
+     * record says. */
     public boolean olderOpenCommand(String tenantId, String senderSessionId,
             String commandId) {
         return !jdbc.query("SELECT l.message_id FROM"
@@ -176,7 +180,8 @@ public class SessionMessageRelayStore {
                         + " AND r.record_id = l.message_id"
                         + " WHERE l.tenant_id = ? AND l.sender_session_id = ?"
                         + " AND l.message_id < ?"
-                        + " AND l.state NOT IN ('done', 'unknown', 'orphaned')",
+                        + " AND l.state NOT IN ('done', 'unknown', 'orphaned')"
+                        + " AND r.delivery_state IN ('planned', 'accepting')",
                 (result, row) -> result.getString(1), tenantId,
                 senderSessionId, commandId).isEmpty();
     }
