@@ -262,9 +262,7 @@ test('previews artifact and @file with lazy Excel loading, formats and virtual s
   expect(modules).toEqual([]);
   expect(workers).toEqual([]);
   await page
-    .locator(
-      '[data-web-shell-message-list] [title="Quarterly workbook"] > button',
-    )
+    .locator('[data-web-shell-message-list] [title="quarterly.xlsx"] > button')
     .click();
   const preview = page.locator(previewSelector);
   const table = preview.getByRole('table', { name: 'Quarterly', exact: true });
@@ -420,9 +418,7 @@ test('keeps large worksheets virtual while scrolling through wrapped and merged 
   const mock = await install(page, info, scenario, bytes);
   await mock.open();
   await page
-    .locator(
-      '[data-web-shell-message-list] [title="Quarterly workbook"] > button',
-    )
+    .locator('[data-web-shell-message-list] [title="quarterly.xlsx"] > button')
     .click();
   const preview = page.locator(previewSelector);
   const table = preview.getByRole('table', { name: 'Large', exact: true });
@@ -696,7 +692,7 @@ for (const kind of [
     await mock.open();
     await page
       .locator(
-        '[data-web-shell-message-list] [title="Quarterly workbook"] > button',
+        '[data-web-shell-message-list] [title="quarterly.xlsx"] > button',
       )
       .click();
     const preview = page.locator(previewSelector);
@@ -745,9 +741,7 @@ test('retains all content when peripheral empty cells carry formatting', async (
   const mock = await install(page, info, scenario, bytes);
   await mock.open();
   await page
-    .locator(
-      '[data-web-shell-message-list] [title="Quarterly workbook"] > button',
-    )
+    .locator('[data-web-shell-message-list] [title="quarterly.xlsx"] > button')
     .click();
   const preview = page.locator(previewSelector);
   await expect(preview.getByRole('table')).toHaveAttribute(
@@ -805,7 +799,7 @@ for (const allowWorker of [false, true]) {
     await mock.open();
     await page
       .locator(
-        '[data-web-shell-message-list] [title="Quarterly workbook"] > button',
+        '[data-web-shell-message-list] [title="quarterly.xlsx"] > button',
       )
       .click();
     const preview = page.locator(previewSelector);
@@ -853,9 +847,7 @@ test('keeps artifact and incoming Blob downloadable when the lazy preview module
   );
   await mock.open();
   await page
-    .locator(
-      '[data-web-shell-message-list] [title="Quarterly workbook"] > button',
-    )
+    .locator('[data-web-shell-message-list] [title="quarterly.xlsx"] > button')
     .click();
   const panel = page.getByRole('complementary', {
     name: 'Right panel',
