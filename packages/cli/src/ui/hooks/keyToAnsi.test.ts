@@ -113,4 +113,20 @@ describe('keyToAnsi', () => {
       '\x1b[3~',
     );
   });
+
+  it('passes through an ordinary printable key sequence', () => {
+    expect(keyToAnsi(key({ name: 'f', sequence: 'f' }))).toBe('f');
+  });
+
+  it('drops an Alt-modified key instead of passing through its sequence', () => {
+    expect(
+      keyToAnsi(key({ name: 'f', meta: true, sequence: '\x1bf' })),
+    ).toBeNull();
+  });
+
+  it('maps Kitty Ctrl + letter before its raw CSI sequence', () => {
+    expect(
+      keyToAnsi(key({ name: 'a', ctrl: true, sequence: '\x1b[97;5u' })),
+    ).toBe('\u0001');
+  });
 });

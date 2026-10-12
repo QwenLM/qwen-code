@@ -17,11 +17,8 @@ export type { Key };
  */
 export function keyToAnsi(key: Key): string | null {
   if (key.ctrl) {
-    // Ctrl + letter. `name` is a string, so the range test below only reads
-    // its first character: every named key ('up', 'delete', 'home', …) starts
-    // with a letter in a–z and matched, turning Ctrl+Down and Ctrl+Delete into
-    // 0x04 (EOF) and Ctrl+Left into a form feed. Require a single character so
-    // a modified named key falls through to its escape sequence instead.
+    // Only single letters use Ctrl arithmetic. Named keys such as 'down'
+    // also satisfy the string range check and would otherwise emit EOF.
     if (key.name.length === 1 && key.name >= 'a' && key.name <= 'z') {
       return String.fromCharCode(
         key.name.charCodeAt(0) - 'a'.charCodeAt(0) + 1,
