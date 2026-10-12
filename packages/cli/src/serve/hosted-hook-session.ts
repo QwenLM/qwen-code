@@ -489,7 +489,7 @@ export class HostedHookSession {
    * acquisition-free state when a foreground child would need the mount.
    */
   get mountHeld(): boolean {
-    return this.acquired;
+    return this.acquired || this.broker.acquired;
   }
 
   /**
@@ -1787,7 +1787,7 @@ export class HostedHookSession {
     // before releasing the Session's own owner: the Session stays attached
     // with it, so a later turn can still run and retry the fenced release.
     if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
-    if (this.ownsBroker && this.broker.runtime) {
+    if (this.ownsBroker && this.mountHeld) {
       try {
         await this.broker.release({ drain: true });
       } catch (cause) {
