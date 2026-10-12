@@ -34,6 +34,31 @@ class ManagedEventEnvelopesTest {
     }
 
     @Test
+    void jsNumberToStringMatchesEcmaScriptOnSubnormals() {
+        // ECMAScript picks the shortest digits that round-trip; Java's
+        // Double.toString diverges on these deep subnormals (wenshao's :233).
+        // Expected values are Node 22's String(...) output — e.g.
+        // String(5e-324) === "5e-324" where Java's Double.toString gives
+        // "4.9E-324".
+        assertEquals("5e-324", ManagedEventEnvelopes.jsNumberToString(5e-324));
+        assertEquals("1e-323", ManagedEventEnvelopes.jsNumberToString(1e-323));
+        assertEquals("1e-322", ManagedEventEnvelopes.jsNumberToString(1e-322));
+        assertEquals("1e-321", ManagedEventEnvelopes.jsNumberToString(1e-321));
+        assertEquals("1e-320", ManagedEventEnvelopes.jsNumberToString(1e-320));
+        assertEquals("1.5e-323",
+                ManagedEventEnvelopes.jsNumberToString(1.5e-323));
+        assertEquals("2.5e-323",
+                ManagedEventEnvelopes.jsNumberToString(2.5e-323));
+        // The extreme doubles round-trip through the same rule.
+        assertEquals("5e-324",
+                ManagedEventEnvelopes.jsNumberToString(Double.MIN_VALUE));
+        assertEquals("2.2250738585072014e-308",
+                ManagedEventEnvelopes.jsNumberToString(Double.MIN_NORMAL));
+        assertEquals("1.7976931348623157e+308",
+                ManagedEventEnvelopes.jsNumberToString(Double.MAX_VALUE));
+    }
+
+    @Test
     void canonicalJsonRendersExponentialNumbersLikeJsonStringify()
             throws Exception {
         JsonNode node = JSON.readTree("{\"x\":1e21,\"y\":1e-7,\"z\":0.95}");

@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -226,15 +228,49 @@ public final class ManagedEventEnvelopes {
                     "non-finite number in digest input");
         }
         String sign = d < 0 ? "-" : "";
-        // Shortest round-trip digits via Double.toString, re-read through
-        // BigDecimal so precision() and scale() give the significant digits
-        // and the decimal exponent.
-        BigDecimal bd = new BigDecimal(Double.toString(Math.abs(d)))
-                .stripTrailingZeros();
-        String digits = bd.unscaledValue().abs().toString();
+        double a = Math.abs(d);
+        // ECMAScript Number::toString digits: the shortest decimal that still
+        // parses back to this exact double; among the shortest, the closest to
+        // the exact value, then even on a tie. Double.toString is not faithful
+        // on subnormals (2^-1074 → Java "4.9e-324" but ECMAScript "5e-324"), so
+        // the digits are generated from the exact value, not re-read from it.
+        BigDecimal exact = new BigDecimal(a);
+        String digits = null;
+        int n = 0;
+        for (int p = 1; p <= 17 && digits == null; p++) {
+            // lo/hi are the consecutive p-digit decimals bracketing the exact
+            // value; any round-tripping p-digit decimal is one of them.
+            BigDecimal lo = exact.round(new MathContext(p, RoundingMode.FLOOR));
+            BigDecimal hi = exact.round(new MathContext(p, RoundingMode.CEILING));
+            BigDecimal best = null;
+            for (BigDecimal candidate : new BigDecimal[] {lo, hi}) {
+                if (candidate.signum() <= 0 || candidate.doubleValue() != a) {
+                    continue;
+                }
+                if (best != null) {
+                    int cmp = candidate.subtract(exact).abs()
+                            .compareTo(best.subtract(exact).abs());
+                    boolean closer = cmp < 0;
+                    boolean tieToEven = cmp == 0
+                            && !candidate.unscaledValue().testBit(0)
+                            && best.unscaledValue().testBit(0);
+                    if (!closer && !tieToEven) {
+                        continue;
+                    }
+                }
+                best = candidate;
+            }
+            if (best != null) {
+                BigDecimal s = best.stripTrailingZeros();
+                digits = s.unscaledValue().toString();
+                // n: the value is 0.d1…dk × 10^n (so 10^(n-1) ≤ |x| < 10^n).
+                n = digits.length() - s.scale();
+            }
+        }
+        if (digits == null) {
+            throw new AssertionError("no shortest decimal for " + d);
+        }
         int k = digits.length();
-        // n: the value is 0.d1…dk × 10^n (so 10^(n-1) ≤ |x| < 10^n).
-        int n = k - bd.scale();
         StringBuilder sb = new StringBuilder(sign);
         if (k <= n && n <= 21) {
             // integral value in the plain range: digits then (n-k) zeros.
