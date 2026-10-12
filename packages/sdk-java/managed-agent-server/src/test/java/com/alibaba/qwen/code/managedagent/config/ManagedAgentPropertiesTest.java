@@ -101,6 +101,54 @@ class ManagedAgentPropertiesTest {
                         .hasRootCauseMessage("Hosted Workspace files require"
                                 + " a supported Harness, Session Store and Session-isolated"
                                 + " local-process Broker with Workspace mounts"));
+        // A definition Session publishes instructions through the Session
+        // Store at Harness create, so the Harness implies the Store even
+        // when Workspace files are off.
+        context.withPropertyValues(
+                "qwen.managed-agent.harness.enabled=true",
+                "qwen.managed-agent.session-store.enabled=false")
+                .run(started -> assertThat(started).hasFailed()
+                        .getFailure().hasRootCauseInstanceOf(IllegalStateException.class)
+                        .hasRootCauseMessage("Hosted Harness requires the Managed Session Store"));
+    }
+
+    @Test
+    void shellAdmissionIsDefaultOffAndRequiresAnAskingModeAndFiles() throws Exception {
+        String key = "qwen.managed-agent.harness.workspace-shell-enabled";
+        assertThat(applicationYmlValues()).containsEntry(key,
+                "${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}");
+        assertThat(new ManagedAgentProperties().getHarness().isWorkspaceShellEnabled()).isFalse();
+        ApplicationContextRunner supported = new ApplicationContextRunner()
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .withPropertyValues(
+                        key + "=true",
+                        "qwen.managed-agent.harness.enabled=true",
+                        "qwen.managed-agent.harness.workspace-files-enabled=true",
+                        "qwen.managed-agent.harness.approval-mode=default",
+                        "qwen.managed-agent.session-store.enabled=true",
+                        "qwen.managed-agent.runtime-broker.enabled=true",
+                        "qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=tenant",
+                        "qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
+                        "qwen.managed-agent.runtime-broker.workspace-mounts[0].root=/workspace");
+        for (String mode : List.of("default", "auto-edit", "DEFAULT")) {
+            supported.withPropertyValues("qwen.managed-agent.harness.approval-mode=" + mode)
+                    .run(started -> assertThat(started).hasNotFailed());
+        }
+        for (String mode : List.of("yolo", "", " ", "plan", "unknown")) {
+            supported.withPropertyValues("qwen.managed-agent.harness.approval-mode=" + mode)
+                    .run(started -> assertThat(started).hasFailed());
+        }
+        for (String invalid : List.of("harness.workspace-files-enabled=false", "harness.enabled=false",
+                "session-store.enabled=false", "runtime-broker.enabled=false",
+                "runtime-broker.isolation-class=workspace", "runtime-broker.provisioner=kubernetes")) {
+            supported.withPropertyValues("qwen.managed-agent." + invalid)
+                    .run(started -> assertThat(started).hasFailed());
+        }
+        ManagedAgentProperties missing = new ManagedAgentProperties();
+        missing.getHarness().setWorkspaceShellEnabled(true);
+        missing.getHarness().setWorkspaceFilesEnabled(true);
+        missing.getHarness().setApprovalMode(null);
+        assertThatThrownBy(missing::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
     }
 
     @Configuration(proxyBeanMethods = false)

@@ -119,10 +119,10 @@ export const MOD_GUEST_FACTORY = String.raw`
   };
 
   return {
-    load: async (register, cwd) => {
+    load: async (register, cwd, options) => {
       if (typeof register !== 'function') throw new Error('Mod must export register(on, options)');
       registering = true;
-      try { await register(on, freeze({})); } finally { registering = false; }
+      try { await register(on, frozen(parse(options))); } finally { registering = false; }
       starting = true;
       try { await dispatch('session.start', { cwd, surface: null, isInteractive: false }); }
       finally { starting = false; }

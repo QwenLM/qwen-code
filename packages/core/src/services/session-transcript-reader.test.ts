@@ -1173,7 +1173,7 @@ describe('SessionTranscriptReader', () => {
       sys('files', 'attribution', 'file_history_snapshot', {
         snapshots: [
           {
-            promptId: `${sessionId}########3`,
+            promptId: `${sessionId}########12`,
             timestamp: T0,
             trackedFileBackups: {},
           },
@@ -1222,6 +1222,7 @@ describe('SessionTranscriptReader', () => {
       loaded!.conversation.messages,
       sessionId,
     );
+    expect(turnState.initialTurn).toBe(12);
     expect(runtime?.recording.turnParentUuids).toEqual(
       turnState.turnParentUuids,
     );

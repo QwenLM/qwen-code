@@ -80,18 +80,21 @@ public final class ApiModels {
             @JsonProperty("session_close") boolean sessionClose,
             @JsonProperty("session_archive") boolean sessionArchive,
             @JsonProperty("session_unarchive") boolean sessionUnarchive,
-            @JsonProperty("session_delete") boolean sessionDelete) {
+            @JsonProperty("session_delete") boolean sessionDelete,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell) {
     }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
             boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
-            boolean sessionUnarchive, boolean sessionDelete) {
+            boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PublicSession(String id, String object,
             @JsonProperty("agent_id") String agentId,
             @JsonProperty("agent_revision") String agentRevision,
+            @JsonProperty("agent_digest") String agentDefinitionDigest,
             String status,
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("updated_at") long updatedAt,
@@ -602,7 +605,8 @@ public final class ApiModels {
 
     /**
      * An AgentDefinition revision's content (D8a). The server stores and
-     * digests it; no field changes Session execution yet.
+     * digests it; a Session pinned to a revision executes its
+     * permission_policy, tools, model and instructions (D8b/D8c).
      */
     public record AgentDefinitionRequest(
             @NotNull Map<String, Object> model,

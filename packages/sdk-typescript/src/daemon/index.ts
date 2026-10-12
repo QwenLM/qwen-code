@@ -473,6 +473,7 @@ export type {
   DaemonMidTurnMessageSummary,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
