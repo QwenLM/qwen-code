@@ -35,6 +35,9 @@ const { Terminal } = pkg;
 const mockGetSystemEncoding = vi.hoisted(() =>
   vi.fn().mockReturnValue('utf-8'),
 );
+const mockGetCachedEncodingForBuffer = vi.hoisted(() =>
+  vi.fn().mockReturnValue('utf-8'),
+);
 const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
 const mockSpawnSync = vi.hoisted(() => vi.fn());
@@ -113,8 +116,8 @@ vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
 }));
 vi.mock('../utils/systemEncoding.js', () => ({
-  getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
   getSystemEncoding: mockGetSystemEncoding,
+  getCachedEncodingForBuffer: mockGetCachedEncodingForBuffer,
 }));
 
 const mockProcessKill = vi
@@ -2171,7 +2174,15 @@ describe('ShellExecutionService child_process fallback', () => {
    * Executes under a raw-output capture with a 64-byte preview; `drive` emits
    * the child's output, then both streams end and the child exits with `code`.
    */
-  const runCaptured = async (command: string, drive: () => void, code = 0) => {
+  const runCaptured = async (
+    command: string,
+    drive: () => void,
+    code = 0,
+    config: ShellExecutionConfig = {
+      ...shellExecutionConfig,
+      maxBufferedOutputBytes: 64,
+    },
+  ) => {
     for (const stream of [mockChildProcess.stdout!, mockChildProcess.stderr!]) {
       Object.assign(stream, { pause: vi.fn(), resume: vi.fn() });
     }
@@ -2187,7 +2198,7 @@ describe('ShellExecutionService child_process fallback', () => {
       onOutputEventMock,
       new AbortController().signal,
       true,
-      { ...shellExecutionConfig, maxBufferedOutputBytes: 64 },
+      config,
       { rawCapture: capture },
     );
     drive();
@@ -2264,127 +2275,97 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   it('strips an orphan CSI suffix left by a cut ANSI sequence at the tail boundary', async () => {
-    // Force maxBufferedOutputBytes = 4096. Head = 2048, Tail = 2048.
-    // Payload = 4098 bytes. Tail starts at byte 2050 ("31m").
     const payload = Buffer.concat([
-      Buffer.alloc(2048, 'A'),
+      Buffer.alloc(30, 'A'),
       Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]), // \x1b[31m
-      Buffer.alloc(2045, 'A'),
+      Buffer.alloc(30, 'A'),
     ]);
-    const stdout = mockChildProcess.stdout!;
-    stdout.pause = vi.fn();
-    stdout.resume = vi.fn();
-    const handlePromise = ShellExecutionService.execute(
-      'echo',
-      process.cwd(),
-      () => {},
-      new AbortController().signal,
-      false,
-      { maxBufferedOutputBytes: 4096, showColor: false },
-      {
-        rawCapture: {
-          write: async () => {},
-          finish: async () => {},
-          setStarted: () => {},
-          setProcessResult: () => {},
-        },
-      },
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
     );
-    await new Promise(process.nextTick);
-    stdout.emit('data', payload);
-    mockChildProcess.emit('exit', 0, null);
-    mockChildProcess.emit('close', 0, null);
-    const result = await (await handlePromise).result;
-    expect(result.output).not.toMatch(/^[0-9;]*m/);
-    // Use the exact string from shellExecutionService.ts
-    expect(result.output).toContain(
-      '[Middle output omitted from this preview; complete bytes are retained in the managed capture.]',
-    );
-    expect(result.output).toContain('A'.repeat(2045));
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^A+$/);
   });
 
-  it('drops orhpan UTF-8 continuation bytes when the remainder is all ASCII', async () => {
-    // Force maxBufferedOutputBytes = 4096. Head = 2048, Tail = 2048.
-    // Payload = 4097 bytes. Tail starts at byte 2049 (0x94 0x99).
+  it('drops orphan UTF-8 continuation bytes when the remainder is all ASCII', async () => {
     const payload = Buffer.concat([
-      Buffer.alloc(2048, 'A'),
+      Buffer.alloc(32, 'A'),
       Buffer.from([0xe9, 0x94, 0x99]),
-      Buffer.alloc(2046, 'A'),
+      Buffer.alloc(31, 'A'),
     ]);
-    const stdout = mockChildProcess.stdout!;
-    stdout.pause = vi.fn();
-    stdout.resume = vi.fn();
-    const handlePromise = ShellExecutionService.execute(
-      'echo',
-      process.cwd(),
-      () => {},
-      new AbortController().signal,
-      false,
-      { maxBufferedOutputBytes: 4096, showColor: false },
-      {
-        rawCapture: {
-          write: async () => {},
-          finish: async () => {},
-          setStarted: () => {},
-          setProcessResult: () => {},
-        },
-      },
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
     );
-    await new Promise(process.nextTick);
-    stdout.emit('data', payload);
-    mockChildProcess.emit('exit', 0, null);
-    mockChildProcess.emit('close', 0, null);
-    const result = await (await handlePromise).result;
-    expect(result.output).not.toContain('\uFFFD');
-    expect(result.output).toContain('A'.repeat(2046));
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^A+$/);
   });
 
   it('preserve non-UTF_8 leading bytes when the ring starts on them', async () => {
-    // Force maxBufferedOutputBytes = 4096. Head = 2048, Tail = 2048.
-    // Payload = 4097 bytes. Tail starts at byte 2049 (0xA1).
+    mockGetCachedEncodingForBuffer.mockReturnValue('latin1');
     const payload = Buffer.concat([
-      Buffer.alloc(2048, 'A'),
+      Buffer.alloc(33, 'A'),
       Buffer.from([0xb0, 0xa1]),
-      Buffer.alloc(2047, 'A'),
+      Buffer.alloc(30, 'A'),
     ]);
-    const stdout = mockChildProcess.stdout!;
-    stdout.pause = vi.fn();
-    stdout.resume = vi.fn();
-    // Mock the encoding to be latin1 so it doesn't try to decode as UTF-8
-    const systemEncoding = await import('../utils/systemEncoding.js');
-    const spy = vi
-      .spyOn(systemEncoding, 'getCachedEncodingForBuffer')
-      .mockReturnValue('latin1');
-
-    const handlePromise = ShellExecutionService.execute(
-      'echo',
-      process.cwd(),
-      () => {},
-      new AbortController().signal,
-      false,
-      { maxBufferedOutputBytes: 4096, showColor: false },
-      {
-        rawCapture: {
-          write: async () => {},
-          finish: async () => {},
-          setStarted: () => {},
-          setProcessResult: () => {},
-        },
-      },
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
     );
-    await new Promise(process.nextTick);
-    stdout.emit('data', payload);
-    mockChildProcess.emit('exit', 0, null);
-    mockChildProcess.emit('close', 0, null);
-    const result = await (await handlePromise).result;
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toContain('¡');
+    expect(tail).not.toContain('\uFFFD');
+    mockGetCachedEncodingForBuffer.mockReset();
+    mockGetCachedEncodingForBuffer.mockReturnValue('utf-8');
+  });
 
-    // In latin1, 0xA1 is '¡'. It should NOT be dropped or replaced with U+FFFD.
-    expect(result.output).toContain('¡');
-    expect(result.output).not.toContain('\uFFFD');
-    expect(result.output).toContain('A'.repeat(2047));
+  it('strips orphan CSI suffix at 64 KiB budget', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(32767, 'A'),
+      Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]), // \x1b[31m
+      Buffer.alloc(32765, 'A'),
+    ]);
+    const { result } = await runCaptured(
+      'printf output',
+      () => emitOut(payload),
+      0,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 65536 },
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toMatch(/^A+$/);
+  });
 
-    // Restore ONLY this spy so we don't break other tests
-    spy.mockRestore();
+  it('handles binary remainder gracefully without throwing', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(32, 'A'),
+      Buffer.from([0xff, 0xfe, 0xff]), // Invalid UTF-8 binary
+      Buffer.alloc(31, 'A'),
+    ]);
+    const { result } = await runCaptured('printf output', () =>
+      emitOut(payload),
+    );
+    const tail = result.output.split(
+      'complete bytes are retained in the managed capture.]\n',
+    )[1];
+    expect(tail).toContain('\uFFFD');
+  });
+
+  it('strips orphan CSI suffix from stderr preview', async () => {
+    const payload = Buffer.concat([
+      Buffer.alloc(30, 'A'),
+      Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]), // \x1b[31m
+      Buffer.alloc(30, 'A'),
+    ]);
+    const { result } = await runCaptured('printf err', () =>
+      emitOut(payload, 'stderr'),
+    );
+    expect(result.output).not.toContain('31m');
   });
 
   describe('child environment sanitization (#6601)', () => {

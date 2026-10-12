@@ -309,7 +309,7 @@ function decodeBufferedOutput(finalBuffer: Buffer): string {
   return new TextDecoder(fallbackEncoding).decode(finalBuffer);
 }
 
-const ORPHAN_CSI_SUFFIX = /^[0-9;]*m/;
+const ORPHAN_CSI_SUFFIX = /^\[?[0-9;]+m/;
 
 function stripOrphanCsiSuffix(text: string): string {
   if (!text) return text;
@@ -317,28 +317,32 @@ function stripOrphanCsiSuffix(text: string): string {
   return match ? text.slice(match[0].length) : text;
 }
 
-function decodePreviewTail(buffer: Buffer): string {
+// Add a new `previewEncoding` parameter so the detector is fed the complete
+// buffer (per its documented contract), not the truncated tail fragment.
+
+function decodePreviewTail(buffer: Buffer, previewEncoding?: string): string {
   let start = 0;
   while (start < buffer.length && start < 3 && (buffer[start] & 0xc0) === 0x80)
     start++;
-
   if (start === 0) {
     return decodeBufferedOutput(buffer);
   }
-
   const aligned = buffer.subarray(start);
-  // A ring can start inside a UTF-8 character. Drop the orphan continuation
-  // bytes ONLY if we are in a UTF-8 context and the aligned remainder is a
-  // valid UTF-8 sequence (decodable without U+FFFD). For non-UTF-8 encodings
-  // (e.g. GBK) keep the legacy full-buffer decode to preserve legitimate
-  // leading bytes.
-  const encoding = getCachedEncodingForBuffer(buffer);
-  const isUtf8path = encoding === 'utf8' || encoding === 'utf-8' || !encoding;
+
+  // Use the encoding detected on the complete final buffer (passed in),
+  // NOT on this truncated fragment. Falls back to legacy full-buffer decode
+  // for non-UTF-8 encodings (e.g. GBK) to preserve legitimate DBCS lead bytes.
+  const isUtf8path =
+    previewEncoding === 'utf8' ||
+    previewEncoding === 'utf-8' ||
+    (previewEncoding === undefined && isUtf8(aligned));
 
   if (isUtf8path && isUtf8(aligned)) {
     return decodeBufferedOutput(aligned);
   }
-
+  if (previewEncoding) {
+    return new TextDecoder(previewEncoding).decode(buffer);
+  }
   return decodeBufferedOutput(buffer);
 }
 
@@ -1320,16 +1324,17 @@ export class ShellExecutionService {
             stdout + (stderr ? (stdout ? separator : '') + stderr : '');
 
           const finalStrippedOutput = stripAnsi(combinedOutput).trim();
+          const previewEncoding = getCachedEncodingForBuffer(finalBuffer);
           const stderrPreview = stderrTail?.read() ?? Buffer.alloc(0);
           const tailPreview = retainedTail();
           const tailText = rawCapture
             ? stripOrphanCsiSuffix(
-                stripAnsi(decodePreviewTail(tailPreview)),
+                stripAnsi(decodePreviewTail(tailPreview, previewEncoding)),
               ).trim()
             : '';
           const stderrText = stderrPreview.length
             ? stripOrphanCsiSuffix(
-                stripAnsi(decodePreviewTail(stderrPreview)),
+                stripAnsi(decodePreviewTail(stderrPreview, previewEncoding)),
               ).trim()
             : '';
           const boundedOutput =
