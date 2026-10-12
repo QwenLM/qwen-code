@@ -22,6 +22,15 @@ public class ManagedArtifactConfiguration {
     }
 
     /**
+     * The materialization tick runs blocking JDBC, so it must never share
+     * the one-thread default pool.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler managedMaterializationScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("managed-materialization-").build();
+    }
+
+    /**
      * The automation scanner relays each fire to the Hosted Harness over
      * blocking HTTP (up to the Harness request timeout per call), so it must
      * not share the one-thread default pool with the message materializer

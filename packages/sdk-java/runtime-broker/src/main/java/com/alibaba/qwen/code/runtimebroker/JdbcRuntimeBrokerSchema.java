@@ -45,6 +45,7 @@ public final class JdbcRuntimeBrokerSchema {
             addIndex(statement, "qwen_runtime_session", "idx_runtime_session_id", "runtime_session_id");
             addIndex(statement, "qwen_runtime_binding", "idx_runtime_binding_retention", "binding_state, last_active_at, binding_id");
             addIndex(statement, "qwen_runtime_binding", "idx_runtime_binding_tenant_state", "tenant_id, binding_state");
+            addIndex(statement, "managed_workspace_execution_lease", "idx_workspace_execution_binding", "binding_id, runtime_generation");
         } catch (SQLException exception) {
             throw JdbcRepositorySupport.failure(exception);
         }

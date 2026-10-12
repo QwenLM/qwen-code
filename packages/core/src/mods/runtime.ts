@@ -18,6 +18,8 @@ import {
   type ModLog,
   type ModReply,
   type ModRequest,
+  type ModSource,
+  type ModOptions,
 } from './types.js';
 
 function workerEntry(): URL | string {
@@ -62,15 +64,16 @@ export class ModRuntime {
   }
 
   static async create(
-    source: string,
+    source: ModSource,
     cwd: string,
     log: (entry: ModLog) => void,
     signal: AbortSignal,
+    options: ModOptions = {},
   ): Promise<ModRuntime> {
     const runtime = new ModRuntime(log);
     try {
       const result = await runtime.request(
-        { type: 'load', source, cwd },
+        { type: 'load', source, cwd, options },
         signal,
         30_000,
       );
