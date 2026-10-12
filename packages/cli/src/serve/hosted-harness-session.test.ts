@@ -3929,7 +3929,7 @@ describe('Hosted Harness no-tool session', () => {
   }, 45_000);
 
   it('refuses a prompt while a wake park is still unsettled, retriably', async () => {
-    await prewriteAutomationParkedWakeSession();
+    const inputId = await prewriteAutomationParkedWakeSession();
     const repair = mockRepairBroker();
     // The first projection the wake classification reads after the load
     // hangs until the test lets go: only the prompt route's own
@@ -3987,6 +3987,31 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(false);
     releaseClassify();
     repair.unlatch();
+    // Drain the parked settle before teardown: an unsettled park keeps the
+    // wake pump retrying past this test's end, and its settle failures land
+    // in later tests' stderr spies. The pump's own view is the journal —
+    // watch the consume, not a route: a status poll can answer before the
+    // hung classification ever latches the block.
+    await vi.waitFor(
+      async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        expect(
+          journal.events.some(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === inputId,
+          ),
+        ).toBe(true);
+      },
+      { timeout: 15_000 },
+    );
     await vi.waitFor(
       async () => {
         const status = await authorize(
@@ -3996,7 +4021,10 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 15_000 },
     );
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    const closed = await headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(closed.status).toBe(204);
   }, 45_000);
 
   it('refuses a prompt whose wake-park probe let the pump block the Session', async () => {
