@@ -1291,3 +1291,88 @@ describe('managed session raw record parsing', () => {
     expect(parseJson(over, cap)).toThrow(/exceeds 65536 UTF-8 bytes/);
   });
 });
+
+describe('Hosted recovery envelopes', () => {
+  it('keeps old attempts readable and validates new references', () => {
+    expect(parseManagedSessionEvent(harnessEvent()).kind).toBe('model.attempt');
+    const payload = {
+      attemptId: 'a',
+      routeRef: ref(),
+      inputCheckpointRef: null,
+      state: 'started',
+      usageRef: null,
+      recoveryRef: ref('hosted-model-request'),
+    };
+    expect(
+      parseManagedSessionEvent(harnessEvent({ payload })).payload[
+        'recoveryRef'
+      ],
+    ).toEqual(payload.recoveryRef);
+    expect(() =>
+      parseManagedSessionEvent(
+        harnessEvent({ payload: { ...payload, recoveryRef: ref() } }),
+      ),
+    ).toThrow(/recoveryRef/);
+  });
+  it('requires a complete bounded retraction and ordered range', () => {
+    const event = (payload: unknown) =>
+      harnessEvent({ kind: 'message.retracted', payload });
+    const payload = { messageId: 'msg', turnId: 'turn', fromSequence: 2 };
+    expect(parseManagedSessionEvent(event(payload)).kind).toBe(
+      'message.retracted',
+    );
+    expect(() =>
+      parseManagedSessionEvent(event({ ...payload, throughSequence: 3 })),
+    ).toThrow(/together/);
+    const bounded = {
+      ...payload,
+      throughSequence: 3,
+      sourceBootId: 'boot',
+      sourceEventEpoch: 'epoch',
+    };
+    expect(parseManagedSessionEvent(event(bounded)).payload).toEqual(bounded);
+    expect(() =>
+      parseManagedSessionEvent(event({ ...bounded, throughSequence: 1 })),
+    ).toThrow(/range/);
+  });
+  it('validates batch plans and cleanup states under Harness ownership', () => {
+    for (const [kind, payload] of [
+      [
+        'hosted.batch.planned',
+        {
+          batchId: 'batch',
+          planRevision: 1,
+          planRef: ref('hosted-approval-continuation'),
+        },
+      ],
+      [
+        'hosted.cleanup',
+        {
+          cleanupId: 'cleanup',
+          descriptorRef: ref('hosted-turn-cleanup'),
+          state: 'owed',
+        },
+      ],
+    ] as const) {
+      const event = parseManagedSessionEvent(harnessEvent({ kind, payload }));
+      expect(() =>
+        assertManagedSessionEventActor(event, 'harness'),
+      ).not.toThrow();
+      expect(() =>
+        assertManagedSessionEventActor(event, 'trusted_entry'),
+      ).toThrow();
+    }
+    expect(() =>
+      parseManagedSessionEvent(
+        harnessEvent({
+          kind: 'hosted.cleanup',
+          payload: {
+            cleanupId: 'c',
+            descriptorRef: ref('hosted-turn-cleanup'),
+            state: 'released',
+          },
+        }),
+      ),
+    ).toThrow();
+  });
+});

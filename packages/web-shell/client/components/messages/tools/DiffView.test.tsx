@@ -130,3 +130,48 @@ describe('DiffView', () => {
     );
   });
 });
+
+it.each([
+  ['a\r\nb\r\nc', 'a\r\nb\r\nC', ['a', 'b', 'c', 'C']],
+  [
+    'a\r\nb\r\nc\r\nd\r\ne',
+    'a\r\nb\r\nC\r\nd\r\ne',
+    ['a', 'b', 'c', 'C', 'd', 'e'],
+  ],
+])(
+  'keeps unterminated CRLF content edits free of terminator noise',
+  (oldText, newText, expected) => {
+    expect(
+      renderDiff(buildContextBoundedDiff(oldText, newText)).slice(1),
+    ).toEqual(expected);
+    expect(container.textContent).not.toContain('\\r');
+  },
+);
+
+it.each([
+  '👨\u200d👩\u200d👧',
+  'می\u200cشود',
+  '\ufeffimport x',
+  'text\u061carabic',
+])('visibly marks real invisible characters in %j', (text) => {
+  renderDiff(buildContextBoundedDiff('', text));
+  const marks = container.querySelectorAll('[title^="Invisible character:"]');
+  expect(marks.length).toBeGreaterThan(0);
+  expect(marks[0].className).toContain('escaped');
+  renderDiff(buildContextBoundedDiff('', 'literal\\u200dtext'));
+  expect(container.querySelector('[title^="Invisible character:"]')).toBeNull();
+  expect(container.textContent).toContain('literal\\u200dtext');
+});
+
+it('localizes the invisible-character label in Chinese', () => {
+  act(() =>
+    root.render(
+      <I18nProvider language="zh-CN">
+        <DiffView diff={buildContextBoundedDiff('', 'a\u200db')} />
+      </I18nProvider>,
+    ),
+  );
+  expect(
+    container.querySelector('[title^="不可见字符:"]')?.getAttribute('title'),
+  ).toBe('不可见字符: \\u200d');
+});

@@ -1,43 +1,83 @@
 import { memo } from 'react';
 import { useI18n } from '../../../i18n';
-import { escapePreviewText } from '../../../adapters/transcriptAdapter';
+import { DIFF_INVISIBLE_CHARACTERS, escapeDiffContent } from './diffContent';
 import {
   localizeDiffNotice,
   parseUnifiedDiff,
 } from '../../../utils/unifiedDiff';
-import { sanitizeControlChars } from '../toolFormatting';
 import styles from './DiffView.module.css';
 
 interface DiffViewProps {
   diff: string;
+  maxLength?: number;
 }
 
-// Strip CR only for uniform CRLF bodies: mixed endings are part of the change.
-// Compose both existing guards to cover C0/C1 and invisible format characters,
-// while leaving adapter-preescaped input unchanged.
-function sanitizeDiffContent(content: string, crlfBody: boolean): string {
-  const body =
-    crlfBody && content.endsWith('\r') ? content.slice(0, -1) : content;
-  return escapePreviewText(sanitizeControlChars(body));
-}
-
-export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
+export const DiffView = memo(function DiffView({
+  diff,
+  maxLength,
+}: DiffViewProps) {
   // `buildContextBoundedDiff` emits ASCII-safe markers instead of prose (it is
   // import-free, so it cannot reach the catalog); resolve them here, at the
   // render boundary, where a translator is in scope.
   const { t } = useI18n();
   if (!diff) return null;
 
-  const { lines, additions, deletions } = parseUnifiedDiff(diff);
+  const input = maxLength === undefined ? diff : diff.slice(0, maxLength);
+  const { lines, additions, deletions } = parseUnifiedDiff(input);
   const contentLines = lines.filter((line) => line.type !== 'header');
+  const reversedContent = [...contentLines].reverse();
+  const lastOld = reversedContent.find((line) => line.oldLine !== undefined);
+  const lastNew = reversedContent.find((line) => line.newLine !== undefined);
+  const unterminatedEnds =
+    lastOld &&
+    lastNew &&
+    !lastOld.content.endsWith('\r') &&
+    !lastNew.content.endsWith('\r');
   const crlfBody =
-    contentLines.length > 0 &&
-    contentLines.every((line) => line.content.endsWith('\r'));
+    contentLines.some((line) => line.content.endsWith('\r')) &&
+    contentLines.every(
+      (line) =>
+        line.content.endsWith('\r') ||
+        (unterminatedEnds && (line === lastOld || line === lastNew)),
+    );
   // Builders emit a notice as the whole preview, never inside a raw patch.
   const notice =
     lines.length === 1 && lines[0].type === 'header'
       ? localizeDiffNotice(diff, t)
       : undefined;
+  let remaining = maxLength ?? Infinity;
+  let truncated = input.length < diff.length;
+  const renderedLines = lines.flatMap((line) => {
+    if (remaining === 0) {
+      truncated = true;
+      return [];
+    }
+    const content = notice ?? line.content;
+    const body =
+      crlfBody && content.endsWith('\r') ? content.slice(0, -1) : content;
+    const parts = body.split(DIFF_INVISIBLE_CHARACTERS);
+    const rendered = parts.map((part, index) => {
+      const safe = escapeDiffContent(part);
+      const visible = safe.slice(0, remaining);
+      truncated ||= visible.length < safe.length;
+      remaining -= visible.length;
+      if (!visible) return '';
+      return safe === part ? (
+        visible
+      ) : (
+        <span
+          key={index}
+          className={styles.escaped}
+          title={`${t('gitDiff.escapedCharacter')}: ${safe}`}
+        >
+          {visible}
+        </span>
+      );
+    });
+    return remaining === 0 && rendered.every((part) => part === '')
+      ? []
+      : [{ ...line, rendered }];
+  });
 
   return (
     <div className={styles.view}>
@@ -46,7 +86,7 @@ export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
         {deletions > 0 && <span className={styles.statDel}>-{deletions}</span>}
       </div>
       <div className={styles.lines} tabIndex={0} aria-label="File diff">
-        {lines.map((line, i) => (
+        {renderedLines.map((line, i) => (
           <div
             key={i}
             className={`${styles.line} ${styles[`line${line.type[0].toUpperCase()}${line.type.slice(1)}`]}`}
@@ -63,12 +103,15 @@ export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
                     ? ''
                     : ' '}
             </span>
-            <span className={styles.content}>
-              {sanitizeDiffContent(notice ?? line.content, crlfBody)}
-            </span>
+            <span className={styles.content}>{line.rendered}</span>
           </div>
         ))}
       </div>
+      {truncated && (
+        <p className="text-xs text-muted-foreground">
+          {t('gitDiff.truncated')}
+        </p>
+      )}
     </div>
   );
 });

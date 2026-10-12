@@ -15,6 +15,7 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
+import { highlightSpecialChars } from '@codemirror/view';
 import { DownloadIcon } from 'lucide-react';
 import {
   ChevronRightIcon,
@@ -52,6 +53,11 @@ import {
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import { DiffView } from '../messages/tools/DiffView';
+import {
+  DIFF_INVISIBLE_CHARACTERS,
+  escapeDiffContent,
+} from '../messages/tools/diffContent';
+import diffStyles from '../messages/tools/DiffView.module.css';
 import { TurnCallsPanel } from './TurnCallsPanel';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
@@ -2502,6 +2508,7 @@ function CodeMirrorDiff({
   oldText: string;
   newText: string;
 }) {
+  const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [isWide, setIsWide] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -2526,6 +2533,18 @@ function CodeMirrorDiff({
 
     const extensions = [
       basicSetup,
+      highlightSpecialChars({
+        specialChars: DIFF_INVISIBLE_CHARACTERS,
+        render: (code) => {
+          const node = document.createElement('span');
+          const safe = escapeDiffContent(String.fromCodePoint(code));
+          node.textContent = safe;
+          node.className = diffStyles.escaped;
+          node.title = `${t('gitDiff.escapedCharacter')}: ${safe}`;
+          node.setAttribute('aria-label', node.title);
+          return node;
+        },
+      }),
       EditorView.editable.of(false),
       EditorState.readOnly.of(true),
       EditorView.lineWrapping,
@@ -2582,7 +2601,7 @@ function CodeMirrorDiff({
       cancelled = true;
       view?.destroy();
     };
-  }, [isWide, newText, oldText]);
+  }, [isWide, newText, oldText, t]);
 
   return (
     <div className={styles.codeMirrorDiffWrap}>

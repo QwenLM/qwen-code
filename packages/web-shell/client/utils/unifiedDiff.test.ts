@@ -69,6 +69,12 @@ describe('buildContextBoundedDiff', () => {
   it.each([
     ['#!/bin/sh\nexit 0\n', '#!/bin/sh\nexit 0', 'trailingNewlineRemoved'],
     ['#!/bin/sh\nexit 0', '#!/bin/sh\nexit 0\n', 'trailingNewlineAdded'],
+    [
+      '#!/bin/sh\r\nexit 0\r\n',
+      '#!/bin/sh\r\nexit 0',
+      'trailingNewlineRemoved',
+    ],
+    ['#!/bin/sh\r\nexit 0', '#!/bin/sh\r\nexit 0\r\n', 'trailingNewlineAdded'],
   ])('shows a trailing-newline-only change', (oldText, newText, key) => {
     const diff = buildContextBoundedDiff(oldText, newText);
     expect(localizeDiffNotice(diff, stubT)).toBe(`[approval.${key}]`);
@@ -301,3 +307,32 @@ describe('localizeDiffNotice', () => {
     }
   });
 });
+
+it.each([
+  ['a\n', 'a\r\n'],
+  ['a\r\n', 'a\n'],
+])(
+  'keeps a single-line ending conversion as content rows',
+  (oldText, newText) => {
+    const diff = buildContextBoundedDiff(oldText, newText);
+    expect(parseUnifiedDiff(diff)).toMatchObject({
+      additions: 1,
+      deletions: 1,
+    });
+    expect(localizeDiffNotice(diff, stubT)).toBe(diff);
+  },
+);
+
+it.each([
+  ['', '\n', 1, 0],
+  ['\n', '', 0, 1],
+  ['', '\r\n', 1, 0],
+  ['\r\n', '', 0, 1],
+])(
+  'keeps a sole blank line as a real added or removed row',
+  (oldText, newText, additions, deletions) => {
+    const diff = buildContextBoundedDiff(oldText, newText);
+    expect(parseUnifiedDiff(diff)).toMatchObject({ additions, deletions });
+    expect(localizeDiffNotice(diff, stubT)).toBe(diff);
+  },
+);

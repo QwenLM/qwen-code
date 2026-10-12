@@ -205,7 +205,11 @@ export function extractDiff(tool: ACPToolCall): string {
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
   ) {
-    return buildDiff(
+    // Real edit arguments are replacement fragments, not file coordinates.
+    const hasWholeFileText =
+      typeof tool.args?.oldText === 'string' ||
+      typeof tool.args?.newText === 'string';
+    return (hasWholeFileText ? buildDiff : buildUnifiedDiff)(
       typeof previewOldText === 'string' ? previewOldText : '',
       typeof previewNewText === 'string' ? previewNewText : '',
     );

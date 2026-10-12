@@ -4060,3 +4060,79 @@ describe('ArtifactPanel trajectory entry', () => {
     ).not.toBeNull();
   });
 });
+
+it('renders matching visible escapes in mixed artifact diffs neutralize the same character consistently', async () => {
+  const changes = [
+    {
+      path: 'src/app.ts',
+      status: 'modified' as const,
+      toolCallId: 'tool-app',
+      isArtifact: false,
+      diffs: [
+        { oldText: 'old', newText: 'safe\u200blooking', fullContent: true },
+        {
+          oldText: '',
+          newText: '',
+          fileDiff: '@@ -1,1 +1,1 @@\n-old\n+safe\u200blooking',
+        },
+      ],
+    },
+  ];
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  mounted.push({ root, container });
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            {
+              id: 'review',
+              kind: 'review',
+              title: 'Review',
+              changes,
+              workspaceCwd: '/primary',
+              workspaceId: 'primary-id',
+            },
+          ]}
+          activeTabId="review"
+          reviewChanges={changes}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>,
+    ),
+  );
+  act(() =>
+    container
+      .querySelector<HTMLButtonElement>('button[aria-label="src/app.ts"]')
+      ?.click(),
+  );
+  await flush();
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  });
+  const cm = container.querySelector('.cm-content');
+  const patch = container.querySelector('[aria-label="File diff"]');
+  expect(cm).not.toBeNull();
+  expect(patch).not.toBeNull();
+  expect(EditorView.findFromDOM(cm!)!.state.doc.toString()).toBe(
+    'safe\u200blooking',
+  );
+  expect(
+    cm!.querySelector('[title^="Invisible character:"]')?.getAttribute('title'),
+  ).toBe('Invisible character: \\u200b');
+  expect(
+    patch!
+      .querySelector('[title^="Invisible character:"]')
+      ?.getAttribute('title'),
+  ).toBe('Invisible character: \\u200b');
+  expect(cm!.textContent).not.toContain('\u200b');
+  expect(cm!.textContent).toContain('safe\\u200blooking');
+  expect(patch!.textContent).toContain('safe\\u200blooking');
+});

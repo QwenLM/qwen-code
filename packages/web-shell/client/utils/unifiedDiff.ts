@@ -109,6 +109,17 @@ export function buildContextBoundedDiff(
 ): string {
   const omitted = DIFF_OMITTED_MARKER;
   if (oldText.length + newText.length > 100_000) return omitted;
+  if (oldText === newText) return '';
+  if (
+    oldText.length > 0 &&
+    newText.length > 0 &&
+    oldText.endsWith('\n') !== newText.endsWith('\n') &&
+    oldText.replace(/\r?\n$/, '') === newText.replace(/\r?\n$/, '')
+  ) {
+    return newText.endsWith('\n')
+      ? DIFF_TRAILING_NEWLINE_ADDED_MARKER
+      : DIFF_TRAILING_NEWLINE_REMOVED_MARKER;
+  }
   const oldLines = splitLines(oldText);
   const newLines = splitLines(newText);
   const context = 3;
@@ -121,11 +132,7 @@ export function buildContextBoundedDiff(
     prefix++;
   }
   if (prefix === oldLines.length && prefix === newLines.length) {
-    return oldText === newText
-      ? ''
-      : newText.endsWith('\n')
-        ? DIFF_TRAILING_NEWLINE_ADDED_MARKER
-        : DIFF_TRAILING_NEWLINE_REMOVED_MARKER;
+    return '';
   }
   let suffix = 0;
   while (

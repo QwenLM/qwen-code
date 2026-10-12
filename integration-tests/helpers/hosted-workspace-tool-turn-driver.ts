@@ -124,6 +124,13 @@ const storeProxy = createServer(async (req, res) => {
         'X-Qwen-Managed-Writer-Token': String(
           req.headers['x-qwen-managed-writer-token'],
         ),
+        ...(req.headers['x-qwen-managed-max-readable-storage-version']
+          ? {
+              'X-Qwen-Managed-Max-Readable-Storage-Version': String(
+                req.headers['x-qwen-managed-max-readable-storage-version'],
+              ),
+            }
+          : {}),
       },
       ...(payload.length ? { body: payload } : {}),
       signal: AbortSignal.timeout(30000),
@@ -155,7 +162,11 @@ const storeProxy = createServer(async (req, res) => {
         ),
       });
     }
-    if (response.ok && req.url?.endsWith('/transactions:commit')) {
+    if (
+      response.ok &&
+      (req.url?.endsWith('/transactions:commit') ||
+        req.url?.endsWith('/transactions:commit-v2'))
+    ) {
       for (const line of Buffer.from(body.recordBytesBase64, 'base64')
         .toString()
         .trim()

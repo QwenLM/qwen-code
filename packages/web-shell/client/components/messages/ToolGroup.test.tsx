@@ -2848,9 +2848,14 @@ describe('tool output logic', () => {
     ]) {
       for (const status of ['pending', 'in_progress'] as const) {
         const diff = extractDiff(makeTool({ toolName: 'edit', status, args }));
-        expect(diff).toContain('@@ -97,7 +97,7 @@');
+        if ('oldText' in args) {
+          expect(diff).toContain('@@ -97,7 +97,7 @@');
+          expect(diff.split('\n')).toHaveLength(9);
+        } else {
+          expect(diff).not.toContain('@@');
+          expect(diff).toBe(buildUnifiedDiff(args.old_string, args.new_string));
+        }
         expect(diff).toContain('-line 100\n+updated line 100');
-        expect(diff.split('\n')).toHaveLength(9);
         expect(
           extractDiff(
             makeTool({
