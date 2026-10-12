@@ -1116,6 +1116,68 @@ describe('member messages (b3c decision 8)', () => {
     expect(text.text).not.toContain('<from>parent</from>');
   });
 
+  it('answers the reply hint through the leader while the run is in plan mode', async () => {
+    const child = await side(CHILD, {
+      parentSessionId: PARENT,
+      parentChildRunId: 'run-1',
+    });
+    // The run's first input carries the plan-mode block (decision 9): its
+    // reply hint points to the leader, not the sender.
+    const firstText =
+      teamMemberPreamble({ name: 'alice', teamName: 'review' }, true) +
+      'hold the plan';
+    const firstContentRef = await child.session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: firstText }]), 'utf8'),
+    );
+    const firstAdmissionRef = await child.session.resources.publish(
+      'managed-admission',
+      Buffer.from('{}', 'utf8'),
+    );
+    await child.session.authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: 'first-input',
+        sessionKey: child.session.authority.sessionHeader.sessionKey,
+        contentDigest: createHash('sha256')
+          .update(JSON.stringify({ text: firstText }))
+          .digest('hex'),
+      },
+      {
+        inputId: 'first-input',
+        turnId: 'first-input',
+        source: 'test',
+        contentRef: firstContentRef,
+        deadline: null,
+        admissionRef: firstAdmissionRef,
+        wakeReason: 'input',
+      },
+    );
+    const content = memberMessageContent('bob', 'check task 3');
+    const messageId = `msgc_${'c9d8e7f6'.repeat(4)}`;
+    expect(
+      await child.messages.receive({
+        messageId,
+        route: 'to_child',
+        childRunId: 'run-1',
+        senderSessionId: PARENT,
+        content: Buffer.from(content),
+        contentDigest: sha256(content),
+      }),
+    ).toBe(`${messageId}:message`);
+    const text = JSON.parse(
+      (
+        await child.session.resources.read(
+          inputs(child.session)[1]!.payload['contentRef'] as never,
+        )
+      ).toString('utf8'),
+    ) as { text: string };
+    expect(text.text).toContain('<from>member bob</from>');
+    expect(text.text).toContain(
+      'To answer bob while your run is in plan mode, use send_message with to "parent"',
+    );
+  });
+
   it("renders a member-id message without the header as the leader's form", async () => {
     const child = await side(CHILD, {
       parentSessionId: PARENT,

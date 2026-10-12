@@ -751,6 +751,25 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(lead.commands.command(commandId)?.direction).toBe('inbound');
   });
 
+  it('names what a stopping recipient cannot take', async () => {
+    const lead = await leadWithMembers(['alice']);
+    await lead.children.requestStop('run-alice');
+    const commandId = commandIdOf('call-msg-stop');
+    const reply = await lead.commands.execute(lead.teams, {
+      commandId,
+      kind: 'member_message',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: 'alice', message: 'one last thing' },
+    });
+    expect(reply).toEqual({
+      outcome: 'refused',
+      text: 'The message was not sent:\n- alice: not reached: it is being stopped.',
+    });
+    expect(sentToHead(lead, 'run-alice')).toHaveLength(0);
+    expect(lead.commands.command(commandId)?.direction).toBe('inbound');
+  });
+
   it('refuses the stranger, the reserved names and the sender itself', async () => {
     const lead = await leadWithMembers(['alice']);
     for (const [to, text] of [
