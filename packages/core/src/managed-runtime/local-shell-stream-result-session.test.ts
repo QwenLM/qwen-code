@@ -13,8 +13,10 @@ import { LocalManagedSessionResourceStore } from './managed-session-resources.js
 import { LocalToolResultSegmentStore } from './local-managed-tool-result-store.js';
 import { LocalShellStreamResultSession } from './local-shell-stream-result-session.js';
 
-// Both domains stay disabled for submission on main; this suite admits
+// monitor_run stays disabled for submission on main; this suite admits
 // captures ahead of the H3 enablement flip, like the sibling suites do.
+// child_run's gate is per kind since H4b, so the mock lifts the kind gate
+// while the flag stands.
 const enablement = vi.hoisted(() => ({ childRun: true, monitorRun: true }));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -25,9 +27,13 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
     assertManagedSessionDomainEnabled: (
       domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
     ) => {
-      if (domain === 'child_run' && enablement.childRun) return;
       if (domain === 'monitor_run' && enablement.monitorRun) return;
       actual.assertManagedSessionDomainEnabled(domain);
+    },
+    assertManagedSessionChildRunKindEnabled: (kind: string) => {
+      if (!enablement.childRun) {
+        actual.assertManagedSessionChildRunKindEnabled(kind);
+      }
     },
   };
 });

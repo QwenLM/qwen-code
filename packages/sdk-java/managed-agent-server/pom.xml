@@ -229,8 +229,12 @@
                             <failIfNoTests>true</failIfNoTests>
                             <!-- The Hosted*IT classes share one fork; the file
                                  history control calls roughly doubled the
-                                 ToolTurn driver's runtime. -->
-                            <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
+                                 ToolTurn driver's runtime. The channel fault
+                                 gates (five letters FG7a,b,d–f plus the FG7c
+                                 crash class) extend the fork's wall-clock by
+                                 ~150 s — ~60 s of it test time — at 2×
+                                 headroom. -->
+                            <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -268,6 +272,20 @@
                     <includes><include>**/HostedWorkspaceToolTurnIT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <forkedProcessTimeoutInSeconds>300</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-channel-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedChannel*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>
