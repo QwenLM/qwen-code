@@ -27,7 +27,6 @@ import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
 import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
-import com.alibaba.qwen.code.managedagent.config.HarnessConfiguration;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
@@ -55,11 +54,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -2192,26 +2186,23 @@ class QwenHostedHarnessConnectorTest {
     }
 
     // A stale milliseconds-style turn deadline (the pre-sweep spelling
-    // of one hour) binds PT1000H under the seconds convention and the
-    // refusal is the boot failure's root cause, so the message must
-    // name the convention — a millisecond range statement tells the
-    // operator the value they wrote is legal.
+    // of one hour) binds PT1000H under the seconds convention — the
+    // binding side is pinned in ManagedAgentPropertiesTest — and the
+    // refusal message must name the convention: a millisecond range
+    // statement tells the operator the value they wrote is legal.
     @Test
     void turnDeadlineRefusalNamesTheSecondsConvention() {
-        new ApplicationContextRunner()
-                .withPropertyValues(
-                        "qwen.managed-agent.harness.enabled=true",
-                        "qwen.managed-agent.harness.token=token",
-                        "qwen.managed-agent.harness.capability-digest=digest",
-                        "qwen.managed-agent.harness.turn-deadline=3600000")
-                .withUserConfiguration(HarnessRefusalConfiguration.class)
-                .run(failed -> assertThat(failed).hasFailed()
-                        .getFailure().hasRootCauseMessage(
-                                "Hosted Harness turn deadline must be"
-                                        + " between 1ms and about 24.8"
-                                        + " days; a suffix-less number"
-                                        + " binds as seconds, so write"
-                                        + " 3600s rather than 3600000"));
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setTurnDeadline(Duration.ofSeconds(3600000));
+        assertThatThrownBy(() ->
+                new QwenHostedHarnessConnector(properties,
+                        mock(AgentStateStore.class),
+                        mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Hosted Harness turn deadline must be between"
+                        + " 1ms and about 24.8 days; a suffix-less number"
+                        + " binds as seconds, so write 3600s rather than"
+                        + " 3600000");
     }
 
     @Test
@@ -2460,26 +2451,6 @@ class QwenHostedHarnessConnectorTest {
                 () -> connector.createOrLoad("tenant-a", SESSION_ID, false))
                 .isSameAs(failure);
         verify(client, never()).loadSession(any());
-    }
-
-    @Configuration(proxyBeanMethods = false)
-    @EnableConfigurationProperties(ManagedAgentProperties.class)
-    @Import(HarnessConfiguration.class)
-    static class HarnessRefusalConfiguration {
-        @Bean
-        AgentStateStore agentStateStore() {
-            return mock(AgentStateStore.class);
-        }
-
-        @Bean
-        WorkspaceExecutionStore workspaceExecutionStore() {
-            return mock(WorkspaceExecutionStore.class);
-        }
-
-        @Bean
-        ManagedActionStore managedActionStore() {
-            return mock(ManagedActionStore.class);
-        }
     }
 
     private static ManagedAgentProperties properties() {

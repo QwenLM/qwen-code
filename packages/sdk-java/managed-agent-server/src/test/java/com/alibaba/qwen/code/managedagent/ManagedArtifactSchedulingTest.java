@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 class ManagedArtifactSchedulingTest {
     @Configuration
@@ -133,11 +134,13 @@ class ManagedArtifactSchedulingTest {
             throws Exception {
         var state = mock(AgentStateStore.class);
         AtomicInteger materialized = new AtomicInteger();
+        AtomicReference<String> materializeThread = new AtomicReference<>();
         when(state.findMaterializationTargets(anyInt()))
                 .thenReturn(List.of(new MaterializationTarget("tenant-1",
                         "session-1")));
         doAnswer(invocation -> {
             materialized.incrementAndGet();
+            materializeThread.set(Thread.currentThread().getName());
             return null;
         }).when(state).materializeNextBatch(eq("tenant-1"), eq("session-1"),
                 anyInt());
@@ -165,6 +168,11 @@ class ManagedArtifactSchedulingTest {
             int after = materialized.get();
             DefaultPoolHog.release.countDown();
             assertThat(after).isGreaterThan(before);
+            // The qualifier is the pool's only discriminating property:
+            // every sibling dedicated scheduler is poolSize(1) too, so a
+            // retargeted @Qualifier leaves the count assertion green.
+            assertThat(materializeThread.get())
+                    .startsWith("message-materialize-");
         } finally {
             DefaultPoolHog.release.countDown();
             context.close();
