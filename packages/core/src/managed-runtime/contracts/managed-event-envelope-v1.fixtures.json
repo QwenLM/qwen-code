@@ -19,7 +19,8 @@
     "lifecycle.changed",
     "domain.committed",
     "message.delta",
-    "message.retracted"
+    "message.retracted",
+    "operation.replayed"
   ],
   "streams": ["authoritative_journal"],
   "forbiddenFields": [
@@ -352,6 +353,24 @@
         "eventId": "evt-000117",
         "kind": "message.retracted",
         "occurredAt": 1760000000016,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-operation-replayed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 118,
+        "eventId": "evt-000118",
+        "kind": "operation.replayed",
+        "occurredAt": 1760000000017,
         "payloadRef": {
           "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
         }
