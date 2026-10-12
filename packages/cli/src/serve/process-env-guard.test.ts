@@ -159,6 +159,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/hosted-workspace-tool-turn.ts',
+    {
+      reason:
+        'The hosted probe witnesses admit the frozen-registry H3 domains ' +
+        'at the two turn-admission checks through a test-only process ' +
+        'switch; production never sets it.',
+      accesses: { 'key:QWEN_MANAGED_SESSION_TEST_DOMAINS': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/local-path-open.ts',
     {
       reason:
