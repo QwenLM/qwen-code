@@ -17,6 +17,7 @@ import {
   assertManagedSessionKey,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  managedSessionEventRefs,
   managedSessionKeysEqual,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
@@ -313,7 +314,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
     for (const prior of revisions.values()) requireSameRef(prior, ref);
     revisions.set(revision, ref);
     references.set(ref.resourceId, revisions);
-    const nested = nestedResourceRefs(ref, stored.bytes);
+    const nested = collectNestedResourceRefs(ref, stored.bytes);
     pending.push(...nested.map((ref) => ({ revision, ref })));
   }
   if (resources.size !== references.size) {
@@ -499,7 +500,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       const staged = this.staged.get(ref.resourceId);
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
-        pending.push(...nestedResourceRefs(ref, staged.bytes));
+        pending.push(...collectNestedResourceRefs(ref, staged.bytes));
       }
     }
     return [...closure.values()].map((ref) => {
@@ -842,7 +843,15 @@ class ManagedSessionStoreHttpClient {
           attempt === 0 &&
           error instanceof ManagedSessionStoreHttpError &&
           ((error.status === 409 &&
-            error.remoteCode === 'workspace_lifecycle_admission_closed') ||
+            (error.remoteCode === 'workspace_lifecycle_admission_closed' ||
+              // The verdict/mint gate's refusal is a rollbackable
+              // non-commit: the corrected retry must reach the backend
+              // without the authority latching a write failure behind it.
+              error.remoteCode === 'child_run_lineage_minted' ||
+              // So is a session message the lineage refuses: only the
+              // store holds a child's lineage, so the authority could not
+              // refuse it first, and the Session's log stays writable.
+              error.remoteCode === 'session_message_lineage_refused')) ||
             (this.lifecycleAuthority &&
               (error.status === 403 ||
                 (error.status === 409 &&
@@ -1216,6 +1225,17 @@ class ManagedSessionStoreHttpClient {
     ) {
       throw corrupt('restore head is not readable by this v1 writer.');
     }
+    // A head below this writer's committed position is a server-side
+    // regression; re-baselining onto it would silently forget our own
+    // commits, so only an equal-or-ahead head may replace the grant.
+    if (
+      head.journalRevision < grant.journalRevision ||
+      head.committedSequence < grant.committedSequence
+    ) {
+      throw corrupt(
+        `restore head regressed below this writer's committed position (head ${head.journalRevision}/${head.committedSequence} < grant ${grant.journalRevision}/${grant.committedSequence}).`,
+      );
+    }
   }
 
   private requireGrant(): WriterGrant {
@@ -1417,7 +1437,13 @@ export function describeTransaction(
       commitDigest: null,
       activationEpoch: currentActivationEpoch,
       latestCheckpointResourceId: null,
-      refs: collectRefs(records),
+      refs: dedupeRefs([
+        header.definitionRef,
+        header.rootSnapshotRef,
+        ...(header.baseTranscriptProof === undefined
+          ? []
+          : [header.baseTranscriptProof]),
+      ]),
     };
   }
   if (records.length < 2) {
@@ -1489,8 +1515,22 @@ export function describeTransaction(
     ),
     activationEpoch,
     latestCheckpointResourceId,
-    refs: collectRefs(records),
+    refs: dedupeRefs(
+      eventRecords.flatMap((event) => managedSessionEventRefs(event)),
+    ),
   };
+}
+
+function dedupeRefs(
+  found: Iterable<ManagedSessionDurableRef>,
+): ManagedSessionDurableRef[] {
+  const refs = new Map<string, ManagedSessionDurableRef>();
+  for (const ref of found) {
+    const existing = refs.get(ref.resourceId);
+    if (existing !== undefined) requireSameRef(existing, ref);
+    else refs.set(ref.resourceId, ref);
+  }
+  return [...refs.values()];
 }
 
 function collectRefs(records: readonly unknown[]): ManagedSessionDurableRef[] {
@@ -1690,7 +1730,12 @@ function parseRestoreHead(value: unknown): RestoreHead {
   };
 }
 
-function nestedResourceRefs(
+/**
+ * Every ref a committed resource closes over transitively. Exported so the
+ * envelope-closure invariant (a `managed-input` carrying attachment refs)
+ * has a directly testable seam.
+ */
+export function collectNestedResourceRefs(
   ref: ManagedSessionDurableRef,
   bytes: Buffer,
 ): ManagedSessionDurableRef[] {
@@ -1703,6 +1748,7 @@ function nestedResourceRefs(
   }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
@@ -1716,6 +1762,23 @@ function nestedResourceRefs(
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
     return collectRefs([record]);
+  }
+  // An input's envelope embeds what it admits — a channel attachment's ref
+  // among them. The commit closes over those bytes exactly like an
+  // explicit ref, or a reopened reader finds the envelope but 404s on its
+  // attachments (R8 P1). A body this parse cannot represent has no refs
+  // to close over by definition.
+  if (ref.kind === 'managed-input') {
+    try {
+      return collectRefs([
+        parseManagedSessionRecordJson(
+          bytes.toString('utf8'),
+          MANAGED_SESSION_LIMITS.maxEventBytes,
+        ),
+      ]);
+    } catch {
+      return [];
+    }
   }
   return [];
 }

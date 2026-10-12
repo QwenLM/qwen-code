@@ -12,30 +12,30 @@ import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { managedExtensionRecordKey } from './managed-extension-projection.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
-import {
-  ManagedSessionRecordError,
-  type ManagedSessionDurableRef,
-} from './managed-session-records.js';
+import { type ManagedSessionDurableRef } from './managed-session-records.js';
 
-// child_run and child_acceptance are enabled by the H4 enablement slice;
-// this suite runs the commit/rebuild path ahead of it, like the H3 shell
-// suite does. It covers the `child_agent` body kind and the acceptance's
-// cross-record rules of docs/design/2026-10-06-managed-child-agent-runtime.md.
-const enablement = vi.hoisted(() => ({ childDomains: true }));
+// The H4b enablement gates are real in this suite: `child_acceptance` sits
+// in the plain enabled list and the kind gate admits `child_agent`, so no
+// mock is needed to run commits. One case still plants a `shell` chain to
+// prove an acceptance cannot name it, and the H4c cases commit `workflow`
+// chains ahead of that kind's enablement; the flags below lift the kind
+// gate for exactly those plantings.
+const enablement = vi.hoisted(() => ({
+  shellKind: false,
+  workflowKind: false,
+}));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('./managed-session-records.js')>();
   return {
     ...actual,
-    assertManagedSessionDomainEnabled: (
-      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-    ) => {
+    assertManagedSessionChildRunKindEnabled: (kind: string) => {
       if (
-        (domain !== 'child_run' && domain !== 'child_acceptance') ||
-        !enablement.childDomains
+        !(kind === 'shell' && enablement.shellKind) &&
+        !(kind === 'workflow' && enablement.workflowKind)
       ) {
-        actual.assertManagedSessionDomainEnabled(domain);
+        actual.assertManagedSessionChildRunKindEnabled(kind);
       }
     },
   };
@@ -44,7 +44,8 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
-  enablement.childDomains = true;
+  enablement.shellKind = false;
+  enablement.workflowKind = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -273,6 +274,51 @@ function life(refs: ChildRefs) {
   ];
 }
 
+// A workflow child's pin names the workflow revision it runs, from launch.
+const WORKFLOW_PIN = {
+  definitionId: 'workflow-review',
+  definitionRevision: 3,
+  definitionDigest: '9'.repeat(64),
+};
+
+/** The same lifecycle as {@link life}, as a workflow child (H4c). */
+function workflowLife(refs: ChildRefs) {
+  return life(refs).map((record) => ({
+    ...record,
+    kind: 'workflow',
+    run: { ...record.run, definition: WORKFLOW_PIN },
+  }));
+}
+
+/** A valid background-Shell launch body, for kind-gate and cross-kind cases. */
+function shellRun(refs: ChildRefs, runOverrides: Record<string, unknown> = {}) {
+  return {
+    kind: 'shell',
+    shellId: 'run-1',
+    ownerScopeId: 'scope-main',
+    commandRef: refs.input,
+    startReceiptRef: null,
+    outputRef: null,
+    stopReason: null,
+    stopRequested: false,
+    exitCode: null,
+    exitSignal: null,
+    run: {
+      state: 'admitted',
+      reason: null,
+      definition: null,
+      executionCallId: 'call-shell-1',
+      effectId: null,
+      dispatchId: null,
+      deliveryId: null,
+      execution: 'intent',
+      runtime: null,
+      delivery: null,
+      ...runOverrides,
+    },
+  };
+}
+
 function acceptance(
   refs: ChildRefs,
   deliveryState: 'accepted' | 'consumed' = 'accepted',
@@ -440,14 +486,26 @@ describe('managed session authority child_agent records', () => {
         },
       ]);
 
-      // The relay advances the delivery independently of the acceptance.
+      // The delivery steps follow their acceptance revisions (H4b
+      // decision 7): accepted only after the acceptance record exists,
+      // consumed only after its consumption commits.
       harness.now = 5_000;
+      await authority.commitExtensionRecord(
+        command('accept-1:1'),
+        { domain: 'child_acceptance', record: acceptance(refs) },
+        TRUSTED,
+      );
       await authority.commitExtensionRecord(
         command('run-1:5'),
         { domain: 'child_run', record: chain[4] },
         TRUSTED,
       );
       harness.now = 6_000;
+      await authority.commitExtensionRecord(
+        command('accept-1:2'),
+        { domain: 'child_acceptance', record: acceptance(refs, 'consumed') },
+        TRUSTED,
+      );
       const consumed = await authority.commitExtensionRecord(
         command('run-1:6'),
         { domain: 'child_run', record: chain[5] },
@@ -645,42 +703,19 @@ describe('managed session authority child_agent records', () => {
           { domain: 'child_acceptance', record: acceptance(refs) },
           TRUSTED,
         ),
-      ).rejects.toThrow('must name a child agent run of this Session');
+      ).rejects.toThrow('must name a child Session run of this Session');
       expect(await publishedBodies(harness, 'child_acceptance')).toBe(0);
     });
   });
 
   it('refuses an acceptance that names a shell run', async () => {
+    enablement.shellKind = true;
     const harness = await createHarness();
     const refs = await publishRefs(harness);
-    const shell = {
-      kind: 'shell',
-      shellId: 'run-1',
-      ownerScopeId: 'scope-main',
-      commandRef: refs.input,
-      startReceiptRef: null,
-      outputRef: null,
-      stopReason: null,
-      stopRequested: false,
-      exitCode: null,
-      exitSignal: null,
-      run: {
-        state: 'admitted',
-        reason: null,
-        definition: null,
-        executionCallId: 'call-shell-1',
-        effectId: null,
-        dispatchId: null,
-        deliveryId: null,
-        execution: 'intent',
-        runtime: null,
-        delivery: null,
-      },
-    };
     await withAuthority(harness, async (authority) => {
       await authority.commitExtensionRecord(
         command('shell-1:1'),
-        { domain: 'child_run', record: shell },
+        { domain: 'child_run', record: shellRun(refs) },
         TRUSTED,
       );
       await expect(
@@ -689,7 +724,7 @@ describe('managed session authority child_agent records', () => {
           { domain: 'child_acceptance', record: acceptance(refs) },
           TRUSTED,
         ),
-      ).rejects.toThrow('must name a child agent run of this Session');
+      ).rejects.toThrow('must name a child Session run of this Session');
     });
   });
 
@@ -971,27 +1006,255 @@ describe('managed session authority child_agent records', () => {
     });
   });
 
-  it('refuses both domains while they stay disabled', async () => {
-    enablement.childDomains = false;
+  it('admits child_agent while refusing a shell body through the kind gate', async () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     const chain = life(refs);
     await withAuthority(harness, async (authority) => {
       await expect(
         authority.commitExtensionRecord(
-          command('run-1:1'),
-          { domain: 'child_run', record: chain[0] },
+          command('shell-1:1'),
+          { domain: 'child_run', record: shellRun(refs) },
           TRUSTED,
         ),
-      ).rejects.toThrow(ManagedSessionRecordError);
+      ).rejects.toThrow(
+        'domain child_run kind shell is registered but not enabled for submission.',
+      );
+      const launch = await authority.commitExtensionRecord(
+        command('run-1:1'),
+        { domain: 'child_run', record: chain[0] },
+        TRUSTED,
+      );
+      expect(launch.revision).toBe(1);
+      expect(await publishedBodies(harness, 'child_run')).toBe(1);
+      // And the kind its sibling gate admitted (`child_acceptance` is real
+      // on this chain, not a tolerated-unknown domain).
+      await settleChild(harness, authority, chain);
+      await authority.commitExtensionRecord(
+        command('accept-1:1'),
+        { domain: 'child_acceptance', record: acceptance(refs) },
+        TRUSTED,
+      );
+      expect(await publishedBodies(harness, 'child_acceptance')).toBe(1);
+    });
+  });
+
+  it('refuses a delivery reaching accepted ahead of its acceptance record', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
+    await withAuthority(harness, async (authority) => {
+      await settleChild(harness, authority, chain);
+      await expect(
+        authority.commitExtensionRecord(
+          command('run-1:5'),
+          { domain: 'child_run', record: chain[4] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        'reaches accepted or consumed only with its acceptance record',
+      );
+      expect(await publishedBodies(harness, 'child_run')).toBe(4);
+    });
+  });
+
+  it('refuses a delivery retraction once the acceptance record exists', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
+    await withAuthority(harness, async (authority) => {
+      await settleChild(harness, authority, chain);
+      await authority.commitExtensionRecord(
+        command('accept-1:1'),
+        { domain: 'child_acceptance', record: acceptance(refs) },
+        TRUSTED,
+      );
+      for (const state of ['unknown', 'rejected'] as const) {
+        const retracting = childAgent(
+          refs,
+          {
+            state: 'settled',
+            execution: 'settled',
+            dispatchId: 'dispatch-1',
+            runtime: BINDING_1,
+            delivery: { target: 'session', state },
+          },
+          {
+            childSessionId: 'session-child',
+            stopReason: 'completed',
+            resultRef: refs.result,
+            terminalReceiptRef: refs.receipt,
+          },
+        );
+        await expect(
+          authority.commitExtensionRecord(
+            command(`run-1:${state}`),
+            { domain: 'child_run', record: retracting },
+            TRUSTED,
+          ),
+        ).rejects.toThrow(
+          'cannot go unknown or rejected after its acceptance record',
+        );
+      }
+      expect(await publishedBodies(harness, 'child_run')).toBe(4);
+    });
+  });
+
+  it('allows an unknown delivery while no acceptance record exists', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = life(refs);
+    await withAuthority(harness, async (authority) => {
+      await settleChild(harness, authority, chain);
+      const unknown = childAgent(
+        refs,
+        {
+          state: 'settled',
+          execution: 'settled',
+          dispatchId: 'dispatch-1',
+          runtime: BINDING_1,
+          delivery: { target: 'session', state: 'unknown' },
+        },
+        {
+          childSessionId: 'session-child',
+          stopReason: 'completed',
+          resultRef: refs.result,
+          terminalReceiptRef: refs.receipt,
+        },
+      );
+      const revised = await authority.commitExtensionRecord(
+        command('run-1:5'),
+        { domain: 'child_run', record: unknown },
+        TRUSTED,
+      );
+      expect(revised.revision).toBe(5);
+      expect(authority.extensionRecord('child_run', 'run-1')).toMatchObject({
+        revision: 5,
+        record: unknown,
+      });
+    });
+  });
+});
+
+describe('managed session authority workflow records (H4c)', () => {
+  it('refuses a workflow launch through the kind gate, committing nothing', async () => {
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          command('run-1:1'),
+          { domain: 'child_run', record: workflowLife(refs)[0] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        'domain child_run kind workflow is registered but not enabled for submission.',
+      );
+      expect(await publishedBodies(harness, 'child_run')).toBe(0);
+      expect(authority.extensionRecord('child_run', 'run-1')).toBeUndefined();
+      expect(authority.taskViews()).toEqual([]);
+    });
+  });
+
+  it('chains a workflow child through acceptance and consumption, rebuilt on reopen', async () => {
+    enablement.workflowKind = true;
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = workflowLife(refs);
+    const view = {
+      taskId: TASK_ID,
+      sessionId,
+      kind: 'workflow',
+      state: 'completed',
+      runtimeState: null,
+      // The task names the workflow revision the launch pinned.
+      definitionRevision: 3,
+      createdAt: 1_000,
+      startedAt: 2_000,
+      settledAt: 4_000,
+    };
+    await withAuthority(harness, async (authority) => {
+      await settleChild(harness, authority, chain);
+      expect(authority.taskViews()).toEqual([view]);
+      harness.now = 5_000;
+      await authority.commitExtensionRecord(
+        command('accept-1:1'),
+        { domain: 'child_acceptance', record: acceptance(refs) },
+        TRUSTED,
+      );
+      await authority.commitExtensionRecord(
+        command('run-1:5'),
+        { domain: 'child_run', record: chain[4] },
+        TRUSTED,
+      );
+      await authority.commitExtensionRecord(
+        command('accept-1:2'),
+        { domain: 'child_acceptance', record: acceptance(refs, 'consumed') },
+        TRUSTED,
+      );
+      await authority.commitExtensionRecord(
+        command('run-1:6'),
+        { domain: 'child_run', record: chain[5] },
+        TRUSTED,
+      );
+    });
+    // Rebuild needs no gate: the gate refuses submission, never a reader.
+    enablement.workflowKind = false;
+    await withAuthority(
+      harness,
+      async (authority) => {
+        expect(authority.taskViews()).toEqual([view]);
+        expect(authority.extensionRecord('child_run', 'run-1')).toMatchObject({
+          revision: 6,
+          record: chain[5],
+        });
+        expect(
+          authority.extensionRecord('child_acceptance', 'run-1'),
+        ).toMatchObject({ revision: 2, record: acceptance(refs, 'consumed') });
+      },
+      { create: false },
+    );
+  });
+
+  it('binds a workflow child to the child Session commit rules', async () => {
+    enablement.workflowKind = true;
+    const harness = await createHarness();
+    const refs = await publishRefs(harness);
+    const chain = workflowLife(refs);
+    await withAuthority(harness, async (authority) => {
+      await expect(
+        authority.commitExtensionRecord(
+          command('run-1:1'),
+          {
+            domain: 'child_run',
+            record: { ...chain[0], rootSessionId: 'session-other' },
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        'rootSessionId must be this Session for a first-level child',
+      );
+      await settleChild(harness, authority, chain);
+      await expect(
+        authority.commitExtensionRecord(
+          command('run-1:5'),
+          { domain: 'child_run', record: chain[4] },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(
+        'reaches accepted or consumed only with its acceptance record',
+      );
       await expect(
         authority.commitExtensionRecord(
           command('accept-1:1'),
-          { domain: 'child_acceptance', record: acceptance(refs) },
+          {
+            domain: 'child_acceptance',
+            record: acceptance(refs, 'accepted', { parentScopeId: 'scope-x' }),
+          },
           TRUSTED,
         ),
-      ).rejects.toThrow(ManagedSessionRecordError);
-      expect(await publishedBodies(harness, 'child_run')).toBe(0);
+      ).rejects.toThrow('must match its child run scope and result version');
+      expect(await publishedBodies(harness, 'child_run')).toBe(4);
       expect(await publishedBodies(harness, 'child_acceptance')).toBe(0);
     });
   });

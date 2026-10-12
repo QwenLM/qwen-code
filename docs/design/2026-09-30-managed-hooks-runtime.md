@@ -181,6 +181,75 @@ rejection is completion evidence; an abort signal alone is not. A callback still
 pending after the grace period keeps its unknown outcome and original Runtime
 hold, with no replay. Native Legacy function-Hook cancellation remains unchanged.
 
+A trusted function handler module is itself evaluated with a bounded budget:
+`max(manifest function timeout in milliseconds, a 500 ms floor)`, the floor
+protecting cold-but-healthy evaluation from a budget declared for the callback.
+The budget bounds an evaluation that yields: a module whose top-level code
+blocks synchronously outruns its own timer, because the Runtime can only stop
+waiting, never interrupt the load. ESM evaluation cannot be cancelled, so an
+evaluation timeout or abort only abandons the wait: the operation settles at the
+Runtime — releasing its one slot of the 16-operation admission budget and
+unblocking Runtime `close()` — while keeping its hold until the module's
+top-level code actually finishes; a never-settling evaluation keeps the hold for
+the worker's lifetime. The Runtime reports an evaluation timeout with the
+dedicated code `managed_hook_module_evaluation_timeout` and an evaluation
+abandoned by a cancel or shutdown with
+`managed_hook_module_evaluation_abandoned`, and the Harness fences both as
+outcome_unknown rather than claiming not_started_proven — or committing a
+definite cancellation — for code that may still be running. That fence is not
+terminal. Once the evaluation definitively ends, the Runtime republishes the
+receipt with what is then provable — when the module loaded the callback
+demonstrably never dispatched, so an abandoned evaluation settles as a
+cancelled result and an over-budget one as a timeout result, while a module
+that itself failed settles as `managed_hook_handler_unavailable` — so the next
+status poll reconciles the record, whether it comes from an explicit status
+call, from the turn path polling once before it refuses a new occurrence, from
+the reconciliation a blocked Session runs before refusing its next prompt, or
+from drain. A result-bearing republish also settles the turn its fence parked,
+and the Session stays usable and deletable; a republished
+`managed_hook_handler_unavailable` reconciles to `not_started_proven`, which
+retires the hold and lets DELETE complete, but leaves the record
+`recovery_blocked`, so later turns of that Session still require recovery. Only an evaluation that never ends keeps the fence, and with it the
+recovery barrier, for the worker's lifetime. A module whose
+evaluation fails settles as
+`managed_hook_handler_unavailable`, which the Harness records as
+not_started_proven — whether it was rejected before any top-level statement ran,
+partway through top-level execution, or only after it evaluated in full (the
+shape or handler-revision guard, for instance); the proof therefore does not
+cover any top-level effects that already ran.
+When the Harness releases an earlier owner, the Broker may refuse. A refusal
+because the owner is already absent (404 `runtime_session_not_found`) is booked
+as released, reported on the debug logger, and never retried. An execution the
+Harness fenced as
+outcome_unknown is never drained or released past, so a hold-fenced refusal
+caused by a Hook execution arrives only from a Runtime that certified an
+abandoned evaluation as cancelled before the fence existed. The same code
+also answers for unfinished non-Hook work on that Runtime Session — an MCP,
+Monitor or background hold, provider-side pending work, or an in-flight tool
+invocation — which the record-based release gate does not inspect. Both
+pending-work producers name the condition with the dedicated code
+`managed_runtime_owner_hold_pending`: the Runtime Session still owns
+unfinished work of any kind. The generic conflict
+codes stay catch-alls an identity mismatch or an unexpected provider error
+also answers with, so only the dedicated code is read as a hold and every
+other refusal propagates as it did before. A refusal from a hold-fenced owner
+(409 `managed_runtime_owner_hold_pending`) is skipped for that pass, reported
+on the daemon's stderr, and left unreleased, so each later turn of that Hook
+Session attempts the release again. On the acquisition path any other refusal
+propagates and blocks the replacement activation; on a later turn's retry pass
+it is absorbed and reported instead, leaving the owner fenced, because that
+pass runs on an already-acquired Session and must not fail a healthy live turn
+for a stale owner's sake. Closing a Hook Session that owns its Runtime owner
+answers a hold fence — its own or an earlier owner's — with the Hook
+recovery-required condition rather than a bare Broker refusal, so DELETE and
+detach report the retained hold and keep the Session attached and retryable
+instead of deleting it. A Hook Session that shares the MCP owner does not
+release that broker; its release is answered by the MCP session and still
+reports the generic close failure. Earlier owners recovered from Hook records
+remain that Hook Session's to release in the shared shape too: a hold fence
+from one is absorbed, reported, and retried on later turns, and close names
+the Hook recovery-required condition after attempting every remaining owner.
+
 Workspace Write/Edit backups and explicit rewind share the Session's Hook Runtime
 owner, while snapshots retain the actual prompt identity. Acknowledged async Hooks
 may coexist with history bind, prepare and snapshot; rewind and owner release still
@@ -236,8 +305,11 @@ An unknown SessionEnd or SessionDelete prevents DELETE from completing: it retur
 the same saved occurrence; they do not redispatch it. Detach also requires all
 Hook effects to settle. The retained owner can block tools in other Sessions in
 that Workspace; it does not block a different Workspace's Runtime worker.
-Unknown operations count toward the worker's 16-operation admission limit and
-retain their holds for its lifetime. All saved receipts, including settled ones,
+Unknown operations that never settle at the Runtime retain their holds for the
+worker's lifetime and count toward the worker's 16-operation admission limit;
+an operation whose module evaluation was abandoned settles at the Runtime,
+releases its admission slot, and retains its hold only until the module's
+top-level code finishes. All saved receipts, including settled ones,
 count toward the 4096 lifetime limit. Neither timeout, user cancellation, DELETE
 nor process replacement proves completion or permits replay. H2 provides no
 administrative abandonment route; receipt reconciliation or durable fenced

@@ -256,6 +256,7 @@ export class HostedWorkspaceBroker {
     argsDigest: string,
     requestDigest: string,
     publicationId: string,
+    turnId: string,
   ): Promise<{
     executionCallId: string;
     runtimeBindingId: string;
@@ -263,14 +264,19 @@ export class HostedWorkspaceBroker {
   }> {
     const response = await this.request('/executions:prepare', {
       idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
-      turnId: this.identity.runtimeSessionId,
+      // One pair, two axes, same as the publisher registration: the
+      // logical turn id on the checkpoint axis (the reserve's reference
+      // and the persisted execution must both carry it, or the
+      // publication store's `execution.turnId == reference.promptId`
+      // refuses), the mapped Runtime Session on the execution axis.
+      turnId,
       toolCallId: callId,
       requestDigest,
       toolProtocol: 'v3',
       publicationId,
       reference: {
         sessionId: this.identity.runtimeSessionId,
-        promptId: this.identity.runtimeSessionId,
+        promptId: turnId,
         callId,
         argsDigest,
       },

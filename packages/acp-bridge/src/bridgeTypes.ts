@@ -1338,23 +1338,6 @@ export interface BridgeClientRequestContext {
     };
   };
   /**
-   * The workspace-agent run this prompt is a turn of. Trusted: injected by the
-   * daemon dispatcher, never populated from caller-controlled ACP metadata.
-   *
-   * Present on every prompt the dispatcher sends to an agent session, and on
-   * nothing else. The child re-establishes its run frame from this, which is
-   * what lets the thread tools know which thread they are acting on.
-   */
-  agentRun?: {
-    workspaceId: string;
-    agentId: string;
-    runId: string;
-    threadId: string;
-    rootThreadId: string;
-    attempt: number;
-    contextThroughSequence?: number;
-  };
-  /**
    * Internal: set ONLY by `continueSession` to re-arm the continuation meta
    * key that `sendPrompt` strips from untrusted callers. HTTP routes never
    * populate this from request input, so an external caller cannot use it to
@@ -1431,15 +1414,6 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
-/**
- * Which workspace-agent run a prompt is one turn of.
- *
- * Trusted like {@link DAEMON_CHANNEL_DELIVERY_META_KEY}: the bridge strips this
- * wire key from every caller and re-injects it only from the daemon-supplied
- * request context. An agent's thread tools act on whatever this names, so a
- * caller that could set it could make one agent post as another.
- */
-export const DAEMON_AGENT_RUN_META_KEY = 'qwen.daemon.agentRun';
 export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
 export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
@@ -1492,6 +1466,19 @@ export interface BridgeHeartbeatState {
  * prompts; older clients can omit it.
  */
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+// A drain with `userInputOnly: true` (sent for send-now) takes only messages
+// that are not queue-only; hosts that ignore the flag drain everything.
+
+/**
+ * Parent-to-agent request asking the agent to deliver the session's queued
+ * mid-turn messages now (`{ sessionId }`), sent when the user chooses to send
+ * them now. An agent streaming a model response may drain the queue at once
+ * and cut that response short, so the messages reach the model now instead of
+ * after the response and its tool batch. Advisory only: agents that do not
+ * know the method answer `-32601`, and the queue is still drained at the next
+ * tool boundary.
+ */
+export const MID_TURN_SEND_NOW_METHOD = 'craft/midTurnSendNow';
 
 /**
  * Cap on each per-session mid-turn reconciliation ring.
@@ -1564,7 +1551,6 @@ export interface MidTurnQueueEntry {
   eventDetailMode?: LiveReplayMode;
   messageId: string;
   text: string;
-  agentRun?: BridgeClientRequestContext['agentRun'];
   /**
    * Image content blocks attached to the message. The drain
    * combines them with `text` into structured `items` for the ACP child;
@@ -2859,6 +2845,23 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     options?: { assertCanCommit?: () => void },
   ): Promise<void>;
+
+  /**
+   * Ask the agent to deliver the session's queued mid-turn messages now: a
+   * model response that a foreground turn is streaming is cut short so they
+   * reach the model in this round trip, unless it has started a tool call;
+   * running tools still finish first. Otherwise, as in a channel, cron or
+   * background turn, the messages are delivered as without the request, at a
+   * tool boundary or by promotion when the turn ends; the protocol reference
+   * lists the narrow windows where neither happens. `requested` is true
+   * when user messages were waiting and the agent was asked, not that a
+   * response was cut; it is false when none were waiting. Authorized like
+   * the sibling mid-turn methods.
+   */
+  sendMidTurnMessagesNow(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): { requested: boolean };
 
   /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(

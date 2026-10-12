@@ -12,13 +12,12 @@ import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { managedExtensionRecordKey } from './managed-extension-projection.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
-import {
-  ManagedSessionRecordError,
-  type ManagedSessionDurableRef,
-} from './managed-session-records.js';
+import { type ManagedSessionDurableRef } from './managed-session-records.js';
 
-// child_run is enabled by the H3 enablement slice; this suite runs the
-// commit/rebuild path ahead of it, like the monitor suite does for H0c.
+// child_run's shell kind is enabled by the H3 enablement slice; this
+// suite runs the commit/rebuild path ahead of it, like the monitor suite
+// does for H0c. H4b turned the gate per-kind, so the mock lifts the kind
+// gate while the flag stands.
 const enablement = vi.hoisted(() => ({ childRun: true }));
 
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -26,11 +25,9 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
     await importOriginal<typeof import('./managed-session-records.js')>();
   return {
     ...actual,
-    assertManagedSessionDomainEnabled: (
-      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-    ) => {
-      if (domain !== 'child_run' || !enablement.childRun) {
-        actual.assertManagedSessionDomainEnabled(domain);
+    assertManagedSessionChildRunKindEnabled: (kind: string) => {
+      if (!enablement.childRun) {
+        actual.assertManagedSessionChildRunKindEnabled(kind);
       }
     },
   };
@@ -533,7 +530,7 @@ describe('managed session authority child_run records', () => {
           { domain: 'child_run', record: chain[0] },
           TRUSTED,
         ),
-      ).rejects.toThrow(ManagedSessionRecordError);
+      ).rejects.toThrow('domain child_run kind shell is registered but not');
       expect(await publishedBodies(harness)).toBe(0);
     });
   });

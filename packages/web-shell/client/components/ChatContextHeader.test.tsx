@@ -67,6 +67,20 @@ describe('ChatContextHeader', () => {
     expect(view.querySelectorAll('button')).toHaveLength(1);
   });
 
+  it('renders the location slot only when provided', () => {
+    const withLocation = mount({
+      location: <span data-testid="fake-location">Remote · host</span>,
+    });
+    expect(
+      withLocation.querySelector('[data-testid="fake-location"]')?.textContent,
+    ).toBe('Remote · host');
+
+    const withoutLocation = mount();
+    expect(
+      withoutLocation.querySelector('[data-testid="fake-location"]'),
+    ).toBeNull();
+  });
+
   it('hides the right-panel action until content exists', () => {
     const view = mount();
 

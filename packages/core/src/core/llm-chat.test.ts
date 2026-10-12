@@ -2404,6 +2404,36 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('sends the latest memory catalog without persisting it to history', async () => {
+      // The catalog part carries the volatile-boundary marker so the provider
+      // cache passes anchor their per-turn breakpoint before it.
+      const catalogPart = (text: string) => ({
+        text,
+        partMetadata: { 'qwen-code:reattach-boundary': true },
+      });
+      let catalog = 'first catalog';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      mockStream(textStream('response'));
+      await sendDrain('first question', 'memory-tail-1');
+      expect(
+        (requestAt(0).contents as Content[]).at(-1)?.parts?.at(-1),
+      ).toEqual(catalogPart('first catalog'));
+      expect(JSON.stringify(chat.getHistory())).not.toContain('first catalog');
+      const firstHistory = chat.getHistory();
+      catalog = 'updated catalog';
+      mockStream(textStream('done'));
+      await sendDrain('second question', 'memory-tail-2');
+      const second = requestAt(1).contents as Content[];
+      expect(second.slice(0, firstHistory.length)).toEqual(firstHistory);
+      expect(second.at(-1)?.parts?.at(-1)).toEqual(
+        catalogPart('updated catalog'),
+      );
+      expect(JSON.stringify(second)).not.toContain('first catalog');
+      expect(JSON.stringify(chat.getHistory())).not.toContain(
+        'updated catalog',
+      );
+    });
+
     it('caps function responses at the provider send boundary without changing user text', async () => {
       (
         mockConfig as Config & {
@@ -3477,6 +3507,21 @@ describe('LlmChat', async () => {
       expect(reactiveOpts.trigger).toBe('auto');
       expect(reactiveOpts.originalTokenCount).toBe(135_000);
       expect(reactiveOpts.precomputedEffectiveTokens).toBe(135_000);
+      // The ceiling is the error's FIRST number (`limitTokens`), not the
+      // actual count: this is the only assertion covering the
+      // producer→`tryCompress`→`compress()` hops, so dropping either forward
+      // or swapping in `actualTokens` must turn it red (#13432).
+      expect(reactiveOpts.observedServerCeiling).toBe(128_000);
+      // The kind travels on the same producer→`tryCompress`→`compress()`
+      // hops: an input-bound ceiling must not size an output budget
+      // downstream (#13876).
+      expect(reactiveOpts.observedServerCeilingKind).toBe('total');
+      // The route that reported the ceiling must travel with it, or the
+      // service cannot tell a retry on that route from a side-query on another
+      // one (#13876). Same producer→tryCompress→compress() hop.
+      expect(reactiveOpts.requestRouteKey).toBe(
+        mockConfig.getModelRouteIdentity(mockConfig.getModel()),
+      );
       expectStreamCalls(2);
       expect(requestAt(1).contents).toEqual(expectedRequestContents);
       expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
