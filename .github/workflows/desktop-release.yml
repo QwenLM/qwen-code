@@ -542,6 +542,11 @@ jobs:
           WINDOWS_CONFIG: '${{ env.WINDOWS_CONFIG }}'
         run: |
           set -euo pipefail
+          if [ "$RUNNER_OS" = 'Linux' ]; then
+            QWEN_DESKTOP_PATCHELF="$(command -v patchelf)"
+            PATCHELF="$GITHUB_WORKSPACE/packages/desktop/scripts/patchelf-immutable-runtime.sh"
+            export QWEN_DESKTOP_PATCHELF PATCHELF
+          fi
           args=( ${{ matrix.tauri_args }} )
           if [ "$DRY_RUN" = 'true' ]; then
             args+=(--no-sign)
@@ -549,6 +554,11 @@ jobs:
             args+=(--config "$WINDOWS_CONFIG")
           fi
           npm run tauri -- build "${args[@]}"
+
+      - name: 'Verify Linux installer runtimes'
+        if: "runner.os == 'Linux'"
+        working-directory: 'packages/desktop'
+        run: 'npm run smoke:linux-installers -- src-tauri/target/${{ matrix.rust_target }}/release/bundle'
 
       - name: 'Verify macOS signature'
         if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
