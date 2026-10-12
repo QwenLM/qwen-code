@@ -2970,76 +2970,71 @@ async function executeHostedTurn(
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         let stopReason = 'end_turn';
         try {
-          if (workflowLaunch !== undefined) {
-            const result = await runHostedWorkflowTurn({
-              sessionId,
-              cwd,
-              launch: workflowLaunch,
-              signal: abort.signal,
-            });
-            await commit(
-              'assistant',
-              result.parts ?? [{ text: result.text }],
-              result.model,
-            );
-          } else {
-            const result = await runHostedHarnessTextTurn({
-              sessionId,
-              cwd,
-              history,
-              prompt: text,
-              promptId,
-              signal: abort.signal,
-              modelScope,
-              workspaceContext,
-              agentDefinition: session.agentDefinition,
-              agentInstructions: await readHostedAgentInstructions(
-                session.agentDefinition,
-                session.managed.resources,
-              ),
-              ...(session.hooks ? { hooks: session.hooks } : {}),
-              ...(toolTurn ? { toolTurn } : {}),
-              ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
-              ...(resumeApproval
-                ? { initialRound: resumeApproval.plan.round + 1 }
-                : {}),
-              ...(resumeModel ? { resumeModel } : {}),
-              ...(!session.hooks
-                ? {
-                    prepareModel: async (
-                      prepared,
-                      round,
-                      pendingToolResults,
-                      context,
-                      captureUnsupported,
-                    ) => {
-                      if (captureUnsupported) return undefined;
-                      const snapshot = createHostedModelRequest(
-                        session.managed,
-                        promptId,
-                        prepared,
-                        round,
-                        pendingToolResults,
-                        context,
-                        session.streamOwner,
-                      );
-                      const ref = await publishHostedModelRequest(
-                        session.managed,
-                        snapshot,
-                      );
-                      deltas.bindMessageId(snapshot.messageId);
-                      return ref;
-                    },
-                  }
-                : {}),
-              ...(deltas ? { textDeltas: deltas } : {}),
-            });
-            await commit(
-              'assistant',
-              result.parts ?? [{ text: result.text }],
-              result.model,
-            );
-          }
+          const result =
+            workflowLaunch !== undefined
+              ? await runHostedWorkflowTurn({
+                  sessionId,
+                  cwd,
+                  launch: workflowLaunch,
+                  signal: abort.signal,
+                  agentDefinition: session.agentDefinition,
+                })
+              : await runHostedHarnessTextTurn({
+                  sessionId,
+                  cwd,
+                  history,
+                  prompt: text,
+                  promptId,
+                  signal: abort.signal,
+                  modelScope,
+                  workspaceContext,
+                  agentDefinition: session.agentDefinition,
+                  agentInstructions: await readHostedAgentInstructions(
+                    session.agentDefinition,
+                    session.managed.resources,
+                  ),
+                  ...(session.hooks ? { hooks: session.hooks } : {}),
+                  ...(toolTurn ? { toolTurn } : {}),
+                  ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
+                  ...(resumeApproval
+                    ? { initialRound: resumeApproval.plan.round + 1 }
+                    : {}),
+                  ...(resumeModel ? { resumeModel } : {}),
+                  ...(!session.hooks
+                    ? {
+                        prepareModel: async (
+                          prepared,
+                          round,
+                          pendingToolResults,
+                          context,
+                          captureUnsupported,
+                        ) => {
+                          if (captureUnsupported) return undefined;
+                          const snapshot = createHostedModelRequest(
+                            session.managed,
+                            promptId,
+                            prepared,
+                            round,
+                            pendingToolResults,
+                            context,
+                            session.streamOwner,
+                          );
+                          const ref = await publishHostedModelRequest(
+                            session.managed,
+                            snapshot,
+                          );
+                          deltas.bindMessageId(snapshot.messageId);
+                          return ref;
+                        },
+                      }
+                    : {}),
+                  ...(deltas ? { textDeltas: deltas } : {}),
+                });
+          await commit(
+            'assistant',
+            result.parts ?? [{ text: result.text }],
+            result.model,
+          );
         } catch (cause) {
           if (
             cause instanceof HostedToolRecoveryRequiredError ||

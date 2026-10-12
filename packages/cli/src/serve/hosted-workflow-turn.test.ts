@@ -15,6 +15,7 @@ import {
   runHostedWorkflowTurn,
   workflowLaunchSummaryText,
 } from './hosted-workflow-turn.js';
+import { HostedModelUnavailableError } from './hosted-agent-definition.js';
 
 // The runner is the ordinary headless engine; the suite pins the turn's
 // own behavior — pin re-verification, outcome rendering, failure and abort
@@ -37,10 +38,17 @@ const configDouble = vi.hoisted(() => {
     initialize: ReturnType<typeof vi.fn>;
     refreshAuth: ReturnType<typeof vi.fn>;
     shutdownImpl: ReturnType<typeof vi.fn>;
+    switchModel: ReturnType<typeof vi.fn>;
   };
   return {
     current: undefined as State | undefined,
     forcedAuthType: undefined as string | undefined,
+    models: [] as Array<{
+      id: string;
+      authType: string;
+      isRuntimeModel?: boolean;
+      registryBaseUrl?: string;
+    }>,
   };
 });
 vi.mock('../config/config.js', () => ({
@@ -61,12 +69,15 @@ vi.mock('../config/config.js', () => ({
       shutdownImpl: vi.fn(async () => {
         state.shut = true;
       }),
+      switchModel: vi.fn(async () => undefined),
     };
     configDouble.current = state;
     return {
       initialize: state.initialize,
       refreshAuth: state.refreshAuth,
       shutdown: state.shutdownImpl,
+      switchModel: state.switchModel,
+      getAllConfiguredModels: () => configDouble.models,
       getModelsConfig: () => ({
         getCurrentAuthType: () => state.authType,
       }),
@@ -101,6 +112,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   configDouble.current = undefined;
   configDouble.forcedAuthType = undefined;
+  configDouble.models = [];
 });
 
 describe('parseHostedWorkflowLaunchBlock', () => {
@@ -321,8 +333,10 @@ describe('runHostedWorkflowTurn', () => {
       32 * 1024,
     );
     expect(result.text).toContain(
-      'truncated: the full outcome is in the run snapshot at <projectDir>/workflows/<runId>.json',
+      `truncated: the outcome exceeded ${32 * 1024} bytes; have the script return a smaller result`,
     );
+    // R1-32: never a pointer to a snapshot this Session cannot read.
+    expect(result.text).not.toContain('snapshot');
     // The cut keeps the outcome's body: a bounded() that discarded it
     // would match the length bound too.
     expect(result.text).toContain(
@@ -453,6 +467,52 @@ describe('runHostedWorkflowTurn', () => {
       }),
     ).rejects.toThrow('Hosted Harness model authentication is unavailable.');
     expect(start).not.toHaveBeenCalled();
+    expect(configDouble.current?.shutdownImpl).toHaveBeenCalledTimes(1);
+  });
+
+  // #13858 R3-4: the workflow lane runs every agent() dispatch on the
+  // Session's pinned model, exactly as the sibling text Turn does.
+  it("switches to the Session's pinned model before the run starts", async () => {
+    configDouble.models = [
+      { id: 'pinned', authType: 'openai', registryBaseUrl: 'https://m' },
+      { id: 'pinned', authType: 'openai', isRuntimeModel: true },
+    ];
+    start.mockResolvedValue(
+      handleWith({
+        ok: true,
+        outcome: { runId: 'r', result: 1, phases: [], logs: [] },
+      }),
+    );
+    const launch = { definition: pin(SCRIPT), script: SCRIPT, args: null };
+    await runHostedWorkflowTurn({
+      ...base,
+      launch,
+      signal: new AbortController().signal,
+      agentDefinition: { model: { id: 'pinned' } } as never,
+    });
+    expect(configDouble.current?.switchModel).toHaveBeenCalledWith(
+      'openai',
+      'pinned',
+      { requireCachedCredentials: true, baseUrl: 'https://m' },
+    );
+    expect(
+      configDouble.current!.switchModel.mock.invocationCallOrder[0],
+    ).toBeLessThan(start.mock.invocationCallOrder[0]!);
+  });
+
+  it('fails the Turn on a pin that does not resolve instead of falling back', async () => {
+    configDouble.models = [{ id: 'other', authType: 'openai' }];
+    const launch = { definition: pin(SCRIPT), script: SCRIPT, args: null };
+    await expect(
+      runHostedWorkflowTurn({
+        ...base,
+        launch,
+        signal: new AbortController().signal,
+        agentDefinition: { model: { id: 'pinned' } } as never,
+      }),
+    ).rejects.toThrow(HostedModelUnavailableError);
+    expect(start).not.toHaveBeenCalled();
+    expect(configDouble.current?.switchModel).not.toHaveBeenCalled();
     expect(configDouble.current?.shutdownImpl).toHaveBeenCalledTimes(1);
   });
 

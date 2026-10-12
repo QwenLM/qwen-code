@@ -13,7 +13,14 @@ import type { WorkflowRunOutcome } from '@qwen-code/qwen-code-core/agents/runtim
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
-import type { HostedHarnessModelResult } from './hosted-harness-model.js';
+import {
+  applyHostedModelPin,
+  type HostedHarnessModelResult,
+} from './hosted-harness-model.js';
+import {
+  HostedModelUnavailableError,
+  type HostedAgentDefinition,
+} from './hosted-agent-definition.js';
 
 // #13803 (K1): the workflow child Session's first Turn executes a workflow
 // instead of a prompt. The Java creation arm mints the Turn with one
@@ -135,9 +142,10 @@ function bounded(text: string): string {
   // R1-5: never spread the whole outcome into a code-point array — the
   // byte check usually makes it unnecessary, and the walk-back below costs
   // one buffer instead of an array plus a slice-and-join per search step.
-  // R1-9: the outcome lives in the run snapshot, never in the run journal.
-  const marker =
-    '\n… (truncated: the full outcome is in the run snapshot at <projectDir>/workflows/<runId>.json)';
+  // R1-32: no pointer to the run snapshot — it lives on the Harness host,
+  // which this Session's tools never read, and an unwritten one would send
+  // the model to nothing. The script itself is what can return less.
+  const marker = `\n… (truncated: the outcome exceeded ${WORKFLOW_TURN_RESULT_LIMIT} bytes; have the script return a smaller result to see all of it)`;
   const budget = WORKFLOW_TURN_RESULT_LIMIT - Buffer.byteLength(marker, 'utf8');
   const bytes = Buffer.from(text, 'utf8');
   let end = Math.min(budget, bytes.length);
@@ -173,6 +181,9 @@ export async function runHostedWorkflowTurn(input: {
   readonly cwd: string;
   readonly launch: HostedWorkflowLaunch;
   readonly signal: AbortSignal;
+  /** The Session's pinned definition: its model governs every agent()
+   * dispatch of the run, exactly as it governs the sibling text Turn. */
+  readonly agentDefinition?: HostedAgentDefinition;
 }): Promise<HostedHarnessModelResult> {
   // The pin binds the bytes that run: the launch's digest must equal the
   // script's own, or this Turn never starts (decision 2).
@@ -217,6 +228,8 @@ export async function runHostedWorkflowTurn(input: {
     undefined,
     true,
   );
+  const model = input.agentDefinition?.model;
+  await applyHostedModelPin(config, model);
   try {
     await config.initialize({
       signal: input.signal,
@@ -230,7 +243,12 @@ export async function runHostedWorkflowTurn(input: {
     if (!authType) {
       throw new Error('Hosted Harness model authentication is unavailable.');
     }
-    await config.refreshAuth(authType, true);
+    try {
+      await config.refreshAuth(authType, true);
+    } catch (cause) {
+      if (model) throw new HostedModelUnavailableError(cause);
+      throw cause;
+    }
     const handle = await WorkflowRunner.start({
       config,
       signal: input.signal,
