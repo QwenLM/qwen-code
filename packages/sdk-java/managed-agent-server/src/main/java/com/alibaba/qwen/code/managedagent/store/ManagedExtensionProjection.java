@@ -116,8 +116,11 @@ public final class ManagedExtensionProjection {
      * H4f: the task kinds whose cancel reaches a durable stop request on
      * their own record. A child agent's stop request is set once on its
      * child_run record; every other kind has no public cancel path yet —
-     * H3's Shell and Monitor domains stay disabled, the workflow kind has
-     * no runtime and an automation run carries no stop request.
+     * H3's Shell and Monitor domains stay disabled, an automation run
+     * carries no stop request, and a workflow run's public cancel is its
+     * own named slice (#13803 follow-up work): the workflow runtime already
+     * stops a workflow row through the parent-close cascade, so the set
+     * stays closed by slice boundary, not by a missing runtime.
      */
     public static final Set<String> CANCELLABLE_TASK_KINDS = Set.of(
             "child_agent");
