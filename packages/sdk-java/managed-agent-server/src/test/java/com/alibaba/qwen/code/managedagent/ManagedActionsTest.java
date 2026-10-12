@@ -916,7 +916,10 @@ class ManagedActionsTest {
         CountDownLatch release = new CountDownLatch(1);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getDispatch().setLeaseDuration(Duration.ofMillis(300));
-        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(50));
+        // 400ms > leaseDuration/3, so the coordinator's clamp (min → 100ms)
+        // is what picks the period. Inverting the clamp (max → 400ms) starves
+        // the 300ms lease and the competing replica must win it.
+        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(400));
         AtomicInteger calls = new AtomicInteger();
         ActionResponseCoordinator first = null;
         ActionResponseCoordinator sibling = null;

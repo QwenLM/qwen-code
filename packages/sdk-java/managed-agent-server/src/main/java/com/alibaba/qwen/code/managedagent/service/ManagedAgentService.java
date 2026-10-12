@@ -1379,18 +1379,21 @@ public class ManagedAgentService {
                 : title instanceof String ? (String) title : null);
     }
 
+    private static boolean unicodeBlank(String title) {
+        return title.codePoints().allMatch(character -> Character.isWhitespace(character)
+                || Character.isSpaceChar(character) || character == 0xfeff);
+    }
+
     private static String validTitle(String title) {
         if (title != null && title.length() > 512) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
                     "Title must not exceed 512 characters.");
         }
-        return title == null || title.isBlank() ? null : title;
+        return title == null || unicodeBlank(title) ? null : title;
     }
 
     private static String validRenameTitle(String title) {
-        if (title == null || title.length() > 256
-                || title.codePoints().allMatch(character -> Character.isWhitespace(character)
-                        || Character.isSpaceChar(character) || character == 0xfeff)) {
+        if (title == null || title.length() > 256 || unicodeBlank(title)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
                     "Title must contain 1-256 characters.");
         }
