@@ -95,6 +95,7 @@ const calls: Record<
       'project',
       'session_start',
     ),
+  FileChanged: (h) => h.fireFileChangedEvent('/workspace/notes.md', 'change'),
 };
 
 function fixture() {

@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
@@ -20,8 +21,9 @@ import type {
   ContextUsageData,
   DefaultHookOutput,
   HookPhase,
+  FileChangeEvent,
 } from './types.js';
-import { createHookOutput, PermissionMode } from './types.js';
+import { createHookOutput, PermissionMode, HookEventName } from './types.js';
 import type {
   SessionStartSource,
   SessionEndReason,
@@ -32,7 +34,6 @@ import type {
   NotificationType,
   PermissionDeniedReason,
   PermissionSuggestion,
-  HookEventName,
   FunctionHookCallback,
   CommandHookConfig,
   HttpHookConfig,
@@ -47,6 +48,10 @@ import type {
 } from './types.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
+import { FileChangedWatcher } from './file-changed-watcher.js';
+import { runWithHookExecutionOwner } from './hook-execution-context.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 
 // Re-export MessagesProvider for external use
 export type { MessagesProvider } from './types.js';
@@ -67,9 +72,15 @@ export class HookSystem {
   private readonly sessionHooksManager: SessionHooksManager;
   /** Optional provider for automatically fetching conversation history */
   private messagesProvider?: MessagesProvider;
+  private fileWatcher?: FileChangedWatcher;
+  private dynamicWatchPaths: string[] = [];
+  private fileWatchingStarted = false;
+  private fileWatchingSessionId?: string;
+  private fileWatcherClosing: Promise<void> = Promise.resolve();
+  private closed = false;
 
   constructor(
-    config: Config,
+    private readonly config: Config,
     private readonly managedDispatcher?: ManagedHookDispatcher,
   ) {
     // Get allowed HTTP URLs from config
@@ -99,12 +110,16 @@ export class HookSystem {
   async initialize(): Promise<void> {
     if (this.managedDispatcher) return;
     await this.hookRegistry.initialize();
+    this.fileWatchingStarted = true;
+    this.fileWatchingSessionId = this.config.getSessionId();
+    await this.refreshFileWatching();
     debugLogger.debug('Hook system initialized successfully');
   }
 
   async reload(): Promise<void> {
     if (this.managedDispatcher) return;
     await this.hookRegistry.reloadConfiguredHooks();
+    await this.refreshFileWatching();
     debugLogger.debug('Hook system reloaded successfully');
   }
 
@@ -143,6 +158,136 @@ export class HookSystem {
    */
   setHookEnabled(hookName: string, enabled: boolean): void {
     this.hookRegistry.setHookEnabled(hookName, enabled);
+    this.refreshFileWatchingInBackground();
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await this.stopFileWatching();
+  }
+
+  private stopFileWatching(): Promise<void> {
+    this.fileWatchingStarted = false;
+    this.fileWatchingSessionId = undefined;
+    this.dynamicWatchPaths = [];
+    const watcher = this.fileWatcher;
+    this.fileWatcher = undefined;
+    if (watcher) {
+      this.fileWatcherClosing = Promise.all([
+        this.fileWatcherClosing,
+        watcher.close(),
+      ]).then(() => undefined);
+    }
+    return this.fileWatcherClosing;
+  }
+
+  private refreshFileWatchingInBackground(): void {
+    void this.refreshFileWatching().catch((error: unknown) => {
+      debugLogger.warn(`Failed to update FileChanged watch paths: ${error}`);
+    });
+  }
+
+  private async refreshFileWatching(
+    result?: AggregatedHookResult,
+    eventName?: HookEventName,
+  ): Promise<void> {
+    if (
+      !this.fileWatchingStarted ||
+      this.closed ||
+      this.fileWatchingSessionId !== this.config.getSessionId()
+    )
+      return;
+    if (
+      this.managedDispatcher ||
+      this.config.getExecutionEnvironment?.() ||
+      this.config.getShellExecutionSandbox?.()
+    ) {
+      return;
+    }
+    for (const output of result?.allOutputs ?? []) {
+      const specific = output.hookSpecificOutput;
+      if (!specific || specific['hookEventName'] !== eventName) continue;
+      const paths = specific['watchPaths'];
+      if (paths === undefined) continue;
+      if (
+        !Array.isArray(paths) ||
+        !paths.every(
+          (value: unknown): value is string =>
+            typeof value === 'string' && path.isAbsolute(value),
+        )
+      ) {
+        debugLogger.warn('FileChanged watchPaths must be absolute paths');
+        continue;
+      }
+      this.dynamicWatchPaths = paths;
+    }
+    const entries = this.hookRegistry
+      .getHooksForEvent(HookEventName.FileChanged)
+      .filter(
+        (entry) =>
+          entry.agentScope === undefined && (entry.isSourceTrusted?.() ?? true),
+      );
+    const sessionEntries = this.sessionHooksManager
+      .getHooksForEvent(this.config.getSessionId(), HookEventName.FileChanged)
+      .filter((entry) => !entry.trustGated || this.config.isTrustedFolder());
+    const paths =
+      this.config.getDisableAllHooks?.() ||
+      entries.length + sessionEntries.length === 0
+        ? []
+        : [
+            ...this.dynamicWatchPaths,
+            ...[...entries, ...sessionEntries].flatMap((entry) =>
+              (entry.matcher ?? '')
+                .split('|')
+                .map((filename) => filename.trim())
+                .filter(
+                  (filename) =>
+                    filename !== '' &&
+                    filename !== '*' &&
+                    filename !== '.*' &&
+                    path.basename(filename) === filename &&
+                    filename !== '.' &&
+                    filename !== '..',
+                )
+                .map((filename) =>
+                  path.resolve(this.config.getWorkingDir(), filename),
+                ),
+            ),
+          ];
+    if (!this.fileWatcher && paths.length > 0) {
+      const owner = Object.freeze({
+        runtimeId: this.runtimeId,
+        sessionId: this.config.getSessionId(),
+        agentId: null,
+      });
+      this.fileWatcher = new FileChangedWatcher((filePath, event, signal) =>
+        runWithInvocationContext(undefined, () =>
+          promptIdContext.exit(() =>
+            runWithHookExecutionOwner(owner, async () => {
+              if (owner.sessionId !== this.config.getSessionId()) return;
+              await this.fireFileChangedEvent(filePath, event, signal);
+            }),
+          ),
+        ),
+      );
+    }
+    await this.fileWatcher?.setPaths(paths);
+  }
+
+  async fireFileChangedEvent(
+    filePath: string,
+    event: FileChangeEvent,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const result = await this.hookEventHandler.fireFileChangedEvent(
+      filePath,
+      event,
+      signal,
+    );
+    if (!signal?.aborted) {
+      await this.refreshFileWatching(result, HookEventName.FileChanged);
+    }
+    return result;
   }
 
   /**
@@ -265,6 +410,16 @@ export class HookSystem {
     agentType?: AgentType,
     signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
+    const sessionId = this.config.getSessionId();
+    if (
+      this.fileWatchingSessionId !== undefined &&
+      this.fileWatchingSessionId !== sessionId
+    ) {
+      await this.stopFileWatching();
+    }
+    await this.fileWatcherClosing;
+    if (this.closed || sessionId !== this.config.getSessionId())
+      return undefined;
     const result = await this.hookEventHandler.fireSessionStartEvent(
       source,
       model,
@@ -272,6 +427,15 @@ export class HookSystem {
       agentType,
       signal,
     );
+    if (
+      !signal?.aborted &&
+      !this.closed &&
+      sessionId === this.config.getSessionId()
+    ) {
+      this.fileWatchingStarted = true;
+      this.fileWatchingSessionId = sessionId;
+      await this.refreshFileWatching(result, HookEventName.SessionStart);
+    }
     return result.finalOutput
       ? createHookOutput('SessionStart', result.finalOutput)
       : undefined;
@@ -281,10 +445,10 @@ export class HookSystem {
     reason: SessionEndReason,
     signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
-    const result = await this.hookEventHandler.fireSessionEndEvent(
-      reason,
-      signal,
-    );
+    const ended = this.hookEventHandler.fireSessionEndEvent(reason, signal);
+    const stopped = this.stopFileWatching();
+    const result = await ended;
+    await stopped;
     return result.finalOutput
       ? createHookOutput('SessionEnd', result.finalOutput)
       : undefined;
@@ -640,7 +804,7 @@ export class HookSystem {
       skillRoot?: string;
     },
   ): string {
-    return this.sessionHooksManager.addFunctionHook(
+    const id = this.sessionHooksManager.addFunctionHook(
       sessionId,
       event,
       matcher,
@@ -648,6 +812,9 @@ export class HookSystem {
       errorMessage,
       options,
     );
+    if (event === HookEventName.FileChanged)
+      this.refreshFileWatchingInBackground();
+    return id;
   }
 
   /**
@@ -670,13 +837,16 @@ export class HookSystem {
       trustGated?: boolean;
     },
   ): string {
-    return this.sessionHooksManager.addSessionHook(
+    const id = this.sessionHooksManager.addSessionHook(
       sessionId,
       event,
       matcher,
       hook,
       options,
     );
+    if (event === HookEventName.FileChanged)
+      this.refreshFileWatchingInBackground();
+    return id;
   }
 
   /**
@@ -691,11 +861,14 @@ export class HookSystem {
     event: HookEventName,
     hookId: string,
   ): boolean {
-    return this.sessionHooksManager.removeFunctionHook(
+    const removed = this.sessionHooksManager.removeFunctionHook(
       sessionId,
       event,
       hookId,
     );
+    if (event === HookEventName.FileChanged)
+      this.refreshFileWatchingInBackground();
+    return removed;
   }
 
   /**
@@ -705,7 +878,9 @@ export class HookSystem {
    * @returns True if hook was found and removed
    */
   removeSessionHook(sessionId: string, hookId: string): boolean {
-    return this.sessionHooksManager.removeHook(sessionId, hookId);
+    const removed = this.sessionHooksManager.removeHook(sessionId, hookId);
+    this.refreshFileWatchingInBackground();
+    return removed;
   }
 
   /**
@@ -725,6 +900,7 @@ export class HookSystem {
     this.sessionHooksManager.clearSessionHooks(sessionId);
     // Also clear async hooks for this session
     this.getAsyncRegistry().clearSession(sessionId);
+    this.refreshFileWatchingInBackground();
   }
 
   /**

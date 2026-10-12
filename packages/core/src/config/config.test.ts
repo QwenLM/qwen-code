@@ -314,6 +314,7 @@ vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.close = vi.fn().mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
@@ -11730,7 +11731,13 @@ describe('Model Switching and Config Updates', () => {
         const config = await withHookSystem(hookSystem);
         const warn = vi.spyOn(config.getDebugLogger(), 'warn');
 
-        const response = await hookRequest(config, eventName, {});
+        const response = await hookRequest(
+          config,
+          eventName,
+          eventName === 'FileChanged'
+            ? { file_path: '/tmp/notes.md', event: 'change' }
+            : {},
+        );
 
         expect(warn).not.toHaveBeenCalledWith(
           expect.stringContaining('Unknown hook event'),
@@ -11742,6 +11749,44 @@ describe('Model Switching and Config Updates', () => {
   });
 
   describe('direct-call hook events through the hook execution bridge', () => {
+    it.each(['add', 'change', 'unlink'] as const)(
+      'forwards a valid FileChanged %s input',
+      async (event) => {
+        const fireFileChangedEvent = vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [],
+          errors: [],
+          totalDuration: 0,
+        });
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', {
+          file_path: path.resolve('/memory/topic.md'),
+          event,
+        });
+        expect(response.success).toBe(true);
+        expect(fireFileChangedEvent).toHaveBeenCalledWith(
+          path.resolve('/memory/topic.md'),
+          event,
+          undefined,
+        );
+      },
+    );
+
+    it.each([
+      {},
+      { file_path: 'relative.md', event: 'change' },
+      { file_path: '/memory/topic.md', event: 'rename' },
+      { file_path: 1, event: 'add' },
+    ])(
+      'rejects invalid FileChanged input %j before dispatch',
+      async (input) => {
+        const fireFileChangedEvent = vi.fn();
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', input);
+        expect(response.success).toBe(false);
+        expect(fireFileChangedEvent).not.toHaveBeenCalled();
+      },
+    );
     const dispatch = async (
       method: string,
       fire: ReturnType<typeof vi.fn>,
