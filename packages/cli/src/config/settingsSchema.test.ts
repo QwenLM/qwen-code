@@ -31,6 +31,34 @@ import {
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
+  it('exposes a restart-required compression strategy without losing existing tuning fields', () => {
+    const strategy =
+      getSettingsSchema().model.properties.chatCompression.properties.strategy;
+    expect(strategy).toMatchObject({
+      type: 'enum',
+      default: 'summary',
+      showInDialog: true,
+      requiresRestart: true,
+    });
+    expect(strategy.options.map((option) => option.value)).toEqual([
+      'summary',
+      'notes',
+    ]);
+    const settings: Settings = {
+      model: {
+        chatCompression: {
+          strategy: 'notes',
+          imageTokenEstimate: 1800,
+          maxRecentFilesToRetain: 2,
+          maxRecentImagesToRetain: 0,
+          enableScreenshotTrigger: true,
+          screenshotTriggerThreshold: 4,
+          imagePayloadThreshold: 1000,
+        },
+      },
+    };
+    expect(settings.model?.chatCompression?.strategy).toBe('notes');
+  });
   describe('getSettingsSchema', () => {
     it('should describe prompt hooks supported by the runtime', () => {
       const hookProperties =

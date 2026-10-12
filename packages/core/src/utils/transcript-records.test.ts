@@ -462,6 +462,7 @@ describe('validateTranscriptRecord', () => {
   // An unknown subtype makes the whole transcript incomplete, which a paired
   // host reads as unprovable ownership and refuses to restore.
   const RECORDED_SUBTYPES: Record<NonNullable<ChatRecord['subtype']>, true> = {
+    session_notes: true,
     chat_compression: true,
     slash_command: true,
     ui_telemetry: true,

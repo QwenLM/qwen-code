@@ -21,6 +21,7 @@ import { ICON, SPINNER_FRAMES, SPINNER_INTERVAL_MS } from '../constants.js';
 import { C } from './theme.js';
 
 export interface CompactionViewProps {
+  strategy?: 'summary' | 'notes';
   isPending: boolean;
   originalTokenCount: number | null;
   newTokenCount: number | null;
@@ -43,7 +44,9 @@ export function compactionText(props: CompactionViewProps): string {
   switch (compressionStatus) {
     case CompressionStatus.COMPRESSED:
       return t(
-        'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.',
+        props.strategy === 'notes'
+          ? 'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.'
+          : 'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.',
         {
           originalTokens: String(originalTokens),
           newTokens: String(newTokens),
