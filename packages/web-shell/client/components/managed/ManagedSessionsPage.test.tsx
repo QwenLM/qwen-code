@@ -11,6 +11,7 @@ import type {
   ManagedAgentSessionSummary,
   ManagedAgentSessionEvent,
   ManagedAgentSessionTranscript,
+  ManagedTask,
 } from './managed-agent-provider';
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { getComposerDraftStorageKey } from '../../hooks/useComposerCore';
@@ -130,6 +131,7 @@ vi.mock('../ChatEditor', async () => {
 
 import { ManagedSessionsPage } from './ManagedSessionsPage';
 import { artifact, result } from './managed-tool-result.test-fixtures';
+import { task, taskOperation } from './managed-task.test-fixtures';
 
 function summary(
   sessionId = 's1',
@@ -265,6 +267,188 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it('opens child tasks without losing drafts or history and leaves sending available during uncertain cancellation', async () => {
+    mocks.client.getSession.mockImplementation(async () =>
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, tasks: true },
+      }),
+    );
+    provider = {
+      ...provider,
+      tasks: {
+        list: vi.fn().mockResolvedValue({ data: [task], hasMore: false }),
+        get: vi.fn().mockResolvedValue(task),
+        listEvents: vi
+          .fn()
+          .mockResolvedValue({ data: [], hasMore: false, nextCursor: 'floor' }),
+        cancel: {
+          submit: vi.fn().mockRejectedValue(new TypeError('lost response')),
+          query: vi.fn(),
+        },
+      },
+    };
+    await render('s1');
+    const composer = container.querySelector('textarea')!;
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      'value',
+    )!.set!;
+    await act(async () => {
+      valueSetter.call(composer, 'draft remains');
+      composer.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const transcriptReads = mocks.client.getTranscript.mock.calls.length;
+    const click = async (text: string) =>
+      act(async () => {
+        [...document.querySelectorAll('button')]
+          .find((button) => button.textContent === text)!
+          .click();
+      });
+    await click('Child Agent tasks');
+    await click('Request cancellation');
+    await click('Confirm cancellation');
+    expect(document.body.textContent).toContain(
+      'Cancellation result is unconfirmed.',
+    );
+    await click('Close tasks');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(composer.value).toBe('draft remains');
+    expect(composer.disabled).toBe(false);
+    const send = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Send',
+    )!;
+    expect(send.disabled).toBe(false);
+    expect(container.textContent).toContain('Persisted answer');
+    expect(mocks.client.getTranscript).toHaveBeenCalledTimes(transcriptReads);
+    expect(container.textContent).toContain(
+      'Cancellation result is unconfirmed.',
+    );
+    expect(document.activeElement?.textContent).toBe('Child Agent tasks');
+  });
+
+  it.each([false, true])(
+    'publishes cancellation settlement before delayed panel refreshes (detail=%s)',
+    async (detail) => {
+      mocks.client.getSession.mockImplementation(async () =>
+        summary('s1', {
+          capabilities: { canSend: true, canCancel: false, tasks: true },
+        }),
+      );
+      const settled: ManagedTask = {
+        ...task,
+        state: 'cancelled',
+        settledAt: 5,
+        actionCapabilities: [],
+      };
+      let slow = false;
+      let release!: (value: { data: ManagedTask[]; hasMore: boolean }) => void;
+      provider = {
+        ...provider,
+        tasks: {
+          list: vi.fn().mockImplementation(() =>
+            slow
+              ? new Promise((resolve) => {
+                  release = resolve;
+                })
+              : Promise.resolve({ data: [task], hasMore: false }),
+          ),
+          get: vi.fn().mockImplementation(async () => (slow ? settled : task)),
+          listEvents: vi.fn().mockResolvedValue({
+            data: [],
+            hasMore: false,
+            nextCursor: 'floor',
+          }),
+          cancel: {
+            submit: vi.fn().mockResolvedValue(taskOperation),
+            query: vi.fn(),
+          },
+        },
+      };
+      await render('s1');
+      const click = async (text: string) =>
+        act(async () => {
+          [...document.querySelectorAll('button')]
+            .find((button) => button.textContent === text)!
+            .click();
+          await flush();
+        });
+      await click('Child Agent tasks');
+      if (detail) {
+        await click('Child Agent · 01234567');
+        expect(document.body.textContent).toContain('Back to tasks');
+      }
+      await click('Request cancellation');
+      slow = true;
+      await click('Confirm cancellation');
+      expect(document.body.textContent).toContain('Cancelled');
+      expect(
+        [...document.querySelectorAll('button')].some(
+          (button) => button.textContent === 'Request cancellation',
+        ),
+      ).toBe(false);
+      expect(provider.tasks!.cancel!.submit).toHaveBeenCalledOnce();
+      expect(document.body.textContent).not.toContain(
+        'Cancellation request failed.',
+      );
+      // A delayed stale page must not restore the old action either.
+      await act(async () => {
+        release({ data: [task], hasMore: false });
+        await flush();
+      });
+      if (detail) await click('Back to tasks');
+      expect(document.body.textContent).toContain('Cancelled');
+      expect(
+        [...document.querySelectorAll('button')].some(
+          (button) => button.textContent === 'Request cancellation',
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('does not query tasks or show an entry when the server lacks its capability', async () => {
+    provider = {
+      ...provider,
+      tasks: { list: vi.fn(), get: vi.fn(), listEvents: vi.fn() },
+    };
+    await render('s1');
+    expect(container.textContent).not.toContain('Child Agent tasks');
+    expect(container.textContent).not.toContain('Resume task cancellation');
+    expect(provider.tasks!.list).not.toHaveBeenCalled();
+  });
+
+  it('resumes known task cancellation even when the task capability is no longer true', async () => {
+    sessionStorage.setItem(
+      `qwen-managed-task-cancel:${JSON.stringify([provider.storageKey, 's1'])}`,
+      JSON.stringify({
+        [task.taskId]: {
+          sessionId: 's1',
+          taskId: task.taskId,
+          idempotencyKey: 'original',
+          operationId: taskOperation.operationId,
+        },
+      }),
+    );
+    provider = {
+      ...provider,
+      tasks: {
+        list: vi.fn(),
+        get: vi
+          .fn()
+          .mockResolvedValue({ ...task, state: 'cancelled', settledAt: 5 }),
+        listEvents: vi.fn(),
+        cancel: {
+          submit: vi.fn(),
+          query: vi.fn().mockResolvedValue(taskOperation),
+        },
+      },
+    };
+    await render('s1');
+    expect(provider.tasks!.cancel!.query).toHaveBeenCalledOnce();
+    expect(provider.tasks!.cancel!.submit).not.toHaveBeenCalled();
+  });
 
   it('changes cwd without optimistic directory updates or losing the editable draft', async () => {
     let committed = false;

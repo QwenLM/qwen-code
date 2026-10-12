@@ -26,6 +26,11 @@ import {
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
 
+import {
+  MANAGED_TASK_MESSAGES_EN,
+  MANAGED_TASK_MESSAGES_ZH,
+} from './components/managed/managed-task-messages.js';
+
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
@@ -4355,6 +4360,7 @@ const EN: Messages = {
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
+  ...MANAGED_TASK_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
@@ -8415,6 +8421,7 @@ const ZH: Messages = {
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
+  ...MANAGED_TASK_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
