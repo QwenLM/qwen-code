@@ -66,7 +66,6 @@ public final class HostedChannelCrashFixtureMain {
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
-                "--qwen.managed-agent.runtime-broker.cli-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage-0",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + root.resolve("workspace-mount"),

@@ -22203,6 +22203,7 @@ export function App({
                           className={styles.approvalOverlay}
                         >
                           <ToolApproval
+                            showBrowserNotifications
                             disabled={isExitPlanApprovalRequest(pendingToolApproval) && modeControlsBusy}
                             planExecutionMode={connection.planExecutionMode}
                             request={pendingToolApproval}

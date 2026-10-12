@@ -40,6 +40,19 @@ delete process.env['SANDBOX_SET_UID_GID'];
 // pinning: tests that want the variable set it in-body.
 delete process.env['QWEN_RUNTIME_DIR'];
 
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// QWEN_HOME is the OPERATOR's config home, and inheriting it lets the host's
+// real ~/.qwen leak into this suite: every unpinned settings read
+// (loadSettings, createMinimalSettings, ...) then parses the operator's
+// files, so one corrupted real settings.json on the shared autofix gate host
+// failed 389 tests across 13 files at once. Pinning rather than deleting:
+// deletion falls back to os.homedir(), which is the same leak. Tests that
+// exercise the variable set it in-body.
+process.env['QWEN_HOME'] = mkdtempSync(join(tmpdir(), 'qwen-cli-test-home-'));
+
 // Registration capacity is an OPERATOR daemon setting, and `createServeApp` /
 // `runQwenServe` read it straight from the ambient environment when no explicit
 // option or `daemonEnv` is supplied. A maintainer who exports the documented

@@ -16,6 +16,7 @@ import {
 } from '@qwen-code/qwen-code-core/mods/dependencies.js';
 import { resolveModOptions } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
+import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import { MOD_END_TIMEOUT_MS } from '@qwen-code/qwen-code-core/mods/types.js';
 import type { ModLog } from '@qwen-code/qwen-code-core/mods/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
@@ -33,12 +34,12 @@ export class ModSession implements ICommandLoader {
   private readonly mods: Array<{
     id: string;
     name: string;
-    runtime: ModRuntime;
   }> = [];
+  private runtime?: ModRuntime;
+  private toolQueue: Promise<unknown> = Promise.resolve();
   private readonly lifetime = new AbortController();
   private initialization?: Promise<void>;
   private closing?: Promise<void>;
-  private initialized = false;
   private logsReady = false;
   private readonly pendingLogs: Array<ModLog & { plugin: string }> = [];
   private sessionId: string;
@@ -171,30 +172,35 @@ export class ModSession implements ICommandLoader {
               resolveModDependency(selected, plugin, dependency).source,
           ),
         }));
-      for (const { extension, source, options } of orderModPlugins(mods)) {
-        if (!source) continue;
-        signal.throwIfAborted();
-        try {
-          const runtime = await ModRuntime.create(
-            { root: source.root, entry: source.entry, source: source.source },
-            this.config.getTargetDir(),
-            (entry) => {
-              this.pendingLogs.push({ ...entry, plugin: extension.name });
-              if (this.logsReady) this.flushLogs();
+      const ordered = orderModPlugins(mods);
+      if (ordered.length) {
+        this.runtime = await ModRuntime.createGroup(
+          ordered.map(({ extension, source, options }) => ({
+            id: extension.id,
+            name: extension.name,
+            source: {
+              root: source!.root,
+              entry: source!.entry,
+              source: source!.source,
             },
-            signal,
             options,
-          );
-          this.mods.push({ id: extension.id, name: extension.name, runtime });
-        } catch (error) {
-          throw new Error(
-            `Mod ${extension.name}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
+          })),
+          this.config.getTargetDir(),
+          (entry, plugin) => {
+            this.pendingLogs.push({ ...entry, plugin });
+            if (this.logsReady) this.flushLogs();
+          },
+          signal,
+        );
+        this.mods.push(
+          ...ordered.map(({ extension }) => ({
+            id: extension.id,
+            name: extension.name,
+          })),
+        );
       }
-      this.initialized = true;
     } catch (error) {
-      await Promise.all(this.mods.map((mod) => mod.runtime.dispose()));
+      await this.runtime?.dispose();
       this.mods.length = 0;
       throw error;
     }
@@ -203,7 +209,7 @@ export class ModSession implements ICommandLoader {
   async loadCommands(signal: AbortSignal): Promise<SlashCommand[]> {
     await this.initialize(signal);
     return this.mods.flatMap((mod) =>
-      mod.runtime.getCommands().map(
+      this.runtime!.getCommands(mod.id).map(
         (command): SlashCommand => ({
           name: command.name,
           description: command.description,
@@ -214,19 +220,20 @@ export class ModSession implements ICommandLoader {
           argumentHint: command.argumentHint,
           modelInvocable: false,
           action: async (_context, args) => {
-            const active = this.config
-              .getExtensions()
-              .some(
-                (extension) => extension.id === mod.id && extension.isActive,
+            if (!this.allowed() || !this.active() || this.closing) {
+              await this.runtime!.dispose();
+              throw new Error(
+                `Mod ${mod.name} is disabled or its middleware chain changed.`,
               );
-            if (!this.allowed() || !active || this.closing) {
-              await mod.runtime.dispose();
-              throw new Error(`Mod ${mod.name} is disabled.`);
             }
             return {
               type: 'message' as const,
               messageType: 'info' as const,
-              content: await mod.runtime.runCommand(command.name, args, signal),
+              content: await this.runtime!.runCommand(
+                command.name,
+                args,
+                signal,
+              ),
             };
           },
         }),
@@ -239,6 +246,47 @@ export class ModSession implements ICommandLoader {
     if (current === this.sessionId) return;
     await this.end(reason);
     this.sessionId = current;
+  }
+
+  get hasToolHooks(): boolean {
+    return this.runtime?.hasToolHooks === true;
+  }
+
+  toolCall(onRepeat: () => void): ModToolCall | undefined {
+    if (!this.hasToolHooks) return undefined;
+    return (input, next, signal) => {
+      const active = AbortSignal.any([signal, this.lifetime.signal]);
+      const assertAllowed = () => {
+        active.throwIfAborted();
+        if (!this.allowed() || !this.active() || this.closing)
+          throw new Error(
+            'Mod tool middleware is disabled or its chain changed.',
+          );
+      };
+      const task = this.toolQueue.then(async () => {
+        assertAllowed();
+        let attempts = 0;
+        return this.runtime!.runTool(
+          input,
+          async (changed, hostSignal, check) => {
+            assertAllowed();
+            if (attempts++) onRepeat();
+            active.throwIfAborted();
+            return next(
+              changed,
+              hostSignal,
+              async (question, verdict, checkSignal) => {
+                assertAllowed();
+                return check(question, verdict, checkSignal);
+              },
+            );
+          },
+          active,
+        );
+      });
+      this.toolQueue = task.catch(() => {});
+      return task;
+    };
   }
 
   flushLogs(): void {
@@ -266,27 +314,39 @@ export class ModSession implements ICommandLoader {
     ]);
   }
 
+  private active(): boolean {
+    const extensions = this.config.getExtensions();
+    return this.mods.every((mod) =>
+      extensions.some(
+        (extension) => extension.id === mod.id && extension.isActive,
+      ),
+    );
+  }
+
   private async end(reason: 'clear' | 'resume' | 'other'): Promise<void> {
-    const signal = AbortSignal.timeout(MOD_END_TIMEOUT_MS);
-    for (const mod of this.mods) {
-      try {
-        await mod.runtime.end(this.sessionId, reason, signal);
-      } catch (error) {
-        logger.warn(`Mod ${mod.name} session.end: ${String(error)}`);
-      }
+    await this.toolQueue;
+    if (!this.allowed() || !this.active()) return;
+    try {
+      await this.runtime?.end(
+        this.sessionId,
+        reason,
+        AbortSignal.timeout(MOD_END_TIMEOUT_MS),
+      );
+    } catch (error) {
+      logger.warn(`Mod session.end: ${String(error)}`);
     }
   }
 
   close(): Promise<void> {
     this.closing ??= (async () => {
       this.unregisterCleanup();
-      if (!this.initialized) this.lifetime.abort();
+      this.lifetime.abort();
       await this.initialization?.catch(() => {});
       try {
         await this.end('other');
       } finally {
         this.lifetime.abort();
-        await Promise.all(this.mods.map((mod) => mod.runtime.dispose()));
+        await this.runtime?.dispose();
         await this.flushOutput();
       }
     })();
