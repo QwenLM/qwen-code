@@ -11,6 +11,7 @@ import {
   type QuickJSHandle,
 } from 'quickjs-emscripten-core';
 import { MOD_GUEST_FACTORY } from './guest.js';
+import { compileModModules } from './module-loader.js';
 import {
   MOD_END_TIMEOUT_MS,
   MOD_MAX_BYTES,
@@ -24,11 +25,6 @@ const wasm = await newQuickJSWASMModuleFromVariant(variant);
 const runtime = wasm.newRuntime();
 runtime.setMemoryLimit(64 * 1024 * 1024);
 runtime.setMaxStackSize(1024 * 1024);
-runtime.setModuleLoader(() => {
-  throw new Error(
-    'Mod imports are not supported yet; use a self-contained JS module.',
-  );
-});
 let deadline = Infinity;
 runtime.setInterruptHandler(() => Date.now() >= deadline);
 const vm = runtime.newContext();
@@ -85,10 +81,24 @@ port.on('message', async (request: ModRequest) => {
     let pending: QuickJSHandle;
     if (request.type === 'load') {
       if (loaded) throw new Error('Mod already loaded.');
-      if (Buffer.byteLength(request.source) > MOD_MAX_BYTES)
-        throw new Error('Mod source is too large.');
+      const { modules, imports } = await compileModModules(request.source);
+      runtime.setModuleLoader(
+        (name) => {
+          const source = modules.get(name);
+          if (source === undefined) throw new Error('Unknown Mod module.');
+          return source;
+        },
+        (base, name) => {
+          const resolved = imports.get(base)?.get(name);
+          if (!resolved) throw new Error('Unknown Mod import.');
+          return resolved;
+        },
+      );
+      deadline = Date.now() + MOD_TIMEOUT_MS;
       const evaluation = vm.unwrapResult(
-        vm.evalCode(request.source, 'mod.mjs', { type: 'module' }),
+        vm.evalCode(modules.get(request.source.entry)!, request.source.entry, {
+          type: 'module',
+        }),
       );
       let namespace: QuickJSHandle;
       try {
@@ -98,13 +108,15 @@ port.on('message', async (request: ModRequest) => {
       }
       const register = vm.getProp(namespace, 'register');
       const cwd = vm.newString(request.cwd);
+      const options = vm.newString(JSON.stringify(request.options));
       try {
         pending = vm.unwrapResult(
-          vm.callMethod(guest, 'load', [register, cwd]),
+          vm.callMethod(guest, 'load', [register, cwd, options]),
         );
       } finally {
         register.dispose();
         cwd.dispose();
+        options.dispose();
         namespace.dispose();
       }
       loaded = true;

@@ -132,6 +132,10 @@ describe('Hosted real-process gates', () => {
       for (const path of [
         'packages/sdk-java/**',
         'packages/cli/src/serve/**',
+        'packages/cli/src/commands/channel/**',
+        'packages/cli/src/commands/channel.ts',
+        'packages/channels/email/**',
+        'packages/channels/base/**',
         'packages/core/src/managed-runtime/**',
         'packages/cli/src/config/**',
         'packages/core/src/config/**',
@@ -244,6 +248,12 @@ describe('Hosted real-process gates', () => {
     );
     expect(upload.if).toBe('always()');
     expect(upload.with.path).toContain('failsafe-reports');
+    // The FG7 lane moved its per-case evidence out of @TempDir into this
+    // module-relative directory precisely so an artifact can carry it; the
+    // writer and the upload path must not drift.
+    expect(upload.with.path).toContain(
+      'packages/sdk-java/managed-agent-server/target/fg7-cases/',
+    );
   });
 
   it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {
@@ -252,11 +262,12 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (25 + 9x10 + 20); the uncapped setup steps need
-    // their own allowance, which is exactly what the job comment claims.
-    expect(summed).toBe(135);
-    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
-    expect(job['timeout-minutes']).toBe(148);
+    // Step ceilings today (35 + 9x10 + 20); the uncapped setup steps need
+    // their own allowance — the job comment estimates it at ~13, so the
+    // enforced floor moves with that estimate, not the older 10.
+    expect(summed).toBe(145);
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
+    expect(job['timeout-minutes']).toBe(160);
   });
 
   it.each([
@@ -363,6 +374,13 @@ describe('Hosted real-process gates', () => {
       expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
         forkSeconds + 600,
       );
+      // The hosted fork bump was deliberate (FG7a,b,d–f plus the FG7c crash
+      // class, ~150 s of wall clock at 2x headroom): the relational check
+      // above tolerates anything up to step*60, so the value is pinned
+      // literally here — an unnoticed raise has no other red to land on.
+      if (profile === 'hosted-harness-mysql') {
+        expect(forkSeconds).toBe(1200);
+      }
     },
   );
 
