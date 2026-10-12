@@ -241,6 +241,10 @@ export async function runHostedWorkflowTurn(input: {
       // because this run may execute only the bytes its pin examined.
       restrictNestedScriptPaths: true,
       refuseNestedWorkflows: true,
+      // The in-process subagents' tools would dispatch against this
+      // Harness's own cwd and host, never the Session's Workspace — until
+      // they route through the Hosted broker, the child declares none.
+      refuseSubagentTools: true,
     });
     input.signal.addEventListener('abort', () => handle.abort(), {
       once: true,

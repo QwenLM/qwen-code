@@ -116,6 +116,14 @@ export interface WorkflowRunnerOptions {
    * child): any nested resolution would run bytes the pin never examined.
    */
   refuseNestedWorkflows?: boolean;
+  /**
+   * Give this run's `agent()` subagents no tools at all. Set by a host
+   * whose sandbox cannot honour the manager's tool calls (the managed
+   * workflow child): a text-only `agent()` runs against an empty
+   * declaration list while a tool-bearing `agent()` is refused, never
+   * letting a tool dispatch reach the wrong tree or host.
+   */
+  refuseSubagentTools?: boolean;
 }
 
 /**
@@ -525,6 +533,7 @@ export class WorkflowRunner {
                   : () => undefined
             : undefined,
           reviewLimits?.subagent,
+          options.refuseSubagentTools,
         );
       orchestrator = new WorkflowOrchestrator(dispatch);
       const registration: WorkflowTaskRegistration = {

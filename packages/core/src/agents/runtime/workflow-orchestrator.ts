@@ -556,6 +556,14 @@ export function createProductionDispatch(
     dispatchId?: string,
   ) => () => void,
   subagentBounds?: WorkflowSubagentBounds,
+  /**
+   * When true, the run's `agent()` subagents carry no tools at all
+   * (hosted harness's managed workflow child): a text-only `agent()` runs
+   * against an empty declaration list, while a tool-bearing `agent()` is
+   * refused by narrowing — never letting a tool dispatch reach the wrong
+   * tree or host.
+   */
+  refuseSubagentTools?: boolean,
 ): WorkflowAgentDispatch {
   return async (prompt, opts, dispatchId) => {
     // An empty or non-string prompt seeds no `user` record, so the
@@ -630,6 +638,7 @@ export function createProductionDispatch(
             agentIdentity,
             onTokens,
             subagentBounds,
+            refuseSubagentTools,
           );
         } finally {
           cleanupTranscript();
@@ -793,6 +802,7 @@ async function runSingleDispatch(
   agentIdentity: WorkflowAgentIdentity,
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
   subagentBounds?: WorkflowSubagentBounds,
+  refuseSubagentTools?: boolean,
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
@@ -826,7 +836,9 @@ async function runSingleDispatch(
       // T11 (PR #4732 R1): disallow SendMessage / ExitPlanMode to align with
       // upstream Tg8 — closes the back-channel that would let a subagent
       // deliver its answer via user message instead of the script's read.
-      { tools: ['*'], disallowedTools: WORKFLOW_SUBAGENT_DISALLOWED_TOOLS },
+      refuseSubagentTools === true
+        ? { tools: [], disallowedTools: [] }
+        : { tools: ['*'], disallowedTools: WORKFLOW_SUBAGENT_DISALLOWED_TOOLS },
       // P-stall: the stall-watchdog emitter observes reasoning-loop events
       // (round/tool/usage) to detect a hang and abort `attemptSignal`.
       emitter,
@@ -878,6 +890,7 @@ async function runSingleDispatch(
     onTokens,
     emitter,
     subagentBounds,
+    refuseSubagentTools,
   );
 }
 
@@ -1040,6 +1053,7 @@ async function runOverridePath(
    */
   emitter?: AgentEventEmitter,
   subagentBounds?: WorkflowSubagentBounds,
+  refuseSubagentTools?: boolean,
 ): Promise<WorkflowAgentResult> {
   if (opts.isolation === 'remote') {
     // Error message verbatim from upstream Claude Code 2.1.168 strings.
@@ -1158,6 +1172,10 @@ async function runOverridePath(
         ...(baseConfig.disallowedTools ?? []),
         ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
         ...requestedDenies,
+        // A host refusing this run's tools (the managed workflow child)
+        // has every tool-bearing opts refuse at narrow time, by each
+        // one's own name — never by a lucky miss in the registry.
+        ...(refuseSubagentTools === true ? (requestedAllows ?? []) : []),
       ]),
     ),
   };

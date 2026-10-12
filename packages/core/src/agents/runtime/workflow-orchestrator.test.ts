@@ -2073,6 +2073,23 @@ describe('createProductionDispatch', () => {
     ]);
   });
 
+  // #13858 S1: the hosted workflow child's subagents carry no tools at
+  // all — the fast path must declare an empty list instead of the
+  // ordinary '*' floor, so no tool-bearing agent() can run against this
+  // Harness's own host from inside a managed child.
+  it('refuseSubagentTools declares an empty tool list on the fast path', async () => {
+    await createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    )('hello', { label: 'h1' });
+    expect(created[0]!.toolConfig?.tools).toEqual([]);
+    expect(created[0]!.toolConfig?.disallowedTools).toEqual([]);
+  });
+
   // T10 (PR #4732 R1): a non-GOAL terminate mode must throw; otherwise
   // `await agent(...)` resolves to '' on user cancel and the script runs on.
   it.each([['CANCELLED'], ['MAX_TURNS'], ['TIMEOUT'], ['ERROR']])(
@@ -3868,6 +3885,27 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       expect(calls[0]!.config.disallowedTools).toEqual(
         expect.arrayContaining(['agent', 'ask_user_question']),
       );
+    });
+
+    // #13858 S1: a host refusing this run's tools (the managed workflow
+    // child) denies every requested tool by its own name at narrow time —
+    // the call is refused with the named reason, never provisioning a
+    // subagent on the wrong host.
+    it('refuseSubagentTools refuses a tool-bearing agent by name before provisioning', async () => {
+      const mgr = dispatchVia(
+        {},
+        'scan',
+        { tools: ['run_shell_command'] },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      await expect(mgr.result).rejects.toThrow(
+        /tools no workflow subagent may use/,
+      );
+      expect(mgr.calls).toHaveLength(0);
     });
 
     it.each([
