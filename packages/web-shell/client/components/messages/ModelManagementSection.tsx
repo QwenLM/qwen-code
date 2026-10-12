@@ -144,8 +144,21 @@ export function ModelManagementSection({
       isRuntime: false,
     });
   }
+  // Settings is the third surface that has to drop the discontinued built-in
+  // OAuth entry: the composer, ChatPane and the advisor list already hide it.
+  // The filter runs on the merged list, not on `providers`, because the loop
+  // above recreates the row from a persisted configuration after the provider
+  // input has been read. Keyed on the auth type rather than the encoded
+  // `coder-model(qwen-oauth)` string, so an unrelated OpenAI-compatible model
+  // that happens to be called `coder-model` still renders (issue #13965).
+  for (const provider of displayProviders) {
+    if (provider.authType !== 'qwen-oauth') continue;
+    provider.models = provider.models.filter(
+      (model) => model.baseModelId !== 'coder-model',
+    );
+  }
   const hasModels = displayProviders.some((p) => p.models.length > 0);
-  const currentRowKey = findCurrentRowKey(providers, currentModelId);
+  const currentRowKey = findCurrentRowKey(displayProviders, currentModelId);
 
   return (
     <div className={styles.section} data-testid="model-management">

@@ -600,3 +600,83 @@ describe('host model management controls', () => {
     expect(props.onDeleteModel).not.toHaveBeenCalled();
   });
 });
+
+describe('ModelManagementSection issue #13965 discontinued OAuth model', () => {
+  // The provider list the daemon serves enumerates every auth type, so the
+  // built-in `qwen-oauth` group reaches Settings even when the session runs on
+  // an OpenAI-compatible provider. The composer already hides it; Settings did
+  // not.
+  function oauthProvider(): DaemonWorkspaceProviderStatus {
+    return {
+      kind: 'model_provider',
+      status: 'ok',
+      authType: 'qwen-oauth',
+      current: false,
+      models: [
+        {
+          modelId: 'coder-model(qwen-oauth)',
+          baseModelId: 'coder-model',
+          name: 'coder-model',
+          baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+          isCurrent: false,
+          isRuntime: true,
+        },
+      ],
+    };
+  }
+
+  it('hides the built-in OAuth group and its row', () => {
+    const { container } = renderSection({
+      providers: [...providers(), oauthProvider()],
+    });
+    expect(container.textContent).not.toContain('qwen-oauth');
+    expect(
+      container.querySelector('[aria-label="Delete coder-model"]'),
+    ).toBeNull();
+    // The unrelated OpenAI-compatible rows are untouched.
+    expect(container.textContent).toContain('GPT-4o');
+  });
+
+  it('does not resurrect the row through the saved-configuration merge', () => {
+    // The merge creates a provider group for an authType that is absent from
+    // the live list, so filtering the provider input alone is not enough.
+    const { container } = renderSection({
+      providers: providers(),
+      configurations: [
+        {
+          key: 'oauth-coder',
+          authType: 'qwen-oauth',
+          modelId: 'coder-model',
+          name: 'coder-model',
+          baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+          purpose: 'chat',
+        },
+      ],
+    });
+    expect(container.textContent).not.toContain('qwen-oauth');
+    expect(container.textContent).not.toContain('DYNAMIC_QWEN_OAUTH_BASE_URL');
+    expect(
+      container.querySelector('[aria-label="Delete coder-model"]'),
+    ).toBeNull();
+  });
+
+  it('keeps another provider’s model that is also called coder-model', () => {
+    const openaiCoder = providers();
+    openaiCoder[0].models.push({
+      modelId: 'coder-model(openai)',
+      baseModelId: 'coder-model',
+      name: 'coder-model',
+      baseUrl: 'https://api.openai.com/v1',
+      isCurrent: false,
+      isRuntime: false,
+    });
+    const { container } = renderSection({
+      providers: [...openaiCoder, oauthProvider()],
+      currentModelId: 'gpt-4o(openai)',
+    });
+    // Dropping the hidden entry must not be a name-based filter.
+    expect(container.textContent).toContain('coder-model');
+    expect(container.textContent).toContain('https://api.openai.com/v1');
+    expect(container.textContent).not.toContain('qwen-oauth');
+  });
+});
