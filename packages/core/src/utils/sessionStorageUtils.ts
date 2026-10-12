@@ -896,7 +896,7 @@ function lastCommittedDomainRecord(
         Number.isSafeInteger(body.sequence) &&
         body.sequence! >= committed.firstSequence &&
         body.sequence! <= committed.lastSequence &&
-        line.includes(marker)
+        JSON.stringify(record).includes(marker)
       ) {
         return record;
       }

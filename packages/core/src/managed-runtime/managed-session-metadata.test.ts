@@ -141,6 +141,7 @@ describe('managed session metadata', () => {
     managedSession?: {
       kind?: string;
       sequence?: number;
+      eventCount?: number;
       firstSequence?: number;
       lastSequence?: number;
     };
@@ -172,6 +173,69 @@ describe('managed session metadata', () => {
     lines.splice(index + 1, 1);
     await fs.writeFile(filePath, lines.join('\n'), 'utf8');
     return next!;
+  }
+
+  async function glueThreeRecordsStartingAt(
+    filePath: string,
+    probe: (record: TranscriptRecord) => boolean,
+  ): Promise<[TranscriptRecord, TranscriptRecord]> {
+    const lines = (await fs.readFile(filePath, 'utf8')).split('\n');
+    const records = lines.map((line) =>
+      line.length === 0 ? undefined : (JSON.parse(line) as TranscriptRecord),
+    );
+    const index = records.findIndex(
+      (record) => record !== undefined && probe(record),
+    );
+    expect(index, 'no record matched the probe').toBeGreaterThanOrEqual(0);
+    const marker = records[index + 1];
+    const next = records[index + 2];
+    expect(marker, 'the probed record has no following marker').toBeDefined();
+    expect(next, 'the marker has no following record').toBeDefined();
+    lines[index] = lines[index] + lines[index + 1] + lines[index + 2];
+    lines.splice(index + 1, 2);
+    await fs.writeFile(filePath, lines.join('\n'), 'utf8');
+    return [marker!, next!];
+  }
+
+  async function removeTranscriptRecords(
+    filePath: string,
+    predicate: (record: TranscriptRecord) => boolean,
+  ): Promise<void> {
+    const lines = (await fs.readFile(filePath, 'utf8')).split('\n');
+    const kept = lines.filter((line) => {
+      if (line.length === 0) return true;
+      return !predicate(JSON.parse(line) as TranscriptRecord);
+    });
+    await fs.writeFile(filePath, kept.join('\n'), 'utf8');
+  }
+
+  async function moveRecordAfter(
+    filePath: string,
+    movingProbe: (record: TranscriptRecord) => boolean,
+    afterProbe: (record: TranscriptRecord) => boolean,
+  ): Promise<void> {
+    const lines = (await fs.readFile(filePath, 'utf8')).split('\n');
+    const records = lines.map((line) =>
+      line.length === 0 ? undefined : (JSON.parse(line) as TranscriptRecord),
+    );
+    const movingIndex = records.findIndex(
+      (record) => record !== undefined && movingProbe(record),
+    );
+    expect(
+      movingIndex,
+      'no record matched the move probe',
+    ).toBeGreaterThanOrEqual(0);
+    const [movingLine] = lines.splice(movingIndex, 1);
+    const afterIndex = lines.findIndex((line) => {
+      if (line.length === 0) return false;
+      return afterProbe(JSON.parse(line) as TranscriptRecord);
+    });
+    expect(
+      afterIndex,
+      'no record matched the destination probe',
+    ).toBeGreaterThanOrEqual(0);
+    lines.splice(afterIndex + 1, 0, movingLine);
+    await fs.writeFile(filePath, lines.join('\n'), 'utf8');
   }
 
   const domainEvent = (sequence: number) => (record: TranscriptRecord) =>
@@ -384,6 +448,156 @@ describe('managed session metadata', () => {
         harness.runtimeBaseDir,
       ),
     ).toEqual({ title: 'Second title', source: 'manual' });
+  });
+
+  it.each([
+    ['session_metadata', 'session_source'],
+    ['session_source', 'session_metadata'],
+  ] as const)(
+    'keeps domain reads scoped to records in a three-record %s/%s glue',
+    async (firstDomain, secondDomain) => {
+      const harness = await createHarness();
+      const metadata = {
+        domain: 'session_metadata' as const,
+        content: { title: 'Design review notes', titleSource: 'manual' },
+      };
+      const source = {
+        domain: 'session_source' as const,
+        content: {
+          record: {
+            uuid: 'rec-source-managed',
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-09-01T10:00:00.000Z',
+            type: 'system',
+            subtype: 'session_source',
+            cwd: '/workspace',
+            version: 'test',
+            systemPayload: { sourceType: 'agent', sourceId: 'managed' },
+          },
+        },
+      };
+      const contentFor = (domain: 'session_metadata' | 'session_source') =>
+        domain === 'session_metadata' ? metadata : source;
+
+      await withAuthority(harness, async (authority) => {
+        await authority.commitDomainRecord(
+          renameCommand(`cmd-${firstDomain}`),
+          contentFor(firstDomain),
+          { class: 'trusted_entry' },
+        );
+        await authority.commitDomainRecord(
+          renameCommand(`cmd-${secondDomain}`),
+          contentFor(secondDomain),
+          { class: 'trusted_entry' },
+        );
+      });
+
+      const [marker, nextEvent] = await glueThreeRecordsStartingAt(
+        harness.transcriptPath,
+        domainEvent(1),
+      );
+      expect(marker).toMatchObject({
+        subtype: 'managed_session_commit_v1',
+        managedSession: { firstSequence: 1, lastSequence: 1, eventCount: 1 },
+      });
+      expect(nextEvent).toMatchObject({
+        subtype: 'managed_session_event_v1',
+        managedSession: { kind: 'domain.committed', sequence: 2 },
+      });
+
+      expect(
+        readManagedSessionTitleInfoSync(
+          harness.transcriptPath,
+          harness.runtimeBaseDir,
+        ),
+      ).toEqual({ title: 'Design review notes', source: 'manual' });
+      expect(
+        readManagedSessionSourceSync(
+          harness.transcriptPath,
+          harness.runtimeBaseDir,
+        ),
+      ).toEqual({ sourceType: 'agent', sourceId: 'managed' });
+    },
+  );
+
+  it('rejects a title outside the lower bound of the latest commit window', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      for (const [sequence, title] of [
+        [1, 'First title'],
+        [2, 'Second title'],
+      ] as const) {
+        await authority.commitDomainRecord(
+          renameCommand(`cmd-window-${sequence}`),
+          {
+            domain: 'session_metadata',
+            content: { title, titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        );
+      }
+    });
+
+    // Keep a real {2,2} marker while removing its event and the older {1,1}
+    // marker. The remaining event is outside the only committed window.
+    await removeTranscriptRecords(
+      harness.transcriptPath,
+      (record) =>
+        (record.subtype === 'managed_session_event_v1' &&
+          record.managedSession?.sequence === 2) ||
+        (record.subtype === 'managed_session_commit_v1' &&
+          record.managedSession?.firstSequence === 1),
+    );
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({});
+  });
+
+  it('rejects a newer title beyond the upper bound of the latest commit window', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      for (const [sequence, title] of [
+        [1, 'First title'],
+        [2, 'Second title'],
+      ] as const) {
+        await authority.commitDomainRecord(
+          renameCommand(`cmd-window-${sequence}`),
+          {
+            domain: 'session_metadata',
+            content: { title, titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        );
+      }
+    });
+
+    // Keep the real {1,1} marker and both events, but omit the newer marker.
+    // The second title is therefore newer than any committed window.
+    await removeTranscriptRecords(
+      harness.transcriptPath,
+      (record) =>
+        record.subtype === 'managed_session_commit_v1' &&
+        record.managedSession?.firstSequence === 2,
+    );
+    await moveRecordAfter(
+      harness.transcriptPath,
+      (record) =>
+        record.subtype === 'managed_session_commit_v1' &&
+        record.managedSession?.firstSequence === 1,
+      domainEvent(2),
+    );
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'First title', source: 'manual' });
   });
 
   it('fences delayed hosted titles across cold reopen and recorder renames', async () => {
