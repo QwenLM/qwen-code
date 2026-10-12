@@ -19,6 +19,8 @@ Run isolated Playwright contexts from `.qwen/e2e-tests/managed-child-task-panel-
 7. Events/Artifacts: expiry resets with a visible history gap; unknown types checkpoint without display, paged cursors are not replaced by task tails; authorized public Artifact refs use the existing reader.
 8. Export boundary: rebuild the library and verify the read-only transcript carries no `managed.tasks.*` strings or lookups and remains below its existing JS budget. Verify task cancellation and elapsed-time translations still work in English and Chinese in the interactive shell.
 
+9. Settlement races: delay list/detail refreshes after the cancel reader observes a terminal task. Both surfaces must publish the terminal snapshot immediately, offer no second cancellation, and reject late running snapshots. In the losing tab, stale admission contention disappears when the task ends; unknown command recovery and genuine command failures remain. Check that periodic reads do not repeatedly announce loading or disable pagination, and timestamps follow the selected language.
+
 ## Real Java and Hosted
 
 Build and bundle the CLI, then run the current Java task read/cancel and Hosted child-Agent acceptance tests using JDK 21 and the local `dist/cli.js`. Exercise a real child task through the browser panel against a real Java service and Hosted Harness with a deterministic OpenAI-compatible model fixture. Verify stop admission separately from actual task settlement and verify parent continuation. A deterministic model is protocol/physical-execution evidence, not live-model quality evidence. Record any unexecuted scenario explicitly.

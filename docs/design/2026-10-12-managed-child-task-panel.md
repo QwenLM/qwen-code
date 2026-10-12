@@ -22,6 +22,8 @@ Add optional `tasks.list`, `tasks.get`, `tasks.listEvents`, `tasks.cancel.submit
 
 Separate task reads and cancellation recovery into two Session-level hooks. While the panel and browser tab are visible, refresh the current raw page, selected task and event page with serial completion-to-next-start 3-second polling. Closing the panel pauses ordinary reads; reopening or restoring visibility refreshes them. Events start from the retention floor, are deduplicated by opaque cursor and do not overwrite the task snapshot. Unknown event types advance the cursor without rendering. On `cursor_expired`, announce the missing history and restart at the floor. A page with `hasMore` requires the user to load more before tail following resumes. Session/provider/account changes abort requests and clear read caches; request ownership prevents delayed responses from changing another selection.
 
+Background polling keeps cached reads interactive and does not announce a new loading state every three seconds; initial reads and explicit refresh/navigation show loading. Timestamps follow the panel language, and detail labels and values use separate columns.
+
 The `cancel` task action describes task support, not actor permission. Do not infer Workspace roles or use `workspaceTurns` to authorize cancellation. Server `403 task_forbidden` is shown as insufficient permission. A local cancel does not lock sending, cancel the parent or resolve approvals.
 
 ## Cancellation and recovery
@@ -31,6 +33,8 @@ Use inline confirmation. Explain that stopping takes time and existing results a
 Known operations are automatically queried when returning to the Session, even if the task capability was removed. An intent without an operation ID requires a user click to replay the original request with its original key. Query with 1/2/3-second waits and then 3-second waits, with a 30-second budget for each confirmation round. A timeout, failed query, lost reply or `recovery_blocked` remains unconfirmed and offers continue confirmation. Do not invent a new key, automatically resend a blocked operation or offer abandonment as cancellation.
 
 Pending/running commands display submitting cancellation; a completed command with a nonterminal task displays stop requested, waiting for task settlement. Only the authoritative task state displays cancelled, completed or failed. Natural completion wins its race. A definitive operation failure clears the recovery intent, reports its reason and refreshes the task; a new attempt requires a new user submission. A completed command is retained until a terminal task snapshot is read. A terminal task alone cannot settle an unknown command. Ordinary task reads and recovered completed cancellations keep tracking physical settlement, and elapsed waiting never converts confirmed admission into failure.
+
+Before clearing an accepted cancellation, publish its validated task snapshot into the list and selected detail. Delayed nonterminal reads cannot replace a known terminal snapshot. Once a terminal task is observed, remove stale admission-contention/action-unavailable messages; retain other explicit command failures and unknown operation recovery.
 
 Local duplicate cancellation for the same task is disabled. Other tasks and other tabs use server admission; `session_operation_active` reports contention. Query permission errors and missing operations retain uncertainty. Requests are aborted on identity changes and late replies are ignored.
 

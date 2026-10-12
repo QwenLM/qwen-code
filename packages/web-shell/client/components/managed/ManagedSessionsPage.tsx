@@ -135,6 +135,7 @@ function ManagedSessionsContent({
     sessionId,
     taskSnapshots,
     tasks.refresh,
+    tasks.apply,
   );
   useEffect(() => {
     const element = pageRef.current;

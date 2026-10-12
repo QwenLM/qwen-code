@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   ManagedAgentProvider,
+  ManagedTask,
   ManagedTaskPage,
 } from './managed-agent-provider';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
@@ -93,6 +94,65 @@ describe('useManagedTasks', () => {
       document.dispatchEvent(new Event('visibilitychange')),
     );
     expect(provider.tasks!.list).toHaveBeenCalledTimes(hiddenCalls + 1);
+  });
+
+  it('keeps cached reads interactive during background polling and announces explicit refreshes', async () => {
+    vi.mocked(provider.tasks!.list).mockImplementation(
+      () => new Promise(() => {}),
+    );
+    await render();
+    expect(current.loading).toBe(true);
+    vi.mocked(provider.tasks!.list).mockResolvedValueOnce({
+      data: [task],
+      hasMore: true,
+      nextCursor: 'next',
+    });
+    await act(async () => current.refresh());
+    expect(current.loading).toBe(false);
+    expect(current.page.data).toEqual([task]);
+    await advance();
+    expect(current.loading).toBe(false);
+    expect(current.page.hasMore).toBe(true);
+    expect(current.page.data).toEqual([task]);
+    await act(async () => current.refresh());
+    expect(current.loading).toBe(true);
+  });
+
+  it('publishes a cancellation snapshot and rejects late regressions and old-owner writes', async () => {
+    let release!: (page: ManagedTaskPage) => void;
+    await render();
+    await act(async () => current.select(task.taskId));
+    const settled: ManagedTask = {
+      ...task,
+      state: 'cancelled',
+      settledAt: 5,
+      actionCapabilities: [],
+    };
+    const apply = current.apply;
+    vi.mocked(provider.tasks!.list).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    await advance();
+    await act(async () => apply(settled));
+    expect(current.task).toEqual(settled);
+    await act(async () => release({ data: [task], hasMore: false }));
+    expect(current.page.data[0]).toEqual(settled);
+    expect(current.task).toEqual(settled);
+    await act(async () => current.select());
+    await act(async () => current.select(task.taskId));
+    expect(current.task).toEqual(settled);
+    sessionId = 's2';
+    vi.mocked(provider.tasks!.list).mockResolvedValue({
+      data: [{ ...task, sessionId }],
+      hasMore: false,
+    });
+    await render();
+    await act(async () => apply(settled));
+    expect(current.page.data[0].sessionId).toBe('s2');
+    expect(current.page.data[0].state).toBe('running');
   });
 
   it('uses the event page checkpoint, deduplicates and resets an expired cursor', async () => {

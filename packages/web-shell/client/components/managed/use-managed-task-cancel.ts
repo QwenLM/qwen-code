@@ -80,6 +80,7 @@ export function useManagedTaskCancel(
   sessionId: string | undefined,
   snapshots: readonly ManagedTask[],
   refreshTasks: () => void,
+  applySnapshot: (task: ManagedTask) => void,
 ) {
   const [, render] = useReducer((value: number) => value + 1, 0);
   const scope = useMemo(() => {
@@ -96,6 +97,8 @@ export function useManagedTaskCancel(
   currentScope.current = scope;
   const refreshRef = useRef(refreshTasks);
   refreshRef.current = refreshTasks;
+  const applyRef = useRef(applySnapshot);
+  applyRef.current = applySnapshot;
   const current = () => scope.alive && currentScope.current === scope;
   function update(taskId: string, state: ManagedTaskCancelState) {
     if (!current()) return;
@@ -193,6 +196,7 @@ export function useManagedTaskCancel(
             task.kind !== 'child_agent'
           )
             throw new Error('Task identity mismatch');
+          applyRef.current(task);
           if (isManagedTaskTerminal(task)) {
             clear(intent.taskId);
             refreshRef.current();
@@ -236,6 +240,7 @@ export function useManagedTaskCancel(
       ) {
         clear(original.taskId);
         update(original.taskId, { status: 'failed', busy: false, code });
+        refreshRef.current();
       } else
         update(original.taskId, {
           status: accepted ? 'stopping' : 'unconfirmed',
@@ -270,7 +275,14 @@ export function useManagedTaskCancel(
       if (
         task.sessionId === sessionId &&
         isManagedTaskTerminal(task) &&
-        scope.states[task.taskId]?.status === 'stopping'
+        (scope.states[task.taskId]?.status === 'stopping' ||
+          (!scope.intents[task.taskId] &&
+            scope.states[task.taskId]?.status === 'failed' &&
+            [
+              'session_operation_active',
+              'task_action_unavailable',
+              'task_already_settled',
+            ].includes(scope.states[task.taskId].code ?? '')))
       )
         clear(task.taskId);
     }

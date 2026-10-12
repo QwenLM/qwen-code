@@ -31,6 +31,7 @@ describe('ManagedTaskPanel', () => {
       historyGap: false,
       hasPrevious: false,
       refresh: vi.fn(),
+      apply: vi.fn(),
       select: vi.fn(),
       next: vi.fn(),
       previous: vi.fn(),
@@ -55,10 +56,11 @@ describe('ManagedTaskPanel', () => {
     wide = true,
     canCancel = true,
     reader?: ManagedToolResultReader,
+    language: 'en' | 'zh-CN' = 'en',
   ) {
     await act(async () =>
       root.render(
-        <I18nProvider language="en">
+        <I18nProvider language={language}>
           <ManagedTaskPanel
             wide={wide}
             tasks={tasks}
@@ -171,6 +173,23 @@ describe('ManagedTaskPanel', () => {
         ) as HTMLDivElement
       ).scrollTop,
     ).toBe(144);
+  });
+
+  it('requires the task cancel action even when the host supports cancellation', async () => {
+    tasks.page.data = [{ ...task, actionCapabilities: [] }];
+    await render();
+    expect(container.textContent).not.toContain('Request cancellation');
+    expect(cancel.submit).not.toHaveBeenCalled();
+  });
+
+  it('formats timestamps in the panel language', async () => {
+    await render(true, true, undefined, 'zh-CN');
+    expect(container.textContent).toContain(
+      new Date(task.createdAt).toLocaleString('zh-CN'),
+    );
+    expect(container.textContent).not.toContain(
+      new Date(task.createdAt).toLocaleString('en'),
+    );
   });
 
   it('offers reads without cancellation in an identity-less host', async () => {

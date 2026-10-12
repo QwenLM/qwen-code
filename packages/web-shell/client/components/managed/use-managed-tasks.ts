@@ -11,6 +11,17 @@ export function isManagedTaskTerminal(task: ManagedTask): boolean {
   return ['completed', 'failed', 'cancelled'].includes(task.state);
 }
 
+function retainTerminalTask(
+  previous: ManagedTask | undefined,
+  task: ManagedTask,
+): ManagedTask {
+  return previous &&
+    isManagedTaskTerminal(previous) &&
+    !isManagedTaskTerminal(task)
+    ? previous
+    : task;
+}
+
 export function useManagedTasks(
   provider: ManagedAgentProvider,
   clientId: string,
@@ -78,8 +89,12 @@ export function useManagedTasks(
           value.owner === owner ? { ...value, ...patch } : value,
         );
     };
-    async function poll() {
-      update({ loading: true, error: undefined });
+    async function poll(showLoading = false) {
+      update(
+        showLoading
+          ? { loading: true, error: undefined }
+          : { error: undefined },
+      );
       const request = { clientId, signal: abort.signal };
       try {
         const page = await api!.list(sessionId!, {
@@ -89,7 +104,27 @@ export function useManagedTasks(
         });
         if (page.data.some((task) => task.sessionId !== sessionId))
           throw new Error('Task page identity mismatch');
-        update({ page });
+        if (current())
+          setState((value) =>
+            value.owner === owner
+              ? {
+                  ...value,
+                  page: {
+                    ...page,
+                    data: page.data.map((task) =>
+                      retainTerminalTask(
+                        value.task?.taskId === task.taskId
+                          ? value.task
+                          : value.page.data.find(
+                              (row) => row.taskId === task.taskId,
+                            ),
+                        task,
+                      ),
+                    ),
+                  },
+                }
+              : value,
+          );
         if (selectedId && current()) {
           const task = await api!.get(sessionId!, selectedId, request);
           if (
@@ -103,11 +138,19 @@ export function useManagedTasks(
               value.owner === owner && value.selectedId === selectedId
                 ? {
                     ...value,
-                    task,
+                    task: retainTerminalTask(
+                      value.task ??
+                        value.page.data.find(
+                          (row) => row.taskId === task.taskId,
+                        ),
+                      task,
+                    ),
                     page: {
                       ...value.page,
                       data: value.page.data.map((row) =>
-                        row.taskId === task.taskId ? task : row,
+                        row.taskId === task.taskId
+                          ? retainTerminalTask(row, task)
+                          : row,
                       ),
                     },
                   }
@@ -170,7 +213,7 @@ export function useManagedTasks(
         if (current()) timer = setTimeout(() => void poll(), 3_000);
       }
     }
-    void poll();
+    void poll(true);
     return () => {
       abort.abort();
       clearTimeout(timer);
@@ -200,6 +243,29 @@ export function useManagedTasks(
     refresh: () => {
       ++generation.current;
       setRevision((value) => value + 1);
+    },
+    apply: (task: ManagedTask) => {
+      setState((value) =>
+        value.owner !== owner ||
+        task.sessionId !== sessionId ||
+        task.kind !== 'child_agent'
+          ? value
+          : {
+              ...value,
+              task:
+                value.selectedId === task.taskId
+                  ? retainTerminalTask(value.task, task)
+                  : value.task,
+              page: {
+                ...value.page,
+                data: value.page.data.map((row) =>
+                  row.taskId === task.taskId
+                    ? retainTerminalTask(row, task)
+                    : row,
+                ),
+              },
+            },
+      );
     },
     select: (taskId?: string) => {
       ++generation.current;

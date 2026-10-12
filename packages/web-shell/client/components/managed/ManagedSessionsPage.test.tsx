@@ -11,6 +11,7 @@ import type {
   ManagedAgentSessionSummary,
   ManagedAgentSessionEvent,
   ManagedAgentSessionTranscript,
+  ManagedTask,
 } from './managed-agent-provider';
 
 const mocks = vi.hoisted(() => ({
@@ -260,6 +261,85 @@ describe('ManagedSessionsPage', () => {
     expect(document.activeElement?.textContent).toBe('Child Agent tasks');
   });
 
+  it.each([false, true])(
+    'publishes cancellation settlement before delayed panel refreshes (detail=%s)',
+    async (detail) => {
+      mocks.client.getSession.mockImplementation(async () =>
+        summary('s1', {
+          capabilities: { canSend: true, canCancel: false, tasks: true },
+        }),
+      );
+      const settled: ManagedTask = {
+        ...task,
+        state: 'cancelled',
+        settledAt: 5,
+        actionCapabilities: [],
+      };
+      let slow = false;
+      let release!: (value: { data: ManagedTask[]; hasMore: boolean }) => void;
+      provider = {
+        ...provider,
+        tasks: {
+          list: vi.fn().mockImplementation(() =>
+            slow
+              ? new Promise((resolve) => {
+                  release = resolve;
+                })
+              : Promise.resolve({ data: [task], hasMore: false }),
+          ),
+          get: vi.fn().mockImplementation(async () => (slow ? settled : task)),
+          listEvents: vi.fn().mockResolvedValue({
+            data: [],
+            hasMore: false,
+            nextCursor: 'floor',
+          }),
+          cancel: {
+            submit: vi.fn().mockResolvedValue(taskOperation),
+            query: vi.fn(),
+          },
+        },
+      };
+      await render('s1');
+      const click = async (text: string) =>
+        act(async () => {
+          [...document.querySelectorAll('button')]
+            .find((button) => button.textContent === text)!
+            .click();
+          await flush();
+        });
+      await click('Child Agent tasks');
+      if (detail) {
+        await click('Child Agent · 01234567');
+        expect(document.body.textContent).toContain('Back to tasks');
+      }
+      await click('Request cancellation');
+      slow = true;
+      await click('Confirm cancellation');
+      expect(document.body.textContent).toContain('Cancelled');
+      expect(
+        [...document.querySelectorAll('button')].some(
+          (button) => button.textContent === 'Request cancellation',
+        ),
+      ).toBe(false);
+      expect(provider.tasks!.cancel!.submit).toHaveBeenCalledOnce();
+      expect(document.body.textContent).not.toContain(
+        'Cancellation request failed.',
+      );
+      // A delayed stale page must not restore the old action either.
+      await act(async () => {
+        release({ data: [task], hasMore: false });
+        await flush();
+      });
+      if (detail) await click('Back to tasks');
+      expect(document.body.textContent).toContain('Cancelled');
+      expect(
+        [...document.querySelectorAll('button')].some(
+          (button) => button.textContent === 'Request cancellation',
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('does not query tasks or show an entry when the server lacks its capability', async () => {
     provider = {
       ...provider,
@@ -267,6 +347,7 @@ describe('ManagedSessionsPage', () => {
     };
     await render('s1');
     expect(container.textContent).not.toContain('Child Agent tasks');
+    expect(container.textContent).not.toContain('Resume task cancellation');
     expect(provider.tasks!.list).not.toHaveBeenCalled();
   });
 

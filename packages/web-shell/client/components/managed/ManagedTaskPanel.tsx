@@ -73,7 +73,7 @@ export function ManagedTaskPanel({
   onClose: () => void;
   restoreFocus: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const heading = useId();
   const listRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -97,7 +97,7 @@ export function ManagedTaskPanel({
   const time = (value?: number) =>
     value === undefined
       ? t('managed.tasks.notStarted')
-      : new Date(value).toLocaleString();
+      : new Date(value).toLocaleString(language);
   const task = tasks.task;
   const children = tasks.page.data.filter(
     (task) => task.kind === 'child_agent',
@@ -281,7 +281,7 @@ export function ManagedTaskPanel({
               <Badge variant="secondary">
                 {t(`managed.tasks.state.${task.state}`)}
               </Badge>
-              <dl className="space-y-2">
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 [&>dt]:text-muted-foreground [&>dd]:break-all">
                 <dt>{t('managed.tasks.created')}</dt>
                 <dd>{time(task.createdAt)}</dd>
                 <dt>{t('managed.tasks.started')}</dt>

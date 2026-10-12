@@ -18,6 +18,7 @@ describe('useManagedTaskCancel', () => {
   let sessionId: string;
   let snapshots: ManagedTask[];
   let refresh: ReturnType<typeof vi.fn>;
+  let apply: ReturnType<typeof vi.fn>;
   const key = 'qwen-managed-task-cancel:["tenant:actor","s1"]';
   function Probe() {
     current = useManagedTaskCancel(
@@ -26,6 +27,7 @@ describe('useManagedTaskCancel', () => {
       sessionId,
       snapshots,
       refresh,
+      apply,
     );
     return null;
   }
@@ -43,6 +45,7 @@ describe('useManagedTaskCancel', () => {
     sessionId = 's1';
     snapshots = [];
     refresh = vi.fn();
+    apply = vi.fn();
     root = createRoot(document.createElement('div'));
     provider = {
       storageKey: 'tenant:actor',
@@ -169,6 +172,9 @@ describe('useManagedTaskCancel', () => {
     await act(async () => current.resume(task.taskId));
     expect(current.states[task.taskId].status).toBe('unconfirmed');
     expect(provider.tasks!.cancel!.submit).toHaveBeenCalledTimes(1);
+    const queries = vi.mocked(provider.tasks!.cancel!.query).mock.calls.length;
+    await advance(3_000);
+    expect(provider.tasks!.cancel!.query).toHaveBeenCalledTimes(queries);
     vi.mocked(provider.tasks!.cancel!.query).mockRejectedValue(
       new JavaManagedAgentHttpError(403, 'task_forbidden', 'denied'),
     );
@@ -209,6 +215,49 @@ describe('useManagedTaskCancel', () => {
     await act(async () => current.submit(task));
     expect(provider.tasks!.cancel!.submit).not.toHaveBeenCalled();
     expect(current.states[task.taskId].code).toBe('storage_unavailable');
+  });
+
+  it('publishes terminal snapshots before clearing accepted recovery', async () => {
+    const settled = {
+      ...task,
+      state: 'completed' as const,
+      settledAt: 5,
+      actionCapabilities: [],
+    };
+    vi.mocked(provider.tasks!.get).mockResolvedValue(settled);
+    apply.mockImplementation(() =>
+      expect(
+        JSON.parse(sessionStorage.getItem(key)!)[task.taskId].accepted,
+      ).toBe(true),
+    );
+    await render();
+    await act(async () => current.submit(task));
+    expect(apply).toHaveBeenCalledWith(settled);
+    expect(current.pendingTaskIds).toEqual([]);
+  });
+
+  it('removes stale admission contention after terminal state without hiding other command failures', async () => {
+    vi.mocked(provider.tasks!.cancel!.submit).mockRejectedValue(
+      new JavaManagedAgentHttpError(409, 'session_operation_active', 'busy'),
+    );
+    await render();
+    await act(async () => current.submit(task));
+    expect(current.states[task.taskId].code).toBe('session_operation_active');
+    expect(refresh).toHaveBeenCalledOnce();
+    snapshots = [
+      { ...task, state: 'cancelled', settledAt: 5, actionCapabilities: [] },
+    ];
+    await render();
+    expect(current.states).toEqual({});
+    vi.mocked(provider.tasks!.cancel!.submit).mockResolvedValue({
+      ...taskOperation,
+      status: 'failed',
+      failureCode: 'runtime_unavailable',
+    });
+    await act(async () => current.submit(task));
+    snapshots = [...snapshots];
+    await render();
+    expect(current.states[task.taskId].code).toBe('runtime_unavailable');
   });
 
   it('keeps an unknown command even if the task already ended', async () => {
