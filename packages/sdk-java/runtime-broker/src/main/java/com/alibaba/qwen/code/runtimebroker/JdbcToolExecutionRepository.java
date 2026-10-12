@@ -205,24 +205,19 @@ public final class JdbcToolExecutionRepository
                     throw csiContinuationUnavailable();
                 }
             }
-            return compareAndSet(connection, expected, replacement, owner, dispatchGeneration);
+            return compareAndSet(connection, expected, replacement, owner, dispatchGeneration, false, continuation);
         });
-    }
-
-    static ToolExecutionRecord compareAndSet(Connection connection, ToolExecutionRecord expected,
-            ToolExecutionRecord replacement, String owner, long dispatchGeneration) throws SQLException {
-        return compareAndSet(connection, expected, replacement, owner, dispatchGeneration, false);
     }
 
     static ToolExecutionRecord authorizeDispatch(Connection connection, ToolExecutionRecord expected,
             String owner, long dispatchGeneration, long bindingVersion) throws SQLException {
         return compareAndSet(connection, expected, expected.authorizeDispatch(bindingVersion),
-                owner, dispatchGeneration, true);
+                owner, dispatchGeneration, true, null);
     }
 
     private static ToolExecutionRecord compareAndSet(Connection connection, ToolExecutionRecord expected,
             ToolExecutionRecord replacement, String owner, long dispatchGeneration,
-            boolean authorizing) throws SQLException {
+            boolean authorizing, CsiContinuation continuation) throws SQLException {
         requireReplacement(expected, replacement);
         if (!authorizing && !expected.sameAuthorization(replacement)) {
             throw new IllegalArgumentException("replacement must preserve dispatch authorization");
@@ -263,6 +258,7 @@ public final class JdbcToolExecutionRepository
         }
         ToolExecutionRecord updated = replacement.withVersion(
                 expected.getVersion() + 1);
+        requireCsiCurrentTime(connection, continuation);
         updateExecution(connection, updated);
         return updated;
     }
@@ -289,6 +285,7 @@ public final class JdbcToolExecutionRepository
                     continuation.original().requireAdmission();
                 }
             }
+            requireCsiCurrentTime(connection, continuation);
             if (current == null || current.isTerminal()
                     || current.getState()
                             == ToolExecutionRecord.State.UNKNOWN) {
@@ -308,6 +305,7 @@ public final class JdbcToolExecutionRepository
                             == ToolExecutionRecord.State.CANCEL_REQUESTED) {
                 ToolExecutionRecord unknown = current.withUnknown()
                         .withVersion(current.getVersion() + 1);
+                requireCsiCurrentTime(connection, continuation);
                 updateExecution(connection, unknown);
                 return null;
             }
@@ -319,6 +317,11 @@ public final class JdbcToolExecutionRepository
                     current.getDispatchGeneration() + 1,
                     ToolExecutionRecord.State.DISPATCHING)
                     .withVersion(current.getVersion() + 1);
+            if (continuation != null) {
+                continuation.progress().requireLease(connection, claimed.getDispatchLeaseUntil().toEpochMilli(),
+                        claimed.getDispatchLeaseUntil().toEpochMilli());
+            }
+            requireCsiCurrentTime(connection, continuation);
             updateExecution(connection, claimed);
             return claimed;
         });
@@ -346,6 +349,7 @@ public final class JdbcToolExecutionRepository
                     continuation.original().requireAdmission();
                 }
             }
+            requireCsiCurrentTime(connection, continuation);
             if (current == null || current.isTerminal()
                     || current.getState()
                             == ToolExecutionRecord.State.UNKNOWN) {
@@ -362,6 +366,11 @@ public final class JdbcToolExecutionRepository
                     dispatchGeneration,
                     current.getState())
                     .withVersion(current.getVersion() + 1);
+            if (continuation != null) {
+                continuation.progress().requireLease(connection, current.getDispatchLeaseUntil().toEpochMilli(),
+                        renewed.getDispatchLeaseUntil().toEpochMilli());
+            }
+            requireCsiCurrentTime(connection, continuation);
             updateExecution(connection, renewed);
             return renewed;
         });
@@ -382,6 +391,7 @@ public final class JdbcToolExecutionRepository
             if (continuation != null) {
                 continuation.require(current);
             }
+            requireCsiCurrentTime(connection, continuation);
             if (current == null || current.isTerminal()
                     || current.getVersion() != expectedVersion) {
                 return null;
@@ -407,6 +417,7 @@ public final class JdbcToolExecutionRepository
             }
             ToolExecutionRecord updated = requested.withVersion(
                     current.getVersion() + 1);
+            requireCsiCurrentTime(connection, continuation);
             updateExecution(connection, updated);
             return updated;
         });
@@ -475,24 +486,33 @@ public final class JdbcToolExecutionRepository
 
     private CsiContinuation lockCsiContinuation(Connection connection, ToolExecutionRecord hint)
             throws SQLException {
-        var original = JdbcCsiActivationAdmission.lockForContinuation(connection, hint.getBindingId(), csiBindings);
-        if (original == null) {
+        var scope = JdbcCsiActivationAdmission.lockForContinuation(connection, hint.getBindingId(), csiBindings);
+        if (scope == null) {
             return null;
         }
+        var original = scope.original();
         JdbcCsiActivationAdmission.requireExecution(original, hint);
-        Long seal = JdbcCsiRetirementSeal.lock(connection, original);
         JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
         var runtime = JdbcRuntimeSessionRepository.selectSession(connection, original.request().getScope(),
                 hint.getRuntimeSessionId(), true);
         original.requireSession(runtime);
-        var continuation = new CsiContinuation(original, seal, runtime, JdbcCsiExecutionAdmission.legacyReference(hint));
+        var continuation = new CsiContinuation(original, scope.progress(), scope.head(), runtime,
+                JdbcCsiExecutionAdmission.legacyReference(hint));
         continuation.require(hint);
         if (continuation.legacy()) {
             JdbcCsiExecutionAdmission.requireLegacyContinuation(connection, original);
         } else {
             JdbcCsiExecutionAdmission.verifyRelated(connection, original);
         }
+        requireCsiCurrentTime(connection, continuation);
         return continuation;
+    }
+
+    private static void requireCsiCurrentTime(Connection connection, CsiContinuation continuation) throws SQLException {
+        if (continuation != null) {
+            continuation.progress().requireCurrentTime(connection);
+            continuation.head().requireCurrentTime(connection);
+        }
     }
 
     private static boolean running(ToolExecutionRecord current) {
@@ -505,7 +525,8 @@ public final class JdbcToolExecutionRepository
                 "The original CSI execution continuation is unavailable.", false);
     }
 
-    private record CsiContinuation(JdbcCsiFilesRetirementGuard.Original original, Long sealedBindingVersion,
+    private record CsiContinuation(JdbcCsiFilesRetirementGuard.Original original,
+            JdbcCsiApplicationProgress.Continuation progress, JdbcCsiActivationAdmission.NativeHead head,
             RuntimeSessionRecord runtime, boolean legacy) {
         void require(ToolExecutionRecord execution) {
             JdbcCsiActivationAdmission.requireExecution(original, execution);
@@ -518,6 +539,7 @@ public final class JdbcToolExecutionRepository
                 throw csiContinuationUnavailable();
             }
             Long authorized = execution.getAuthorizedBindingVersion();
+            Long sealedBindingVersion = progress.sealedBindingVersion();
             if (authorized != null) {
                 if (authorized <= 0 || authorized > original.version()
                         || sealedBindingVersion != null && !execution.wasDispatchAuthorizedBefore(sealedBindingVersion)) {

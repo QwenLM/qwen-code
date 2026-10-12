@@ -114,6 +114,17 @@ export class ManagedCsiMount extends ManagedContextMount {
     return this.withVerifiedRoot(async (_handle, receipt) => receipt);
   }
 
+  async retirementInspection() {
+    const root = await this.#directory;
+    if (!root) throw new Error(UNAVAILABLE);
+    return {
+      admissionClosed: this.#closed,
+      pendingOperations: this.#observations.size,
+      closeFailed: this.#closeFailure !== undefined,
+      root: root.retirementInspection(),
+    };
+  }
+
   async withVerifiedRoot<T>(
     operation: (
       handle: FileHandle,

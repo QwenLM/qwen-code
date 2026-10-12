@@ -247,7 +247,7 @@ export function csiFileHistoryEnvelope(
   installedContext: Record<string, unknown>,
   operation: CsiFileHistoryOperation,
 ) {
-  ensure(boot.version === 5);
+  ensure(boot.version === 5 || boot.version === 6);
   const result = {
     protocolVersion: 2,
     managedCsi: MANAGED_CSI_FILE_PROTOCOL,
@@ -275,7 +275,7 @@ export function readCsiFileHistoryEnvelope(
     'operation',
   ]);
   ensure(
-    boot.version === 5 &&
+    (boot.version === 5 || boot.version === 6) &&
       body['protocolVersion'] === 2 &&
       body['managedCsi'] === MANAGED_CSI_FILE_PROTOCOL,
   );

@@ -187,6 +187,8 @@ class WorkspaceCsiRuntimeIdentityTest {
             var boot = WorkspaceCsiRuntimeIdentity.boot(original);
             ManagedCsiFilesProtocol.validateBoot(boot);
             assertThat(boot.get("version")).isEqualTo(4);
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.fileHistoryBoot(original))
+                    .isInstanceOf(RuntimeBrokerException.class);
             assertThat(nested(api.objects.get("secrets"), "data").get("boot.json"))
                     .isEqualTo(Base64.getEncoder().encodeToString(WorkspaceCsiRuntimeIdentity.bytes(boot)));
             assertThat(handle.getValue().get("bootDigest")).isEqualTo(WorkspaceCsiRuntimeIdentity.digest(boot));
@@ -208,8 +210,9 @@ class WorkspaceCsiRuntimeIdentityTest {
         }
     }
 
-    @Test
-    void privateAuthorityPersistsInHandle3AndRestartUsesOriginalBoot5DespiteChangedConfiguration() {
+    @ParameterizedTest
+    @CsvSource({"3,5", "4,6"})
+    void privateAuthorityRestartRetainsOriginalBootDespiteChangedConfiguration(int handleVersion, int bootVersion) {
         privateRequest();
         var authority = ManagedCsiFilesProtocol.authority("https://original-broker.example");
         RuntimeResourceHandle handle;
@@ -218,14 +221,34 @@ class WorkspaceCsiRuntimeIdentityTest {
         try (var provider = authorityProvider(authority)) {
             provider.reserveResource(original);
             handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
-            assertThat(handle.getVersion()).isEqualTo(3);
-            assertThat(handle.getValue().get("authority")).isEqualTo(authority);
-            assertThat(provider.supportsStartupRecovery(handle)).isTrue();
+            assertThat(handle.getVersion()).isEqualTo(4);
+            assertThat(handle.getValue().get("finalization")).isEqualTo(ManagedCsiFilesProtocol.FINALIZATION_FORMAT);
             original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
             lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
+            if (handleVersion == 3) {
+                var legacy = copy(handle.getValue());
+                legacy.remove("finalization");
+                legacy.put("bootDigest", WorkspaceCsiRuntimeIdentity.digest(ManagedCsiFilesProtocol.boot(original.getRequest(),
+                        original.getProvisionSeed(), WorkspaceCsiRuntimeIdentity.map(legacy.get("storage")), authority)));
+                legacy.remove("identity");
+                legacy.put("identity", WorkspaceCsiRuntimeIdentity.digest(legacy));
+                handle = new RuntimeResourceHandle(handle.getKind(), handleVersion, legacy);
+                nested(api.objects.get("secrets"), "data").put("boot.json", Base64.getEncoder().encodeToString(
+                        WorkspaceCsiRuntimeIdentity.bytes(WorkspaceCsiRuntimeIdentity.boot(original.getRequest(), original.getProvisionSeed(), handle))));
+                // Seed a pre-existing handle3; production CAS must never downgrade handle4.
+                assertThat(new JdbcTemplate(source).update("UPDATE qwen_runtime_binding SET resource_handle_version = ?,"
+                        + " resource_handle_json = ? WHERE binding_id = ?", handleVersion,
+                        com.alibaba.fastjson2.JSON.toJSONString(handle.getValue(), com.alibaba.fastjson2.JSONWriter.Feature.WriteNulls),
+                        original.getBindingId())).isEqualTo(1);
+                original = bindings.findById(original.getBindingId());
+            }
+            assertThat(handle.getVersion()).isEqualTo(handleVersion);
+            assertThat(handle.getValue().get("authority")).isEqualTo(authority);
+            assertThat(provider.supportsStartupRecovery(handle)).isTrue();
             original = bindings.compareAndSet(original, original.withAttestation(lease, handle, Instant.now(), Instant.now()));
             boot = WorkspaceCsiRuntimeIdentity.boot(original);
-            assertThat(boot.get("version")).isEqualTo(5);
+            assertThat(boot.get("version")).isEqualTo(bootVersion);
+            assertThat(WorkspaceCsiRuntimeIdentity.fileHistoryBoot(original)).isEqualTo(boot);
             assertThat(boot.get("authority")).isEqualTo(authority);
             assertThat(api.objects.get("secrets").get("immutable")).isEqualTo(true);
             assertThat(nested(api.objects.get("secrets"), "data").get("boot.json"))
@@ -243,14 +266,15 @@ class WorkspaceCsiRuntimeIdentityTest {
                     .isEqualTo(RuntimeObservation.Outcome.READY);
             assertThat(api.creates).isEqualTo(2);
             assertThat(WorkspaceCsiRuntimeIdentity.boot(reloaded)).isEqualTo(boot);
+            assertThat(WorkspaceCsiRuntimeIdentity.fileHistoryBoot(reloaded)).isEqualTo(boot);
             var changed = copy(handle.getValue());
             changed.put("authority", ManagedCsiFilesProtocol.authority("https://replacement-broker.example"));
             changed.remove("identity");
             changed.put("identity", WorkspaceCsiRuntimeIdentity.digest(changed));
             assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(reloaded.getRequest(), reloaded.getProvisionSeed(),
-                    new RuntimeResourceHandle("kubernetes-workspace", 3, changed))).isInstanceOf(RuntimeBrokerException.class);
+                    new RuntimeResourceHandle("kubernetes-workspace", handleVersion, changed))).isInstanceOf(RuntimeBrokerException.class);
             assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(reloaded.getRequest(), reloaded.getProvisionSeed(),
-                    new RuntimeResourceHandle("kubernetes-workspace", 2, handle.getValue()))).isInstanceOf(RuntimeBrokerException.class);
+                    new RuntimeResourceHandle("kubernetes-workspace", 2, reloaded.getResourceHandle().getValue()))).isInstanceOf(RuntimeBrokerException.class);
             nested(api.objects.get("secrets"), "data").put("boot.json", Base64.getEncoder().encodeToString(
                     WorkspaceCsiRuntimeIdentity.bytes(ManagedCsiFilesProtocol.boot(reloaded.getRequest(), reloaded.getProvisionSeed(),
                             WorkspaceCsiRuntimeIdentity.map(boot.get("storage")), ManagedCsiFilesProtocol.authority("https://replacement-broker.example")))));
@@ -318,6 +342,104 @@ class WorkspaceCsiRuntimeIdentityTest {
         var request = WorkspaceCsiRuntimeConstructionFixture.create(source, registration);
         var created = bindings.findOrCreate(request);
         original = bindings.claimOperation(created.getBindingId(), "owner", Duration.ofMinutes(5));
+    }
+
+    @Test
+    void evidencePodToleratesOnlyTheIsolatedNodeAndStandardNoExecuteDefaults() throws ReflectiveOperationException {
+        privateRequest();
+        api.changeCreatedPod = pod -> {
+            var spec = nested(pod, "spec");
+            assertThat(spec.get("schedulingGates")).isEqualTo(List.of(Map.of("name", "qwen-code.io/k2-source-ready")));
+            assertThat(spec.get("serviceAccountName")).isEqualTo("qwen-k2-worker");
+            assertThat(nested(spec, "securityContext").get("appArmorProfile"))
+                    .isEqualTo(Map.of("type", "Localhost", "localhostProfile", "qwen-k2-worker-v1"));
+            spec.put("serviceAccount", "qwen-k2-worker");
+            nested(pod, "metadata").put("annotations", Map.of("container.apparmor.security.beta.kubernetes.io/runtime", "localhost/qwen-k2-worker-v1"));
+            assertThat(spec.get("tolerations")).isEqualTo(List.of(
+                    Map.of("key", "qwen-code.io/k2-evidence", "operator", "Equal", "value", "isolated", "effect", "NoSchedule"),
+                    Map.of("key", "node.kubernetes.io/not-ready", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 300),
+                    Map.of("key", "node.kubernetes.io/unreachable", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 300)));
+        };
+        try (var provider = evidenceProvider()) {
+            provider.reserveResource(original);
+            assertThat(join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null))).isNotNull();
+            assertThat(nested(api.objects.get("pods"), "spec")).doesNotContainKey("schedulingGates");
+            assertThat(attestations).hasValue(2);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"missing-account", "foreign-account", "foreign-alias", "missing-profile", "unconfined", "foreign-profile", "extra-profile-field", "container-override", "legacy-unconfined", "legacy-foreign", "static-source", "image-pull"})
+    void evidencePodRefusesChangedAccountOrConfinement(String mutation) throws ReflectiveOperationException {
+        privateRequest();
+        api.changeCreatedPod = pod -> {
+            var spec = nested(pod, "spec");
+            var security = nested(spec, "securityContext");
+            switch (mutation) {
+                case "missing-account" -> spec.remove("serviceAccountName");
+                case "foreign-account" -> spec.put("serviceAccountName", "default");
+                case "foreign-alias" -> spec.put("serviceAccount", "default");
+                case "missing-profile" -> security.remove("appArmorProfile");
+                case "unconfined" -> security.put("appArmorProfile", Map.of("type", "Unconfined"));
+                case "foreign-profile" -> security.put("appArmorProfile", Map.of("type", "Localhost", "localhostProfile", "foreign"));
+                case "extra-profile-field" -> security.put("appArmorProfile", Map.of("type", "Localhost", "localhostProfile", "qwen-k2-worker-v1", "extra", true));
+                case "container-override" -> nested((Map<String, Object>) ((List<?>) spec.get("containers")).getFirst(), "securityContext")
+                        .put("appArmorProfile", Map.of("type", "Unconfined"));
+                case "legacy-unconfined" -> nested(pod, "metadata").put("annotations", Map.of("container.apparmor.security.beta.kubernetes.io/runtime", "unconfined"));
+                case "legacy-foreign" -> nested(pod, "metadata").put("annotations", Map.of("container.apparmor.security.beta.kubernetes.io/runtime", "localhost/foreign"));
+                case "static-source" -> nested(pod, "metadata").put("annotations", Map.of("kubernetes.io/config.source", "file"));
+                case "image-pull" -> spec.put("imagePullSecrets", List.of(Map.of("name", "foreign")));
+                default -> throw new AssertionError(mutation);
+            }
+        };
+        try (var provider = evidenceProvider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(attestations).hasValue(0);
+            assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+            assertThat(storage.inspect(registration).phase()).isEqualTo("RESERVED");
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"missing", "wildcard", "extra", "duplicate", "value", "seconds"})
+    void evidencePodRefusesAlteredOrAdditionalTolerations(String mutation) throws ReflectiveOperationException {
+        privateRequest();
+        api.changeCreatedPod = pod -> {
+            var spec = nested(pod, "spec");
+            var tolerations = new java.util.ArrayList<Object>((List<?>) spec.get("tolerations"));
+            switch (mutation) {
+                case "missing" -> tolerations.removeFirst();
+                case "wildcard" -> tolerations.set(0, Map.of("operator", "Exists"));
+                case "extra" -> tolerations.add(Map.of("key", "foreign", "operator", "Exists", "effect", "NoSchedule"));
+                case "duplicate" -> tolerations.add(tolerations.getFirst());
+                case "value" -> tolerations.set(0, Map.of("key", "qwen-code.io/k2-evidence", "operator", "Equal", "value", "foreign", "effect", "NoSchedule"));
+                case "seconds" -> tolerations.set(1, Map.of("key", "node.kubernetes.io/not-ready", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 301));
+                default -> throw new AssertionError(mutation);
+            }
+            spec.put("tolerations", tolerations);
+        };
+        try (var provider = evidenceProvider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(attestations).hasValue(0);
+            assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+            assertThat(storage.inspect(registration).phase()).isEqualTo("RESERVED");
+        }
+    }
+
+    @Test
+    void ordinaryPodKeepsItsExistingInjectedNoExecuteTolerations() {
+        api.changeCreatedPod = pod -> nested(pod, "spec").put("tolerations", List.of(
+                Map.of("key", "node.kubernetes.io/not-ready", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 300),
+                Map.of("key", "node.kubernetes.io/unreachable", "operator", "Exists", "effect", "NoExecute", "tolerationSeconds", 300)));
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            assertThat(join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null))).isNotNull();
+            assertThat((List<?>) nested(api.objects.get("pods"), "spec").get("tolerations")).hasSize(2);
+            assertThat(nested(api.objects.get("pods"), "spec")).doesNotContainKey("serviceAccountName");
+            assertThat(nested(nested(api.objects.get("pods"), "spec"), "securityContext")).doesNotContainKey("appArmorProfile");
+        }
     }
 
     @Test
@@ -835,6 +957,26 @@ class WorkspaceCsiRuntimeIdentityTest {
 
     private WorkspaceCsiRuntimeProvisioner provider() {
         return provider(Duration.ofSeconds(5), List.of());
+    }
+
+    private WorkspaceCsiRuntimeProvisioner evidenceProvider() throws ReflectiveOperationException {
+        var evidence = mock(WorkspaceCsiNodeEvidence.class);
+        when(evidence.affinity()).thenReturn(Map.of("nodeAffinity", Map.of("requiredDuringSchedulingIgnoredDuringExecution", Map.of("nodeSelectorTerms",
+                List.of(Map.of("matchFields", List.of(Map.of("key", "metadata.name", "operator", "In", "values", List.of("node")))))))));
+        when(evidence.bindAndOpen(any(), any(), any(), any())).thenAnswer(call -> {
+            Map<String, Object> pod = call.getArgument(2);
+            nested(pod, "spec").remove("schedulingGates");
+            return pod;
+        });
+        when(evidence.publication(any(), any(), any(), any())).thenReturn(true);
+        var constructor = WorkspaceCsiRuntimeProvisioner.class.getDeclaredConstructor(WorkspaceCsiReservationStore.class,
+                JdbcRuntimeBindingRepository.class, WorkspaceCsiRegistration.class, KubernetesRuntimeClient.class,
+                WorkspaceCsiResourceGuard.class, String.class, List.class, Duration.class, List.class,
+                RuntimeTransport.class, Map.class, WorkspaceCsiNodeEvidence.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(storage, bindings, registration, api,
+                new WorkspaceCsiResourceGuard(api, "cluster", registration, protection), IMAGE, COMMAND,
+                Duration.ofSeconds(5), List.of(), transport, null, evidence);
     }
 
     private WorkspaceCsiRuntimeProvisioner authorityProvider(Map<String, Object> authority) {

@@ -364,6 +364,74 @@ class WorkspaceCsiNativeActivationGate {
         assertThat(allRows()).isEqualTo(before);
     }
 
+    @Test
+    void textConversationSettlingCompletesOnlyTheAdmittedTurn() throws Exception {
+        ready();
+        int index = 2;
+        while (!"submitInput".equals(nativeFixture.path("commits").get(index).path("request").path("operation").textValue())) {
+            commit(index++);
+        }
+        commit(index++);
+        retire();
+        int completed = 0;
+        boolean settled = false;
+        while (!"submitInput".equals(nativeFixture.path("commits").get(index).path("request").path("operation").textValue())) {
+            settled |= "settleTurn".equals(nativeFixture.path("commits").get(index).path("request").path("operation").textValue());
+            assertThat(commit(index++).replayed()).isFalse();
+            completed++;
+        }
+        assertThat(completed).isGreaterThan(1);
+        assertThat(settled).isTrue();
+        var before = allRows();
+        var nextInput = JSON.treeToValue(nativeFixture.path("commits").get(index).path("request"),
+                ManagedSessionStoreModels.CommitTransactionRequest.class);
+        rejected(() -> transaction.execute(status -> journal.commit("tenant", sessionId, token, nextInput)),
+                "runtime_admission_closed");
+        assertThat(allRows()).isEqualTo(before);
+        assertThat(commit(index - 1).replayed()).isTrue();
+        assertThat(allRows()).isEqualTo(before);
+    }
+
+    @Test
+    void textConversationSettlingReadsOnlyTheCurrentCheckpointOfTheAdmittedTurn() throws Exception {
+        ready();
+        int index = 2;
+        while (!"submitInput".equals(nativeFixture.path("commits").get(index).path("request").path("operation").textValue())) {
+            commit(index++);
+        }
+        commit(index++);
+        while (!"commitCheckpoint".equals(nativeFixture.path("commits").get(index).path("request").path("operation").textValue())) {
+            commit(index++);
+        }
+        commit(index++);
+        retire();
+        String checkpoint = jdbc.queryForObject("SELECT latest_checkpoint_resource_id"
+                + " FROM qwen_managed_session_journal_head WHERE session_id = ?", String.class, sessionId);
+        var head = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", sessionId);
+        var resource = journal.readOwnerResource("tenant", "workspace", sessionId, checkpoint, token);
+        assertThat(resource.resourceId()).isEqualTo(checkpoint);
+        assertThat(resource.bytes()).isEqualTo(jdbc.queryForObject("SELECT inline_bytes"
+                + " FROM qwen_managed_session_resource WHERE resource_id = ?", byte[].class, checkpoint));
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", sessionId)).isEqualTo(head);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_csi_resource_read"
+                + " WHERE resource_id = ? AND state = 'RETURNED' AND outcome_code = 'verified'", Long.class, checkpoint)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Long.class)).isZero();
+        var before = allRows();
+        String definition = nativeFixture.path("commits").get(0).path("request").path("resources").get(0).path("resourceId").textValue();
+        rejected(() -> journal.readOwnerResource("tenant", "workspace", sessionId, definition, token),
+                "csi_original_activation_unavailable");
+        assertThat(allRows()).isEqualTo(before);
+        while (!"submitInput".equals(nativeFixture.path("commits").get(index).path("request").path("operation").textValue())) {
+            commit(index++);
+        }
+        String settled = jdbc.queryForObject("SELECT latest_checkpoint_resource_id"
+                + " FROM qwen_managed_session_journal_head WHERE session_id = ?", String.class, sessionId);
+        before = allRows();
+        rejected(() -> journal.readOwnerResource("tenant", "workspace", sessionId, settled, token),
+                "csi_original_activation_unavailable");
+        assertThat(allRows()).isEqualTo(before);
+    }
+
     private Map<String, List<String>> allRows() {
         Map<String, List<String>> rows = new TreeMap<>();
         for (String table : jdbc.queryForList("SELECT table_name FROM information_schema.tables"
@@ -947,7 +1015,7 @@ class WorkspaceCsiNativeActivationGate {
         jdbc.update("UPDATE managed_workspace_csi_retirement SET identity_json = ?", encoded);
         jdbc.update("UPDATE managed_workspace_execution_lease SET csi_revision = 3");
         rejected(() -> executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120)),
-                "csi_retirement_identity_unavailable");
+                "csi_application_continuation_unavailable");
     }
 
     @Test

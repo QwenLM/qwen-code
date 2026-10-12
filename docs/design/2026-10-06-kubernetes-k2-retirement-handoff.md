@@ -3,16 +3,18 @@
 [English](2026-10-06-kubernetes-k2-retirement-handoff.md) | [简体中文](2026-10-06-kubernetes-k2-retirement-handoff.zh-CN.md)
 
 Status: completion design with a local K2-A1 prototype and K2-A2 implementation
-in progress, updated 2026-10-07. The native boundary observer is implemented;
-private CREATE/request pinning is locally implemented and verified. The original
-binding/Session/writer guards and first native SQL activation pin are locally
-implemented, with selected execution admission, dispatch and original SQL
-continuation consumers. The initial native checkpoint gate is locally
-implemented and independently verified on owned MySQL. The complete
+candidate, updated 2026-10-11. Private CREATE/request pinning, original
+binding/Session/writer guards, native SQL activation and the
 [native file execution chain](2026-10-07-k2-native-file-execution.md)
-is designed but not implemented. Complete A2 admission closure and K2-B through
-K2-D remain pending; no complete K2 or new cluster
-acceptance is claimed.
+are implemented, with bounded original Read/Write/Edit and checkpoint-renewal
+verification on owned MySQL. The
+[application coordinator](2026-10-11-k2-settled-application-cut.md)
+is implemented. The sealed H candidate passed 53 application checks and 12
+failure/retry windows through the real Hosted path on owned MySQL. Its Darwin
+kernel/path seam limits those results to application behavior; they do not
+qualify an ACK installation or later candidates.
+Complete A2 acceptance and K2-B through K2-D remain pending; no complete K2 or
+new cluster acceptance is claimed.
 Implementation baseline: main `4bffa678bced8b14c25c85e3ba4226b7b752414d`, after
 [PR #13289](https://github.com/QwenLM/qwen-code/pull/13289) merged as
 `69d5db2ff2424da01ac6f14e4c484773aae7204c`. Track remaining work in
@@ -94,7 +96,12 @@ original `identity_json` bytes: saved ACKs bind its digest. Do not create a
 second execution, publication, receipt or ACK ledger.
 
 Add revisioned progress and bounded evidence references around that original
-identity. The proposed retirement phases are:
+identity. The proposed aggregate lifecycle stages below are not values to write
+over the immutable intent. The new application protocol retains the original
+row's `phase='DRAINING'` and `identity_json` bytes while its separate revisioned
+progress reaches `DRAINED`. Qualified physical release must likewise preserve
+that immutable intent and persist its own exact outcome through the later
+narrow physical consumer.
 
 | Phase      | Meaning                                                                                                                            | Storage may be reassigned? |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
@@ -140,7 +147,7 @@ creation requires matching registered storage, ACTIVE Workspace, read/create
 permission, and fixed `csi-files-retirement-tools/1` and
 `csi-files-retirement-policy/1` references. The Session UUID is allocated before
 deriving its Session-isolated `kubernetes-workspace` request. Its remote mount
-root comes from the registration, without host filesystem resolution. V53 adds
+root comes from the registration, without host filesystem resolution. V63 adds
 nullable `runtime_request_key` with no legacy evidence backfill; the CREATE
 inserts it alongside `tool_profile=csi-files-retirement/1`.
 The first profile only accepts Workspace root selection (`cwdRelative="."`).
@@ -251,13 +258,15 @@ The native genesis uses `managed-definition` and `managed-root` resources,
 with raw bodies exactly `{engine: 'managed', sessionId, toolProfile:
 'csi-files-retirement/1'}` and `{cwd}`. Require the Hosted creator and original
 CREATE Session scope. Imported histories or extra MCP, Hook, shell or approval
-configuration do not qualify. The narrow SQL reader admits genesis, install,
-same-identity renew transactions and once-only initial `before_model` checkpoint
-while READY. The complete closed empty checkpoint, original header references,
-covered prefix, activation, full events hash, marker and state resource must
-agree. The history fold retains its reference across later original renewals
-and compares it with the current head. A second checkpoint, later phase or
-unrelated event remains refused; these are not a qualified normal file chain.
+configuration do not qualify. The initial first-activation batch admitted genesis,
+install, same-identity renew transactions and a once-only initial `before_model`
+checkpoint while READY. Its complete closed empty checkpoint, original header
+references, covered prefix, activation, full events hash, marker and state
+resource had to agree. The current bounded native reader also admits input,
+later checkpoints, tool intents and results, messages, model responses, deltas,
+turn settlement and file-history commits. This wider grammar does not qualify
+application retirement; the settled application cut still needs the independent
+acceptance described below.
 
 Retain the complete ordered records from the existing native parse. First
 install and renewal each contain exactly one activation event;
@@ -280,7 +289,7 @@ admission; its revision and task projection persist. Earlier reports for the
 previous main's Session-only deletion admission remain historical and do not
 establish the new ordering. Session workspace identity is immutable.
 
-Install V54 and the standalone JDBC fresh/upgrade schema with a nullable
+Install V64 and the standalone JDBC fresh/upgrade schema with a nullable
 `first_activation_journal_revision`, without legacy backfill or a caller-settable
 binding field. On the same original SQL connection, first acceptance changes
 NULL to the exact SQL journal revision and increments `record_version` once,
@@ -504,55 +513,70 @@ prove Kubernetes container stop or CSI unpublish.
 
 ### 5.4 Application cut and worker finalization
 
-Use the following order, without holding database locks during RPC or replay:
+Use the following proposed order, without holding database locks during RPC or
+replay. The [settled original-owner application design](2026-10-11-k2-settled-application-cut.md)
+defines its first supported lane, exact writer gates, complete inventory and
+new immutable boot contract. It is not implemented or qualified yet.
 
-1. Commit original retirement/seal; seal the original worker; keep original
-   result/cancel/settlement routes available and renew the original writer as
-   needed. Do not create a replacement activation to complete an old ACK.
-2. Enumerate, finish original results, commit checkpoints and collect all
-   required ACKs. Obtain a candidate worker observation with no pending starts,
-   invocations, history tails or lifecycle blockers.
-3. Through a new CSI retirement-close operation in the original Harness, stop
-   new Session mutations and activation renewal, await already admitted
-   continuations/renewals, then commit the native `releaseActivation` boundary
-   with the original writer still valid. Do not call generic close: it also
-   seals the journal before the coordinator can commit the cut.
-4. Re-export and semantically verify the original history, including exactly
-   that terminal activation boundary and its resources. In a fresh bounded
-   transaction, lock and revalidate membership, original writer, current heads,
-   results and resources. Commit the immutable application cut and atomically
-   seal the journal/revoke its writer authority, recording the resulting sealed
-   head pins. Retention, writer acquisition, activation replacement and ordinary
-   release must honor the retirement fence. Keep Runtime Session `READY` for
+1. Commit original retirement/seal with same-intent `SETTLING` progress and its
+   fixed DB-time settlement deadline; retain the binding and physical holder.
+   Stop new admission and allow only already-authorized original settlement
+   within that deadline. Do not create a replacement activation or new work to
+   complete an old prefix.
+2. Select the existing original Hosted owner, close its ordinary admission and
+   renewal timers before joining actual admitted tasks and raw renewal
+   promises, and retain every failure. The first lane requires the complete
+   settled Read/Write/Edit prefix; pending or UNKNOWN work blocks it.
+3. Prepare exactly one native `releaseActivation` body in the original serial
+   authority, without HTTP, writer acquisition or append. Validate the complete
+   predecessor and candidate, obtain the original worker pre-cut barrier and
+   inventory outside SQL, then revalidate current authority and persist the
+   exact body, server envelope and observation as `FROZEN`. Retries retain the
+   original UUIDs, references, times and bytes. Generic close cannot replace
+   this preparation or freeze.
+4. In one fresh bounded Connection/transaction, consume only that saved frozen
+   request, revalidate the complete predecessor and unique terminal suffix,
+   install its exact resource/ref/transaction, and atomically commit the
+   immutable application cut, `CUT` progress and journal `SEALED`. There is no
+   separately committed ACTIVE-terminal interval. Retention, writer acquisition,
+   renewal, activation replacement, binding controls and ordinary release honor
+   the progress gate. Keep the original logical Runtime Session `READY` for
    worker finalization.
 5. Call a new versioned `finalize` operation on the original worker with the cut
    digest. It atomically compares the sealed invocation/history inventory with
    the cut and checks the final mutation barrier, waits/refuses if original tails
    remain, and permanently refuses subsequent mutations. Only original
    read/status/result and exact finalization retry remain available.
-6. Revalidate and persist the finalization receipt, close the original Runtime
-   Session through a narrow CSI repository operation, and mark `DRAINED` in one
-   transaction. Retain the binding slot, handle and physical holder. Local
+6. Revalidate the complete stable inventory and persist the exact finalization
+   receipt, CAS only the original logical Runtime Session `READY` to `RELEASED`
+   through a narrow CSI repository operation, and CAS progress to `DRAINED` in
+   one Connection/transaction. Retain the binding slot, handle and physical holder. Local
    Harness disposal stops renewal and releases local resources without appending
    another activation boundary or changing the cut's journal head.
 
-Step 3 is allowed only after all original settlement and required ACKs succeed.
-Its terminal boundary must bind the exact previously settled prefix; no ordinary
+Step 3 is allowed only after all original settlement obligations succeed. The
+first native file/model lane refuses legacy publication/ACK history; a later
+supported ACK path requires separate qualification. Its terminal boundary must
+bind the exact previously settled prefix; no ordinary
 work suffix or replacement activation is accepted. The new cut verifier handles
 this boundary explicitly instead of claiming the older result checkpoint covers
-a later activation event. A crash between the boundary and cut resumes only
-with the original valid writer; expiry or an incomplete boundary blocks, without
-new activation or repeated live ACK. After the cut, a crash/conflict remains
+a later activation event. Before atomic terminal/cut commit, retries consume
+only the saved frozen request with the still-valid original authority and fixed
+deadline; expiry or incomplete evidence blocks without a new activation or
+repeated live ACK. After the cut, a crash/conflict remains
 `DRAINING` with the same cut; resume original finalization, never reopen the
 Session or roll back to another manifest. If the worker cannot confirm it,
 report the blocker and retain ownership. New protocol fixtures must reject a
-different cut, Pod, generation or profile. Existing boot-v3/`managed-csi/1`
-workers cannot be upgraded in place into this contract.
+different cut, Pod, generation or profile. New handle-v4/boot-v6 pins the
+`qwen-csi-file-finalize/1` contract while retaining `managed-csi/2` file
+admission. Existing boot-v3/4/5 workers cannot be upgraded in place into this
+contract; exact old handle replay must reconstruct its original boot bytes.
 
 From the terminal boundary onward, use a narrowly scoped historical validator.
 Existing live ACK helpers require an ACTIVE durable Session, live activation and
 READY Runtime Session; those requirements intentionally cease during closure.
-Before the cut, require the original writer and exact original native boundary;
+Before the cut, require the original writer, exact saved candidate and complete
+active predecessor;
 after it, require the committed cut and resulting sealed head. Verify unchanged
 committed receipt/resource/ACK pins and current quarantine without reacquiring a
 writer. The semantic verifier runs in the trusted coordinator's pinned bundle,
@@ -629,13 +653,16 @@ incarnation-bound event history.
 ## 7. Atomic release, retry and migration
 
 Perform semantic replay and external resource/source verification before SQL
-commit. Preserve the current lock order:
+commit. The new application and physical-release consumers must qualify the
+same common prefix; physical release must not take retention after descendants:
 
-1. Tenant placement domain → active slot → original binding.
-2. Registration alias → shared physical holder → retirement.
-3. Original Runtime Session → sorted executions.
-4. Tenant quota/retention → sorted durable Session heads → publications.
-5. Receipt/finish/journal/resource authorities → ACK and retirement evidence.
+1. Tenant placement domain → tenant quota/retention.
+2. Complete sorted slots/bindings → indexed current private pin/context.
+3. Registration alias → shared physical holder → immutable retirement/progress.
+4. Complete durable Session heads/history/resources/refs → original Runtime
+   Session membership → sorted executions.
+5. Complete publication/read/output/secondary inventory → ACK and physical
+   retirement evidence in declared fixed table/key order.
 
 Keep the existing ten-second SQL timeout and recheck deadlines against fresh
 database time after lock waits. A timeout rolls back; it is not evidence of a
@@ -643,7 +670,8 @@ free volume. No Kubernetes, worker RPC or object I/O runs inside this transactio
 
 The final transaction rechecks the committed cut, finalization, original stop
 and unpublish records, all original identity/revision pins, and current resource
-quarantine/protection status. It then marks the retirement `RELEASED`, makes the
+quarantine/protection status. It then records the qualified physical `RELEASED`
+outcome without overwriting the immutable intent phase/identity, makes the
 original binding terminal, clears only its active slot, and releases only its
 physical holder atomically on the same connection. Add a narrow repository
 method; do not loosen generic sealed-binding CAS or call its independent
@@ -656,6 +684,14 @@ actual original reservation/drain revisions; remove fixed 1/2 assumptions from
 all readers, snapshot exporters and ACK consumers in the same change. There is
 no need to introduce an unused ownership `ACTIVE` phase.
 
+The current revision-adaptation candidate validates the three-state cycle and
+bounds revisions at 9007199254740990. Reservation and drain writers bind the
+checked next value in SQL. Continuation, intent, inventory, snapshot and runtime
+observation readers compare the original saved reservation and its exact next
+drain revision, including later cycles. This does not add the physical release
+writer or qualify reuse. A fresh Session's runtime generation remains 1 and
+does not follow the shared physical holder counter.
+
 A new reservation uses a fresh reservation UUID, runtime generation and Pod;
 it cannot inherit an old ACK or release receipt. Cross-tenant aliases continue
 to serialize on the same physical key. Do not place a wait under SQL locks or
@@ -667,16 +703,18 @@ volume now belongs to someone else. Historical lookup must not require current
 for a released retirement. Missing original handles and ambiguous CREATE remain
 blocked; “no handle” is not proof that no mount existed.
 
-The current main synchronization keeps published migrations V48–V52 unchanged,
-including Workspace lifecycle V51 and mutation-attempt sequence V52, and
-renumbers this Draft's unpublished Session request and first activation
-migrations to V53 and V54. Their SQL bytes and ordering do not change. Fresh
-upgrade checks must start from main V52 and request-only V53, retain legacy rows
-and versions, and require a NULL first-activation pin rather than backfilling
-authority. Earlier local qualification databases used V51/V52 or V52/V53
-numbering and were owned and cleaned; their evidence is historical. This is not a shared database upgrade
-from unpublished versions and does not rewrite applied migration history.
-See the [lifecycle main synchronization design](2026-10-08-k2-lifecycle-main-sync.md).
+At `446e6a93c4d5ce07d9d6091b4431112965e278f7`, published main migrations through
+V62 remain unchanged; published V53/V54 belong to Workspace roles and child
+lineage relay. This Draft's unpublished Session request, first activation,
+native execution authorization and resource-read migrations are V63–V66,
+respectively. Fresh upgrade checks start from published main V62, retain all
+old rows/history and require NULL native authority pins rather than backfilling
+them. The bounded main62→66 verification belongs to its exact recorded commit;
+it does not qualify a future application migration. The earlier
+[lifecycle synchronization](2026-10-08-k2-lifecycle-main-sync.md) and local
+V51/V52, V52/V53 or V53/V54 development numbering remain historical. Those owned
+databases were cleaned; this is not a shared upgrade from unpublished versions
+and does not rewrite applied migration history.
 
 Add migrations using the next free version at implementation time. Preserve
 legacy LOCAL rows, existing CSI identity bytes and ACK digests. Never backfill

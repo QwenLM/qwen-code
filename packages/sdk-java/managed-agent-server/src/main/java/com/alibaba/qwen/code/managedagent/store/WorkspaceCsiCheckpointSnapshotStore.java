@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -548,7 +549,8 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 && registration.revision() == number(registrationRow, "registration_revision")
                 && registration.mountRoot().equals(request.getScope().getCanonicalCwd()));
         var original = intent.reservation();
-        require(original != null && "RESERVED".equals(original.phase()) && original.revision() == 1
+        require(original != null && "RESERVED".equals(original.phase())
+                && CsiOwnershipRevision.reserved(original.revision())
                 && uuid(original.reservationId()) && registration.aliasKey().equals(original.registrationKey())
                 && Objects.equals(registration.revision(), original.registrationRevision())
                 && runtime.getBindingId().equals(original.bindingId())
@@ -557,7 +559,8 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
         Map<String, Object> holder = one(connection,
                 "SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", registration.physicalKey());
         require("CSI".equals(holder.get("storage_kind")) && "DRAINING".equals(holder.get("csi_phase"))
-                && number(holder, "csi_revision") == 2 && holder.get("holder_key") == null
+                && number(holder, "csi_revision") == CsiOwnershipRevision.next(original.revision())
+                && holder.get("holder_key") == null
                 && holder.get("runtime_session_id") == null
                 && original.reservationId().equals(holder.get("csi_reservation_id"))
                 && original.registrationKey().equals(holder.get("csi_registration_key"))

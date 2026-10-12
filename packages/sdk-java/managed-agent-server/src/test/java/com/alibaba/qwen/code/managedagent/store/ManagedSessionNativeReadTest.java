@@ -130,11 +130,11 @@ class ManagedSessionNativeReadTest {
     }
 
     @Test
-    void sealingRefusesNewReadsBeforeHistoryOrFetch() {
+    void sealingRefusesNonCheckpointReadsBeforeHistoryOrFetch() {
         retire();
         source.onFetch = () -> { throw new AssertionError("sealed read reached fetch"); };
         assertThatThrownBy(this::read).isInstanceOfSatisfying(RuntimeBrokerException.class,
-                error -> assertThat(error.getCode()).isEqualTo("runtime_admission_closed"));
+                error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
         assertThat(count("qwen_csi_resource_read")).isZero();
         assertThat(count("qwen_output_read_lease")).isZero();
     }

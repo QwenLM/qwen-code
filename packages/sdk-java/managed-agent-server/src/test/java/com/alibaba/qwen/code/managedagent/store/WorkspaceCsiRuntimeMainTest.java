@@ -58,7 +58,8 @@ class WorkspaceCsiRuntimeMainTest {
     @Test
     void refusesInvalidCommandBeforeReadingCredentialsOrStartingServer() {
         for (String[] args : List.of(new String[] {}, new String[] {"create", "missing", "43190"},
-                new String[] {"serve", "missing", "0"}, new String[] {"serve", "missing", "65536"})) {
+                new String[] {"serve", "missing", "0"}, new String[] {"serve", "missing", "65536"},
+                new String[] {"physical"}, new String[] {"physical", "release", "missing", "missing", "retirement"})) {
             assertThatThrownBy(() -> WorkspaceCsiRuntimeMain.run(args)).isInstanceOf(IllegalArgumentException.class);
         }
     }

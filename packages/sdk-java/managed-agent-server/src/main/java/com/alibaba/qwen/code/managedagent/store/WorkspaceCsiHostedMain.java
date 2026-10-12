@@ -45,7 +45,8 @@ final class WorkspaceCsiHostedMain {
                 .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
                 .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
         var request = WorkspaceCsiRuntimeMain.readRequest(Path.of(args[1]), json);
-        var text = readText(Path.of(args[2]), json);
+        boolean retiring = "retire".equals(args[0]);
+        var text = retiring ? null : readText(Path.of(args[2]), json);
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision(required("K2_AGENT_REVISION"));
         properties.getSessionStore().setBindingKey(required("QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY"));
@@ -55,9 +56,39 @@ final class WorkspaceCsiHostedMain {
         var bindings = new JdbcRuntimeBindingRepository(source, AesGcmSecretProtector.fromBase64(
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"),
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
-        var access = new WorkspaceCsiRuntimeAccess(new JdbcTemplate(source), new DataSourceTransactionManager(source),
+        var jdbc = new JdbcTemplate(source);
+        var manager = new DataSourceTransactionManager(source);
+        var access = new WorkspaceCsiRuntimeAccess(jdbc, manager,
                 json, properties, request.registration(), request.sessionId(), request.runtimeRequestKey(),
                 bindings, new JdbcRuntimeSessionRepository(source), new HttpRuntimeTransport());
+        if (retiring) {
+            UUID.fromString(args[2]);
+            var ids = jdbc.queryForList("SELECT binding_id FROM managed_workspace_csi_retirement WHERE retirement_id = ?", String.class, args[2]);
+            if (ids.size() != 1) {
+                throw new IllegalArgumentException("Original retirement is unavailable");
+            }
+            var binding = bindings.findById(ids.getFirst());
+            WorkspaceCsiRuntimeMain.requireSelected(request, binding);
+            var intent = new WorkspaceCsiReservationStore(jdbc, manager, json).inspectRetirement(request.registration(), bindings, binding);
+            if (intent == null || !args[2].equals(intent.operationId())) {
+                throw new IllegalArgumentException("Original retirement is unavailable");
+            }
+            URI baseUri = hostedUri(required("K2_HOSTED_URL"));
+            String token = required("K2_HOSTED_TOKEN");
+            try (var negotiation = HostedHarnessClient.builder().baseUri(baseUri).bearerToken(token)
+                    .capabilityDigest(required("QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST")).build();
+                    var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).followRedirects(HttpClient.Redirect.NEVER).build()) {
+                JsonNode result = post(client, baseUri.resolve("/session/" + request.sessionId() + "/internal-csi/retire"),
+                        token, negotiation.capabilities().getBootId(), Map.of("tenantId", request.registration().tenantId(),
+                                "workspaceId", binding.getRequest().getScope().getWorkspaceId(), "bindingId", binding.getBindingId(), "retirementId", args[2]), json);
+                if (!"qwen-csi-application-retirement/1".equals(result.path("format").textValue())
+                        || !"DRAINED".equals(result.path("stage").textValue()) || !args[2].equals(result.path("retirementId").textValue())) {
+                    throw new IllegalStateException("Original CSI application has not drained");
+                }
+                System.out.println(json.writeValueAsString(result));
+            }
+            return;
+        }
         var scope = access.resolve(request.sessionId()).toCompletableFuture().join();
         URI baseUri = hostedUri(required("K2_HOSTED_URL"));
         String token = required("K2_HOSTED_TOKEN");

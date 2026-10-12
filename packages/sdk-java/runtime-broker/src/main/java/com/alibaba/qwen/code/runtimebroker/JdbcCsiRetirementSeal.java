@@ -63,7 +63,7 @@ final class JdbcCsiRetirementSeal {
     private static void verifyAssociation(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             Identity identity) throws SQLException, IOException {
         Reservation reservation = identity.reservation();
-        require("RESERVED".equals(reservation.phase()) && reservation.revision() == 1
+        require("RESERVED".equals(reservation.phase()) && CsiOwnershipRevision.reserved(reservation.revision())
                 && reservation.reservationId().equals(UUID.fromString(reservation.reservationId()).toString())
                 && original.bindingId().equals(reservation.bindingId())
                 && original.generation() == reservation.runtimeGeneration()
@@ -108,7 +108,8 @@ final class JdbcCsiRetirementSeal {
             statement.setString(1, identity.physicalKey());
             try (var row = statement.executeQuery()) {
                 require(row.next() && "CSI".equals(row.getString("storage_kind"))
-                        && "DRAINING".equals(row.getString("csi_phase")) && row.getLong("csi_revision") == 2
+                        && "DRAINING".equals(row.getString("csi_phase"))
+                        && row.getLong("csi_revision") == CsiOwnershipRevision.next(reservation.revision())
                         && reservation.reservationId().equals(row.getString("csi_reservation_id"))
                         && reservation.registrationKey().equals(row.getString("csi_registration_key"))
                         && reservation.registrationRevision() == row.getLong("csi_registration_revision")

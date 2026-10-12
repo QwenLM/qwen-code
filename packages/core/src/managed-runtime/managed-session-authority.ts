@@ -437,6 +437,7 @@ export class LocalManagedSessionAuthority {
   private writeFailure: Error | undefined;
   private recoveryBlocked = false;
   private queue: Promise<unknown> = Promise.resolve();
+  private retirementPreparation?: Promise<readonly unknown[]>;
   private readonly eventIds = new Set<string>();
   private readonly checkpointSequences = new Map<string, number>();
   private checkpoint: ManagedSessionCheckpoint | undefined;
@@ -750,6 +751,11 @@ export class LocalManagedSessionAuthority {
    * stays closed to writers that do not know how to take it over.
    */
   async close(): Promise<void> {
+    if (this.retirementPreparation) {
+      throw new ManagedSessionConflictError(
+        'original CSI retirement owns the final boundary.',
+      );
+    }
     await this.journal.seal(this.commitProof);
   }
 
@@ -1098,7 +1104,9 @@ export class LocalManagedSessionAuthority {
    * initialisation establishes before any model request.
    */
   async commitCheckpoint(
-    command: ManagedSessionCommand,
+    command:
+      | ManagedSessionCommand
+      | ((state: Buffer, coveredSequence: number) => ManagedSessionCommand),
     request: { state: Buffer; boundary: string | null },
     actor: ManagedSessionActor,
   ): Promise<ManagedSessionCheckpointReceipt> {
@@ -1140,15 +1148,17 @@ export class LocalManagedSessionAuthority {
               },
             })
           : request.state;
+      const assignedCommand =
+        typeof command === 'function' ? command(state, covered) : command;
       const stateRef = await store.publish('managed-checkpoint', state);
       const receipt = await this.commit(
-        command,
+        assignedCommand,
         [
           {
             v: MANAGED_SESSION_FORMAT_VERSION,
             sequence: this.committed + 1,
             eventId: checkpointId,
-            sessionKey: command.sessionKey,
+            sessionKey: assignedCommand.sessionKey,
             kind: 'checkpoint.committed',
             occurredAt: this.now(),
             subject: {
@@ -2852,6 +2862,13 @@ export class LocalManagedSessionAuthority {
    * records around each other's commit markers.
    */
   private runSerial<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.retirementPreparation) {
+      return Promise.reject(
+        new ManagedSessionConflictError(
+          'original CSI retirement admission is closed.',
+        ),
+      );
+    }
     const pending = this.queue.then(operation, operation);
     this.queue = pending.then(
       () => undefined,
@@ -2992,51 +3009,17 @@ export class LocalManagedSessionAuthority {
       encoded.reduce((sum, line) => sum + Buffer.byteLength(line, 'utf8'), 0),
     );
 
-    const marker = parseManagedSessionCommitMarker({
-      transactionId: randomUUID(),
-      commandId: command.commandId,
-      operation: command.operation,
-      contentDigest: command.contentDigest,
-      firstSequence: events[0].sequence,
-      lastSequence: events[events.length - 1].sequence,
-      eventCount: events.length,
-      eventsDigest: managedSessionEventsDigest(events),
-      previousCommitDigest: this.lastMarkerDigest,
-    });
-    const markerLine = JSON.stringify(marker);
-    if (
-      Buffer.byteLength(markerLine, 'utf8') >
-      MANAGED_SESSION_LIMITS.maxCommitMarkerBytes
-    ) {
-      throw new ManagedSessionRecordError(
-        `commit marker exceeds ${MANAGED_SESSION_LIMITS.maxCommitMarkerBytes} bytes.`,
-      );
-    }
-
+    const { marker, records, lastRecordUuid } = this.encodeTransaction(
+      command,
+      events,
+    );
     const branches = await this.validateRecoveryFacts(events);
 
     // Events first, marker last: a crash before the marker leaves the
     // transaction invisible rather than half applied.
-    const records: unknown[] = [];
-    let lastRecordUuid = this.lastRecordUuid;
-    for (const event of events) {
-      const next = this.createRecord(
-        MANAGED_SESSION_EVENT_SUBTYPE,
-        event,
-        lastRecordUuid,
-      );
-      records.push(next.record);
-      lastRecordUuid = next.uuid;
-    }
-    const final = this.createRecord(
-      MANAGED_SESSION_COMMIT_SUBTYPE,
-      marker,
-      lastRecordUuid,
-    );
-    records.push(final.record);
     try {
       await this.journal.appendTransaction(records);
-      this.lastRecordUuid = final.uuid;
+      this.lastRecordUuid = lastRecordUuid;
     } catch (cause) {
       if (cause instanceof ManagedSessionCommitRejectedError) throw cause;
       // Records may already be on disk, so the sequences this transaction
@@ -3077,6 +3060,51 @@ export class LocalManagedSessionAuthority {
     });
     extension?.apply();
     return receipt;
+  }
+
+  private encodeTransaction(
+    command: ManagedSessionCommand,
+    events: readonly ManagedSessionEvent[],
+  ) {
+    const marker = parseManagedSessionCommitMarker({
+      transactionId: randomUUID(),
+      commandId: command.commandId,
+      operation: command.operation,
+      contentDigest: command.contentDigest,
+      firstSequence: events[0].sequence,
+      lastSequence: events[events.length - 1].sequence,
+      eventCount: events.length,
+      eventsDigest: managedSessionEventsDigest(events),
+      previousCommitDigest: this.lastMarkerDigest,
+    });
+    const markerLine = JSON.stringify(marker);
+    if (
+      Buffer.byteLength(markerLine, 'utf8') >
+      MANAGED_SESSION_LIMITS.maxCommitMarkerBytes
+    ) {
+      throw new ManagedSessionRecordError(
+        `commit marker exceeds ${MANAGED_SESSION_LIMITS.maxCommitMarkerBytes} bytes.`,
+      );
+    }
+
+    const records: unknown[] = [];
+    let lastRecordUuid = this.lastRecordUuid;
+    for (const event of events) {
+      const next = this.createRecord(
+        MANAGED_SESSION_EVENT_SUBTYPE,
+        event,
+        lastRecordUuid,
+      );
+      records.push(next.record);
+      lastRecordUuid = next.uuid;
+    }
+    const final = this.createRecord(
+      MANAGED_SESSION_COMMIT_SUBTYPE,
+      marker,
+      lastRecordUuid,
+    );
+    records.push(final.record);
+    return { marker, records, lastRecordUuid: final.uuid };
   }
 
   /**
@@ -3213,6 +3241,68 @@ export class LocalManagedSessionAuthority {
       operation: 'releaseActivation',
       subject: this.currentActivationSubject,
     });
+  }
+
+  /** Stages one original release without appending or applying it locally. */
+  prepareOriginalCsiRelease(): Promise<readonly unknown[]> {
+    if (this.retirementPreparation) return this.retirementPreparation;
+    const prepared = this.queue.then(async () => {
+      const current = this.activation;
+      if (
+        this.writeFailure ||
+        this.recoveryBlocked ||
+        this.compactedThrough !== 0 ||
+        this.header.createdBy !== 'hosted-harness' ||
+        !this.resources ||
+        !current ||
+        current.phase !== 'active' ||
+        current.epoch !== 1 ||
+        current.expiresAt === null ||
+        current.expiresAt <= this.now()
+      ) {
+        throw new ManagedSessionConflictError(
+          'original CSI activation cannot prepare retirement.',
+        );
+      }
+      const boundaryRef = await this.publishActivationBody(
+        'managed-activation-boundary',
+        {
+          version: 1,
+          activationId: current.activationId,
+          epoch: current.epoch,
+          committedSequence: this.committed,
+          lastRecordUuid: this.lastRecordUuid,
+        },
+      );
+      const command = {
+        operation: 'releaseActivation',
+        commandId: `${current.activationId}:released`,
+        sessionKey: this.sessionKey,
+        contentDigest: this.header.definitionRef.digest,
+      };
+      const event = parseManagedSessionEvent({
+        v: MANAGED_SESSION_FORMAT_VERSION,
+        sequence: this.committed + 1,
+        eventId: `activation:${current.activationId}:released`,
+        sessionKey: this.sessionKey,
+        kind: 'activation.changed',
+        occurredAt: this.now(),
+        payload: {
+          activationId: current.activationId,
+          epoch: current.epoch,
+          workerId: current.workerId,
+          subject: this.currentActivationSubject,
+          phase: 'released',
+          leaseDurationMs: null,
+          expiresAt: current.expiresAt,
+          installRef: null,
+          boundaryRef,
+        },
+      });
+      return this.encodeTransaction(command, [event]).records;
+    });
+    this.retirementPreparation = prepared;
+    return prepared;
   }
 
   private async publishActivationBody(

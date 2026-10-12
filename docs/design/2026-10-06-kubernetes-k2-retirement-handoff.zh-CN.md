@@ -2,13 +2,14 @@
 
 [English](2026-10-06-kubernetes-k2-retirement-handoff.md) | [简体中文](2026-10-06-kubernetes-k2-retirement-handoff.zh-CN.md)
 
-状态：补全设计、本地 K2-A1 原型与进行中的 K2-A2 实现，更新于 2026-10-07。
-原生边界观测器已实现；私有 CREATE/request 固定点已在本地实现并验证。
-原 binding/Session/writer guard 与首次原生 SQL activation 固定点已在本地实现，
-并接入部分 execution 准入、dispatch 与原 SQL continuation consumer。
-初始原生 checkpoint 门禁已在本地实现，并在自有 MySQL 上独立验证。
-完整[原生文件执行链](2026-10-07-k2-native-file-execution.zh-CN.md)已设计但尚未实现。
-完整 A2 准入关闭与 K2-B 到 K2-D 仍待完成；本文不声明完整 K2 或新增云上验收完成。
+状态：补全设计、本地 K2-A1 原型与 K2-A2 实现候选，更新于 2026-10-11。
+私有 CREATE/request 固定点、原 binding/Session/writer guard、原生 SQL activation
+与[原生文件执行链](2026-10-07-k2-native-file-execution.zh-CN.md)已实现，
+原 Read/Write/Edit 与 checkpoint renewal 已在自有 MySQL 上通过有界验证。
+[应用协调器](2026-10-11-k2-settled-application-cut.zh-CN.md)已实现。封存的 H 候选
+已在自有 MySQL 的真实 Hosted 路径通过 53 项应用检查与 12 个故障/重试窗口；
+其 Darwin kernel/path seam 将结果限制为应用行为，不资格化 ACK 安装或后续候选。
+完整 A2 验收与 K2-B 到 K2-D 仍待完成；本文不声明完整 K2 或新增云上验收完成。
 实现基线为 main
 `4bffa678bced8b14c25c85e3ba4226b7b752414d`，已包含以
 `69d5db2ff2424da01ac6f14e4c484773aae7204c` 合入的
@@ -75,7 +76,10 @@ slot 为 placement 权威，`managed_workspace_csi_retirement` 为退役 journal
 保持原 `identity_json` 字节不变：已保存 ACK 绑定其 digest。不再建立第二套 execution、
 publication、receipt 或 ACK ledger。
 
-在原身份之外增加有 revision 的进度和有界证据引用。拟议 retirement 阶段为：
+在原身份之外增加有 revision 的进度和有界证据引用。以下是拟议聚合生命周期阶段，
+不能据此覆盖不可变 intent。新 application 协议保留原 row 的 `phase='DRAINING'` 与
+`identity_json` 字节，以独立 revisioned progress 达到 `DRAINED`。合格物理释放也须
+保留不可变 intent，由后续窄 physical consumer 持久化其 exact outcome。
 
 | 阶段       | 含义                                                                                              | 能否重新分配存储？            |
 | ---------- | ------------------------------------------------------------------------------------------------- | ----------------------------- |
@@ -116,7 +120,7 @@ Finalization 引用 cut digest；`DRAINED` 引用两者。物理证据引用相�
 读取与创建权限，并使用固定 `csi-files-retirement-tools/1` 与
 `csi-files-retirement-policy/1` 引用。先分配 Session UUID，再导出以 Session 隔离的
 `kubernetes-workspace` request。远端 mount root 来自 registration，不在宿主机解析
-文件系统。V53 增加可空 `runtime_request_key`，不为旧数据回填成功证据；CREATE 将它与
+文件系统。V63 增加可空 `runtime_request_key`，不为旧数据回填成功证据；CREATE 将它与
 `tool_profile=csi-files-retirement/1` 同时插入。
 
 Capability digest 是精确 `CsiFilesRetirementProfile.CAPABILITY_MANIFEST` UTF-8
@@ -199,11 +203,13 @@ Managed Agent。
 原生 genesis 使用 `managed-definition` 与 `managed-root` 资源，原始 body 分别严格为
 `{engine: 'managed', sessionId, toolProfile: 'csi-files-retirement/1'}` 与 `{cwd}`。
 必须对应 Hosted creator 和原 CREATE Session scope。导入历史及额外 MCP、Hook、shell
-或 approval 配置不具备资格。窄 SQL reader 接受 genesis、install、同一身份 renew
-transaction，以及 READY 下仅一次的初始 `before_model` checkpoint。完整封闭的空
-checkpoint、原 header 引用、已覆盖前缀、activation、全 events hash、marker 与 state
-resource 必须一致。History fold 跨后续原 renewal 保留其引用，并与当前 head 对照。
-第二个 checkpoint、后续 phase 和无关 event 继续拒绝；这不构成正常文件执行链的资格。
+或 approval 配置不具备资格。早期 first-activation 批次接受 genesis、install、
+同一身份 renew transaction，以及 READY 下仅一次的初始 `before_model` checkpoint。
+当时完整封闭的空 checkpoint、原 header 引用、已覆盖前缀、activation、全 events
+hash、marker 与 state resource 必须一致。当前有界 native reader 还接受 input、
+后续 checkpoint、tool intent/result、message、model response、delta、turn settlement
+及 file-history commit。扩展后的语法不代表 application retirement 已具备资格；
+settled application cut 仍需通过下文规定的独立验收。
 
 在既有原生 parse 中保留完整有序 record。首个 install 和 renewal 各只有一个
 activation event；多个 activation event、缺少 event 的 activation
@@ -221,7 +227,7 @@ workspace 的旧 Session。所有 lifecycle 入口必须在锁定 Session 和检
 随后准入删除。旧 main 仅锁 Session 的删除准入报告保留为历史证据，不能证明新的
 锁序。Session 的 workspace 身份不可变。
 
-在 V54 及独立 JDBC 的 fresh/upgrade schema 中增加可空
+在 V64 及独立 JDBC 的 fresh/upgrade schema 中增加可空
 `first_activation_journal_revision`，不回填 legacy，也不增加调用方可设置的 binding
 字段。在原 SQL 连接上，首个接受在既有 binding/version 条件下将 NULL 固定为精确
 SQL journal revision，并将 `record_version` 增加一次。Resources、journal、head 与
@@ -393,27 +399,30 @@ drain 历史。M5c 的普通主机进程组工作可为未来 Shell 证明提供
 
 ### 5.4 Application cut 与 worker finalization
 
-按以下顺序执行，RPC 和 replay 期间不持有数据库锁：
+按以下提案顺序执行，RPC 和 replay 期间不持有数据库锁。[已结算原 owner 应用设计](2026-10-11-k2-settled-application-cut.zh-CN.md)
+定义首条支持路径、精确 writer gate、完整库存与新不可变 boot 契约；尚未实现或资格化。
 
-1. 提交原 retirement/seal，再封住原 worker；保留原 result/cancel/settlement 路径，按需续约原 writer。不能创建 replacement activation 来补旧 ACK。
-2. 枚举、完成原结果、提交 checkpoint，收集全部必要 ACK。取得 worker 候选观测：没有 pending start、调用、history 尾部工作或生命周期 blocker。
-3. 通过原 Harness 新的 CSI retirement-close 操作，停止新 Session 变更和 activation 续约，等待已准入 continuation/renewal 完成，再由仍有效的原 writer 提交原生 `releaseActivation` boundary。不能调用通用 close：它还会在 coordinator 提交 cut 前封住 journal。
-4. 重新导出、语义验证原历史，包括精确的 terminal activation boundary 及资源。在新的有界事务中加锁，重验成员、原 writer、当前 head、结果与资源。提交不可变 application cut，原子 seal journal/撤销 writer 权威，并记录最终 sealed head pin。Retention、writer 获取、activation 替换与普通 release 都须遵守 retirement fence。Runtime Session 保持 `READY` 供 worker finalization 使用。
+1. 提交原 retirement/seal，并原子保存同 intent 的 `SETTLING` progress 与固定 DB-time settlement deadline；保留 binding 和 physical holder。封住新准入，只允许已获授权的原结算在 deadline 内继续；不能用 replacement activation 或新工作补旧 prefix。
+2. 选择现有原 Hosted owner，在 join 真实已准入 task/raw renewal promise 前关闭普通准入与 renewal timer，并保留所有失败。首条路径要求完整已结算 Read/Write/Edit prefix；pending 或 UNKNOWN work 阻断。
+3. 在原 serial authority 中只准备一次 native `releaseActivation` body，不做 HTTP、writer acquisition 或 append。核完整 predecessor/candidate，在 SQL 外取得原 worker pre-cut barrier/inventory，再重验当前 authority，以 `FROZEN` 保存 exact body、server envelope 与 observation。重试保留原 UUID/ref/time/bytes；通用 close 不能代替此准备或 freeze。
+4. 在一个 fresh bounded Connection/transaction 中仅消费持久 frozen request，重验完整 predecessor 和唯一 terminal suffix，写入其 exact resource/ref/transaction，并原子提交不可变 application cut、`CUT` progress 与 journal `SEALED`。不存在另行提交的 ACTIVE-terminal 中间窗口。Retention、writer acquisition/renewal、activation replacement、binding control 与普通 release 遵守 progress gate。原 logical Runtime Session 保持 `READY` 供 worker finalization 使用。
 5. 携带 cut digest 调用原 worker 新版本的 `finalize` 操作。它原子比较 sealed invocation/history inventory 与 cut，并检查最终变更屏障；原尾部工作未结束时等待或拒绝，并永久拒绝后续变更。之后仅允许原 read/status/result 和相同 finalization 重试。
-6. 重新校验并保存 finalization receipt，通过窄 CSI repository 操作关闭原 Runtime Session，在同一事务标记 `DRAINED`。保留 binding slot、handle 与 physical holder。Harness 本地 dispose 停止续约并释放本地资源，不再追加 activation boundary 或改变 cut 的 journal head。
+6. 重验完整稳定库存，保存 exact finalization receipt，通过窄 CSI repository operation 仅 CAS 原 logical Runtime Session `READY`→`RELEASED`，并 CAS progress→`DRAINED`，三者在同一 Connection/transaction。保留 binding slot、handle 与 physical holder。Harness 本地 dispose 停止续约并释放本地资源，不再追加 activation boundary 或改变 cut 的 journal head。
 
-第 3 步只在全部原结算与必要 ACK 成功后执行。Terminal boundary 必须绑定精确的已结算
+第 3 步只在全部原结算义务成功后执行。首条 native file/model 路径拒绝旧 publication/ACK
+历史，后续支持的 ACK 路径需单独资格化。Terminal boundary 必须绑定精确的已结算
 prefix，不接受普通工作后缀或 replacement activation。新的 cut verifier 显式处理此
-boundary，不能声称更早的结果 checkpoint 覆盖了后来的 activation event。Boundary 与
-cut 之间崩溃时，仅允许仍有效的原 writer 继续；过期或 boundary 不完整就阻塞，不能新建
-activation 或重跑 live ACK。Cut 之后发生崩溃/冲突时，保持携带相同 cut 的 `DRAINING`；
+boundary，不能声称更早的结果 checkpoint 覆盖了后来的 activation event。原子 terminal/cut
+commit 前，重试仅消费持久 frozen request，并要求仍有效的原 authority 和固定 deadline；
+过期或证据不完整即阻塞，不新建 activation、不重跑 live ACK。Cut 之后发生崩溃/冲突时，保持携带相同 cut 的 `DRAINING`；
 恢复原 finalization，绝不重新开放 Session 或换另一个 manifest。若 worker 无法确认，
 报告 blocker 并保留所有权。新协议 fixtures 必须拒绝不同 cut、Pod、generation 或
-profile。现有 boot-v3/`managed-csi/1` worker 不能原地升级为此契约。
+profile。新 handle-v4/boot-v6 固定 `qwen-csi-file-finalize/1` 契约，保留 `managed-csi/2`
+文件准入。现有 boot-v3/4/5 worker 不能原地升级为此契约；旧 handle 精确重放须重建原 boot bytes。
 
 从 terminal boundary 开始使用范围严格的历史验证器。现有 live ACK helper 要求持久
 Session 为 ACTIVE、activation 有效、Runtime Session 为 READY；这些条件在关闭过程中
-会有意失效。Cut 前要求原 writer 和精确原生 boundary；cut 后要求已提交 cut 和最终
+会有意失效。Cut 前要求原 writer、exact saved candidate 与完整 active predecessor；cut 后要求已提交 cut 和最终
 sealed head。验证已提交 receipt/resource/ACK pin 未变及当前 quarantine，不重新取得
 writer。语义验证器在可信 coordinator 的固定 bundle 中运行，不接受 worker 提供的
 `matched` 标志；其结果还须与当前加锁的权威重新核对。
@@ -472,20 +481,22 @@ detach 或 VolumeAttachment 消失，都不能独立补足缺失的原 publicati
 
 ## 7. 原子释放、重试与迁移
 
-语义 replay 与外部资源/来源校验在 SQL commit 之前完成。保留现有锁顺序：
+语义 replay 与外部资源/来源校验在 SQL commit 之前完成。新 application 与 physical-release
+consumer 必须资格化同一 common prefix；物理释放不能在后代锁之后取得 retention：
 
-1. Tenant placement domain → active slot → 原 binding。
-2. Registration alias → 共享 physical holder → retirement。
-3. 原 Runtime Session → 排序的 execution。
-4. Tenant quota/retention → 排序的持久 Session head → publication。
-5. Receipt/finish/journal/resource 权威 → ACK 与 retirement evidence。
+1. Tenant placement domain → tenant quota/retention。
+2. 完整排序 slot/binding → 索引上的当前 private pin/context。
+3. Registration alias → 共享 physical holder → 不可变 retirement/progress。
+4. 完整持久 Session head/history/resource/ref → 原 Runtime Session membership → 排序 execution。
+5. 完整 publication/read/output/secondary inventory → ACK 与物理 retirement evidence，按声明的固定 table/key 顺序。
 
 保留既有十秒 SQL timeout，锁等待后按新的数据库时间重验 deadline。超时回滚，不证明卷
 空闲。事务内不执行 Kubernetes、worker RPC 或对象 I/O。
 
 最终事务重新检查已提交的 cut、finalization、原 stop/unpublish 记录、全部原身份/
-revision，以及当前资源 quarantine/protection 状态。随后在同一连接、同一事务中把
-retirement 标为 `RELEASED`、将原 binding 设为终态、仅清除其 active slot，并仅释放其
+revision，以及当前资源 quarantine/protection 状态。随后在同一连接、同一事务中
+保存 qualified physical `RELEASED` outcome 而不覆盖不可变 intent phase/identity，
+将原 binding 设为终态、仅清除其 active slot，并仅释放其
 physical holder。增加窄 repository 方法；不能放宽通用 sealed-binding CAS，也不能
 从 Workspace release 事务内部调用另起事务的通用 CAS。
 
@@ -495,6 +506,13 @@ released 0 → reserved 1 → draining 2 → released 3 → 下次 reserved 4，
 exporter 和 ACK consumer 中固定 1/2 的假设。无需引入没有消费者的所有权 `ACTIVE`
 阶段。
 
+当前 revision 适配候选校验三状态周期，并将 revision 上限固定为
+9007199254740990。reservation/drain writer 在 SQL 中绑定经过检查的 next value。
+continuation、intent、inventory、snapshot 和 runtime observation reader
+比较原已保存 reservation 及其精确 next drain revision，支持后续周期。
+这不新增 physical release writer，也不资格化复用。fresh Session 的 runtime
+generation 仍为 1，不跟随 shared physical holder counter。
+
 新 reservation 使用新的 reservation UUID、runtime generation 和 Pod，不能继承旧
 ACK 或 release receipt。跨 tenant alias 仍在同一 physical key 上串行。不能持 SQL
 锁等待，也不能因 busy 自动改选其他 storage profile。
@@ -503,14 +521,14 @@ ACK 或 release receipt。跨 tenant alias 仍在同一 physical key 上串行�
 查询不应要求当前仍为 `DRAINING` holder，但也不能变更新 holder，或为已释放 retirement
 提交新 ACK。缺少原 handle、CREATE 不确定仍阻塞；“没有 handle”不证明从未挂载。
 
-当前同步 main 保留已发布的 V48–V52，包括 Workspace lifecycle V51 与 mutation
-attempt sequence V52，将本 Draft 尚未发布的 Session request 与首次 activation
-migration 重编号为 V53、V54，SQL 字节与顺序不变。新升级检查必须分别从 main V52
-和仅 request 的 V53 开始，保留 legacy 行及版本，要求 first-activation pin 保持
-NULL，不能回填权威。此前本地资格验证数据库使用 V51/V52 或 V52/V53 编号，均自有
-且已清理，其证据仅属于历史提交。
-这不是使用未发布编号的共享数据库升级，不改写已应用 migration history。
-参见 [lifecycle main 同步设计](2026-10-08-k2-lifecycle-main-sync.zh-CN.md)。
+在 `446e6a93c4d5ce07d9d6091b4431112965e278f7`，main 已发布至 V62 的迁移均保持不变；
+已发布 V53/V54 分别属于 Workspace roles 和 child lineage relay。本 Draft 未发布的
+Session request、first activation、native execution authorization、resource-read
+migration 依次为 V63–V66。新升级检查从已发布 main V62 开始，保留全部旧行/history，
+要求 native authority pin 保持 NULL，不能回填。main62→66 有界验证只属于记录的准确提交，
+不资格化未来 application migration。此前 [lifecycle 同步](2026-10-08-k2-lifecycle-main-sync.zh-CN.md)
+及本地 V51/V52、V52/V53、V53/V54 开发编号保留为历史；这些自有数据库均已清理。
+这不是未发布编号的共享升级，不改写已应用 migration history。
 
 实现时使用下一个可用 migration 版本。保留旧 LOCAL 行、现有 CSI identity 字节和 ACK
 digest。不回填 `DRAINED`、`RELEASED` 或正向证据。在所有 coordinator writer/reader

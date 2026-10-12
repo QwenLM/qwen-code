@@ -1,0 +1,273 @@
+{
+  "schemaVersion": 1,
+  "kubernetesVersion": "v1.36.2",
+  "source": "https://raw.githubusercontent.com/kubernetes/api/v0.36.2/core/v1/types.go",
+  "sourceSha256": "335f6d034eb92b6751e9fc3833e5c027aa0da8138de44acaaadf62c5cf25183a",
+  "fields": {
+    "PodSpec": {
+      "volumes": "[]Volume",
+      "initContainers": "[]Container",
+      "containers": "[]Container",
+      "ephemeralContainers": "[]EphemeralContainer",
+      "restartPolicy": "RestartPolicy",
+      "terminationGracePeriodSeconds": "int64",
+      "activeDeadlineSeconds": "int64",
+      "dnsPolicy": "DNSPolicy",
+      "nodeSelector": "map[string]string",
+      "serviceAccountName": "string",
+      "serviceAccount": "string",
+      "automountServiceAccountToken": "bool",
+      "nodeName": "string",
+      "hostNetwork": "bool",
+      "hostPID": "bool",
+      "hostIPC": "bool",
+      "shareProcessNamespace": "bool",
+      "securityContext": "PodSecurityContext",
+      "imagePullSecrets": "[]LocalObjectReference",
+      "hostname": "string",
+      "subdomain": "string",
+      "affinity": "Affinity",
+      "schedulerName": "string",
+      "tolerations": "[]Toleration",
+      "hostAliases": "[]HostAlias",
+      "priorityClassName": "string",
+      "priority": "int32",
+      "dnsConfig": "PodDNSConfig",
+      "readinessGates": "[]PodReadinessGate",
+      "runtimeClassName": "string",
+      "enableServiceLinks": "bool",
+      "preemptionPolicy": "PreemptionPolicy",
+      "overhead": "ResourceList",
+      "topologySpreadConstraints": "[]TopologySpreadConstraint",
+      "setHostnameAsFQDN": "bool",
+      "os": "PodOS",
+      "hostUsers": "bool",
+      "schedulingGates": "[]PodSchedulingGate",
+      "resourceClaims": "[]PodResourceClaim",
+      "resources": "ResourceRequirements",
+      "hostnameOverride": "string",
+      "schedulingGroup": "PodSchedulingGroup"
+    },
+    "Container": {
+      "name": "string",
+      "image": "string",
+      "command": "[]string",
+      "args": "[]string",
+      "workingDir": "string",
+      "ports": "[]ContainerPort",
+      "envFrom": "[]EnvFromSource",
+      "env": "[]EnvVar",
+      "resources": "ResourceRequirements",
+      "resizePolicy": "[]ContainerResizePolicy",
+      "restartPolicy": "ContainerRestartPolicy",
+      "restartPolicyRules": "[]ContainerRestartRule",
+      "volumeMounts": "[]VolumeMount",
+      "volumeDevices": "[]VolumeDevice",
+      "livenessProbe": "Probe",
+      "readinessProbe": "Probe",
+      "startupProbe": "Probe",
+      "lifecycle": "Lifecycle",
+      "terminationMessagePath": "string",
+      "terminationMessagePolicy": "TerminationMessagePolicy",
+      "imagePullPolicy": "PullPolicy",
+      "securityContext": "SecurityContext",
+      "stdin": "bool",
+      "stdinOnce": "bool",
+      "tty": "bool"
+    },
+    "EnvVar": {
+      "name": "string",
+      "value": "string",
+      "valueFrom": "EnvVarSource"
+    },
+    "EnvVarSource": {
+      "fieldRef": "ObjectFieldSelector",
+      "resourceFieldRef": "ResourceFieldSelector",
+      "configMapKeyRef": "ConfigMapKeySelector",
+      "secretKeyRef": "SecretKeySelector",
+      "fileKeyRef": "FileKeySelector"
+    },
+    "ObjectFieldSelector": {
+      "apiVersion": "string",
+      "fieldPath": "string"
+    },
+    "ContainerPort": {
+      "name": "string",
+      "hostPort": "int32",
+      "containerPort": "int32",
+      "protocol": "Protocol",
+      "hostIP": "string"
+    },
+    "Probe": {
+      "initialDelaySeconds": "int32",
+      "timeoutSeconds": "int32",
+      "periodSeconds": "int32",
+      "successThreshold": "int32",
+      "failureThreshold": "int32",
+      "terminationGracePeriodSeconds": "int64",
+      "exec": "ExecAction",
+      "httpGet": "HTTPGetAction",
+      "tcpSocket": "TCPSocketAction",
+      "grpc": "GRPCAction"
+    },
+    "TCPSocketAction": {
+      "port": "intstr.IntOrString",
+      "host": "string"
+    },
+    "ResourceRequirements": {
+      "limits": "ResourceList",
+      "requests": "ResourceList",
+      "claims": "[]ResourceClaim"
+    },
+    "SecurityContext": {
+      "capabilities": "Capabilities",
+      "privileged": "bool",
+      "seLinuxOptions": "SELinuxOptions",
+      "windowsOptions": "WindowsSecurityContextOptions",
+      "runAsUser": "int64",
+      "runAsGroup": "int64",
+      "runAsNonRoot": "bool",
+      "readOnlyRootFilesystem": "bool",
+      "allowPrivilegeEscalation": "bool",
+      "procMount": "ProcMountType",
+      "seccompProfile": "SeccompProfile",
+      "appArmorProfile": "AppArmorProfile"
+    },
+    "Capabilities": {
+      "add": "[]Capability",
+      "drop": "[]Capability"
+    },
+    "PodSecurityContext": {
+      "seLinuxOptions": "SELinuxOptions",
+      "windowsOptions": "WindowsSecurityContextOptions",
+      "runAsUser": "int64",
+      "runAsGroup": "int64",
+      "runAsNonRoot": "bool",
+      "supplementalGroups": "[]int64",
+      "supplementalGroupsPolicy": "SupplementalGroupsPolicy",
+      "fsGroup": "int64",
+      "sysctls": "[]Sysctl",
+      "fsGroupChangePolicy": "PodFSGroupChangePolicy",
+      "seccompProfile": "SeccompProfile",
+      "appArmorProfile": "AppArmorProfile",
+      "seLinuxChangePolicy": "PodSELinuxChangePolicy"
+    },
+    "SeccompProfile": {
+      "type": "SeccompProfileType",
+      "localhostProfile": "string"
+    },
+    "AppArmorProfile": {
+      "type": "AppArmorProfileType",
+      "localhostProfile": "string"
+    },
+    "Volume": {
+      "name": "string",
+      "hostPath": "HostPathVolumeSource",
+      "emptyDir": "EmptyDirVolumeSource",
+      "gcePersistentDisk": "GCEPersistentDiskVolumeSource",
+      "awsElasticBlockStore": "AWSElasticBlockStoreVolumeSource",
+      "gitRepo": "GitRepoVolumeSource",
+      "secret": "SecretVolumeSource",
+      "nfs": "NFSVolumeSource",
+      "iscsi": "ISCSIVolumeSource",
+      "glusterfs": "GlusterfsVolumeSource",
+      "persistentVolumeClaim": "PersistentVolumeClaimVolumeSource",
+      "rbd": "RBDVolumeSource",
+      "flexVolume": "FlexVolumeSource",
+      "cinder": "CinderVolumeSource",
+      "cephfs": "CephFSVolumeSource",
+      "flocker": "FlockerVolumeSource",
+      "downwardAPI": "DownwardAPIVolumeSource",
+      "fc": "FCVolumeSource",
+      "azureFile": "AzureFileVolumeSource",
+      "configMap": "ConfigMapVolumeSource",
+      "vsphereVolume": "VsphereVirtualDiskVolumeSource",
+      "quobyte": "QuobyteVolumeSource",
+      "azureDisk": "AzureDiskVolumeSource",
+      "photonPersistentDisk": "PhotonPersistentDiskVolumeSource",
+      "projected": "ProjectedVolumeSource",
+      "portworxVolume": "PortworxVolumeSource",
+      "scaleIO": "ScaleIOVolumeSource",
+      "storageos": "StorageOSVolumeSource",
+      "csi": "CSIVolumeSource",
+      "ephemeral": "EphemeralVolumeSource",
+      "image": "ImageVolumeSource"
+    },
+    "SecretVolumeSource": {
+      "secretName": "string",
+      "items": "[]KeyToPath",
+      "defaultMode": "int32",
+      "optional": "bool"
+    },
+    "KeyToPath": {
+      "key": "string",
+      "path": "string",
+      "mode": "int32"
+    },
+    "PersistentVolumeClaimVolumeSource": {
+      "claimName": "string",
+      "readOnly": "bool"
+    },
+    "EmptyDirVolumeSource": {
+      "medium": "StorageMedium",
+      "sizeLimit": "resource.Quantity"
+    },
+    "ProjectedVolumeSource": {
+      "sources": "[]VolumeProjection",
+      "defaultMode": "int32"
+    },
+    "VolumeProjection": {
+      "secret": "SecretProjection",
+      "downwardAPI": "DownwardAPIProjection",
+      "configMap": "ConfigMapProjection",
+      "serviceAccountToken": "ServiceAccountTokenProjection",
+      "clusterTrustBundle": "ClusterTrustBundleProjection",
+      "podCertificate": "PodCertificateProjection"
+    },
+    "ConfigMapProjection": {
+      "items": "[]KeyToPath",
+      "optional": "bool",
+      "name": "string"
+    },
+    "VolumeMount": {
+      "name": "string",
+      "readOnly": "bool",
+      "recursiveReadOnly": "RecursiveReadOnlyMode",
+      "mountPath": "string",
+      "subPath": "string",
+      "mountPropagation": "MountPropagationMode",
+      "subPathExpr": "string"
+    },
+    "Affinity": {
+      "nodeAffinity": "NodeAffinity",
+      "podAffinity": "PodAffinity",
+      "podAntiAffinity": "PodAntiAffinity"
+    },
+    "NodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": "NodeSelector",
+      "preferredDuringSchedulingIgnoredDuringExecution": "[]PreferredSchedulingTerm"
+    },
+    "NodeSelector": {
+      "nodeSelectorTerms": "[]NodeSelectorTerm"
+    },
+    "NodeSelectorTerm": {
+      "matchExpressions": "[]NodeSelectorRequirement",
+      "matchFields": "[]NodeSelectorRequirement"
+    },
+    "NodeSelectorRequirement": {
+      "key": "string",
+      "operator": "NodeSelectorOperator",
+      "values": "[]string"
+    },
+    "Toleration": {
+      "key": "string",
+      "operator": "TolerationOperator",
+      "value": "string",
+      "effect": "TaintEffect",
+      "tolerationSeconds": "int64"
+    },
+    "PodSchedulingGate": {
+      "name": "string"
+    }
+  }
+}

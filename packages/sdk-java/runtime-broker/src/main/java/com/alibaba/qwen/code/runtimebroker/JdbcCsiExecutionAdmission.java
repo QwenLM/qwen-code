@@ -271,6 +271,8 @@ public final class JdbcCsiExecutionAdmission {
         require(saved != null && execution.getAuthorizedBindingVersion() != null
                 && execution.getAuthorizedDispatchGeneration() == execution.getDispatchGeneration()
                 && execution.getAuthorizedBindingVersion() > 0 && execution.getAuthorizedBindingVersion() <= original.version());
+        Long ceiling = JdbcCsiRetirementSeal.lock(connection, original);
+        require(ceiling == null || execution.wasDispatchAuthorizedBefore(ceiling));
         JsonNode value = CsiNativeActivationProof.readObject(CsiNativeActivationProof.utf8(saved));
         CsiNativeActivationProof.closed(value, java.util.Set.of("protocolVersion", "runtimeBindingId", "bindingGeneration", "authorizedBindingVersion",
                 "executionCallId", "dispatchGeneration", "authorizationRevision", "authorizationSequence", "executionReference",
@@ -375,7 +377,8 @@ public final class JdbcCsiExecutionAdmission {
                         row.getString("workspace_storage_id"), row.getString("cwd_relative"), row.getString("context_config_ref"),
                         row.getLong("context_revision"));
                 if (binding == null) {
-                    require(row.getInt("resource_handle_version") == WorkspaceCsiRuntimeIdentity.FILES_AUTHORITY_VERSION);
+                    require(row.getInt("resource_handle_version") == WorkspaceCsiRuntimeIdentity.FILES_AUTHORITY_VERSION
+                            || row.getInt("resource_handle_version") == WorkspaceCsiRuntimeIdentity.FILES_FINALIZATION_VERSION);
                     var handle = CsiNativeActivationProof.readObject(CsiNativeActivationProof.utf8(row.getString("resource_handle_json")));
                     return Map.of("identity", map(handle.path("profileIdentity")), "context", map(handle.path("context")),
                             "installedContext", ManagedContextProtocol.installation(original.request(),

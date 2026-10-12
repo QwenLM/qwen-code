@@ -84,8 +84,12 @@ class WorkspaceCsiSessionMainTest {
 
     @Test
     void createsAnOriginalPinBeforeAnyWorkerOrTurnAndReplaysWithoutChangingIt() {
+        assertThat(count("qwen_tool_publication_tenant")).isZero();
         var physicalBefore = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
         var first = create(request("create"));
+        var retention = jdbc.queryForMap("SELECT * FROM qwen_tool_publication_tenant");
+        assertThat(retention.get("tenant_id")).isEqualTo("tenant");
+        assertThat(retention.get("tenant_key")).isEqualTo(ToolPublicationRetentionStore.hash("tenant"));
         assertThat(first.replayed()).isFalse();
         assertThat(UUID.fromString(first.sessionId()).toString()).isEqualTo(first.sessionId());
         var row = jdbc.queryForMap("SELECT * FROM managed_agent_session");
@@ -107,6 +111,7 @@ class WorkspaceCsiSessionMainTest {
         jdbc.update("UPDATE managed_workspace_registry SET workspace_generation = 4, storage_id = 'changed',"
                 + " config_ref = 'changed', policy_ref = 'changed'");
         var replay = create(request("create"));
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_tool_publication_tenant")).isEqualTo(retention);
         assertThat(replay).isEqualTo(new WorkspaceCsiSessionMain.Created(first.sessionId(), first.runtimeRequestKey(), true));
         assertThat(json.<com.fasterxml.jackson.databind.JsonNode>valueToTree(jdbc.queryForMap("SELECT * FROM managed_agent_session"))).isEqualTo(json.<com.fasterxml.jackson.databind.JsonNode>valueToTree(row));
         assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(physicalBefore);

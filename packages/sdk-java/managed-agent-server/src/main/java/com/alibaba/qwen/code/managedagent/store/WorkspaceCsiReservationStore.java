@@ -3,6 +3,9 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationProgress;
+import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -123,13 +126,14 @@ public final class WorkspaceCsiReservationStore {
             if (!"RELEASED".equals(current.phase())) {
                 throw busy();
             }
+            long revision = nextRevision(current.revision());
             int changed = jdbc.update("UPDATE managed_workspace_execution_lease"
-                    + " SET csi_phase = 'RESERVED', csi_revision = csi_revision + 1,"
+                    + " SET csi_phase = 'RESERVED', csi_revision = ?,"
                     + " csi_reservation_id = ?, csi_registration_key = ?, csi_registration_revision = ?,"
                     + " binding_id = ?, runtime_generation = ?, csi_provision_request_id = ?"
                     + " WHERE storage_key = ? AND storage_kind = 'CSI' AND csi_phase = 'RELEASED'"
                     + " AND csi_revision = ? AND holder_key IS NULL AND runtime_session_id IS NULL",
-                    reservationId, registration.aliasKey(), registration.revision(), original.getBindingId(),
+                    revision, reservationId, registration.aliasKey(), registration.revision(), original.getBindingId(),
                     original.getGeneration(), requestId, registration.physicalKey(), current.revision());
             if (changed != 1) {
                 throw unavailable();
@@ -142,7 +146,7 @@ public final class WorkspaceCsiReservationStore {
             JdbcRuntimeBindingRepository bindings, RuntimeBindingRecord original,
             Reservation expected, String operationId) {
         requireRetirementInput(bindings, original);
-        if (expected == null || !"RESERVED".equals(expected.phase()) || expected.revision() != 1
+        if (expected == null || !"RESERVED".equals(expected.phase()) || !CsiOwnershipRevision.reserved(expected.revision())
                 || !uuid(operationId)) {
             throw unavailable();
         }
@@ -177,21 +181,32 @@ public final class WorkspaceCsiReservationStore {
                 throw unavailable();
             }
             Retirement intent = snapshot(operationId, registration, sealed, expected);
+            long settlementDeadline;
+            try {
+                settlementDeadline = Math.addExact(Instant.parse(intent.startedAt()).toEpochMilli(), 300_000L);
+            } catch (ArithmeticException error) {
+                throw unavailable();
+            }
             String encoded;
             try {
                 encoded = json.writeValueAsString(intent);
             } catch (JsonProcessingException error) {
                 throw unavailable();
             }
+            requireRetirementLease(current);
             jdbc.update("INSERT INTO managed_workspace_csi_retirement"
-                    + " (retirement_id, binding_id, runtime_generation, physical_key, phase, identity_json)"
-                    + " VALUES (?, ?, ?, ?, 'DRAINING', ?)", operationId, current.getBindingId(),
-                    current.getGeneration(), registration.physicalKey(), encoded);
+                    + " (retirement_id, binding_id, runtime_generation, physical_key, phase, identity_json,"
+                    + " progress_format, progress_version, progress_stage, settlement_deadline_ms)"
+                    + " VALUES (?, ?, ?, ?, 'DRAINING', ?, 'qwen-csi-application-retirement/1', 1, 'SETTLING', ?)",
+                    operationId, current.getBindingId(), current.getGeneration(), registration.physicalKey(), encoded,
+                    settlementDeadline);
+            requireRetirementLease(current);
+            long drainingRevision = nextRevision(expected.revision());
             if (jdbc.update("UPDATE managed_workspace_execution_lease"
-                    + " SET csi_phase = 'DRAINING', csi_revision = csi_revision + 1"
+                    + " SET csi_phase = 'DRAINING', csi_revision = ?"
                     + " WHERE storage_key = ? AND storage_kind = 'CSI' AND csi_phase = 'RESERVED'"
                     + " AND csi_revision = ? AND csi_reservation_id = ?",
-                    registration.physicalKey(), expected.revision(), expected.reservationId()) != 1) {
+                    drainingRevision, registration.physicalKey(), expected.revision(), expected.reservationId()) != 1) {
                 throw unavailable();
             }
             return intent;
@@ -232,6 +247,10 @@ public final class WorkspaceCsiReservationStore {
             if (!DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource())) {
                 throw unavailable();
             }
+            var guard = JdbcCsiFilesRetirementGuard.lockBindingControl(target, original.getBindingId());
+            if (guard != null) {
+                JdbcCsiApplicationProgress.lock(target, guard);
+            }
             return bindings.lockActiveForRetirement(target, original);
         });
         WorkspaceCsiRegistration registration = readRegistration(WorkspaceCsiRegistration.aliasKey(
@@ -264,9 +283,24 @@ public final class WorkspaceCsiReservationStore {
     private RuntimeBindingRecord lockRetirementBinding(JdbcRuntimeBindingRepository bindings,
             RuntimeBindingRecord original) {
         try {
-            return jdbc.execute((ConnectionCallback<RuntimeBindingRecord>) connection ->
-                    bindings.lockActiveForRetirement(connection, original));
+            return jdbc.execute((ConnectionCallback<RuntimeBindingRecord>) connection -> {
+                var target = DataSourceUtils.getTargetConnection(connection);
+                if (!DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource())) {
+                    throw unavailable();
+                }
+                JdbcCsiFilesRetirementGuard.lockBindingControl(target, original.getBindingId());
+                return bindings.lockActiveForRetirement(target, original);
+            });
         } catch (IllegalArgumentException | IllegalStateException error) {
+            throw unavailable();
+        }
+    }
+
+    private void requireRetirementLease(RuntimeBindingRecord binding) {
+        Instant now = jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
+                (row, index) -> Instant.ofEpochSecond(row.getLong(1), row.getLong(2) * 1000));
+        if (now == null || binding.getOperationOwner() == null || binding.getOperationLeaseUntil() == null
+                || !binding.getOperationLeaseUntil().isAfter(now)) {
             throw unavailable();
         }
     }
@@ -301,10 +335,10 @@ public final class WorkspaceCsiReservationStore {
     private void verifyRetirement(Retirement intent, WorkspaceCsiRegistration registration,
             RuntimeBindingRecord binding, Reservation holder) {
         Reservation original = intent.reservation();
-        if (original == null || !"RESERVED".equals(original.phase()) || original.revision() != 1
+        if (original == null || !"RESERVED".equals(original.phase()) || !CsiOwnershipRevision.reserved(original.revision())
                 || !matchesHolder(registration, binding, original)
-                || !"DRAINING".equals(holder.phase()) || holder.revision() != original.revision() + 1
-                || !holder.equals(new Reservation("DRAINING", original.revision() + 1,
+                || !"DRAINING".equals(holder.phase()) || holder.revision() != nextRevision(original.revision())
+                || !holder.equals(new Reservation("DRAINING", nextRevision(original.revision()),
                         original.reservationId(), original.registrationKey(), original.registrationRevision(),
                         original.bindingId(), original.runtimeGeneration(), original.provisionRequestId()))
                 || binding.getState() != RuntimeBindingRecord.State.DRAINING || !binding.isDrainRequested()
@@ -408,12 +442,16 @@ public final class WorkspaceCsiReservationStore {
                             row.getString("csi_reservation_id"), row.getString("csi_registration_key"),
                             row.getObject("csi_registration_revision", Long.class), row.getString("binding_id"),
                             row.getObject("runtime_generation", Long.class), row.getString("csi_provision_request_id"));
-                    boolean released = "RELEASED".equals(value.phase()) && value.revision() == 0
+                    // Later cycles require the unimplemented qualified historical-release validator.
+                    if (value.revision() > 2) {
+                        throw unavailable();
+                    }
+                    boolean released = "RELEASED".equals(value.phase()) && CsiOwnershipRevision.released(value.revision())
                             && value.reservationId() == null && value.registrationKey() == null
                             && value.registrationRevision() == null && value.bindingId() == null
                             && value.runtimeGeneration() == null && value.provisionRequestId() == null;
-                    boolean reserved = ("RESERVED".equals(value.phase()) && value.revision() == 1
-                            || "DRAINING".equals(value.phase()) && value.revision() == 2)
+                    boolean reserved = ("RESERVED".equals(value.phase()) && CsiOwnershipRevision.reserved(value.revision())
+                            || "DRAINING".equals(value.phase()) && CsiOwnershipRevision.draining(value.revision()))
                             && uuid(value.reservationId()) && value.registrationKey() != null
                             && value.registrationRevision() != null && value.registrationRevision() > 0
                             && value.bindingId() != null && value.runtimeGeneration() != null
@@ -428,6 +466,14 @@ public final class WorkspaceCsiReservationStore {
             throw unavailable();
         }
         return rows.getFirst();
+    }
+
+    private static long nextRevision(long revision) {
+        try {
+            return CsiOwnershipRevision.next(revision);
+        } catch (IllegalArgumentException error) {
+            throw unavailable();
+        }
     }
 
     private static Instant verifyBinding(WorkspaceCsiRegistration registration, RuntimeBindingRecord original,

@@ -432,7 +432,8 @@ public class ManagedSessionStore {
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateLeaseMillis(request.leaseMillis());
-        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        var continuation = lockCsiContinuation(tenantId, sessionId);
+        var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
@@ -444,6 +445,7 @@ public class ManagedSessionStore {
                 writerToken, now, true);
         Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                 plusMillis(now, request.leaseMillis()));
+        requireCsiLease(continuation, databaseEpochMillis(head.writerLeaseUntil()), databaseEpochMillis(leaseUntil));
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                         + " writer_lease_until = TIMESTAMPADD(MICROSECOND, ?,"
                         + " CAST(? AS DATETIME(6))),"
@@ -506,7 +508,8 @@ public class ManagedSessionStore {
         }
         validateText(request.recoveryDetailCode(), "recoveryDetailCode",
                 MAX_TEXT_BYTES);
-        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        var continuation = lockCsiContinuation(tenantId, sessionId);
+        var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
@@ -516,6 +519,7 @@ public class ManagedSessionStore {
         Timestamp now = databaseNow();
         requireWriter(head, request.writerId(), request.writerGeneration(),
                 writerToken, now, true);
+        requireCsiWriterCurrent(continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         if (request.recoveryStatus().equals(head.recoveryStatus())
                 && request.recoveryDetailCode()
                         .equals(head.recoveryDetailCode())) {
@@ -528,6 +532,7 @@ public class ManagedSessionStore {
                     "The Managed Session already has a different recovery"
                             + " block.");
         }
+        requireCsiWriterCurrent(continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                         + " recovery_status = ?, recovery_detail_code = ?,"
                         + " updated_at = ? WHERE tenant_id = ? AND"
@@ -554,7 +559,8 @@ public class ManagedSessionStore {
         checkLifecycleWriter(tenantId, sessionId, authority);
         validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
-        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        var continuation = lockCsiContinuation(tenantId, sessionId);
+        var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
@@ -579,6 +585,7 @@ public class ManagedSessionStore {
                             head.journalRevision(), head.committedSequence(), head.lastCommitDigest(), head.writerId());
                     return null;
                 });
+                requireCsiCurrentTime(continuation);
             }
             return replay(existing, request, validated.recordDigest(),
                     writerToken);
@@ -600,7 +607,7 @@ public class ManagedSessionStore {
             requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
         }
         commitResources(scopeKey, tenantId, sessionId, request, revision,
-                now, validated.resources());
+                now, validated.resources(), () -> requireCsiCurrentTime(continuation));
         if (authority != null && extensionRecords.hasNewLifecycleDispatch(tenantId, sessionId, validated.recordBytes(),
                 resourceId -> storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, resourceId))) {
             if (lifecycleExecution == null || lifecycleSessions == null) {
@@ -631,9 +638,11 @@ public class ManagedSessionStore {
                         request.firstSequence(), request.eventCount(), validated.recordBytes(), resourceReader);
         if (csiOriginal != null) {
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
-                JdbcCsiActivationAdmission.acceptCommit(connection, csiOriginal, CSI_JSON.valueToTree(request),
+                JdbcCsiActivationAdmission.acceptCommit(
+                        org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection),
+                        csiOriginal, CSI_JSON.valueToTree(request),
                         applied.records(), head.journalRevision(), head.committedSequence(),
-                        head.lastCommitDigest(), head.writerId(), now.toInstant().toEpochMilli());
+                        head.lastCommitDigest(), head.writerId(), now.toInstant().toEpochMilli(), continuation.progress());
                 return null;
             });
             requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
@@ -653,35 +662,9 @@ public class ManagedSessionStore {
                                     sessionId,
                                     resourceId));
         }
-        jdbc.update("INSERT INTO qwen_managed_session_journal_tx"
-                        + " (tenant_id, workspace_id, session_id,"
-                        + " journal_revision, command_key_hash,"
-                        + " transaction_id, operation, command_id,"
-                        + " content_digest, first_sequence, last_sequence,"
-                        + " event_count, events_digest,"
-                        + " previous_commit_digest, commit_digest,"
-                        + " writer_generation, writer_id,"
-                        + " writer_token_hash, activation_epoch,"
-                        + " latest_checkpoint_resource_id,"
-                        + " record_encoding, record_bytes, byte_length,"
-                        + " record_digest, created_at) VALUES (?, ?, ?, ?,"
-                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?,"
-                        + " 'identity', ?, ?, ?, ?)",
-                tenantId, request.workspaceId(), sessionId, revision,
-                commandKeyHash(request.operation(), request.commandId()),
-                request.transactionId(), request.operation(),
-                request.commandId(), request.contentDigest(),
-                request.firstSequence(), request.lastSequence(),
-                request.eventCount(), request.eventsDigest(),
-                request.previousCommitDigest(), request.commitDigest(),
-                request.writerGeneration(), request.writerId(),
-                tokenHash(writerToken), request.activationEpoch(),
-                request.latestCheckpointResourceId(),
-                validated.recordBytes(), validated.recordBytes().length,
-                validated.recordDigest(), now);
-        ActivationChange activation = activationChange(
-                applied.lastActivation());
+        requireCsiWriterCurrent(continuation, head, request.writerId(), request.writerGeneration(), writerToken);
+        ActivationChange activation = activationChange(applied.lastActivation());
+        persistTransaction(tenantId, sessionId, tokenHash(writerToken), request, revision, validated, now);
         // A payload wider than the columns blanks them instead of
         // failing the commit: authorization then reads the journal
         // directly, exactly as before the columns existed.
@@ -703,6 +686,7 @@ public class ManagedSessionStore {
                 && activationHeadRevision == head.journalRevision())) {
             activationHeadRevision = revision;
         }
+        requireCsiWriterCurrent(continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
@@ -892,11 +876,21 @@ public class ManagedSessionStore {
             return readResource(tenantId, workspaceId, sessionId, resourceId, writerToken);
         }
         NativeRead admission = ownerReads.execute(status -> {
-            var original = lockCsiOriginal(tenantId, sessionId);
+            var continuation = lockCsiContinuation(tenantId, sessionId);
+            var original = continuation == null ? null : continuation.original();
             if (original == null) {
                 throw nativeReadConflict();
             }
-            original.requireAdmission();
+            if (original.state() == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.DRAINING) {
+                jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                    JdbcCsiActivationAdmission.requireCheckpointContinuationRead(
+                            org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection),
+                            original, continuation.progress(), resourceId);
+                    return null;
+                });
+            } else {
+                original.requireAdmission();
+            }
             HeadRow head = requireHeadForUpdate(tenantId, sessionId);
             requireHeadScope(head, tenantId, workspaceId, sessionId);
             requireCsiWriter(original, head);
@@ -912,18 +906,23 @@ public class ManagedSessionStore {
                 throw conflict("csi_inline_resource_required", "The original owner reader requires an inline resource.");
             }
             String id = java.util.UUID.randomUUID().toString();
+            requireCsiReadGrant(continuation, head, writerToken);
             long started = ToolPublicationRetentionStore.now(jdbc);
             long expires = Math.addExact(started, ToolPublicationRetentionStore.READ_BUDGET_MILLIS);
+            requireCsiLease(continuation, expires, expires);
+            long readBindingVersion = continuation.progress().sealedBindingVersion() == null
+                    ? original.version() : continuation.progress().sealedBindingVersion();
             jdbc.update("INSERT INTO qwen_csi_resource_read (read_id, tenant_id, workspace_id, session_id,"
                             + " request_key, binding_id, runtime_generation, binding_version, writer_id, writer_generation,"
                             + " writer_token_hash, journal_revision, activation_id, activation_epoch, resource_id, kind,"
                             + " schema_version, byte_length, sha256, storage_kind, resource_state, state, started_at,"
                             + " delivery_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)",
                     id, tenantId, workspaceId, sessionId, original.request().requestKey(), original.bindingId(),
-                    original.generation(), original.version(), head.writerId(), head.writerGeneration(),
+                    original.generation(), readBindingVersion, head.writerId(), head.writerGeneration(),
                     head.leaseTokenHash(), head.journalRevision(), head.activationId(), head.activationEpoch(),
                     resourceId, resource.kind(), resource.schemaVersion(), resource.byteLength(), resource.digest(),
                     resource.storageKind(), resource.state(), started, expires);
+            requireCsiReadGrant(continuation, head, writerToken);
             jdbc.update("INSERT INTO qwen_output_read_lease (lease_id, tenant_key, session_key,"
                             + " retirement_generation, expires_at) VALUES (?, ?, ?, 0, ?)",
                     id, ToolPublicationRetentionStore.hash(tenantId), ToolPublicationRetentionStore.hash(sessionId), expires);
@@ -976,7 +975,8 @@ public class ManagedSessionStore {
     private ApiException finishNativeRead(NativeRead admission, ResourceRow fetched, boolean returned, String writerToken) {
         return ownerReads.execute(status -> {
             HeadRow admittedHead = admission.head();
-            var original = lockCsiOriginal(admittedHead.tenantId(), admittedHead.sessionId());
+            var continuation = lockCsiContinuation(admittedHead.tenantId(), admittedHead.sessionId());
+            var original = continuation == null ? null : continuation.original();
             if (original == null || !original.request().equals(admission.original().request())
                     || !original.bindingId().equals(admission.original().bindingId())
                     || original.generation() != admission.original().generation()
@@ -984,16 +984,13 @@ public class ManagedSessionStore {
                 throw nativeReadConflict();
             }
             original.requireContinuation();
-            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
-                JdbcCsiFilesRetirementGuard.requireReadCompletion(connection, original);
-                return null;
-            });
             HeadRow head = requireHeadForUpdate(admittedHead.tenantId(), admittedHead.sessionId());
             var persisted = jdbc.queryForMap("SELECT * FROM qwen_csi_resource_read WHERE read_id = ? FOR UPDATE", admission.id());
             if (!persisted.equals(admission.persisted())) {
                 throw nativeReadConflict();
             }
             if (!returned) {
+                requireCsiReadGrant(continuation, head, writerToken);
                 jdbc.update("UPDATE qwen_csi_resource_read SET state = 'UNKNOWN', outcome_code = 'jdbc_fetch_unknown'"
                         + " WHERE read_id = ? AND state = 'OPEN'", admission.id());
                 return null;
@@ -1020,15 +1017,24 @@ public class ManagedSessionStore {
                     throw resourceCorrupt();
                 }
                 verifyStoredResource(fetched);
+                requireCsiReadGrant(continuation, head, writerToken);
+                if (admission.expires() <= ToolPublicationRetentionStore.now(jdbc)) {
+                    throw nativeReadConflict();
+                }
                 jdbc.update("UPDATE qwen_managed_session_resource SET last_verified_at = ?"
                                 + " WHERE session_scope_key = ? AND resource_id = ?",
                         databaseNow(), sessionScopeKey(head.tenantId(), head.sessionId()), fetched.resourceId());
             } catch (ApiException rejected) {
                 failure = rejected;
             }
+            requireCsiReadGrant(continuation, head, writerToken);
+            if (admission.expires() <= ToolPublicationRetentionStore.now(jdbc)) {
+                throw nativeReadConflict();
+            }
             jdbc.update("UPDATE qwen_csi_resource_read SET state = 'RETURNED', ended_at = ?, outcome_code = ?"
                             + " WHERE read_id = ? AND state = 'OPEN'",
                     ToolPublicationRetentionStore.now(jdbc), failure == null ? "verified" : failure.getCode(), admission.id());
+            requireCsiReadGrant(continuation, head, writerToken);
             jdbc.update("DELETE FROM qwen_output_read_lease WHERE lease_id = ?", admission.id());
             return failure;
         });
@@ -1074,7 +1080,8 @@ public class ManagedSessionStore {
         if (bytes.length != request.byteLength() || !sha256(bytes).equals(request.digest())) {
             throw invalid("Tool result bytes do not match their length or digest.");
         }
-        var csiOriginal = lockCsiOriginal(tenantId, sessionId);
+        var continuation = lockCsiContinuation(tenantId, sessionId);
+        var csiOriginal = continuation == null ? null : continuation.original();
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
@@ -1086,6 +1093,7 @@ public class ManagedSessionStore {
         requireInstalledCsiWriter(csiOriginal);
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         ResourceRow existing = findResource(scopeKey, request.resourceId());
+        requireCsiWriterCurrent(continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         if (existing == null) {
             jdbc.update("INSERT INTO qwen_managed_session_resource"
                             + " (session_scope_key, tenant_id, workspace_id, session_id, resource_id,"
@@ -1103,6 +1111,7 @@ public class ManagedSessionStore {
                 throw conflict("managed_session_resource_conflict", "A resourceId was reused with different content metadata.");
             }
         }
+        requireCsiCurrentTime(continuation);
         return new ToolResultResourceRef(request.resourceId(), request.kind(), request.schemaVersion(),
                 request.byteLength(), request.digest());
     }
@@ -1139,10 +1148,164 @@ public class ManagedSessionStore {
                 resource.digest(), resource.bytes());
     }
 
+    private void persistTransaction(String tenantId, String sessionId, String writerTokenHash,
+            CommitTransactionRequest request, long revision, ValidatedCommit validated, Timestamp now) {
+        jdbc.update("INSERT INTO qwen_managed_session_journal_tx"
+                        + " (tenant_id, workspace_id, session_id,"
+                        + " journal_revision, command_key_hash,"
+                        + " transaction_id, operation, command_id,"
+                        + " content_digest, first_sequence, last_sequence,"
+                        + " event_count, events_digest,"
+                        + " previous_commit_digest, commit_digest,"
+                        + " writer_generation, writer_id,"
+                        + " writer_token_hash, activation_epoch,"
+                        + " latest_checkpoint_resource_id,"
+                        + " record_encoding, record_bytes, byte_length,"
+                        + " record_digest, created_at) VALUES (?, ?, ?, ?,"
+                        + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                        + " ?,"
+                        + " 'identity', ?, ?, ?, ?)",
+                tenantId, request.workspaceId(), sessionId, revision,
+                commandKeyHash(request.operation(), request.commandId()),
+                request.transactionId(), request.operation(),
+                request.commandId(), request.contentDigest(),
+                request.firstSequence(), request.lastSequence(),
+                request.eventCount(), request.eventsDigest(),
+                request.previousCommitDigest(), request.commitDigest(),
+                request.writerGeneration(), request.writerId(),
+                writerTokenHash, request.activationEpoch(),
+                request.latestCheckpointResourceId(),
+                validated.recordBytes(), validated.recordBytes().length,
+                validated.recordDigest(), now);
+    }
+
+    record TerminalCandidate(CommitTransactionRequest request,
+            com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TerminalProof proof, String writerTokenSha256) {
+    }
+
+    void requireCsiApplicationCredential(java.sql.Connection target,
+            com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Authority authority,
+            String writerToken) throws SQLException {
+        authority.requireConnection(target);
+        if (!org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(
+                org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(target), jdbc.getDataSource())) {
+            throw nativeReadConflict();
+        }
+        var scope = authority.original().request().getScope();
+        String session = authority.original().request().getIsolationKey();
+        requireCredential(scope.getTenantId(), scope.getWorkspaceId(), session, writerToken);
+        HeadRow head = requireHeadForUpdate(scope.getTenantId(), session);
+        requireHeadScope(head, scope.getTenantId(), scope.getWorkspaceId(), session);
+        requireCsiWriter(authority.original(), head);
+        if (!secureEquals(head.leaseTokenHash(), tokenHash(writerToken))) {
+            throw nativeReadConflict();
+        }
+    }
+
+    TerminalCandidate preflightCsiTerminal(java.sql.Connection target,
+            com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Authority authority,
+            String writerToken, byte[] exactBody, JdbcRuntimeBindingRepository bindings) throws SQLException {
+        authority.requirePreCut(target);
+        if (!org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(
+                org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(target), jdbc.getDataSource())
+                || bindings == null || !bindings.usesDataSource(jdbc.getDataSource())
+                || exactBody == null || exactBody.length == 0 || exactBody.length > 128 * 1024) {
+            throw nativeReadConflict();
+        }
+        var original = authority.original();
+        CommitTransactionRequest request = csiTerminalRequest(exactBody);
+        String tenant = original.request().getScope().getTenantId();
+        String session = original.request().getIsolationKey();
+        validateScope(tenant, request.workspaceId(), session);
+        requireCredential(tenant, request.workspaceId(), session, writerToken);
+        validateCommit(request);
+        HeadRow head = requireHeadForUpdate(tenant, session);
+        requireHeadScope(head, tenant, request.workspaceId(), session);
+        requireCsiWriter(original, head);
+        requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
+        validateHead(head, request);
+        var proof = JdbcCsiActivationAdmission.terminalPreflight(target, authority, CSI_JSON.valueToTree(request), bindings);
+        return new TerminalCandidate(request, proof, head.leaseTokenHash());
+    }
+
+    String commitCsiTerminal(java.sql.Connection target,
+            com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Authority authority,
+            String writerToken, byte[] exactBody, JdbcRuntimeBindingRepository bindings) throws SQLException {
+        authority.requireConnection(target);
+        if (authority.stage() != com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.FROZEN) {
+            throw nativeReadConflict();
+        }
+        var frozen = WorkspaceCsiApplicationJson.object(authority.frozenBytes(), WorkspaceCsiApplicationInventory.MAX_BYTES);
+        byte[] saved = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), 128 * 1024);
+        if (!java.util.Arrays.equals(saved, exactBody)
+                || !com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(saved)
+                        .equals(frozen.path("preparedCommitSha256").textValue())) {
+            throw nativeReadConflict();
+        }
+        var candidate = preflightCsiTerminal(target, authority, writerToken, exactBody, bindings);
+        var request = candidate.request();
+        String tenant = authority.original().request().getScope().getTenantId();
+        String session = authority.original().request().getIsolationKey();
+        HeadRow head = requireHeadForUpdate(tenant, session);
+        var validated = validateCommit(request);
+        Timestamp now = databaseNow();
+        String writtenAt = jdbc.queryForObject("SELECT CAST(? AS DATETIME(6))", (row, index) -> {
+            Timestamp value = row.getTimestamp(1,
+                    java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")));
+            if (value == null) {
+                throw nativeReadConflict();
+            }
+            return value.toInstant().toString();
+        }, now);
+        if (writtenAt == null) {
+            throw nativeReadConflict();
+        }
+        long revision = increment(head.journalRevision(), "journal revision");
+        Runnable fence = () -> {
+            try {
+                authority.requireCurrentTime(target);
+            } catch (SQLException error) {
+                throw new org.springframework.dao.DataAccessResourceFailureException("Original terminal time is unavailable", error);
+            }
+            requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
+        };
+        commitResources(sessionScopeKey(tenant, session), tenant, session, request, revision, now, validated.resources(), fence);
+        fence.run();
+        persistTransaction(tenant, session, candidate.writerTokenSha256(), request, revision, validated, now);
+        fence.run();
+        int changed = jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'SEALED',"
+                        + " journal_revision = ?, committed_sequence = ?, last_commit_digest = ?,"
+                        + " activation_phase = 'released', activation_head_revision = ?, updated_at = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND state = 'ACTIVE'"
+                        + " AND journal_revision = ? AND committed_sequence = ? AND last_commit_digest = ?",
+                revision, candidate.proof().terminalSequence(), request.commitDigest(), revision, now, tenant, session,
+                head.journalRevision(), head.committedSequence(), head.lastCommitDigest());
+        if (changed != 1) {
+            throw nativeReadConflict();
+        }
+        authority.requireCurrentTime(target);
+        return writtenAt;
+    }
+
+    private static CommitTransactionRequest csiTerminalRequest(byte[] bytes) {
+        WorkspaceCsiApplicationJson.object(bytes, 128 * 1024);
+        try {
+            var json = CSI_JSON.copy().enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                    .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                    .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
+                    .disable(com.fasterxml.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS)
+                    .disable(com.fasterxml.jackson.databind.DeserializationFeature.ACCEPT_FLOAT_AS_INT);
+            return json.readValue(bytes, CommitTransactionRequest.class);
+        } catch (IOException malformed) {
+            throw invalid("Invalid original terminal request.");
+        }
+    }
+
     private void commitResources(String scopeKey, String tenantId,
             String sessionId, CommitTransactionRequest request,
             long revision, Timestamp now,
-            List<ValidatedResource> resources) {
+            List<ValidatedResource> resources, Runnable writeFence) {
         Set<String> resourceIds = new HashSet<>();
         for (ValidatedResource input : resources) {
             CommitResource resource = input.resource();
@@ -1151,6 +1314,7 @@ public class ManagedSessionStore {
             }
             ResourceRow existing = findResource(scopeKey,
                     resource.resourceId());
+            writeFence.run();
             if (existing == null) {
                 if (input.bytes() == null) {
                     throw conflict(
@@ -1187,6 +1351,7 @@ public class ManagedSessionStore {
                                     + " content metadata.");
                 }
             }
+            writeFence.run();
             jdbc.update("INSERT INTO qwen_managed_session_resource_ref"
                             + " (session_scope_key, tenant_id, workspace_id,"
                             + " session_id, journal_revision, resource_id,"
@@ -1449,7 +1614,12 @@ public class ManagedSessionStore {
     }
 
     JdbcCsiFilesRetirementGuard.Original lockCsiOriginal(String tenantId, String sessionId) {
-        return jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<JdbcCsiFilesRetirementGuard.Original>) connection -> {
+        var continuation = lockCsiContinuation(tenantId, sessionId);
+        return continuation == null ? null : continuation.original();
+    }
+
+    private CsiContinuation lockCsiContinuation(String tenantId, String sessionId) {
+        return jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<CsiContinuation>) connection -> {
             var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
             if (!org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource())) {
                 var profiles = jdbc.query("SELECT tool_profile FROM managed_agent_session"
@@ -1462,8 +1632,50 @@ public class ManagedSessionStore {
             }
             JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId, 10);
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
-            return JdbcCsiFilesRetirementGuard.lockManagedSession(target, tenantId, sessionId);
+            var original = JdbcCsiFilesRetirementGuard.lockManagedSession(target, tenantId, sessionId);
+            return original == null ? null : new CsiContinuation(original,
+                    com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationProgress.lock(target, original));
         });
+    }
+
+    private void requireCsiCurrentTime(CsiContinuation continuation) {
+        if (continuation != null) {
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                continuation.progress().requireCurrentTime(
+                        org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection));
+                return null;
+            });
+        }
+    }
+
+    private void requireCsiLease(CsiContinuation continuation, long existingExpiry, long targetExpiry) {
+        if (continuation != null) {
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                continuation.progress().requireLease(
+                        org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection),
+                        existingExpiry, targetExpiry);
+                return null;
+            });
+        }
+    }
+
+    private void requireCsiWriterCurrent(CsiContinuation continuation, HeadRow head,
+            String writerId, long generation, String token) {
+        if (continuation != null) {
+            requireCsiLease(continuation, databaseEpochMillis(head.writerLeaseUntil()),
+                    databaseEpochMillis(head.writerLeaseUntil()));
+            requireWriter(head, writerId, generation, token, databaseNow(), true);
+        }
+    }
+
+    private void requireCsiReadGrant(CsiContinuation continuation, HeadRow head, String token) {
+        requireReadGrant(head, token);
+        requireCsiLease(continuation, databaseEpochMillis(head.writerLeaseUntil()),
+                databaseEpochMillis(head.writerLeaseUntil()));
+    }
+
+    private record CsiContinuation(JdbcCsiFilesRetirementGuard.Original original,
+            com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationProgress.Continuation progress) {
     }
 
     private static void requireCsiWriter(JdbcCsiFilesRetirementGuard.Original original, HeadRow head) {
@@ -1489,14 +1701,10 @@ public class ManagedSessionStore {
             var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
             var binding = csiBindings.findByIdForUpdate(target, original.bindingId());
             if (binding == null || !binding.getRequest().equals(original.request())
-                    || binding.getGeneration() != original.generation() || binding.getVersion() != original.version()
-                    || binding.getResourceHandle() == null || binding.getResourceHandle().getVersion() != 3) {
+                    || binding.getGeneration() != original.generation() || binding.getVersion() != original.version()) {
                 throw conflict("csi_native_identity_unavailable", "Original execution bootstrap is unavailable");
             }
-            var boot = WorkspaceCsiRuntimeIdentity.boot(binding);
-            if (!Integer.valueOf(5).equals(boot.get("version"))) {
-                throw conflict("csi_native_identity_unavailable", "Original execution bootstrap is unavailable");
-            }
+            WorkspaceCsiRuntimeIdentity.fileHistoryBoot(binding);
             return null;
         });
     }

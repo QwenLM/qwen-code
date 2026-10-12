@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiNativeReadbackProtocol;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiExecutionAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationProgress;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
@@ -144,6 +145,8 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
             } else {
                 guard.requireAdmission();
             }
+            var progress = JdbcCsiApplicationProgress.lock(original, guard);
+            storage.verifyRegistration(registration);
             JdbcCsiFilesRetirementGuard.requireSingleSession(original, guard);
             var request = request(continuation);
             if (!guard.request().equals(request) || !request.getScope().equals(session.getScope())) {
@@ -159,11 +162,6 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                 throw unavailable();
             }
             WorkspaceCsiRuntimeIdentity.verify(binding);
-            storage.verifyRegistration(registration);
-            var reserved = storage.lockPublication(bindings, binding);
-            if (!continuation && reserved.retirement() != null || reserved.binding().getVersion() != binding.getVersion()) {
-                throw unavailable();
-            }
             var saved = sessions.findByIdForUpdate(original, request.getScope(), sessionId);
             guard.requireSession(saved);
             if (!continuation && !saved.isAcquirable()
@@ -176,6 +174,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
             if (context.getContextRevision() != 1) {
                 throw unavailable();
             }
+            progress.requireCurrentTime(original);
             return new Admission(binding, saved, context);
         }));
     }
@@ -207,6 +206,8 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                 throw unavailable();
             }
             guard.requireAdmission();
+            var progress = JdbcCsiApplicationProgress.lock(original, guard);
+            storage.verifyRegistration(registration);
             var request = request();
             var binding = bindings.findByIdForUpdate(original, guard.bindingId());
             if (binding == null || !guard.request().equals(request) || !binding.getRequest().equals(request)
@@ -224,10 +225,10 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
             var boot = WorkspaceCsiRuntimeIdentity.boot(binding);
             var head = JdbcCsiActivationAdmission.lockNativeHead(original, guard);
             Runnable retirementFence = () -> {
-                storage.verifyRegistration(registration);
-                var reserved = storage.lockPublication(bindings, binding);
-                if (reserved.retirement() != null || reserved.binding().getVersion() != binding.getVersion()) {
-                    throw unavailable();
+                try {
+                    progress.requireCurrentTime(original);
+                } catch (java.sql.SQLException failure) {
+                    throw new IllegalStateException("Original application gate did not complete", failure);
                 }
             };
             Map<String, Object> evidence;
@@ -258,6 +259,8 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                 evidence = JdbcCsiExecutionAdmission.readExecution(original, guard, head,
                         (String) requestBody.get("subject"), expected);
             }
+            head.requireCurrentTime(original);
+            progress.requireCurrentTime(original);
             var response = new LinkedHashMap<>(expected);
             response.remove("subject");
             response.put("action", action);
@@ -353,10 +356,15 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
             }
             return delegate.csiFileExecute(lease, binding.getRequest(), binding.getProvisionSeed(), boot,
                     before.context(), executionId).thenApply(result -> {
-                        Admission after = admission(lease, session, false);
-                        if (binding.getVersion() != after.binding().getVersion()
+                        Admission after = admission(lease, session, true);
+                        if (!binding.getRequest().equals(after.binding().getRequest())
+                                || binding.getGeneration() != after.binding().getGeneration()
+                                || !binding.getProvisionSeed().equals(after.binding().getProvisionSeed())
                                 || !binding.getResourceHandle().equals(after.binding().getResourceHandle())
-                                || !before.context().equals(after.context())) {
+                                || binding.getAttestationGeneration() != after.binding().getAttestationGeneration()
+                                || !before.context().equals(after.context())
+                                || before.session().getVersion() != after.session().getVersion()
+                                || after.session().getState() != RuntimeSessionRecord.State.READY) {
                             throw unavailable();
                         }
                         return result;

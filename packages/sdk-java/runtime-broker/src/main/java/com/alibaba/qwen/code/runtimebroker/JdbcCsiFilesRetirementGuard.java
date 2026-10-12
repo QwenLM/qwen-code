@@ -54,9 +54,16 @@ public final class JdbcCsiFilesRetirementGuard {
         String tenant = request.getScope().getTenantId();
         String session = request.getIsolationKey();
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, 10);
+        boolean retained = lockRetentionRoot(connection, tenant);
+        if (!retained) {
+            initializeRetentionRoot(connection, tenant);
+        }
         List<Slot> slots = lockSlots(connection, tenant, session);
         List<Binding> bindings = lockBindings(connection, tenant, session, slots);
         requirePin(readPin(connection, tenant, session), request);
+        if (!retained && (!slots.isEmpty() || !bindings.isEmpty())) {
+            throw unavailable();
+        }
         if (slots.size() > 1 || bindings.size() > 1
                 || !slots.isEmpty() && (!request.equals(slots.getFirst().request())
                         || !request.requestKey().equals(slots.getFirst().key()))
@@ -67,6 +74,94 @@ public final class JdbcCsiFilesRetirementGuard {
             requireOriginal(slots, bindings);
         }
         return true;
+    }
+
+    public static Original lockBindingControl(Connection connection, String bindingId) throws SQLException {
+        requireTransaction(connection);
+        String tenant;
+        String session;
+        boolean profile;
+        try (PreparedStatement statement = statement(connection,
+                "SELECT tenant_id, isolation_key, isolation_class, capability_digest"
+                        + " FROM qwen_runtime_binding WHERE binding_id = ?")) {
+            statement.setString(1, bindingId);
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next()) {
+                    return null;
+                }
+                profile = CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(row.getString("capability_digest"));
+                if (!profile && !"session".equals(row.getString("isolation_class"))) {
+                    return null;
+                }
+                tenant = row.getString("tenant_id");
+                session = row.getString("isolation_key");
+                if (tenant == null || session == null || row.next()) {
+                    throw unavailable();
+                }
+            }
+        }
+        if (!hasTable(connection, "managed_agent_session")) {
+            if (profile || hasTable(connection, "qwen_tool_publication_tenant")
+                    || hasTable(connection, "managed_workspace_csi_registration")
+                    || hasTable(connection, "managed_workspace_csi_retirement")) {
+                throw unavailable();
+            }
+            return null;
+        }
+        JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, 10);
+        boolean retained = lockRetentionRoot(connection, tenant);
+        Original original = lockManagedSession(connection, tenant, session);
+        if (original == null ? profile : !retained || !bindingId.equals(original.bindingId())) {
+            throw unavailable();
+        }
+        return original;
+    }
+
+    private static boolean hasTable(Connection connection, String name) throws SQLException {
+        var metadata = connection.getMetaData();
+        String tableName = metadata.storesUpperCaseIdentifiers() ? name.toUpperCase(java.util.Locale.ROOT) : name;
+        String catalog = connection.getCatalog();
+        String schema = connection.getSchema();
+        try (ResultSet tables = metadata.getTables(catalog, schema,
+                tableName, new String[] {"TABLE"})) {
+            while (tables.next()) {
+                if (tableName.equals(tables.getString("TABLE_NAME"))
+                        && java.util.Objects.equals(catalog, tables.getString("TABLE_CAT"))
+                        && java.util.Objects.equals(schema, tables.getString("TABLE_SCHEM"))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private static boolean lockRetentionRoot(Connection connection, String tenantId) throws SQLException {
+        try (PreparedStatement statement = statement(connection,
+                "SELECT tenant_id FROM qwen_tool_publication_tenant WHERE tenant_key = ? FOR UPDATE")) {
+            statement.setString(1, CsiNativeActivationProof.sha256(tenantId.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next()) {
+                    return false;
+                }
+                if (!tenantId.equals(row.getString("tenant_id")) || row.next()) {
+                    throw unavailable();
+                }
+                return true;
+            }
+        }
+    }
+
+    private static void initializeRetentionRoot(Connection connection, String tenantId) throws SQLException {
+        try (PreparedStatement statement = statement(connection,
+                "INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
+                        + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key")) {
+            statement.setString(1, CsiNativeActivationProof.sha256(tenantId.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            statement.setString(2, tenantId);
+            statement.executeUpdate();
+        }
+        if (!lockRetentionRoot(connection, tenantId)) {
+            throw unavailable();
+        }
     }
 
     public static Original lockManagedSession(Connection connection, String tenantId, String sessionId)

@@ -150,6 +150,48 @@ class WorkspaceCsiSessionGuardTest {
     }
 
     @Test
+    void frozenAndLegacyProgressCannotRenewOrRecordARecoveryBlock() {
+        ready();
+        transaction.execute(status -> acquire());
+        retire();
+        for (String update : new String[] {"progress_stage = 'FROZEN', progress_version = 2",
+                "progress_format = NULL, progress_version = NULL, progress_stage = NULL, settlement_deadline_ms = NULL"}) {
+            jdbc.update("UPDATE managed_workspace_csi_retirement SET " + update);
+            var before = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head");
+            var progress = jdbc.queryForMap("SELECT * FROM managed_workspace_csi_retirement");
+            assertBrokerCode(() -> transaction.execute(status -> journal.renewWriter("tenant", sessionId, TOKEN,
+                    new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", 1, 60_000L))),
+                    "csi_application_continuation_unavailable");
+            assertBrokerCode(() -> transaction.execute(status -> journal.blockRecovery("tenant", sessionId, TOKEN,
+                    new ManagedSessionStoreModels.BlockRecoveryRequest("workspace", "writer", 1,
+                            "BLOCKED_EXECUTION", "test-blocked"))), "csi_application_continuation_unavailable");
+            assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head")).isEqualTo(before);
+            assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_csi_retirement")).isEqualTo(progress);
+        }
+    }
+
+    @Test
+    void originalWriterCannotExtendOrRetainAnExpiryPastTheFixedSettlementDeadline() {
+        ready();
+        transaction.execute(status -> acquire());
+        retire();
+        var before = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head");
+        assertBrokerCode(() -> transaction.execute(status -> journal.renewWriter("tenant", sessionId, TOKEN,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", 1, 300_000L))),
+                "csi_application_continuation_unavailable");
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head")).isEqualTo(before);
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = '2099-01-01 00:00:00'");
+        before = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head");
+        assertBrokerCode(() -> transaction.execute(status -> journal.renewWriter("tenant", sessionId, TOKEN,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", 1, 60_000L))),
+                "csi_application_continuation_unavailable");
+        assertBrokerCode(() -> transaction.execute(status -> journal.blockRecovery("tenant", sessionId, TOKEN,
+                new ManagedSessionStoreModels.BlockRecoveryRequest("workspace", "writer", 1,
+                        "BLOCKED_EXECUTION", "test-blocked"))), "csi_application_continuation_unavailable");
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head")).isEqualTo(before);
+    }
+
+    @Test
     void onlyTheOriginalUuidSessionCanJoinAndOrdinaryReleaseCannotMutateIt() {
         ready();
         assertBrokerCode(() -> bindings.admitSession(sessions, candidate(UUID.randomUUID().toString())),
@@ -323,10 +365,11 @@ class WorkspaceCsiSessionGuardTest {
         var source = jdbc.getDataSource();
         var retention = new ToolPublicationRetentionStore(jdbc, new DataSourceTransactionManager(source));
         var before = jdbc.queryForMap("SELECT * FROM managed_agent_session WHERE session_id = ?", sessionId);
+        var retained = jdbc.queryForList("SELECT * FROM qwen_tool_publication_tenant");
         for (int index = 0; index < 2; index++) {
             assertApiCode(() -> retention.read("tenant", sessionId), "csi_managed_mutation_unavailable");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease", Integer.class)).isZero();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_tenant", Integer.class)).isZero();
+            assertThat(jdbc.queryForList("SELECT * FROM qwen_tool_publication_tenant")).isEqualTo(retained);
             assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_session WHERE session_id = ?", sessionId))
                     .usingRecursiveComparison().isEqualTo(before);
             jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-files/1' WHERE session_id = ?", sessionId);

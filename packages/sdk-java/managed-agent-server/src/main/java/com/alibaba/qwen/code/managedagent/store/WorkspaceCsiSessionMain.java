@@ -98,6 +98,7 @@ public final class WorkspaceCsiSessionMain {
                 JdbcRuntimeBindingRepository.lockPlacementDomain(connection, request.registration().tenantId(), 10);
                 return null;
             });
+            ToolPublicationRetentionStore.lockTenant(jdbc, request.registration().tenantId());
             reservations.verifyRegistration(request.registration());
             var admission = sessions.insertCsiSessionCommand(request.registration(), request.actorId(),
                     request.idempotencyKey(), digest, request.requestedRevision(), request.title(), request.workspace());
