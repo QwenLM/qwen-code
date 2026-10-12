@@ -810,3 +810,42 @@ it('refuses a status answer for a different execution', async () => {
     'Runtime execution identity changed.',
   );
 });
+
+it('owns the :process ledger key behind a plain execution id', async () => {
+  const paths: string[] = [];
+  const found = await fixture((path) => {
+    paths.push(path);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'call-1:process',
+        status: { state: 'executing' },
+      },
+    };
+  });
+  await expect(found.backgroundProcessStatus('call-1')).resolves.toEqual({
+    state: 'executing',
+  });
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/call-1%3Aprocess',
+  ]);
+
+  const missing = await fixture(() => ({
+    code: 404,
+    body: { code: 'runtime_execution_not_found' },
+  }));
+  await expect(
+    missing.backgroundProcessStatus('call-1'),
+  ).resolves.toBeUndefined();
+
+  const unsuffixed = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'call-1',
+      status: { state: 'executing' },
+    },
+  }));
+  await expect(unsuffixed.backgroundProcessStatus('call-1')).rejects.toThrow(
+    'Runtime execution identity changed.',
+  );
+});

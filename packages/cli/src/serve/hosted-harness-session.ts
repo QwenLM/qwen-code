@@ -99,6 +99,7 @@ import {
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
+import { reconcileNeverStartedChildRuns } from './hosted-never-started-reconcile.js';
 import {
   ChildMessagesPendingError,
   HostedChildAgentSession,
@@ -153,6 +154,7 @@ import {
   monitorWakeNeedsRecovery,
   withChildAgentConsumption,
 } from './hosted-monitor-wake-turn.js';
+import { hasPlanModeBlock, inputBodyText } from './hosted-member-chain.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import {
@@ -309,6 +311,9 @@ interface HostedSession {
   messagesStopped?: boolean;
   /** H4e-b1: the lead's team funnel, beside its child orchestrator. */
   teams?: HostedTeamSession;
+  /** H4e-b3 decisions 5/9: this run's first input carried an unescaped
+   * plan-mode preamble, so its tool calls admit reads only. */
+  memberPlanMode?: boolean;
   /**
    * #13753 I2: the control plane serves child Workspaces, so the Agent
    * tool admits `isolation: "worktree"`. It describes the host, not the
@@ -348,6 +353,57 @@ interface HostedSession {
    * re-acquired idempotently. The continuation route keeps its #13083
    * handback discipline (a recorded follow-up). */
   runtimeLeaseHeld?: string;
+  /** #13856: promptIds of turns whose Runtime Session ended held by a
+   * live background run (the designed hold — the broker refused the
+   * routine release with `runtime_session_held` and stopped nothing).
+   * The Session's close drain-releases each; a later turn never re-uses
+   * the id, so a held Runtime is owed exactly until the close. */
+  readonly heldRuntimeTurns: Set<string>;
+}
+
+/**
+ * H4e-b3 decisions 5/9: whether this run's first committed input carried
+ * an unescaped `plan-mode="required"` preamble. Only a Session with a
+ * lineage has a composed first input to read; a root Session's user
+ * prompt never makes one. The body's route shape is the `/prompt`
+ * array-of-parts, while funnel-written inputs carry a bare `{text}`.
+ */
+async function hostedFirstInputPlanMode(
+  managed: ManagedSession,
+): Promise<boolean> {
+  const first = managed.authority
+    .readEvents({ afterSequence: 0 })
+    .find((event) => event.kind === 'input.accepted');
+  if (first === undefined) return false;
+  const ref = assertManagedSessionDurableRef(
+    first.payload['contentRef'],
+    'member first input',
+  );
+  const body = JSON.parse(
+    (await managed.resources.read(ref)).toString('utf8'),
+  ) as unknown;
+  const text = inputBodyText(body);
+  return text !== undefined && hasPlanModeBlock(text);
+}
+
+/**
+ * H4e-b3a review finding: a member Session's plan mode settles only once
+ * its first input is durable — at Session create it has none committed
+ * yet, so the flag is answered lazily on every turn construction until a
+ * positive answer is cached. A root prompt never arms it.
+ */
+async function ensureMemberPlanMode(session: HostedSession): Promise<boolean> {
+  if (session.memberPlanMode === true || session.toolProfile === undefined)
+    return session.memberPlanMode === true;
+  const lineage = object(session.definition?.['lineage']);
+  if (
+    typeof lineage?.['parentSessionId'] !== 'string' ||
+    typeof lineage['parentChildRunId'] !== 'string'
+  )
+    return false;
+  const planMode = await hostedFirstInputPlanMode(session.managed);
+  if (planMode) session.memberPlanMode = true;
+  return planMode;
 }
 
 async function runHostedLifecycleHook(
@@ -942,10 +998,28 @@ export async function settleCrashedWakeTurnAftermath(params: {
             }
             await broker.release();
           } catch (cause) {
-            if (!(cause instanceof RecoveryDeclined)) throw cause;
-            writeStderrLineSafe(
-              `qwen serve: Hosted wake turn ${turnId} could not derive its wake session's Broker identity; its lease stays the system's re-admitted kind: ${String(cause)}`,
-            );
+            // A wake turn that started a background run leaves that Runtime
+            // held by design, so the routine release refuses
+            // `runtime_session_held`. That is the designed hold, not an
+            // aftermath failure: the run outlives the wake turn it started
+            // on, and the Session's close owes the drain. Register the
+            // obligation and go on settling the crashed wake's input. The
+            // routine recovery is deliberately not turned into a drain, which
+            // would stop a background run the user meant to keep (#13856
+            // R1-28).
+            if (
+              cause instanceof HostedWorkspaceBrokerRejection &&
+              cause.status === 409 &&
+              cause.code === 'runtime_session_held'
+            ) {
+              session.heldRuntimeTurns.add(turnId);
+            } else if (cause instanceof RecoveryDeclined) {
+              writeStderrLineSafe(
+                `qwen serve: Hosted wake turn ${turnId} could not derive its wake session's Broker identity; its lease stays the system's re-admitted kind: ${String(cause)}`,
+              );
+            } else {
+              throw cause;
+            }
           }
         }
       }
@@ -2505,6 +2579,7 @@ async function executeHostedTurn(
                   childAgents: childAgentsOf(session),
                   messages: session.messages,
                   teams: session.teams,
+                  memberPlanMode: await ensureMemberPlanMode(session),
                 },
               )
             : undefined;
@@ -2579,6 +2654,9 @@ async function executeHostedTurn(
           }
         }
         await toolTurn?.finish();
+        // #13856: a turn that ended with its Runtime held owes the close
+        // that Runtime's drain — the run outlives the turn by design.
+        if (toolTurn?.runtimeHeld) session.heldRuntimeTurns.add(promptId);
         turnResult = record(session, sessionId, 'system', null, {
           subtype: 'turn_result',
           systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
@@ -3410,6 +3488,7 @@ export function registerHostedHarnessSessionRoutes(
         admissions: new Map(),
         blocked: false,
         childConsumption: new Set(),
+        heldRuntimeTurns: new Set(),
         mcpRecovering: 0,
         waiters: new HostedApprovalWaiters(),
         stores,
@@ -3508,6 +3587,9 @@ export function registerHostedHarnessSessionRoutes(
               resources: session.managed.resources,
             },
             session.managed.authority.sessionHeader.sessionKey,
+            // H4e-b3 decision 10: request_shutdown commits the stop an
+            // H4f cancel would, through the child funnel's own chain.
+            session.childAgents,
           );
           // H4d-b: messages share the child orchestrator's write chain, so
           // a Shell lane that suppressed the agent tool has no funnel.
@@ -3531,6 +3613,9 @@ export function registerHostedHarnessSessionRoutes(
           }
         }
       }
+      // H4e-b3 decisions 5/9: a member run's plan mode is decided lazily by
+      // ensureMemberPlanMode at tool-turn construction — the first committed
+      // input may not exist yet while the Session assembles on create.
       if (
         session.toolProfile &&
         brokerOptions &&
@@ -3543,6 +3628,15 @@ export function registerHostedHarnessSessionRoutes(
           },
           session.managed.authority.sessionHeader.sessionKey,
         );
+      // #13801 A3: settle records claimed but provably never started
+      // before any route can read this reopened Session.
+      if (session.childRuns && brokerOptions)
+        await reconcileNeverStartedChildRuns({
+          authority: session.managed.authority,
+          resources: session.managed.resources,
+          childRuns: session.childRuns,
+          brokerOptions,
+        });
       // H6b: every hosted Session owns its automation funnel — a run's
       // input needs no Runtime, and its settle reads the turn alone.
       session.automations = new HostedAutomationSession(
@@ -5550,7 +5644,9 @@ export function registerHostedHarnessSessionRoutes(
 
   // Awaited variant for exits after which no route can retry the handback
   // (session close/detach). Retry-inviting refusals must not call it: see
-  // the owed-lease comment at the blocked cancel refusal.
+  // the owed-lease comment at the blocked cancel refusal. The close drains:
+  // a recovered Runtime can hold live background runs (#13856), and only
+  // the drain arm may stop them.
   const releaseLeaseNow = async (session: HostedSession): Promise<void> => {
     const promptId = session.runtimeLeaseHeld;
     if (promptId === undefined || !brokerOptions) return;
@@ -5559,7 +5655,7 @@ export function registerHostedHarnessSessionRoutes(
       session.managed.authority.sessionHeader.sessionKey,
       hostedRuntimeSessionId(promptId),
     )
-      .release()
+      .release({ drain: true })
       .then(() => {
         if (session.runtimeLeaseHeld === promptId)
           session.runtimeLeaseHeld = undefined;
@@ -6481,6 +6577,7 @@ export function registerHostedHarnessSessionRoutes(
             childAgents: childAgentsOf(session),
             messages: session.messages,
             teams: session.teams,
+            memberPlanMode: await ensureMemberPlanMode(session),
           },
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
@@ -6635,6 +6732,9 @@ export function registerHostedHarnessSessionRoutes(
           }
         }
         await toolTurn.finish();
+        // #13856: same hold bookkeeping as the prompt route — the close
+        // owes a drain for every Runtime a turn left held.
+        if (toolTurn.runtimeHeld) session.heldRuntimeTurns.add(promptId);
         await harness.settleConsumedRuntimeContinuation();
         await session.managed.sink.write(turnResultRecord(state));
         // H4b: a redriven turn that consumed child-agent tool results owes
@@ -7476,6 +7576,44 @@ export function registerHostedHarnessSessionRoutes(
       // A lease a recovery load acquired must go back with the Session, or
       // the Workspace stays pinned after every later route is gone.
       await releaseLeaseNow(session);
+      // #13856: drain every Runtime a turn left held, ahead of the loop
+      // stops and the publisher close. The drain's stops land their
+      // finalize through the still-open publisher — the maintenance
+      // answer rides the completion that carries the finalize — so the
+      // records project the requested stop before anything else settles
+      // them. A drain that cannot prove a stop fails the close honestly
+      // below: the Session stays reopenable and nothing claims settled.
+      let heldDrainFailed: unknown = null;
+      if (brokerOptions) {
+        for (const heldTurn of [...session.heldRuntimeTurns]) {
+          try {
+            await new HostedWorkspaceBroker(
+              brokerOptions,
+              session.managed.authority.sessionHeader.sessionKey,
+              hostedRuntimeSessionId(heldTurn),
+            ).release({ drain: true });
+            session.heldRuntimeTurns.delete(heldTurn);
+          } catch (cause) {
+            // A "not found" answer means nothing remains to stop: the Runtime
+            // is already gone, so the turn owes nothing and the close may
+            // proceed — the same tolerance the sibling owner-release carries
+            // (#13856 R1-1). Every other refusal is unproven and parks
+            // honestly below.
+            if (
+              cause instanceof HostedWorkspaceBrokerRejection &&
+              cause.status === 404 &&
+              cause.code === 'runtime_session_not_found'
+            ) {
+              session.heldRuntimeTurns.delete(heldTurn);
+              continue;
+            }
+            heldDrainFailed ??= cause;
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness drain of held Runtime ${heldTurn} failed: ${String(cause)}`,
+            );
+          }
+        }
+      }
       // A registered observation loop outlives its turn: only the Session
       // close ends it. Stop every live loop here, ahead of the publisher
       // close and the log close, so its settle write can still reach the
@@ -7483,14 +7621,20 @@ export function registerHostedHarnessSessionRoutes(
       // never proved to the Runtime that anything stopped: claiming
       // `stop_requested` there would display an unconfirmed task as
       // settled, so the record parks on the runtime_lost line instead —
-      // the loop ends, and the record keeps an honest rebuild path.
-      const stopSettle = session.blocked ? 'runtime_lost' : 'stop_requested';
+      // the loop ends, and the record keeps an honest rebuild path. A
+      // failed held-Runtime drain is the same unproven shape.
+      const stopSettle =
+        session.blocked || heldDrainFailed !== null
+          ? 'runtime_lost'
+          : 'stop_requested';
       for (const loop of session.shell?.monitorLoops?.values() ?? [])
         await loop.stop(stopSettle);
       for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
         await loop.stop(stopSettle);
-      // The broker release drained the Session's background Shells and
-      // their exits settled through this publisher; it closes last.
+      if (heldDrainFailed !== null) throw heldDrainFailed;
+      // The drains above stopped the Session's background Shells and
+      // watches, and their exits settled through this publisher; it
+      // closes last.
       await session.shell?.publisher?.close();
       await session.backgroundLane?.publisher?.close();
       await session.mcp?.close();
