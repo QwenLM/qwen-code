@@ -708,6 +708,37 @@
       "default": 0,
       "minimum": 0
     },
+    "pluginConfigs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "options": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "description": "Mod options keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes."
+    },
     "advisorModel": {
       "description": "Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.",
       "type": "string",
@@ -4421,6 +4452,11 @@
       "description": "Settings to enable experimental features.",
       "type": "object",
       "properties": {
+        "mods": {
+          "description": "Run the experimental JavaScript and TypeScript Mod command subset from enabled extensions in trusted headless sessions.",
+          "type": "boolean",
+          "default": false
+        },
         "liveVoice": {
           "description": "Experimental realtime voice conversations through Qwen Live Host on macOS WebShell.",
           "type": "object",

@@ -50,7 +50,9 @@ vi.mock('./managed-extension-projection.js', async (importOriginal) => {
   };
 });
 
-// monitor_run is enabled by H3; this suite runs the H0c path ahead of it.
+// monitor_run is enabled by H3's slice (#13856), so this suite commits
+// through the real gate. A test that needs the gate shut closes it per
+// test — never the other way around.
 vi.mock('./managed-session-records.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('./managed-session-records.js')>();
@@ -59,9 +61,12 @@ vi.mock('./managed-session-records.js', async (importOriginal) => {
     assertManagedSessionDomainEnabled: (
       domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
     ) => {
-      if (domain !== 'monitor_run' || !enablement.monitorRun) {
-        actual.assertManagedSessionDomainEnabled(domain);
+      if (domain === 'monitor_run' && !enablement.monitorRun) {
+        throw new actual.ManagedSessionRecordError(
+          'domain monitor_run is registered but not enabled for submission.',
+        );
       }
+      actual.assertManagedSessionDomainEnabled(domain);
     },
   };
 });
@@ -333,6 +338,21 @@ function command(commandId: string, digest = 'd') {
     commandId,
     sessionKey,
     contentDigest: digest.repeat(64),
+  };
+}
+
+/** The record a goal_state envelope carries for the reader-facing fence. */
+function goalRecord(goalId: string, title: string) {
+  return {
+    uuid: `rec-${goalId}`,
+    parentUuid: null,
+    sessionId,
+    timestamp: '2026-09-01T10:00:00.000Z',
+    type: 'system',
+    subtype: 'goal_state',
+    cwd: '/workspace',
+    version: 'test',
+    systemPayload: { goalId, title },
   };
 }
 
@@ -868,7 +888,7 @@ describe('managed session authority Stage H records', () => {
         command('rename:goal'),
         {
           domain: 'goal_state',
-          content: { goalId: 'goal-1', title: 'grown' },
+          content: { record: goalRecord('goal-1', 'grown') },
         },
         TRUSTED,
       );
@@ -915,7 +935,7 @@ describe('managed session authority Stage H records', () => {
         command('rename:goal'),
         {
           domain: 'goal_state',
-          content: { goalId: 'goal-1', title: 'pre-body' },
+          content: { record: goalRecord('goal-1', 'pre-body') },
         },
         TRUSTED,
       );
@@ -1129,26 +1149,32 @@ describe('managed session authority Stage H records', () => {
   it('refuses a record of a disabled domain on the generic paths', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
+      // team_message is in the domain vocabulary but neither in the plain
+      // enabled list nor in this suite's extension-record body index, so
+      // the generic path reaches the enablement refusal this test names
+      // (child_run is per-kind exempt here). schedule was the probe until
+      // H6b, then child_acceptance, monitor_run and, until H4e-b1,
+      // team_state.
       const recordRef = await harness.store.publish(
-        'managed-schedule',
+        'managed-team_message',
         Buffer.from('{}', 'utf8'),
       );
       const sequence = authority.committedSequence;
       await expect(
         authority.appendExecution(
-          command('raw-schedule'),
+          command('raw-team-message'),
           [
             {
               v: 1,
               sequence: sequence + 1,
-              eventId: 'schedule-1',
+              eventId: 'team_message-1',
               sessionKey,
               kind: 'domain.committed',
               occurredAt: harness.now,
               payload: {
-                domain: 'schedule',
+                domain: 'team_message',
                 version: 1,
-                operationId: 'raw-schedule',
+                operationId: 'raw-team-message',
                 recordRef,
               },
             },

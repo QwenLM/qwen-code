@@ -1715,5 +1715,19 @@
   "tokenVector": {
     "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "hash": "0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a"
-  }
+  },
+  "payloadCases": [
+    {
+      "id": "background-shell",
+      "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"echo B1-OUT; sleep 900\",\"is_background\":true}}",
+      "requestDigest": "sha256:f83d7f3f1dcf74d642b15e122fc44eb6a70c90d844a98f2f95f80d44dbe6ee00",
+      "argsDigest": "sha256:89255d588c8bc086c77358c3f9d365d497a03791e24ea43383eb25cc85de7255"
+    },
+    {
+      "id": "monitor",
+      "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"while true; do echo tick; sleep 5; done\",\"description\":\"watch ticks\",\"max_events\":100,\"idle_timeout_ms\":300000,\"is_monitor\":true}}",
+      "requestDigest": "sha256:06dade6f696f7d0182c24280475d93c19d2efe72bcc8e7580ddf604b9b6bf0d4",
+      "argsDigest": "sha256:c126dbf7eb742625012b1feb10f1be9bb504d93a135f6f253d0779d3a1130a8e"
+    }
+  ]
 }

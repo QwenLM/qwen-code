@@ -66,6 +66,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
+import { ModSession } from './nonInteractive/mod-session.js';
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
@@ -1269,6 +1270,10 @@ describe('runNonInteractive', () => {
   it('runs resume with the exact permit scheduled by Core', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
+    mockToolRegistry.getAllToolNames.mockReturnValue([
+      'tool_search',
+      'tool_call',
+    ]);
     await prepareGoalState('paused');
     mockFinishedGoalWorker();
     const abortController = new AbortController();
@@ -1284,6 +1289,8 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
     const [parts, , , options] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
+    expect(parts[0]?.text).toContain('In Direct mode:');
+    expect(parts[0]?.text).not.toContain('In Code Mode, discover');
     expect(parts[0]?.text).toContain(
       `<goal_runtime_data>\n{"goalId":"${options.goalPermit.goalId}","revision":${options.goalPermit.revision},"objective":"existing goal"}\n</goal_runtime_data>`,
     );
@@ -4083,7 +4090,12 @@ describe('runNonInteractive', () => {
         )
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
-      await runNonInteractive(mockConfig, 'work the goal', 'p-goal');
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'work the goal',
+        'p-goal',
+      );
 
       const optionsByCallId = new Map(
         recordToolResult.mock.calls.map((call) => [call[1]?.callId, call[2]]),
@@ -4156,7 +4168,12 @@ describe('runNonInteractive', () => {
         )
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
-      await runNonInteractive(mockConfig, 'plain work', 'p-plain');
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'plain work',
+        'p-plain',
+      );
 
       expect(recordToolResult).toHaveBeenCalled();
       for (const call of recordToolResult.mock.calls) {
@@ -6188,6 +6205,66 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).toHaveBeenCalledWith(`${jsonError}\n`);
   });
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'emits init before startup logs when a Mod fails in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      for (const write of [processStdoutSpy, processStderrSpy]) {
+        write.mockImplementation((...args: unknown[]) => {
+          const callback = args.at(-1);
+          if (typeof callback === 'function') queueMicrotask(() => callback());
+          return true;
+        });
+      }
+      const close = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(ModSession, 'create').mockImplementation(
+        (_config, _settings, adapter) =>
+          ({
+            initialize: vi
+              .fn()
+              .mockRejectedValue(new Error('MOD_START_FAILED')),
+            close,
+            flushOutput: vi.fn().mockResolvedValue(undefined),
+            flushLogs: vi.fn().mockImplementationOnce(() => {
+              adapter.emitSystemMessage('ui_log', {
+                plugin: 'broken',
+                text: 'MOD_START_LOG',
+              });
+            }),
+          }) as unknown as ModSession,
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, '/hello', 'mod-failure'),
+      ).rejects.toThrow();
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages[0]).toMatchObject({ type: 'system', subtype: 'init' });
+      expect(messages[1]).toMatchObject({
+        type: 'system',
+        subtype: 'ui_log',
+        data: { plugin: 'broken', text: 'MOD_START_LOG' },
+      });
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: true,
+        error: { message: expect.stringContaining('MOD_START_FAILED') },
+      });
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalled();
+    },
+  );
 
   it('should handle API errors in text mode and exit with error code', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);

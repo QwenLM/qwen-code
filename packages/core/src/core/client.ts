@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { LlmPreparedRequestCallback } from './llm-chat.js';
+
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -38,6 +40,7 @@ import {
 } from '../services/microcompaction/microcompact.js';
 import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
+import { appendAutoMemoryContext } from '../memory/request-context.js';
 import {
   GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
@@ -245,6 +248,7 @@ interface StopHookChain {
 }
 
 export interface SendMessageOptions {
+  onPreparedRequest?: LlmPreparedRequestCallback;
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
@@ -4501,6 +4505,7 @@ export class LlmClient {
         // stays unmarked, so a replaced identified turn fails closed.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
         options?.retractDeliveredOutputOnRetry,
+        options?.onPreparedRequest,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -5724,10 +5729,11 @@ export class LlmClient {
         retryErrorCodes,
         model: requestModel,
       } = await this.config.getBaseLlmClient().resolveForModel(model);
-      const requestContents = slimCompactionInput(
-        contents,
-        contentGeneratorConfig?.modalities ?? {},
-      ).slimmedHistory;
+      const requestContents = appendAutoMemoryContext(
+        slimCompactionInput(contents, contentGeneratorConfig?.modalities ?? {})
+          .slimmedHistory,
+        this.config.getAutoMemoryContext?.() ?? '',
+      );
 
       const apiCall = () => {
         currentAttemptModel = requestModel;

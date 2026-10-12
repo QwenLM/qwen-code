@@ -28,6 +28,7 @@ import {
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
+import { trailingReattachPartCount } from '../../services/image-payload-references.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 // `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
@@ -379,6 +380,7 @@ export class AnthropicContentConverter {
           cacheRetention,
           cacheRetentionByBlock,
         ),
+        trailingReattachPartCount(request.contents),
       );
     }
 
@@ -1385,6 +1387,7 @@ export class AnthropicContentConverter {
   private addCacheControlToMessages(
     messages: Anthropic.MessageParam[],
     cacheRetention: CacheRetention = 'ephemeral',
+    volatileTailBlockCount = 0,
   ): void {
     // Find the last user message to add cache_control. The Anthropic docs
     // (https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
@@ -1402,7 +1405,17 @@ export class AnthropicContentConverter {
           : [{ type: 'text' as const, text: msg.content }];
 
         if (content.length > 0) {
-          const lastContent = content[content.length - 1];
+          // Skip the trailing volatile blocks (reattached images, the
+          // request-only auto-memory catalog): stored history never reproduces
+          // them, so a breakpoint there writes an entry no later request can
+          // read back (issue #11627). If the whole message is volatile, use
+          // an earlier user message; without one, omit the message breakpoint.
+          const anchorIndex = content.length - 1 - volatileTailBlockCount;
+          if (anchorIndex < 0) {
+            volatileTailBlockCount = 0;
+            continue;
+          }
+          const lastContent = content[anchorIndex];
           if (typeof lastContent === 'object' && 'type' in lastContent) {
             const type = lastContent.type;
             // Empty text blocks cannot be cached (per Anthropic docs).

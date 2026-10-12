@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Application, RequestHandler } from 'express';
+import { markAccessLogError } from './server/access-log.js';
 import type { HostedHarnessCapabilities } from './types.js';
 
 export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
@@ -45,6 +46,11 @@ export function createHostedHarnessContract(
     bootId: bootId.toLowerCase(),
     capabilityDigest,
     lifecycleProtocolVersion: 1,
+    titleProtocolVersion: 1,
+    features: Object.freeze([
+      'hosted_approval_resume_v1',
+      'hosted_model_round_recovery_v1',
+    ]),
   });
 }
 
@@ -59,6 +65,7 @@ export function hostedHarnessContractMiddleware(
       String(HOSTED_HARNESS_PROTOCOL_VERSION)
     ) {
       res.setHeader('Upgrade', HOSTED_HARNESS_UPGRADE);
+      markAccessLogError(res, 'hosted_harness_protocol_required');
       res.status(426).json({
         error: 'Hosted Harness protocol version 1 is required.',
         code: 'hosted_harness_protocol_required',
@@ -68,6 +75,7 @@ export function hostedHarnessContractMiddleware(
 
     const requestedBootId = req.get(HOSTED_HARNESS_BOOT_ID_HEADER);
     if (!requestedBootId || !UUID_PATTERN.test(requestedBootId)) {
+      markAccessLogError(res, 'invalid_hosted_harness_boot_id');
       res.status(400).json({
         error: 'X-Qwen-Harness-Boot-Id must be an RFC UUID v1-v5.',
         code: 'invalid_hosted_harness_boot_id',
@@ -75,6 +83,7 @@ export function hostedHarnessContractMiddleware(
       return;
     }
     if (requestedBootId.toLowerCase() !== contract.bootId) {
+      markAccessLogError(res, 'hosted_harness_generation_mismatch');
       res.status(409).json({
         error: 'Hosted Harness process generation changed.',
         code: 'hosted_harness_generation_mismatch',
