@@ -25,3 +25,15 @@ Build and bundle the CLI, then run the current Java task read/cancel and Hosted 
 ## Unit and release checks
 
 Run affected client/provider/hook/component tests from `packages/web-shell`, plus isolated React 18 tests for ref and Dialog paths. Run root build, typecheck and bundle, focused ESLint/Prettier and generated-type drift checks. Read the full diff in two clean self-audit passes and obtain an independent code review. Publish the observed E2E results separately on the single draft PR; state macOS/Windows/Linux validation accurately.
+
+## Observed results (2026-10-12)
+
+The global qwen 0.25.0 availability baseline passed; the pre-change browser had no task entry despite `tasks: true`. The completed implementation passed 190 focused React 19 tests, 24 isolated React 18 tests and 73 Java task/cancel regressions. Controlled Chromium verification passed 10 main groups and 6 extra checks, including public Artifact preview, actual 30-second timeout, visibility pause/resume, two-tab contention and delayed Session responses. Root build, typecheck and bundle and the final Web Shell build/typecheck passed; generated types had no drift.
+
+A real browser connected through a same-origin proxy to Java, Hosted Harness, Broker/worker and the child result relay. It submitted one cancel operation, observed a completed confirmed receipt while the task remained running/draining, then observed the task cancelled. The parent draft survived and the next parent Turn displayed `PARENT_CONTINUATION_OK`. The macOS rig used H2 in MySQL mode, a deterministic model and nondurable local workers. This proves this tested cancellation/continuation path; it does not establish Linux durable-worker recovery, full MySQL acceptance or live-model quality. Windows/Linux, React 18 browser rendering, native screen-reader output and mobile native WebViews were not tested. Scroll restoration was verified in component tests.
+
+| Before                                                                 | Wide panel                                                                                  | Narrow Dialog                                                                     |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| ![No task entry](../design/assets/managed-child-task-panel-before.png) | ![Task panel beside conversation](../design/assets/managed-child-task-panel-after-wide.png) | ![Themed task Dialog](../design/assets/managed-child-task-panel-after-narrow.png) |
+
+Reusable local commands are `node .qwen/e2e-tests/managed-child-task-panel-browser.mjs`, the same command with `--extras`, and the sequential `managed-child-task-hosted-launch.mjs` / `managed-child-task-panel-hosted-browser.mjs` under `.qwen/e2e-tests/`. Scripts and raw reports are ignored working artifacts; the PR's separate report publishes their results. The dedicated Vite and real Java/Hosted processes were stopped after verification.

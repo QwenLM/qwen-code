@@ -25,3 +25,15 @@
 ## 单测与发布检查
 
 从 `packages/web-shell` 运行受影响的 client、Provider、hook 和组件测试，并隔离运行 React 18 ref 与 Dialog 路径测试。运行根目录 build、typecheck、bundle，针对性 ESLint/Prettier 及生成类型漂移检查。完整 diff 两轮干净自审后执行独立代码审查。在唯一 draft PR 上单独发布实际 E2E 结果，如实说明 macOS、Windows 和 Linux 验证。
+
+## 实际结果（2026-10-12）
+
+全局 qwen 0.25.0 可用性基线通过；变更前浏览器即使声明 `tasks: true`，也没有任务入口。实现后通过 190 项针对性 React 19 测试、24 项隔离 React 18 测试和 73 项 Java 任务及取消回归。受控 Chromium 验证通过 10 组主要场景和 6 项补充检查，包括公开产物预览、实际 30 秒超时、可见性暂停/恢复、双标签页竞争和迟到 Session 响应。根目录 build、typecheck、bundle 及最终 Web Shell build/typecheck 均通过；生成类型无漂移。
+
+真实浏览器通过同源代理连接 Java、Hosted Harness、Broker/worker 和子结果 relay。它只提交一次取消 operation，观察到已确认的完成回执时任务仍 running/draining，随后才观察到任务 cancelled。父会话草稿保留，下一轮显示 `PARENT_CONTINUATION_OK`。macOS 测试 rig 使用 H2 MySQL 模式、确定性模型和非持久本地 worker。这证明已测试的取消及后续执行链路，不代表 Linux 持久 worker 恢复、完整 MySQL 验收或真实模型质量。未测试 Windows/Linux、React 18 浏览器渲染、原生屏幕阅读器输出或移动原生 WebView。滚动位置恢复由组件测试验证。
+
+| 变更前                                                                | 宽屏面板                                                                      | 窄屏弹层                                                                        |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| ![没有任务入口](../design/assets/managed-child-task-panel-before.png) | ![对话旁的任务面板](../design/assets/managed-child-task-panel-after-wide.png) | ![带主题的任务弹层](../design/assets/managed-child-task-panel-after-narrow.png) |
+
+本地可复用命令为 `node .qwen/e2e-tests/managed-child-task-panel-browser.mjs`、同一命令加 `--extras`，以及依次执行 `.qwen/e2e-tests/` 下的 `managed-child-task-hosted-launch.mjs` / `managed-child-task-panel-hosted-browser.mjs`。脚本和原始报告为忽略的工作产物；PR 独立报告发布其实际结果。验证后已停止独立 Vite 和真实 Java/Hosted 进程。
