@@ -15,6 +15,10 @@ import type {
   EditorHandle,
   ComposerSubmitCommit,
 } from '../../hooks/useComposerCore';
+import {
+  clearComposerDraftIfMatches,
+  getComposerDraftStorageKey,
+} from '../../hooks/useComposerCore';
 import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
@@ -40,6 +44,7 @@ import type {
 interface PendingPrompt {
   idempotencyKey: string;
   text: string;
+  draftText?: string;
   sessionId?: string;
   cwd?: string;
 }
@@ -60,6 +65,11 @@ function readPending(key: string): PendingPrompt | undefined {
     )
       return undefined;
     if (pending['cwd'] !== undefined && typeof pending['cwd'] !== 'string')
+      return undefined;
+    if (
+      pending['draftText'] !== undefined &&
+      typeof pending['draftText'] !== 'string'
+    )
       return undefined;
     return value as PendingPrompt;
   } catch {
@@ -334,6 +344,7 @@ function ManagedSessionsContent({
       attempt = {
         idempotencyKey: managedRequestId(),
         text: submittedText,
+        draftText: composerRef.current?.getText(),
         sessionId,
         cwd: workspaceCwd,
       };
@@ -371,13 +382,25 @@ function ManagedSessionsContent({
       setPending(undefined);
       persistPending(pendingKey, undefined);
       setListRevision((current) => current + 1);
+      composerCommit.current?.();
+      composerCommit.current = undefined;
+      const draftKey = getComposerDraftStorageKey(
+        undefined,
+        `managed:${provider.storageKey}:${attempt.sessionId ?? 'new'}`,
+      );
+      for (const draft of [attempt.draftText, attempt.text]) {
+        if (draft !== undefined) clearComposerDraftIfMatches(draftKey, draft);
+      }
+      const editor = composerRef.current;
+      if (
+        selection.current === attempt.sessionId &&
+        editor &&
+        [attempt.draftText, attempt.text].includes(editor.getText())
+      ) {
+        editor.clearText();
+        setText('');
+      }
       if (selection.current === selectedAtSubmit) {
-        if (attempt.sessionId === selectedAtSubmit) {
-          if (composerCommit.current) composerCommit.current();
-          else composerRef.current?.clearText();
-          setText('');
-        }
-        composerCommit.current = undefined;
         onSelectSession(admission.sessionId);
         detail.reload();
       }

@@ -13,11 +13,13 @@ import type {
   ManagedAgentSessionTranscript,
 } from './managed-agent-provider';
 import type { EditorHandle } from '../../hooks/useComposerCore';
+import { getComposerDraftStorageKey } from '../../hooks/useComposerCore';
 import type { ComponentProps } from 'react';
 
 const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
   restoreEditorDraft: vi.fn<() => string>(),
+  commitAccepted: vi.fn(),
   client: {
     listSessions: vi.fn(),
     getSession: vi.fn(),
@@ -91,6 +93,7 @@ vi.mock('../ChatEditor', async () => {
           ({
             setText: update,
             clearText: () => update(''),
+            getText: () => input.current?.value ?? '',
             focus: () => input.current?.focus(),
           }) as EditorHandle,
       );
@@ -99,9 +102,10 @@ vi.mock('../ChatEditor', async () => {
           data-managed-composer-scope={props.composerScopeKey}
           onSubmit={(event) => {
             event.preventDefault();
-            const accepted = props.onSubmit(value, undefined, undefined, () =>
-              update(''),
-            );
+            const accepted = props.onSubmit(value, undefined, undefined, () => {
+              mocks.commitAccepted();
+              update('');
+            });
             if (accepted !== false) update('');
           }}
         >
@@ -194,6 +198,7 @@ describe('ManagedSessionsPage', () => {
       ...mocks.client,
     };
     sessionStorage.clear();
+    localStorage.clear();
     mocks.client.listSessions.mockResolvedValue({
       sessions: [summary()],
     });
@@ -1331,6 +1336,7 @@ describe('ManagedSessionsPage', () => {
   function seedPending(record: {
     idempotencyKey: string;
     text: string;
+    draftText?: string;
     sessionId?: string;
   }) {
     const clientId = getManagedClientId(provider.storageKey);
@@ -1361,6 +1367,102 @@ describe('ManagedSessionsPage', () => {
       'Saved draft for session B',
     );
     expect(onSelect).toHaveBeenLastCalledWith('s1');
+  });
+
+  it.each(['  For session A  ', 'A newer different draft'])(
+    'only clears matching accepted storage after restoring a foreign retry: %s',
+    async (storedDraft) => {
+      seedPending({
+        idempotencyKey: 'restored-a',
+        sessionId: 's1',
+        text: 'For session A',
+        draftText: '  For session A  ',
+      });
+      const ownerKey = getComposerDraftStorageKey(
+        undefined,
+        `managed:${provider.storageKey}:s1`,
+      )!;
+      const foreignKey = getComposerDraftStorageKey(
+        undefined,
+        `managed:${provider.storageKey}:s2`,
+      )!;
+      localStorage.setItem(ownerKey, storedDraft);
+      localStorage.setItem(foreignKey, 'Saved draft for session B');
+      mocks.restoreEditorDraft.mockReturnValue('Saved draft for session B');
+      await render('s2');
+
+      await click('Retry the same request');
+
+      expect(localStorage.getItem(ownerKey)).toBe(
+        storedDraft === '  For session A  ' ? null : storedDraft,
+      );
+      expect(localStorage.getItem(foreignKey)).toBe(
+        'Saved draft for session B',
+      );
+      expect(container.querySelector('textarea')?.value).toBe(
+        'Saved draft for session B',
+      );
+      expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
+        's1',
+        { text: 'For session A' },
+        expect.objectContaining({ idempotencyKey: 'restored-a' }),
+      );
+      expect(onSelect).toHaveBeenLastCalledWith('s1');
+    },
+  );
+
+  it('clears accepted input after the owning editor remounts during an uncertain retry', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1'), summary('s2')],
+    });
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new TypeError('Lost response'),
+    );
+    await render('s1');
+    await input('For session A');
+    const originalEditor = container.querySelector('textarea');
+    await click('Send');
+    await render('s2');
+    await render('s1');
+    expect(container.querySelector('textarea')).not.toBe(originalEditor);
+    expect(container.querySelector('textarea')?.value).toBe('For session A');
+
+    await click('Retry the same request');
+
+    expect(mocks.client.submitPrompt).toHaveBeenCalledTimes(2);
+    expect(mocks.client.submitPrompt.mock.calls[1]).toEqual(
+      mocks.client.submitPrompt.mock.calls[0],
+    );
+    expect(container.querySelector('textarea')?.value).toBe('');
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Send',
+      )?.disabled,
+    ).toBe(true);
+    expect(onSelect).toHaveBeenLastCalledWith('s1');
+  });
+
+  it('preserves the visible foreign draft when retrying a live retained commit', async () => {
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new TypeError('Lost response'),
+    );
+    await render('s1');
+    await input('For session A');
+    await click('Send');
+    mocks.restoreEditorDraft.mockReturnValue('Saved draft for session B');
+    await render('s2');
+
+    await click('Retry the same request');
+
+    expect(mocks.client.submitPrompt).toHaveBeenCalledTimes(2);
+    expect(mocks.client.submitPrompt.mock.calls[1]).toEqual(
+      mocks.client.submitPrompt.mock.calls[0],
+    );
+    expect(container.querySelector('textarea')?.value).toBe(
+      'Saved draft for session B',
+    );
+    expect(onSelect).toHaveBeenLastCalledWith('s1');
+    expect(mocks.commitAccepted).toHaveBeenCalledTimes(1);
   });
 
   it('clears the owning editor after a restored pending prompt is accepted', async () => {
