@@ -203,6 +203,55 @@ describe('collectDependencies', () => {
 
     expect([...dependencies.keys()]).toEqual(['hoisted@2.0.0', 'leaf@3.1.0']);
   });
+
+  it('includes declared bundled dev dependencies and their notices, excluding other dev tools', async () => {
+    const workspace = path.join(root, 'packages', 'web-shell');
+    await writePackage(workspace, {
+      name: '@qwen-code/web-shell',
+      version: '1.0.0',
+      bundledDevDependencies: ['bundled'],
+      devDependencies: { bundled: '1.0.0', unused: '1.0.0' },
+    });
+    await fs.mkdir(path.join(root, 'node_modules', '@qwen-code'), {
+      recursive: true,
+    });
+    await fs.symlink(
+      workspace,
+      path.join(root, 'node_modules', '@qwen-code', 'web-shell'),
+      'junction',
+    );
+    const bundled = path.join(root, 'node_modules', 'bundled');
+    await writePackage(bundled, {
+      name: 'bundled',
+      version: '1.0.0',
+      dependencies: { leaf: '1.0.0' },
+    });
+    await fs.writeFile(path.join(bundled, 'LICENSE'), 'BUNDLED LICENSE');
+    await fs.writeFile(path.join(bundled, 'NOTICE.md'), 'DERIVED CODE CREDIT');
+    await writePackage(path.join(root, 'node_modules', 'leaf'), {
+      name: 'leaf',
+      version: '1.0.0',
+      license: 'MIT',
+    });
+    const dependencies = new Map();
+    await collectDependencies(
+      '@qwen-code/web-shell',
+      root,
+      dependencies,
+      new Set(),
+    );
+    expect([...dependencies.keys()]).toEqual(['bundled@1.0.0', 'leaf@1.0.0']);
+    await runNoticeGeneration({}, { packageDir: workspace, bundledOnly: true });
+    const notice = await fs.readFile(
+      path.join(workspace, 'NOTICES.txt'),
+      'utf8',
+    );
+    expect(notice).toContain('bundled@1.0.0');
+    expect(notice).toContain('BUNDLED LICENSE');
+    expect(notice).toContain('DERIVED CODE CREDIT');
+    expect(notice).toContain('leaf@1.0.0');
+    expect(notice).not.toContain('unused');
+  });
 });
 
 describe('normalizeRepositoryUrl', () => {

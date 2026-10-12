@@ -69,8 +69,15 @@ review, attachment and file tabs unchanged. Pierre uses Shadow DOM; style its
 public variables with Web Shell semantic colors. Use its vanilla entry points to
 preserve the package's existing React 18/19 peer range. Pierre is a pinned build-time
 dependency: its vanilla implementation is bundled, so published consumers do not
-install its React peers (which require 18.3.1 or later). Source
-rendering is virtualized; theme changes update the renderer in place. The library
+install its React peers (which require 18.3.1 or later).
+The explicit `bundledDevDependencies` list seeds license generation without
+including unrelated development tools. Bundled dependency licenses and NOTICE
+credits ship in the npm package and the VS Code companion notice file.
+Tree and source loading have local error boundaries. Failed imports offer a page
+reload to clear the browser's cached rejection; renderer initialization errors
+release their resources and can retry locally. Floating drawers traverse shadow-root tab
+stops before Radix's light-DOM focus loop can skip the tree.
+Source rendering is virtualized; theme changes update the renderer in place. The library
 build bundles Pierre's compatible Shiki 3/4 dependency in the lazy preview chunk,
 while retaining the existing Shiki 1 dependency for other renderers; files over 10,000 lines or 1,048,576 characters use plain
 text to bound syntax-highlighting work.

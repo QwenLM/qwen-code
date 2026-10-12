@@ -23,33 +23,40 @@ export default function PierreFilePreview({
     contentContainer.appendChild(fileContainer);
     host.replaceChildren(contentContainer);
     const virtualizer = new Virtualizer();
-    virtualizer.setup(host, contentContainer);
-    const view = new VirtualizedFile(
-      {
-        theme: { light: 'github-light', dark: 'github-dark' },
-        preferredHighlighter: 'shiki-js',
-        overflow: 'wrap',
-        disableFileHeader: true,
-        enableLineSelection: true,
-        tokenizeMaxLength: 10_000,
-      },
-      virtualizer,
-    );
-    viewRef.current = view;
-    view.render({
-      file: {
-        name: path,
-        contents: content,
-        lang: content.length > 1024 * 1024 ? 'text' : undefined,
-      },
-      fileContainer,
-    });
-    return () => {
+    let view: VirtualizedFile | undefined;
+    const cleanUp = () => {
       viewRef.current = undefined;
-      view.cleanUp();
+      view?.cleanUp();
       virtualizer.cleanUp();
       host.replaceChildren();
     };
+    try {
+      virtualizer.setup(host, contentContainer);
+      view = new VirtualizedFile(
+        {
+          theme: { light: 'github-light', dark: 'github-dark' },
+          preferredHighlighter: 'shiki-js',
+          overflow: 'wrap',
+          disableFileHeader: true,
+          enableLineSelection: true,
+          tokenizeMaxLength: 10_000,
+        },
+        virtualizer,
+      );
+      viewRef.current = view;
+      view.render({
+        file: {
+          name: path,
+          contents: content,
+          lang: content.length > 1024 * 1024 ? 'text' : undefined,
+        },
+        fileContainer,
+      });
+    } catch (error) {
+      cleanUp();
+      throw error;
+    }
+    return cleanUp;
   }, [path, content]);
   useEffect(() => {
     viewRef.current?.setThemeType(theme);

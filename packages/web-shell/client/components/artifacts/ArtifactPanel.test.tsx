@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, StrictMode } from 'react';
+import { act, StrictMode, useEffect } from 'react';
 import { Blob as NodeBlob } from 'node:buffer';
 import { createRoot, type Root } from 'react-dom/client';
 import { EditorView } from 'codemirror';
@@ -97,20 +97,48 @@ vi.mock(
 );
 
 const fileBrowserProps = vi.hoisted(() => ({
+  loadError: undefined as Error | undefined,
+  sourceError: undefined as Error | undefined,
+  loadAttempts: 0,
+  previewPath: undefined as string | undefined,
   current: undefined as
     | { workspaceCwd: string; onReferenceFile?: (path: string) => void }
     | undefined,
 }));
 
-vi.mock('./WorkspaceFileBrowser', () => ({
-  WorkspaceFileBrowser: (props: {
+vi.mock('./WorkspaceFileBrowser', () => {
+  const WorkspaceFileBrowser = (props: {
     workspaceCwd: string;
     onReferenceFile?: (path: string) => void;
+    renderPreview: (
+      path: string,
+      source: boolean,
+      version: number,
+    ) => React.ReactNode;
   }) => {
     fileBrowserProps.current = props;
     return (
-      <div data-testid="workspace-file-browser" data-cwd={props.workspaceCwd} />
+      <div data-testid="workspace-file-browser" data-cwd={props.workspaceCwd}>
+        {fileBrowserProps.previewPath &&
+          props.renderPreview(fileBrowserProps.previewPath, true, 0)}
+      </div>
     );
+  };
+  return {
+    get WorkspaceFileBrowser() {
+      fileBrowserProps.loadAttempts++;
+      if (fileBrowserProps.loadError) throw fileBrowserProps.loadError;
+      return WorkspaceFileBrowser;
+    },
+  };
+});
+
+vi.mock('./PierreFilePreview', () => ({
+  default: function MockFileSource() {
+    useEffect(() => {
+      if (fileBrowserProps.sourceError) throw fileBrowserProps.sourceError;
+    }, []);
+    return <div data-testid="recovered-file-source" />;
   },
 }));
 
@@ -372,6 +400,10 @@ function scheduledTaskPanel(
 }
 
 afterEach(() => {
+  fileBrowserProps.loadError = undefined;
+  fileBrowserProps.sourceError = undefined;
+  fileBrowserProps.previewPath = undefined;
+  fileBrowserProps.loadAttempts = 0;
   vi.unstubAllGlobals();
   sideTaskPanelProps.current = undefined;
   // The boundary matrix spies on DOMParser.prototype per row; restore it so
@@ -2358,6 +2390,94 @@ describe('ArtifactPanel add menu', () => {
     act(() => menuItem?.click());
     expect(onOpenFiles).toHaveBeenCalledTimes(2);
   });
+
+  it.each(['browser import', 'source initialization'] as const)(
+    'contains a failed %s inside the files pane and offers recovery',
+    async (failure) => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      if (failure === 'browser import') {
+        fileBrowserProps.loadError = new Error('File tree chunk unavailable');
+      } else {
+        fileBrowserProps.previewPath = 'app.ts';
+        fileBrowserProps.sourceError = new Error('File renderer unavailable');
+        mockWorkspaceActions.stat.mockResolvedValue({
+          type: 'file',
+          sizeBytes: 16,
+          modifiedMs: 1,
+        });
+        mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+          content: 'const value = 1;',
+          truncated: false,
+        });
+      }
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <ArtifactPanel
+              artifacts={[]}
+              tabs={[
+                {
+                  id: 'files:primary',
+                  kind: 'files',
+                  title: 'Files',
+                  workspaceCwd: '/primary',
+                  workspaceId: 'primary-id',
+                },
+              ]}
+              activeTabId="files:primary"
+              reviewChanges={[]}
+              selectedReviewPath={null}
+              workspaceCwd="/primary"
+              onSelectTab={() => {}}
+              onCloseTab={() => {}}
+              onOpenFilePreview={() => {}}
+              onClose={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      await vi.waitFor(() =>
+        expect(container.querySelector('[role="alert"]')).not.toBeNull(),
+      );
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('button[aria-label="Close Files"]'),
+      ).not.toBeNull();
+      const browser = container.querySelector(
+        '[data-testid="workspace-file-browser"]',
+      );
+      if (failure === 'browser import') {
+        expect(container.textContent).toContain('Reload page');
+        expect(container.textContent).not.toContain('Try again');
+        expect(fileBrowserProps.loadAttempts).toBeGreaterThan(0);
+        return;
+      }
+      fileBrowserProps.loadError = undefined;
+      fileBrowserProps.sourceError = undefined;
+      const retry = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Try again',
+      )!;
+      await act(async () => retry.click());
+      await vi.waitFor(() =>
+        expect(container.querySelector('[role="alert"]')).toBeNull(),
+      );
+      expect(
+        container.querySelector('[data-testid="workspace-file-browser"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="recovered-file-source"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="workspace-file-browser"]'),
+      ).toBe(browser);
+    },
+  );
 
   it('retains files panes across tab switches and revokes a hidden workspace owner', async () => {
     const container = document.createElement('div');

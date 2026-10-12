@@ -12,7 +12,6 @@ const projectRoot = path.resolve(
   path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..'),
 );
 const packagePath = path.join(projectRoot, 'packages', 'vscode-ide-companion');
-const noticeFilePath = path.join(packagePath, 'NOTICES.txt');
 
 /**
  * Standard MIT license text used when a package declares MIT but ships no
@@ -402,27 +401,35 @@ export async function collectDependencies(
     }
   }
 
-  for (const depName of Object.keys(manifest.dependencies ?? {})) {
+  const bundled = dir.split(path.sep).includes('node_modules')
+    ? []
+    : (manifest.bundledDevDependencies ?? []);
+  for (const depName of [
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...bundled,
+  ]) {
     await collectDependencies(depName, dir, dependenciesMap, visitedDirs);
   }
 }
 
-async function main() {
+async function main({ packageDir = packagePath, bundledOnly = false } = {}) {
   try {
-    const packageJsonPath = path.join(packagePath, 'package.json');
+    const packageJsonPath = path.join(packageDir, 'package.json');
     const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8');
     const packageJson = JSON.parse(packageJsonContent);
 
     const allDependencies = new Map();
     const visitedDirs = new Set();
-    const directDependencies = Object.keys(packageJson.dependencies);
+    const directDependencies = bundledOnly
+      ? (packageJson.bundledDevDependencies ?? [])
+      : Object.keys(packageJson.dependencies);
 
     // Sequential on purpose: the traversal order is the file's order, and it
     // must not depend on which filesystem read finishes first.
     for (const depName of directDependencies) {
       await collectDependencies(
         depName,
-        packagePath,
+        packageDir,
         allDependencies,
         visitedDirs,
       );
@@ -452,6 +459,7 @@ async function main() {
     // (the file is declared `eol=lf` in .gitattributes).
     noticeText = noticeText.replace(/\r\n/g, '\n');
 
+    const noticeFilePath = path.join(packageDir, 'NOTICES.txt');
     await fs.writeFile(noticeFilePath, noticeText);
     console.log(`NOTICES.txt generated at ${noticeFilePath}`);
     console.log(`Total dependencies: ${dependencyEntries.length}`);
@@ -461,7 +469,7 @@ async function main() {
   }
 }
 
-export async function runNoticeGeneration(env = process.env) {
+export async function runNoticeGeneration(env = process.env, options) {
   const skipGeneration = ['1', 'true'].includes(
     (env.QWEN_SKIP_NOTICE_GENERATION ?? '').toLowerCase(),
   );
@@ -473,7 +481,7 @@ export async function runNoticeGeneration(env = process.env) {
     return;
   }
 
-  await main();
+  await main(options);
 }
 
 // Only run when executed directly (e.g. `npm run generate:notices`), not when
@@ -482,5 +490,9 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  runNoticeGeneration().catch(console.error);
+  const options =
+    process.argv[2] === '--bundled'
+      ? { packageDir: path.resolve(process.argv[3]), bundledOnly: true }
+      : undefined;
+  runNoticeGeneration(process.env, options).catch(console.error);
 }

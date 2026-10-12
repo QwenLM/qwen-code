@@ -40,6 +40,8 @@ import {
 } from 'lucide-react';
 import { Skeleton } from '../ui/skeleton';
 import { Button } from '../ui/button';
+import { ErrorBoundary } from '../ErrorBoundary';
+import { RootErrorFallback } from '../RootErrorFallback';
 import {
   lazy,
   Suspense,
@@ -133,12 +135,20 @@ import {
   ShellTaskDetail,
 } from '../messages/TasksStatusMessage';
 
-const WorkspaceFileBrowser = lazy(() =>
-  import('./WorkspaceFileBrowser').then((module) => ({
-    default: module.WorkspaceFileBrowser,
-  })),
-);
-const PierreFilePreview = lazy(() => import('./PierreFilePreview'));
+class FilePaneImportError extends Error {}
+
+function fileImportFailed(error: unknown): never {
+  throw new FilePaneImportError(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+const loadWorkspaceFileBrowser = () =>
+  import('./WorkspaceFileBrowser')
+    .then((module) => ({ default: module.WorkspaceFileBrowser }))
+    .catch(fileImportFailed);
+const loadPierreFilePreview = () =>
+  import('./PierreFilePreview').catch(fileImportFailed);
 
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
 const FREQUENCIES: Frequency[] = [
@@ -516,7 +526,12 @@ function WorkspaceFilesPane({
   ArtifactPanelProps,
   'workspaceCwd' | 'onOpenFilePreview' | 'onReferenceFile'
 >) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const WorkspaceFileBrowser = useMemo(
+    () => lazy(loadWorkspaceFileBrowser),
+    [],
+  );
+  const PierreFilePreview = useMemo(() => lazy(loadPierreFilePreview), []);
   const target = useArtifactWorkspaceTarget(tab.workspaceCwd);
   const actions =
     target?.workspaceId === tab.workspaceId ? target?.actions : undefined;
@@ -527,39 +542,60 @@ function WorkspaceFilesPane({
       </div>
     );
   }
-  return (
-    <Suspense
-      fallback={<div className={styles.empty}>{t('common.loading')}</div>}
-    >
-      <WorkspaceFileBrowser
-        key={`${tab.workspaceCwd}:${tab.workspaceId ?? ''}`}
-        workspaceCwd={tab.workspaceCwd}
-        actions={actions}
-        onOpenPreview={(path) =>
-          onOpenFilePreview(path, tab.workspaceCwd, tab.workspaceId)
-        }
-        onReferenceFile={
-          tab.workspaceCwd === workspaceCwd ? onReferenceFile : undefined
-        }
-        renderPreview={(path, source, version) => (
-          <WorkspaceFilePreview
-            key={`${path}:${source}:${version}`}
-            workspacePath={path}
-            workspaceActions={actions}
-            previewKind={source ? 'source' : undefined}
-            sourceRenderer={(content) => (
-              <Suspense
-                fallback={
-                  <div className={styles.empty}>{t('common.loading')}</div>
-                }
-              >
-                <PierreFilePreview path={path} content={content} />
-              </Suspense>
-            )}
-          />
-        )}
+  const failure = (error: Error, reset: () => void) => {
+    // Browsers cache rejected module imports too; only a page reload clears
+    // that cache. Renderer errors can remount locally without losing the tree.
+    const reload = error instanceof FilePaneImportError;
+    return (
+      <RootErrorFallback
+        error={error}
+        language={language}
+        retryMode={reload ? 'reload' : 'reset'}
+        onRetry={reload ? () => window.location.reload() : reset}
       />
-    </Suspense>
+    );
+  };
+  return (
+    <ErrorBoundary label="workspace file browser" fallback={failure}>
+      <Suspense
+        fallback={<div className={styles.empty}>{t('common.loading')}</div>}
+      >
+        <WorkspaceFileBrowser
+          key={`${tab.workspaceCwd}:${tab.workspaceId ?? ''}`}
+          workspaceCwd={tab.workspaceCwd}
+          actions={actions}
+          onOpenPreview={(path) =>
+            onOpenFilePreview(path, tab.workspaceCwd, tab.workspaceId)
+          }
+          onReferenceFile={
+            tab.workspaceCwd === workspaceCwd ? onReferenceFile : undefined
+          }
+          renderPreview={(path, source, version) => (
+            <WorkspaceFilePreview
+              key={`${path}:${source}:${version}`}
+              workspacePath={path}
+              workspaceActions={actions}
+              previewKind={source ? 'source' : undefined}
+              sourceRenderer={(content) => (
+                <ErrorBoundary
+                  label="workspace file source"
+                  resetKeys={[path]}
+                  fallback={failure}
+                >
+                  <Suspense
+                    fallback={
+                      <div className={styles.empty}>{t('common.loading')}</div>
+                    }
+                  >
+                    <PierreFilePreview path={path} content={content} />
+                  </Suspense>
+                </ErrorBoundary>
+              )}
+            />
+          )}
+        />
+      </Suspense>
+    </ErrorBoundary>
   );
 }
 

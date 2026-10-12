@@ -77,6 +77,12 @@ describe('build artifact — package boundary', () => {
   });
 
   it('bundles Pierre highlighter dependencies instead of resolving the host Shiki major', () => {
+    const notices = readFileSync(resolve(DIST_DIR, '../NOTICES.txt'), 'utf8');
+    for (const name of ['diffs', 'trees', 'theming', 'theme']) {
+      expect(notices).toContain(`@pierre/${name}@`);
+    }
+    expect(notices).toContain('@headless-tree/core');
+    expect(notices).toContain('shiki@4.');
     expect(readPackageJavascript()).not.toMatch(
       /(?:from\s*|import\s*\()\s*["']@pierre\//,
     );

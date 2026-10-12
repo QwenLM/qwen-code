@@ -13,6 +13,7 @@ async function openFiles(
   page: Page,
   baseURL: string,
   workspaceCwd = '/tmp/qwen-web-shell-e2e',
+  afterOpen?: () => Promise<void>,
 ) {
   const scenario = createWebShellDaemonScenario({
     workspaceCwd,
@@ -203,6 +204,7 @@ async function openFiles(
   await page
     .getByRole('button', { name: /Files.*Browse workspace files/ })
     .click();
+  await afterOpen?.();
   const browser = page.getByTestId('workspace-file-browser');
   await expect(
     browser.getByRole('treeitem', { name: 'README.md', exact: true }),
@@ -222,6 +224,95 @@ async function openFiles(
       rootUpdated = true;
     },
   };
+}
+
+for (const module of ['WorkspaceFileBrowser', 'PierreFilePreview']) {
+  test(`@smoke contains ${module} import failures and reloads successfully`, async ({
+    page,
+  }, testInfo) => {
+    let blocked = true;
+    let attempts = 0;
+    await page.route(`**/${module}.tsx*`, async (route) => {
+      attempts++;
+      if (blocked) await route.abort('failed');
+      else await route.continue();
+    });
+    const recover = async () => {
+      const panel = page.locator('aside[aria-label="Right panel"]');
+      await expect(panel.getByRole('alert')).toBeVisible();
+      await expect(
+        panel.getByRole('button', { name: 'Close Files', exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.locator('.cm-content[contenteditable="true"]'),
+      ).toHaveCount(1);
+      if (module === 'PierreFilePreview') {
+        await expect(
+          panel.getByRole('treeitem', { name: 'README.md', exact: true }),
+        ).toBeVisible();
+      }
+      blocked = false;
+      await Promise.all([
+        page.waitForEvent('load'),
+        panel.getByRole('button', { name: 'Reload page', exact: true }).click(),
+      ]);
+      await expect(page.getByTestId('workspace-file-browser')).toBeVisible();
+    };
+    const { browser } = await openFiles(
+      page,
+      String(testInfo.project.use.baseURL),
+      '/tmp/qwen-web-shell-e2e',
+      module === 'WorkspaceFileBrowser' ? recover : undefined,
+    );
+    const openSource = async () => {
+      await browser
+        .getByRole('treeitem', { name: 'README.md', exact: true })
+        .click();
+      await browser
+        .getByRole('button', { name: 'Source', exact: true })
+        .click();
+    };
+    await openSource();
+    if (module === 'PierreFilePreview') {
+      await recover();
+      await openSource();
+    }
+    await expect(browser.getByTestId('pierre-file-preview')).toContainText(
+      '# Workspace guide',
+    );
+    expect(attempts).toBeGreaterThan(1);
+  });
+}
+
+for (const fullscreen of [false, true]) {
+  test(`@smoke tabs through the file tree in a ${fullscreen ? 'fullscreen ' : ''}drawer`, async ({
+    page,
+  }, testInfo) => {
+    const { browser } = await openFiles(
+      page,
+      String(testInfo.project.use.baseURL),
+    );
+    await page.setViewportSize({ width: 430, height: 900 });
+    await expect(page.locator('[data-slot="drawer-content"]')).toBeVisible();
+    if (fullscreen)
+      await page
+        .getByRole('button', { name: 'Fullscreen', exact: true })
+        .click();
+    const filter = browser.getByRole('textbox', { name: 'Filter files…' });
+    await page
+      .locator('[data-slot="drawer-content"]')
+      .evaluate(async (node) => {
+        await Promise.all(
+          node.getAnimations().map((animation) => animation.finished),
+        );
+      });
+    const row = browser.getByRole('treeitem', { name: 'broken', exact: true });
+    await filter.focus();
+    await page.keyboard.press('Tab');
+    await expect(row).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(filter).toBeFocused();
+  });
 }
 
 test('@smoke filters loaded paths without changing input or fetching directories', async ({
