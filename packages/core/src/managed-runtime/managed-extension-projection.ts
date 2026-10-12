@@ -350,6 +350,16 @@ export function managedTaskId(recordKey: string): string {
   return `task_${recordKey}`;
 }
 
+/** The task ID of one child run: what its launch answers and `send_message` takes. */
+export function managedChildTaskId(
+  sessionId: string,
+  childRunId: string,
+): string {
+  return managedTaskId(
+    managedExtensionRecordKey(sessionId, 'child_run', childRunId),
+  );
+}
+
 /** The part of `SessionTaskView` that the record revisions determine. */
 export interface ManagedTaskProjection {
   readonly state: ManagedTaskState;

@@ -217,8 +217,7 @@ class HostedWorkspaceToolTurnIT {
                 "--qwen.managed-agent.runtime-broker.credential-key-id=test",
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
-                "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
-                "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
+                "--qwen.managed-agent.runtime-broker.worker-entry=" + worker));
         for (int index = 0; index < workspaces.size(); index++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + index + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -451,7 +450,7 @@ class HostedWorkspaceToolTurnIT {
         List<Map<String, Object>> executions = jdbc.queryForList("SELECT execution_call_id, idempotency_key,"
                 + " runtime_session_id, dispatch_generation, execution_state, execution_status"
                 + " FROM qwen_tool_execution WHERE harness_session_id = ?", session.get("sessionId"));
-        assertThat(executions).as(fault + " reservations").hasSize(fault.equals("acquire") ? 0 : 1);
+        assertThat(executions).as(fault + " reservations").hasSize(List.of("acquire", "arguments").contains(fault) ? 0 : 1);
         for (Map<String, Object> execution : executions) {
             assertThat(execution.get("execution_call_id")).isEqualTo(report.path("executionCallId").asText());
             assertThat(execution.get("idempotency_key")).isEqualTo(report.path("idempotencyKey").asText());

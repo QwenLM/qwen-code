@@ -19,11 +19,16 @@ import {
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
 import { useManagedActions } from './use-managed-actions';
+import { useManagedCwdChange } from './use-managed-cwd-change';
+import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
+import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
+import { useManagedTasks } from './use-managed-tasks';
+import { useManagedTaskCancel } from './use-managed-task-cancel';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -114,6 +119,42 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const taskTriggerRef = useRef<HTMLButtonElement>(null);
+  const [wideTasks, setWideTasks] = useState(false);
+  const [taskPanelSession, setTaskPanelSession] = useState<string>();
+  const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
+  const tasks = useManagedTasks(provider, clientId, sessionId, taskPanelOpen);
+  const taskSnapshots = useMemo(
+    () => (tasks.task ? [...tasks.page.data, tasks.task] : tasks.page.data),
+    [tasks.page.data, tasks.task],
+  );
+  const taskCancel = useManagedTaskCancel(
+    provider,
+    clientId,
+    sessionId,
+    taskSnapshots,
+    tasks.refresh,
+    tasks.apply,
+  );
+  useEffect(() => {
+    const element = pageRef.current;
+    if (!element) return;
+    const resize = () =>
+      setWideTasks(element.getBoundingClientRect().width >= 1100);
+    resize();
+    const observer =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(resize)
+        : undefined;
+    observer?.observe(element);
+    window.addEventListener('resize', resize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', resize);
+    };
+  }, []);
+  useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string>();
   const [listLoading, setListLoading] = useState(false);
@@ -175,6 +216,13 @@ function ManagedSessionsContent({
         ? toManagedPermissionRequest(approvals.action, messages)
         : null,
     [approvals.action, messages],
+  );
+  const cwd = useManagedCwdChange(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    detail.refreshSummary,
   );
   // The reason line below is mounted exactly when this holds, so the dialog can
   // point at it without ever leaving a dangling IDREF. A latch-only render has
@@ -306,7 +354,7 @@ function ManagedSessionsContent({
 
   async function submit() {
     const abort = lifetime.current;
-    if (!abort || abort.signal.aborted || busy) return;
+    if (!abort || abort.signal.aborted || busy || cwd.isBlocked()) return;
     setDiscarded(false);
     let attempt = pendingRef.current;
     if (!attempt) {
@@ -422,7 +470,7 @@ function ManagedSessionsContent({
       </Button>
     ) : null;
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3">
+    <div ref={pageRef} className="flex h-full min-h-0 flex-col gap-3">
       {/* The uncertain-request row unmounts on the Discard click itself, so
           a persistent region announces the outcome wherever focus lands. */}
       <p role="status" className="sr-only">
@@ -444,12 +492,28 @@ function ManagedSessionsContent({
           {t('managed.refresh')}
         </Button>
       </div>
-      {(error || detail.error) && (
-        <p role="alert" className="text-sm text-destructive">
-          {error || detail.error}
+      {/* One server condition can surface through both channels; announce
+          each distinct message once, keyed by the message so a standing
+          alert keeps its node when a duplicate of it stops rendering. */}
+      {[
+        ...new Set(
+          [detail.stoppedReason, detail.error, error].filter(
+            (message): message is string => Boolean(message),
+          ),
+        ),
+      ].map((message) => (
+        <p key={message} role="alert" className="text-sm text-destructive">
+          {message}
         </p>
-      )}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]">
+      ))}
+      <div
+        className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]"
+        style={
+          taskPanelOpen && wideTasks
+            ? { gridTemplateColumns: 'minmax(180px,240px) minmax(0,1fr) 360px' }
+            : undefined
+        }
+      >
         <nav
           ref={sessionsNavRef}
           tabIndex={-1}
@@ -513,6 +577,30 @@ function ManagedSessionsContent({
           {summary && (
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium">{summary.title}</span>
+              {provider.tasks &&
+                (summary.capabilities.tasks === true ||
+                  taskCancel.pendingTaskIds.length > 0) && (
+                  <Button
+                    ref={taskTriggerRef}
+                    variant="outline"
+                    size="sm"
+                    aria-expanded={taskPanelOpen}
+                    onClick={() =>
+                      setTaskPanelSession(taskPanelOpen ? undefined : sessionId)
+                    }
+                  >
+                    {t(
+                      summary.capabilities.tasks === true
+                        ? 'managed.tasks.title'
+                        : 'managed.tasks.recovery',
+                    )}
+                  </Button>
+                )}
+              {Object.entries(taskCancel.states).map(([taskId, state]) => (
+                <span key={taskId} role="status">
+                  {t(taskCancelMessage(state))}
+                </span>
+              ))}
               <Badge variant="secondary">
                 {t(`managed.phase.${summary.phase}`)}
               </Badge>
@@ -547,6 +635,30 @@ function ManagedSessionsContent({
                 {t('managed.workspaceDirectory')}:{' '}
                 {summary.workspace.cwdRelative}
               </p>
+              <ManagedSessionCwdControl
+                key={`${provider.storageKey}:${summary.sessionId}`}
+                summary={summary}
+                supported={Boolean(provider.cwdChange)}
+                cwd={cwd}
+                disabledReason={
+                  active ||
+                  pendingApproval ||
+                  busy ||
+                  pending?.sessionId === sessionId
+                    ? t('managed.cwd.busy')
+                    : undefined
+                }
+                onSubmit={(path, revision) => {
+                  if (
+                    pendingRef.current?.sessionId === sessionId ||
+                    busy ||
+                    active ||
+                    pendingApproval
+                  )
+                    return Promise.resolve();
+                  return cwd.submit(path, revision);
+                }}
+              />
               {!summary.capabilities.workspaceTurns && (
                 <p className="text-muted-foreground">
                   {t('managed.workspaceExecutionUnavailable')}
@@ -765,6 +877,7 @@ function ManagedSessionsContent({
                   type="submit"
                   disabled={
                     busy ||
+                    cwd.blocked ||
                     (!pending &&
                       (!text.trim() ||
                         Boolean(sessionId && !summary?.capabilities.canSend)))
@@ -798,6 +911,30 @@ function ManagedSessionsContent({
               />
             )}
         </section>
+        {taskPanelOpen && sessionId && provider.tasks && (
+          <ManagedTaskPanel
+            key={`${provider.storageKey}:${sessionId}`}
+            wide={wideTasks}
+            tasks={tasks}
+            cancel={taskCancel}
+            canCancel={
+              summary?.capabilities.tasks === true && !!provider.tasks.cancel
+            }
+            reader={
+              summary?.capabilities.artifacts === true
+                ? provider.toolResults
+                : undefined
+            }
+            clientId={clientId}
+            sessionId={sessionId}
+            onClose={() => setTaskPanelSession(undefined)}
+            restoreFocus={() => {
+              if (taskTriggerRef.current?.isConnected)
+                taskTriggerRef.current.focus();
+              else sessionsNavRef.current?.focus();
+            }}
+          />
+        )}
       </div>
     </div>
   );

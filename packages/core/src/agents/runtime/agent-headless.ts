@@ -20,6 +20,8 @@ import type { LlmChat } from '../../core/llm-chat.js';
 import type { RuntimeContentGeneratorView } from './agent-context.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { getErrorMessage } from '../../utils/errors.js';
+import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type {
   AgentEventEmitter,
   AgentStartEvent,
@@ -44,6 +46,56 @@ import { AgentCore, EXTERNAL_MESSAGE_PREFIX } from './agent-core.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 
 const debugLogger = createDebugLogger('SUBAGENT');
+
+// `lastError` is spliced into the parent model's tool result, persisted into
+// chat history and re-sent on every later turn, so it gets the same treatment
+// as the sibling model-visible error text in workflow-orchestrator.ts: control
+// characters stripped, then bounded. A provider SDK can pack a whole response
+// body into `message` (#13597).
+const MAX_MODEL_VISIBLE_ERROR_LENGTH = 500;
+// `getErrorMessage` composes `<message> (cause: <detail>)`, so bounding that
+// composed string head-first would cut off exactly the cause the fold adds —
+// the half that tells the parent what to change. The message is therefore
+// bounded short of the total, reserving room for the cause, and the outer bound
+// above stays as the backstop for a long cause.
+const MAX_MODEL_VISIBLE_MESSAGE_LENGTH = MAX_MODEL_VISIBLE_ERROR_LENGTH - 100;
+
+/**
+ * Whitespace runs collapse to a single space rather than being deleted, so a
+ * multi-line provider body keeps its token boundaries — `stripAnsiAndControl`
+ * removes `\n`/`\r`/`\t` outright, which would weld adjacent tokens into ones
+ * that never existed. The result is still single-line, so it cannot forge the
+ * blank-line separator this string is later spliced into.
+ *
+ * The Unicode format class is dropped on top of the escape/control strip:
+ * `\p{Cf}` covers the characters that reorder a row (U+202E) or hide text
+ * (zero-width), which `stripAnsiAndControl` leaves alone and which would
+ * otherwise survive into text that is rendered for a human and grepped by
+ * later consumers. Same clean step as `sanitizeForStderr`
+ * (`packages/cli/src/utils/errors.ts`); it is *not* the same pass as
+ * `sanitizeDescription`, which strips before it collapses whitespace and so
+ * welds the token boundaries this step exists to keep.
+ */
+function collapseModelErrorText(text: string): string {
+  return stripAnsiAndControl(text.replace(/\s+/g, ' '))
+    .replace(/\p{Cf}/gu, '')
+    .trim();
+}
+
+/**
+ * Bound `text` at `max` characters, ending in `…` when it is cut. The cut is
+ * snapped off a high surrogate: the result is persisted into chat history and
+ * the JSONL transcript, where an unpaired surrogate serializes as a lone
+ * `\udXXX` and renders as U+FFFD — mojibake in the one field #13597 added to
+ * make a failure readable. `truncateWorkflowText` and
+ * `truncateNotificationLabel` hold the same invariant.
+ */
+function boundModelErrorText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const before = text.charCodeAt(max - 1);
+  const end = before >= 0xd800 && before <= 0xdbff ? max - 1 : max;
+  return `${text.slice(0, end)}…`;
+}
 
 // ─── Utilities (unchanged, re-exported for consumers) ────────
 
@@ -126,6 +178,12 @@ export class AgentHeadless implements SubagentExecutor {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
+  // Best-effort cause behind an ERROR terminateMode, sanitized and bounded for
+  // the parent model's tool result (#13597). Not guaranteed under ERROR: a
+  // throw out of `createChat` escapes `execute()` before anything is recorded,
+  // and a reasoning-loop ERROR that returns instead of throwing copies only the
+  // mode. Consumers must treat `undefined` as a normal outcome.
+  private lastError: string | undefined;
   // Which loop detector fired when terminateMode is LOOP_DETECTED (#9450).
   private loopType: string | null = null;
   private chat?: LlmChat;
@@ -225,6 +283,7 @@ export class AgentHeadless implements SubagentExecutor {
     this.executing = true;
     this.finalText = '';
     this.terminateMode = AgentTerminateMode.ERROR;
+    this.lastError = undefined;
     // A re-executed instance (stop-hook continuation, resident turns) must
     // not carry the previous run's loop attribution into an ERROR/FINISH
     // spread; the field is only meaningful for a LOOP_DETECTED stop.
@@ -312,6 +371,7 @@ export class AgentHeadless implements SubagentExecutor {
 
     if (!chat) {
       this.terminateMode = AgentTerminateMode.ERROR;
+      this.lastError = 'Failed to create the agent chat session.';
       return;
     }
 
@@ -407,9 +467,48 @@ export class AgentHeadless implements SubagentExecutor {
       } catch (error) {
         debugLogger.error('Error during subagent execution:', error);
         this.terminateMode = AgentTerminateMode.ERROR;
+        const message = error instanceof Error ? error.message : String(error);
+        // Retained on the instance because the rethrow below is what the caller
+        // sees; without this the reason is only ever emitted as an event. The
+        // model-visible copy is sanitized and bounded and folds in `cause`,
+        // which raw `error.message` drops; the event below keeps the full text
+        // because it goes to the transcript, not to the model.
+        //
+        // Bound the message before `getErrorMessage` composes the cause onto
+        // it, not after — see MAX_MODEL_VISIBLE_MESSAGE_LENGTH. Non-Error
+        // rejections are passed through untouched and rely on the outer bound.
+        //
+        // Sanitize before bounding, not after: the budget has to be spent on the
+        // text the parent actually reads. Bounding the raw message let an
+        // ANSI-coloured failure fill it with escape bytes that
+        // `stripAnsiAndControl` then deleted, leaving a stub of the reason.
+        // Every Error goes through the cleaned copy, not only one long enough to
+        // need the bound: `getErrorMessage` head-caps a composed
+        // `<message> (cause: …)` at 1 000 RAW characters, so escape bytes in a
+        // shorter message still evict the folded cause. A message that cleans
+        // to nothing falls back to the name rather than to the raw Error, which
+        // would spend that same cap on the very escape bytes the cleaning
+        // removed and leave the parent the truthy stub `...`.
+        const cleanedMessage =
+          error instanceof Error ? collapseModelErrorText(error.message) : '';
+        const bounded =
+          error instanceof Error
+            ? {
+                message: boundModelErrorText(
+                  cleanedMessage || error.name || 'Error',
+                  MAX_MODEL_VISIBLE_MESSAGE_LENGTH,
+                ),
+                cause: error.cause,
+              }
+            : error;
+        const clean = collapseModelErrorText(getErrorMessage(bounded));
+        this.lastError = boundModelErrorText(
+          clean,
+          MAX_MODEL_VISIBLE_ERROR_LENGTH,
+        );
         this.core.eventEmitter?.emit(AgentEventType.ERROR, {
           subagentId: this.core.subagentId,
-          error: error instanceof Error ? error.message : String(error),
+          error: message,
           timestamp: Date.now(),
         } as AgentErrorEvent);
 
@@ -501,6 +600,10 @@ export class AgentHeadless implements SubagentExecutor {
 
   getTerminateMode(): AgentTerminateMode {
     return this.terminateMode;
+  }
+
+  getLastError(): string | undefined {
+    return this.lastError;
   }
 
   /**

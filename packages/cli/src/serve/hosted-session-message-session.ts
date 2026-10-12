@@ -38,6 +38,10 @@ import {
   type HostedChildAgentStore,
 } from './hosted-child-agent-session.js';
 import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
+import {
+  HostedChildChains,
+  hostedOpenTeamChainMember,
+} from './hosted-member-chain.js';
 
 // H4d-b of #12827: the hosted side of durable session messages between a
 // parent Session and its child Sessions. A sender commits its outbox entry;
@@ -87,6 +91,8 @@ export function sessionMessageNotificationText(params: {
   readonly messageId: string;
   /** The child task the message came from, or none for the parent. */
   readonly fromTaskId: string | null;
+  /** H4e-b2 decision 6: the member name of a child of the open team. */
+  readonly teammate?: string;
   readonly text: string;
 }): string {
   const head = [
@@ -95,6 +101,9 @@ export function sessionMessageNotificationText(params: {
     params.fromTaskId === null
       ? '<from>parent</from>'
       : `<from>child agent ${escapeXml(params.fromTaskId)}</from>`,
+    ...(params.teammate === undefined
+      ? []
+      : [`<teammate>${escapeXml(params.teammate)}</teammate>`]),
     params.fromTaskId === null
       ? '<reply>To answer, use send_message with to "parent".</reply>'
       : `<reply>To answer, use send_message with task_id "${escapeXml(params.fromTaskId)}".</reply>`,
@@ -311,6 +320,7 @@ export class HostedSessionMessageSession {
         );
       }
       let fromTaskId: string | null = null;
+      let teammate: string | undefined;
       if (params.route === 'to_parent') {
         const run = this.store.authority.extensionRecord(
           'child_run',
@@ -328,6 +338,17 @@ export class HostedSessionMessageSession {
           );
         }
         fromTaskId = this.children.taskIdOf(params.childRunId);
+        // H4e-b2 decision 6: a member's message names it while its chain
+        // root is on the open team's roster. The reply hint stays H4d-b's
+        // task id: a later team may reuse both names, and the task id
+        // always reaches the chain that wrote.
+        teammate = hostedOpenTeamChainMember(
+          this.store.authority.extensionRecordsInDomain('team_state'),
+          new HostedChildChains(
+            this.store.authority.extensionRecordsInDomain('child_run'),
+          ),
+          params.childRunId,
+        )?.name;
       } else if (
         this.lineage?.parentSessionId !== params.senderSessionId ||
         this.lineage.parentChildRunId !== params.childRunId
@@ -375,6 +396,7 @@ export class HostedSessionMessageSession {
               text: sessionMessageNotificationText({
                 messageId: params.messageId,
                 fromTaskId,
+                ...(teammate === undefined ? {} : { teammate }),
                 text: params.content.toString('utf8'),
               }),
             }),

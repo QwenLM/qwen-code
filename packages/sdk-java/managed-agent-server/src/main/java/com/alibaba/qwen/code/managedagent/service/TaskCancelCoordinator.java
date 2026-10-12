@@ -17,14 +17,19 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -50,8 +55,11 @@ import org.springframework.stereotype.Component;
  * request (another cancel, the close cascade) completes it, an end
  * without one fails it. A parked cancel holds no lifecycle hostage. The
  * budget counts claims, not completed retries, and a live delivery
- * renews its lease, so an attempt that hangs past the lease can neither
- * be re-claimed underneath itself nor escape the budget.
+ * renews its lease, so a slow attempt is never re-claimed underneath
+ * itself; one still running at its deadline ({@link #deadlineFor}) is
+ * abandoned as an unproven outcome, so a send that never returns cannot
+ * hold the claim, and the Session's operation slot, past the budget
+ * either.
  */
 @Component
 public class TaskCancelCoordinator {
@@ -62,6 +70,14 @@ public class TaskCancelCoordinator {
     static final int ATTEMPT_BUDGET = 16;
     /** How often a parked cancel re-reads its task's record. */
     static final Duration PARKED_RECHECK = Duration.ofMinutes(5);
+    /**
+     * How long one attempt's send may run before the delivery stops
+     * waiting for it, at least: well past a healthy attempt at the default
+     * Harness timeouts (the attachment's load, perhaps behind another
+     * caller's, and the child operation request, 30 s each). A longer
+     * Harness request timeout raises it; see {@link #deadlineFor}.
+     */
+    static final Duration ATTEMPT_DEADLINE = Duration.ofMinutes(5);
     static final String ALREADY_SETTLED = "task_already_settled";
     static final String UNCONFIRMED = "task_cancel_unconfirmed";
 
@@ -71,6 +87,7 @@ public class TaskCancelCoordinator {
     private final ExecutorService executor;
     private final Clock clock;
     private final ManagedAgentProperties.Dispatch dispatch;
+    private final Duration attemptDeadline;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService renewals =
@@ -85,16 +102,44 @@ public class TaskCancelCoordinator {
         renewals.shutdownNow();
     }
 
+    @Autowired
     public TaskCancelCoordinator(AgentStateStore store,
             ManagedExtensionRecordStore records, HarnessConnector harness,
             ExecutorService executor, Clock clock,
             ManagedAgentProperties properties) {
+        this(store, records, harness, executor, clock, properties,
+                deadlineFor(properties.getHarness().getRequestTimeout()));
+    }
+
+    /**
+     * Never below {@link #ATTEMPT_DEADLINE}, nor below four Harness
+     * requests: an attempt may renegotiate the client, wait behind another
+     * caller's attachment load, make its own, and send the child operation.
+     */
+    static Duration deadlineFor(Duration requestTimeout) {
+        if (requestTimeout == null) {
+            return ATTEMPT_DEADLINE;
+        }
+        Duration requests = requestTimeout.multipliedBy(4);
+        return requests.compareTo(ATTEMPT_DEADLINE) > 0 ? requests
+                : ATTEMPT_DEADLINE;
+    }
+
+    TaskCancelCoordinator(AgentStateStore store,
+            ManagedExtensionRecordStore records, HarnessConnector harness,
+            ExecutorService executor, Clock clock,
+            ManagedAgentProperties properties, Duration attemptDeadline) {
         this.store = store;
         this.records = records;
         this.harness = harness;
         this.executor = executor;
         this.clock = clock;
         this.dispatch = properties.getDispatch();
+        this.attemptDeadline = attemptDeadline;
+    }
+
+    Duration attemptDeadline() {
+        return attemptDeadline;
     }
 
     public void dispatch(String tenantId, String sessionId,
@@ -214,7 +259,7 @@ public class TaskCancelCoordinator {
                 return;
             }
             if (verdict.live()) {
-                send(claimed, verdict.target());
+                sendWithinDeadline(claimed, verdict.target());
                 verdict = verdict(claimed);
             }
         } catch (RuntimeException error) {
@@ -240,6 +285,74 @@ public class TaskCancelCoordinator {
             LOG.warn("Task cancel was claimed by another worker tenant={}"
                     + " session={} operation={}", tenantId, sessionId,
                     operationId);
+        }
+    }
+
+    /**
+     * The send runs on its own thread so that one which never returns —
+     * a client close wedged behind a reader on a half-open Harness stream
+     * did — stays an unknown outcome instead of the claim's whole life.
+     * An abandoned send may still land; the record judges it like any
+     * lost reply, and the send logs how it ended. The send runs on the
+     * executor the waiting delivery holds a thread of, so that executor
+     * must stay unbounded (virtual-thread-per-task): on a bounded pool a
+     * delivery could wait on its own send queued behind it.
+     */
+    private void sendWithinDeadline(OperationRecord operation,
+            TaskTarget target) {
+        AtomicBoolean abandoned = new AtomicBoolean();
+        Future<?> sending = executor.submit(() -> {
+            try {
+                send(operation, target);
+            } catch (RuntimeException error) {
+                if (abandoned.get()) {
+                    LOG.warn("Abandoned task cancel send failed"
+                                    + " tenant={} session={} operation={}"
+                                    + " claim={} failure={}",
+                            operation.tenantId(), operation.sessionId(),
+                            operation.operationId(),
+                            operation.claimGeneration(),
+                            error.getClass().getSimpleName() + ": "
+                                    + error.getMessage(),
+                            error);
+                }
+                throw error;
+            }
+            if (abandoned.get()) {
+                LOG.warn("Abandoned task cancel send returned; the record"
+                                + " decides its outcome tenant={} session={}"
+                                + " operation={} claim={}",
+                        operation.tenantId(), operation.sessionId(),
+                        operation.operationId(),
+                        operation.claimGeneration());
+            }
+        });
+        try {
+            sending.get(attemptDeadline.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (ExecutionException error) {
+            if (error.getCause() instanceof RuntimeException cause) {
+                throw cause;
+            }
+            if (error.getCause() instanceof Error cause) {
+                throw cause;
+            }
+            throw new IllegalStateException(error.getCause());
+        } catch (TimeoutException error) {
+            abandoned.set(true);
+            sending.cancel(true);
+            LOG.warn("Task cancel delivery attempt abandoned after {}"
+                            + " tenant={} session={} operation={} claim={}",
+                    attemptDeadline, operation.tenantId(),
+                    operation.sessionId(), operation.operationId(),
+                    operation.claimGeneration());
+            throw new IllegalStateException("The delivery attempt was"
+                    + " still running after " + attemptDeadline, error);
+        } catch (InterruptedException error) {
+            abandoned.set(true);
+            sending.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                    "The delivery attempt was interrupted", error);
         }
     }
 

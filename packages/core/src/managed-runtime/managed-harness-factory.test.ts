@@ -117,7 +117,24 @@ async function settleTurnComplete(
 ): Promise<void> {
   const resultRef = await session.resources.publish(
     'managed-turn-result',
-    Buffer.from('{"state":"completed"}', 'utf8'),
+    Buffer.from(
+      JSON.stringify({
+        uuid: `rec-${turnId}`,
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-09-01T00:00:00.000Z',
+        type: 'system',
+        subtype: 'turn_result',
+        cwd: '/workspace',
+        version: 'test',
+        systemPayload: {
+          promptId: turnId,
+          state: 'completed',
+          stopReason: 'end_turn',
+        },
+      }),
+      'utf8',
+    ),
   );
   await session.authority.commitTurnComplete(
     command('settleTurn', `settle-${turnId}`),
@@ -545,7 +562,25 @@ describe('managed harness factory', () => {
     const handle = createManagedHarnessHandle(session);
     await handle.ensureRunnable();
     const refs = await waitRefs(session);
+    const beforeWait = session.authority.committedSequence;
     const boundary = await handle.commitDurableWait(waitCommit(refs));
+    const waitEvents = session.authority.eventsInSequenceRange(
+      beforeWait + 1,
+      session.authority.committedSequence,
+    );
+    expect(waitEvents.map((event) => event.kind)).toEqual([
+      'action.changed',
+      'checkpoint.committed',
+    ]);
+    const journal = await fs.readFile(workspace.transcriptPath, 'utf8');
+    const records = journal
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const markers = records.filter(
+      (record) => record.subtype === 'managed_session_commit_v1',
+    );
+    expect(markers.at(-1).managedSession.eventCount).toBe(2);
     expect(boundary.kind).toBe('durable_wait');
     expect(session.authority.latestCheckpoint?.boundary).toBe(
       HARNESS_DURABLE_WAIT_BOUNDARY,

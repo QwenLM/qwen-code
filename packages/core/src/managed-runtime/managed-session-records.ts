@@ -9,6 +9,7 @@ import { parseBranchCheckpointPayload } from '../services/branch-points.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { validateTranscriptRecord } from '../utils/transcript-records.js';
 
 export type ManagedSessionJsonValue =
   | null
@@ -69,6 +70,8 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'message.delta',
   'message.retracted',
   'operation.replayed',
+  'hosted.batch.planned',
+  'hosted.cleanup',
 ] as const;
 
 export type ManagedSessionEventKind =
@@ -138,6 +141,12 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'channel_delivery',
     // H4d-b: produced by send_message and the control plane's relay.
     'session_message',
+    // H4e-b1: a lead's team and its task board.
+    'team_state',
+    'team_task',
+    // H3 (#13856): the Monitor runtime, enabled after its physical
+    // acceptance pass; the hold semantics land with the gate.
+    'monitor_run',
   ];
 
 /**
@@ -174,15 +183,16 @@ export function assertManagedSessionScheduleSessionModeEnabled(
 
 /**
  * The `child_run` body kinds a caller may actually submit today (H4b).
- * `child_run` carries two capabilities with independent enablement gates —
- * H3's background Shell and H4's child agent — so it never joins the plain
- * enabled list as a whole: the shell kind stays disabled here until the H3
- * enablement gates clear, while H4b admits `child_agent`. The Java store
- * validates both kinds and, since H4a, deploys before any writer, keeping
- * the server-first order H1/H2 used.
+ * `child_run` carries its capabilities with independent enablement gates —
+ * H3's background Shell, H4's child agent, and the workflow kind (#13803)
+ * — so it never joins the plain enabled list as a whole. H4b admitted
+ * `child_agent`; the shell kind joined once H3's hold semantics and
+ * physical acceptance landed (#13856). The Java store validates every
+ * kind ahead of any writer, keeping the server-first order H1/H2 used.
  */
 export const MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS = Object.freeze([
   'child_agent',
+  'shell',
 ] as const);
 
 /**
@@ -419,7 +429,7 @@ function fail(message: string): never {
   throw new ManagedSessionRecordError(message);
 }
 
-function safeErrorValue(value: string): string {
+export function safeErrorValue(value: string): string {
   return stripAnsiAndControl(value).slice(0, MAX_ERROR_VALUE_LENGTH);
 }
 
@@ -880,7 +890,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         inputCheckpointRef: 'refOrNull',
         state: 'text',
         usageRef: 'refOrNull',
+        recoveryRef: 'ref',
       },
+      optional: ['recoveryRef'],
     },
     'message.committed': {
       fields: {
@@ -918,7 +930,17 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         messageId: 'id',
         turnId: 'id',
         fromSequence: 'sequence',
+        sourceBootId: 'id',
+        sourceEventEpoch: 'id',
+        throughSequence: 'sequence',
       },
+      optional: ['sourceBootId', 'sourceEventEpoch', 'throughSequence'],
+    },
+    'hosted.batch.planned': {
+      fields: { batchId: 'id', planRevision: 'sequence', planRef: 'ref' },
+    },
+    'hosted.cleanup': {
+      fields: { cleanupId: 'id', descriptorRef: 'ref', state: 'text' },
     },
     'action.changed': {
       fields: {
@@ -1027,6 +1049,8 @@ const EVENT_ACTORS: Readonly<
   'tool.intent': ['harness'],
   'message.delta': ['harness'],
   'message.retracted': ['harness'],
+  'hosted.batch.planned': ['harness'],
+  'hosted.cleanup': ['harness'],
   'action.changed': ['harness', 'trusted_entry'],
   'tool.receipt': ['trusted_entry'],
   'checkpoint.committed': ['harness'],
@@ -1050,6 +1074,8 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'tool.intent': true,
   'message.delta': true,
   'message.retracted': true,
+  'hosted.batch.planned': true,
+  'hosted.cleanup': true,
   'action.changed': false,
   'tool.receipt': false,
   'checkpoint.committed': true,
@@ -1213,6 +1239,59 @@ function assertPayloadRules(
       if (state === 'started' && payload['usageRef'] !== null) {
         fail(`${at}.usageRef must be null while the attempt is started.`);
       }
+      if (Object.hasOwn(payload, 'recoveryRef')) {
+        const ref = payload[
+          'recoveryRef'
+        ] as unknown as ManagedSessionDurableRef;
+        if (ref.kind !== 'hosted-model-request' || ref.schemaVersion !== 1) {
+          fail(`${at}.recoveryRef must be a hosted-model-request/1.`);
+        }
+      }
+      return;
+    }
+    case 'hosted.batch.planned': {
+      if ((payload['planRevision'] as number) < 1) {
+        fail(`${at}.planRevision must start at 1.`);
+      }
+      const ref = payload['planRef'] as unknown as ManagedSessionDurableRef;
+      if (
+        ref.kind !== 'hosted-approval-continuation' ||
+        ref.schemaVersion !== 1
+      ) {
+        fail(`${at}.planRef must be a hosted-approval-continuation/1.`);
+      }
+      return;
+    }
+    case 'hosted.cleanup': {
+      assertEnum(
+        payload['state'],
+        ['owed', 'confirmed'] as const,
+        `${at}.state`,
+      );
+      const ref = payload[
+        'descriptorRef'
+      ] as unknown as ManagedSessionDurableRef;
+      if (ref.kind !== 'hosted-turn-cleanup' || ref.schemaVersion !== 1) {
+        fail(`${at}.descriptorRef must be a hosted-turn-cleanup/1.`);
+      }
+      return;
+    }
+    case 'message.retracted': {
+      const fields = ['sourceBootId', 'sourceEventEpoch', 'throughSequence'];
+      const count = fields.filter((name) =>
+        Object.hasOwn(payload, name),
+      ).length;
+      if (count !== 0 && count !== fields.length) {
+        fail(`${at} bounded source fields must be present together.`);
+      }
+      if (
+        (payload['fromSequence'] as number) < 1 ||
+        (count > 0 &&
+          (payload['throughSequence'] as number) <
+            (payload['fromSequence'] as number))
+      ) {
+        fail(`${at} retraction range is invalid.`);
+      }
       return;
     }
     case 'action.changed': {
@@ -1340,7 +1419,6 @@ function assertPayloadRules(
     case 'input.accepted':
     case 'tool.intent':
     case 'message.delta':
-    case 'message.retracted':
     case 'tool.receipt':
     case 'cancel.requested':
     case 'turn.settled':
@@ -1437,6 +1515,119 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
     ...(subject === undefined ? {} : { subject }),
     payload,
   };
+}
+
+/**
+ * The refs an event carries at its schema-declared positions. Anything that
+ * merely has the ref field names without being a declared ref position — a
+ * free-form `json` payload field, for example — is not a dependency.
+ */
+export function managedSessionEventRefs(
+  event: ManagedSessionEvent,
+): ManagedSessionDurableRef[] {
+  const schema = EVENT_SCHEMAS[event.kind];
+  const refs: ManagedSessionDurableRef[] = [];
+  for (const [name, kind] of Object.entries(schema.fields)) {
+    if (kind !== 'ref' && kind !== 'refOrNull' && kind !== 'refs') continue;
+    const value = event.payload[name];
+    if (value === null || value === undefined) continue;
+    if (kind === 'refs') {
+      (value as ManagedSessionJsonValue[]).forEach((item, index) =>
+        refs.push(
+          assertManagedSessionDurableRef(
+            item,
+            `${event.kind}.${name}[${index}]`,
+          ),
+        ),
+      );
+    } else {
+      refs.push(assertManagedSessionDurableRef(value, `${event.kind}.${name}`));
+    }
+  }
+  return refs;
+}
+
+/**
+ * Domains whose body is a whole reader-facing record. The rest carry their own
+ * shape and are not something a reader replays.
+ */
+const RECORD_CARRYING_DOMAINS: ReadonlySet<unknown> = new Set([
+  'goal_state',
+  'file_history',
+  'session_source',
+]);
+
+/** Whether a domain's envelope carries a whole reader-facing record. */
+export function managedSessionDomainCarriesRecord(domain: unknown): boolean {
+  return RECORD_CARRYING_DOMAINS.has(domain);
+}
+
+/**
+ * Where a whole reader-facing record lives, for the channels that carry one.
+ *
+ * A domain body is the authority's envelope wrapping the content, so the record
+ * sits under its own key there, unlike the event channels whose body is the
+ * record itself.
+ *
+ * This list is deliberately wider than the hot `project()`: a reader
+ * rebuilding the whole history needs turn results, compaction summaries and
+ * record-carrying domains materialized, while a live message projection
+ * presents them as events. The writer fences this same list at commit time, so
+ * a channel added here is validated on both sides at once.
+ */
+export function managedSessionReaderFacingBody(event: ManagedSessionEvent):
+  | {
+      readonly ref: ManagedSessionEvent['payload'][string];
+      readonly inDomainEnvelope: boolean;
+    }
+  | undefined {
+  switch (event.kind) {
+    case 'message.committed':
+      return { ref: event.payload['contentRef'], inDomainEnvelope: false };
+    case 'turn.settled':
+      return { ref: event.payload['resultRef'], inDomainEnvelope: false };
+    case 'context.compacted':
+      return { ref: event.payload['summaryRef'], inDomainEnvelope: false };
+    case 'domain.committed':
+      return managedSessionDomainCarriesRecord(event.payload['domain'])
+        ? { ref: event.payload['recordRef'], inDomainEnvelope: true }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The acceptance predicate the writer fence and the cold reader share, so the
+ * two cannot drift: a body the writer commits is a body the reader replays.
+ * Returns the validated record, or the refusal reason for the caller to wrap
+ * in its own error context.
+ */
+export function validateManagedReaderFacingRecord(
+  value: unknown,
+  sessionId: string,
+): { readonly record: ChatRecord } | { readonly error: string } {
+  const { record, diagnostics } = validateTranscriptRecord(value);
+  const candidate = record as Partial<ChatRecord> | undefined;
+  if (record !== undefined && record.sessionId !== sessionId) {
+    return {
+      error: `it belongs to session ${safeErrorValue(record.sessionId)}, not ${safeErrorValue(sessionId)}.`,
+    };
+  }
+  if (
+    record === undefined ||
+    typeof candidate?.cwd !== 'string' ||
+    typeof candidate?.version !== 'string' ||
+    typeof candidate?.timestamp !== 'string' ||
+    diagnostics.length > 0
+  ) {
+    return {
+      error:
+        diagnostics.map((entry) => entry.message).join('; ') ||
+        'missing sessionId/cwd/version/timestamp',
+    };
+  }
+  return { record: candidate as ChatRecord };
 }
 
 /**
