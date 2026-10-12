@@ -103,6 +103,7 @@ import {
   ACTIVE_FORM_CHARS,
   DESCRIPTION_CHARS,
   HOSTED_TEAM_TOOLS,
+  HOSTED_TEAM_PLAN_TOOL,
   HOSTED_TEAM_TOOL_NAMES,
   HostedTeamRefusal,
   hostedTeamArgumentError,
@@ -322,6 +323,15 @@ function sessionCommandAdmissionsEnabled(): boolean {
  */
 export const COMMAND_WAIT_MS = 120_000;
 
+function teamPlanAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('team_plan');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // H4e-b1: the team tools, and the agent tool's `name`, exist only while
 // both lead-side team domains are enabled for commits.
 function teamAdmissionsEnabled(): boolean {
@@ -487,6 +497,8 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'task_create',
   'task_update',
   'request_shutdown',
+  'exit_plan_mode',
+  'team_plan_approval',
 ];
 
 /**
@@ -498,6 +510,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
 const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
   'read_file',
   'glob',
+  'task_list',
   'send_message',
 ]);
 
@@ -505,8 +518,21 @@ const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
  * The b3a plan-mode refusal, worded for a build without `exit_plan_mode`
  * (decision 5): it says the run may only read and never names it.
  */
-const HOSTED_PLAN_MODE_REFUSAL =
-  'This run is in plan mode until the leader approves its plan: only read_file, glob and send_message to the leader are admitted. The decision arrives as your next instruction.';
+function hostedPlanModeRefusal(): string {
+  return `This run is in plan mode until the leader approves its plan: only read_file, glob, task_list${teamPlanAdmissionsEnabled() ? ', exit_plan_mode' : ''} and send_message to the leader are admitted. The decision arrives as your next instruction.`;
+}
+
+export const HOSTED_MEMBER_PLAN_TOOL: FunctionDeclaration = {
+  name: 'exit_plan_mode',
+  description:
+    'Submit your plan to the leader, then end your turn. The decision arrives as your next instruction; this run remains read-only.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: { plan: { type: 'string', minLength: 1 } },
+    required: ['plan'],
+    additionalProperties: false,
+  },
+};
 
 /**
  * H4b: launch one child Session from the Session's own definition. The
@@ -1468,6 +1494,7 @@ export class HostedWorkspaceToolTurn {
               ? HOSTED_TEAM_AGENT_WORKTREE_TOOL
               : HOSTED_TEAM_AGENT_TOOL,
             ...HOSTED_TEAM_TOOLS,
+            ...(teamPlanAdmissionsEnabled() ? [HOSTED_TEAM_PLAN_TOOL] : []),
           ]
         : this.agentsAdmitted()
           ? [
@@ -1503,6 +1530,32 @@ export class HostedWorkspaceToolTurn {
       this.advertised.push(...HOSTED_MEMBER_BOARD_TOOLS);
       for (const tool of HOSTED_MEMBER_BOARD_TOOLS)
         if (tool.name !== undefined) this.commandToolNames.add(tool.name);
+      if (this.memberPlanMode && teamPlanAdmissionsEnabled()) {
+        this.advertised.push(HOSTED_MEMBER_PLAN_TOOL);
+        this.commandToolNames.add('exit_plan_mode');
+      }
+    }
+    if (this.teamsAdmitted() && teamPlanAdmissionsEnabled()) {
+      this.advertised = this.advertised.map((tool) =>
+        tool.name === 'agent'
+          ? {
+              ...tool,
+              parametersJsonSchema: {
+                ...(tool.parametersJsonSchema as Record<string, unknown>),
+                properties: {
+                  ...((tool.parametersJsonSchema as Record<string, unknown>)[
+                    'properties'
+                  ] as Record<string, unknown>),
+                  plan_mode_required: {
+                    type: 'boolean',
+                    description:
+                      'Require this named member to submit a plan before editing.',
+                  },
+                },
+              },
+            }
+          : tool,
+      );
     }
     return this.advertised;
   }
@@ -1997,7 +2050,9 @@ export class HostedWorkspaceToolTurn {
         intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
-        (HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
+        ((HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
+          (call.name === 'team_plan_approval' &&
+            teamPlanAdmissionsEnabled())) &&
           physicalToolStatus(response) === 'success');
       const preToolOutput = preToolOutputs.get(call.callId);
       const beforeContext = preToolOutput?.getAdditionalContext();
@@ -2239,12 +2294,22 @@ export class HostedWorkspaceToolTurn {
         const team =
           !command &&
           mcpInput === undefined &&
-          HOSTED_TEAM_TOOL_NAMES.includes(call.name);
+          (HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
+            (call.name === 'team_plan_approval' &&
+              teamPlanAdmissionsEnabled()));
         // H4e-b3 decision 9: a run whose first input carried an unescaped
         // plan-mode preamble admits reads only; every other call is
         // refused before it runs, ahead of any per-tool arm below.
-        if (this.memberPlanMode && !HOSTED_PLAN_MODE_READS.has(call.name)) {
-          validationError = HOSTED_PLAN_MODE_REFUSAL;
+        if (
+          this.memberPlanMode &&
+          !HOSTED_PLAN_MODE_READS.has(call.name) &&
+          !(
+            call.name === 'exit_plan_mode' &&
+            command &&
+            teamPlanAdmissionsEnabled()
+          )
+        ) {
+          validationError = hostedPlanModeRefusal();
           input = { ...call.args };
         } else if (mcpInput) {
           input = { ...mcpInput.input };
@@ -2425,6 +2490,9 @@ export class HostedWorkspaceToolTurn {
                 'prompt',
                 'run_in_background',
                 ...(named ? ['name'] : []),
+                ...(named && teamPlanAdmissionsEnabled()
+                  ? ['plan_mode_required']
+                  : []),
                 'isolation',
               ].includes(key),
           );
@@ -2453,6 +2521,12 @@ export class HostedWorkspaceToolTurn {
           ) {
             validationError =
               'Hosted child agent isolation must be "worktree" or omitted.';
+          } else if (
+            args['plan_mode_required'] !== undefined &&
+            typeof args['plan_mode_required'] !== 'boolean'
+          ) {
+            validationError =
+              'Hosted child agent plan_mode_required must be a boolean.';
           } else if (backgroundIllFormed) {
             validationError =
               'Hosted child agent run_in_background must be a boolean.';
@@ -2538,7 +2612,7 @@ export class HostedWorkspaceToolTurn {
               validationError =
                 'Hosted send_message requires "to": "parent" for the team leader, a member name, or "*" for every other member.';
             } else if (memberMessageCommand && this.memberPlanMode) {
-              validationError = HOSTED_PLAN_MODE_REFUSAL;
+              validationError = hostedPlanModeRefusal();
             } else if (
               memberMessageCommand &&
               this.memberIdentity?.name !== undefined &&
@@ -4335,7 +4409,9 @@ export class HostedWorkspaceToolTurn {
         ? prompt
         : teamMemberPreamble(
             member,
-            joining ? false : this.teams!.memberPlanMode(member),
+            joining
+              ? request.call.args['plan_mode_required'] === true
+              : this.teams!.memberPlanMode(member),
           ) + prompt;
     // The envelope bound is enforced by the admission's byte_limit
     // refusal — but the encoder throws a size error before that branch
@@ -4433,6 +4509,7 @@ export class HostedWorkspaceToolTurn {
         teamId: member.teamId,
         name: member.name,
         childRunId,
+        planModeRequired: request.call.args['plan_mode_required'] === true,
       });
       if ('ended' in joined) {
         // A run that finished first still delivers its result, unlabeled.
@@ -4531,6 +4608,10 @@ export class HostedWorkspaceToolTurn {
         args,
         this.childRunIdFor(callId),
         `${hostedPromptKey(this.promptId)}:`,
+        {
+          closing: this.session.authority.currentActivation?.phase !== 'active',
+          childWorkspaces: this.childWorkspaces,
+        },
       );
       answer = (each) =>
         convertToFunctionResponse(name, callId, [{ text: each }]);
@@ -4568,6 +4649,7 @@ export class HostedWorkspaceToolTurn {
     batch: readonly ToolCallRequestInfo[],
   ): string | undefined {
     const keys: Record<string, readonly string[]> = {
+      exit_plan_mode: ['plan'],
       task_list: ['status', 'owner', 'blockedBy'],
       task_create: ['subject', 'description', 'activeForm', 'metadata'],
       task_update: [
@@ -4596,6 +4678,11 @@ export class HostedWorkspaceToolTurn {
       )
     )
       return `Hosted ${call.name} cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run board commands in their own batch or beside send_message to "parent".`;
+    if (
+      call.name === 'exit_plan_mode' &&
+      (typeof call.args['plan'] !== 'string' || !call.args['plan'].trim())
+    )
+      return 'Hosted exit_plan_mode requires a nonempty plan.';
     if (call.name === 'task_create') {
       if (
         typeof call.args['subject'] !== 'string' ||
@@ -4664,7 +4751,9 @@ export class HostedWorkspaceToolTurn {
         ? 'board_read'
         : name === 'send_message'
           ? 'member_message'
-          : 'board_write';
+          : name === 'exit_plan_mode'
+            ? 'plan_submit'
+            : 'board_write';
     const key = this.session.authority.sessionHeader.sessionKey;
     const commandId = sessionCommandId({
       senderSessionId: key.sessionId,

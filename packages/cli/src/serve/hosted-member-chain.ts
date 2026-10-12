@@ -157,7 +157,15 @@ export function teamMemberPreamble(
   const attribute = planMode ? ' plan-mode="required"' : '';
   let body = PREAMBLE_BODY_HEAD;
   if (!commandsEnabled) body += PREAMBLE_TAIL_NO_COMMANDS;
-  if (planMode) body += (commandsEnabled ? '' : ' ') + PLAN_MODE_BODY;
+  if (planMode) {
+    body += (commandsEnabled ? '' : ' ') + PLAN_MODE_BODY;
+    try {
+      assertManagedSessionDomainEnabled('team_plan');
+      body += ' Submit your plan with exit_plan_mode, then end your turn.';
+    } catch {
+      // Rollback keeps the read restriction without advertising an absent tool.
+    }
+  }
   return `<team-member name="${member.name}" team="${member.teamName}"${attribute}>\n${body}\n</team-member>\n\n`;
 }
 

@@ -4,7 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const planGate = vi.hoisted(() => ({ enabled: false }));
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'team_plan' && planGate.enabled) return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import type { ChildSessionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import type { SessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
@@ -87,6 +107,17 @@ describe('plan mode (H4e-b3a, decisions 5 and 9)', () => {
       true,
     );
     expect(isSentInstruction(required + 'other', sent)).toBe(false);
+  });
+
+  it('advertises submission only while the plan domain is enabled', () => {
+    planGate.enabled = true;
+    try {
+      expect(teamMemberPreamble(alice, true)).toContain('exit_plan_mode');
+      expect(teamMemberPreamble(alice)).not.toContain('exit_plan_mode');
+    } finally {
+      planGate.enabled = false;
+    }
+    expect(teamMemberPreamble(alice, true)).not.toContain('exit_plan_mode');
   });
 
   it('reads the attribute only on an unescaped well-formed line', () => {

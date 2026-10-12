@@ -466,8 +466,16 @@ async function answerAbandonedTurnCalls(input: {
       call.name === 'send_message'
         ? sentMessageText(input, functionCallId, callKey)
         : undefined;
+    const planDecision =
+      call.name === 'team_plan_approval'
+        ? await input.teams?.planDecisionEvidence(callKey)
+        : undefined;
     let parts: Part[];
-    if (sent !== undefined) {
+    if (planDecision !== undefined) {
+      parts = convertToFunctionResponse(call.name, functionCallId, [
+        { text: planDecision },
+      ]);
+    } else if (sent !== undefined) {
       parts = convertToFunctionResponse(call.name, functionCallId, [
         { text: sent },
       ]);
@@ -494,6 +502,7 @@ async function answerAbandonedTurnCalls(input: {
         (uncommitted === 'none' ||
           (uncommitted === 'hosted' &&
             !HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
+            call.name !== 'team_plan_approval' &&
             call.name !== 'send_message' &&
             !(call.name === 'agent' && launched === undefined)))
       )
@@ -1139,7 +1148,9 @@ export async function fillParkedRoundCommandGaps(input: {
         name,
         callId,
         [],
-        ['task_list', 'task_create', 'task_update'].includes(name)
+        ['task_list', 'task_create', 'task_update', 'exit_plan_mode'].includes(
+          name,
+        )
           ? sessionCommandEvidenceText('planned')
           : input.gapText,
       );

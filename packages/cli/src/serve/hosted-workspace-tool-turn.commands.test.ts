@@ -69,6 +69,26 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   },
 }));
 
+const planGate = vi.hoisted(() => ({ enabled: false }));
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'team_plan' && planGate.enabled) return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
+
 const PARENT = randomUUID();
 const LEAF_RUN = 'run-leaf';
 
@@ -210,6 +230,7 @@ async function seedFirstInput(text: string): Promise<void> {
 }
 
 beforeEach(async () => {
+  planGate.enabled = false;
   vi.resetAllMocks();
   for (const method of [
     broker.warm,
@@ -279,6 +300,61 @@ function texts(parts: Part[]): string {
   // serialization rather than on a text field that never exists.
   return JSON.stringify(parts);
 }
+
+it('gates the member plan tool and submits it through the durable command wait', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }, true),
+  );
+  const signal = new AbortController().signal;
+  expect(
+    (await createTurn('prompt', true).declarations(signal)).map(
+      (tool) => tool.name,
+    ),
+  ).not.toContain('exit_plan_mode');
+  planGate.enabled = true;
+  expect(
+    (await createTurn().declarations(signal)).map((tool) => tool.name),
+  ).not.toContain('exit_plan_mode');
+  const turn = createTurn('prompt', true);
+  expect((await turn.declarations(signal)).map((tool) => tool.name)).toContain(
+    'exit_plan_mode',
+  );
+  expect(
+    texts(
+      await execute(turn, [call({ plan: ' ' }, 'empty', 'exit_plan_mode')]),
+    ),
+  ).toContain('nonempty plan');
+  expect(
+    texts(
+      await execute(turn, [
+        call(
+          { subject: 'write', description: 'write' },
+          'write',
+          'task_create',
+        ),
+      ]),
+    ),
+  ).toContain('plan mode');
+  for (const [name, args, id] of [
+    ['task_list', {}, 'list'],
+    ['exit_plan_mode', { plan: 'Read then edit' }, 'plan'],
+  ] as const) {
+    const running = execute(turn, [call(args, id, name)]);
+    await vi.waitFor(
+      () => expect(commands.command(commandIdOf(id))).toBeDefined(),
+      { timeout: 5000 },
+    );
+    expect(commands.command(commandIdOf(id))?.kind).toBe(
+      name === 'task_list' ? 'board_read' : 'plan_submit',
+    );
+    await commands.handover(commandIdOf(id), PARENT);
+    await commands.answered(commandIdOf(id), {
+      outcome: 'answered',
+      text: 'accepted by leader',
+    });
+    expect(texts(await running)).toContain('accepted by leader');
+  }
+});
 
 it('declares the member board tools behind the member preamble of a launch', async () => {
   await seedFirstInput(

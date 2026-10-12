@@ -8,7 +8,27 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const planGate = vi.hoisted(() => ({ enabled: false }));
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'team_plan' && planGate.enabled) return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
 import {
   openManagedSession,
   type ManagedSession,
@@ -48,6 +68,7 @@ const CHILD = randomUUID();
 const LEAF_RUN = 'run-1';
 
 afterEach(async () => {
+  planGate.enabled = false;
   for (const session of sessions.splice(0)) await session.close();
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
@@ -278,6 +299,202 @@ const TASK_UPDATE_ARGS = {
 } as const;
 
 describe('hosted-session-command-session funnel (H4e-b3)', () => {
+  it('executes a plan submission and replays its real durable receipt', async () => {
+    planGate.enabled = true;
+    const lead = await leadSideSetup();
+    const teams = new HostedTeamSession(
+      { authority: lead.session.authority, resources: lead.session.resources },
+      lead.session.authority.sessionHeader.sessionKey,
+      lead.children,
+    );
+    await teams.run('team_create', { team_name: 'Review' }, 'create');
+    await teams.join({
+      ...teams.admitMember('bob'),
+      childRunId: LEAF_RUN,
+      planModeRequired: true,
+    });
+    const params = {
+      commandId: commandIdOf('real-plan'),
+      kind: 'plan_submit' as const,
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { plan: 'Read then edit' },
+    };
+    const original = await teams.submitPlan(
+      params.commandId,
+      LEAF_RUN,
+      params.args.plan,
+    );
+    expect(await lead.commands.existingReply(params.commandId)).toBeUndefined();
+    planGate.enabled = false;
+    const reply = await lead.commands.execute(teams, params);
+    expect(reply.outcome).toBe('answered');
+    expect(JSON.stringify(reply)).toContain(original);
+    expect(
+      (
+        await lead.commands.execute(teams, {
+          ...params,
+          commandId: commandIdOf('fresh-plan'),
+        })
+      ).outcome,
+    ).toBe('refused');
+    expect(
+      lead.session.authority.extensionRecordsInDomain('team_plan'),
+    ).toHaveLength(1);
+    expect(await lead.commands.execute(teams, params)).toEqual(reply);
+    expect(
+      lead.session.authority.extensionRecordsInDomain('team_plan'),
+    ).toHaveLength(1);
+    expect(await lead.commands.existingReply(params.commandId)).toEqual(reply);
+  });
+
+  it.each(['waiting', 'cancelled', 'decided', 'other-run'] as const)(
+    'accepts result notifications with only this run waiting plan: %s',
+    async (state) => {
+      planGate.enabled = true;
+      const lead = await leadSideSetup();
+      const teams = new HostedTeamSession(
+        {
+          authority: lead.session.authority,
+          resources: lead.session.resources,
+        },
+        lead.session.authority.sessionHeader.sessionKey,
+        lead.children,
+      );
+      await teams.run('team_create', { team_name: 'Review' }, 'create');
+      await teams.join({
+        ...teams.admitMember('bob'),
+        childRunId: LEAF_RUN,
+        planModeRequired: true,
+      });
+      const requestId = commandIdOf('notification-plan');
+      expect(
+        (
+          await lead.commands.execute(teams, {
+            commandId: requestId,
+            kind: 'plan_submit',
+            childRunId: LEAF_RUN,
+            senderSessionId: CHILD,
+            args: { plan: 'Review <special>' },
+          })
+        ).outcome,
+      ).toBe('answered');
+      await lead.children.settleCompleted(LEAF_RUN, {
+        result: Buffer.from('done'),
+        receipt: Buffer.from('{"outcome":"settled"}'),
+      });
+      if (state === 'cancelled')
+        await teams.run('request_shutdown', { to: 'bob' }, 'stop');
+      if (state === 'decided')
+        await teams.run(
+          'team_plan_approval',
+          { request_id: requestId, action: 'approve' },
+          'approve',
+        );
+      let notified = LEAF_RUN;
+      if (state === 'other-run') {
+        notified = 'other-run';
+        await lead.children.admit({
+          completion: 'sent',
+          childRunId: notified,
+          ownerScopeId: PARENT,
+          rootSessionId: PARENT,
+          description: 'other',
+          prompt: 'other',
+          definition: DEFINITION,
+          workingDirectory: '.',
+          workspaceMode: 'shared',
+          executionCallId: notified,
+        });
+        await lead.children.dispatchStarted(notified, {
+          dispatchId: 'other-dispatch',
+          runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+        });
+        await lead.children.attach(notified, 'other-session');
+        await lead.children.settleCompleted(notified, {
+          result: Buffer.from('done'),
+          receipt: Buffer.from('{"outcome":"settled"}'),
+        });
+      }
+      await lead.children.accept(notified, {
+        notification: { description: 'audit' },
+      });
+      const input = lead.session.authority
+        .readEvents({ afterSequence: 0, limit: 1024 })
+        .find((event) => event.kind === 'input.accepted')!;
+      const ref = (input.payload as Record<string, unknown>)[
+        'contentRef'
+      ] as Parameters<typeof lead.session.resources.read>[0];
+      const text = (await lead.session.resources.read(ref)).toString('utf8');
+      if (state === 'waiting') {
+        expect(text).toContain(requestId);
+        expect(text).toContain('Review &lt;special&gt;');
+      } else expect(text).not.toContain(requestId);
+    },
+  );
+
+  it.each([
+    'planned',
+    'accepting',
+    'unknown',
+    'accepted',
+    'consumed',
+    'refused',
+    'cancelled',
+    'rejected',
+  ] as const)(
+    'deduplicates plan submissions from persisted %s evidence',
+    async (state) => {
+      const member = await memberSide();
+      const first = {
+        commandId: commandIdOf('plan-first'),
+        kind: 'plan_submit' as const,
+        args: { plan: 'Read then edit' },
+        executionCallId: 'plan-first',
+        closing: false,
+      };
+      await member.commands.runCommand(first);
+      if (
+        [
+          'accepting',
+          'unknown',
+          'accepted',
+          'consumed',
+          'refused',
+          'rejected',
+        ].includes(state)
+      )
+        await member.commands.handover(first.commandId, PARENT);
+      if (state === 'unknown' || state === 'cancelled' || state === 'rejected')
+        await member.commands.settle(first.commandId, state);
+      if (state === 'accepted' || state === 'consumed' || state === 'refused')
+        await member.commands.answered(first.commandId, {
+          outcome: state === 'refused' ? 'refused' : 'answered',
+          text: state,
+        });
+      if (state === 'consumed')
+        await member.commands.commitConsumed(first.commandId);
+      const restarted = new HostedSessionCommandSession(
+        {
+          authority: member.session.authority,
+          resources: member.session.resources,
+        },
+        member.session.authority.sessionHeader.sessionKey,
+        member.children,
+        { parentSessionId: PARENT, parentChildRunId: LEAF_RUN },
+      );
+      await restarted.runCommand(first);
+      const retry = restarted.runCommand({
+        ...first,
+        commandId: commandIdOf('plan-second'),
+        executionCallId: 'plan-second',
+      });
+      if (['refused', 'cancelled', 'rejected'].includes(state))
+        await expect(retry).resolves.toBeUndefined();
+      else await expect(retry).rejects.toThrow(/already submitted a plan/);
+    },
+  );
+
   it('commits the outbound planned entry and replays an identical restatement', async () => {
     const member = await memberSide();
     const commandId = commandIdOf('call-1');
