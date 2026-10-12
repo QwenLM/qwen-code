@@ -82,6 +82,7 @@
     "remark-math": "^6.0.0",
     "shiki": "^1.29.2",
     "tailwind-merge": "^3.6.0",
+    "turndown": "^7.2.4",
     "vaul": "^1.1.2"
   },
   "peerDependencies": {
@@ -98,6 +99,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.0.0",
+    "@types/turndown": "^5.0.6",
     "@vitejs/plugin-react": "^4.2.0",
     "jsdom": "^26.1.0",
     "openapi-typescript": "^7.13.0",

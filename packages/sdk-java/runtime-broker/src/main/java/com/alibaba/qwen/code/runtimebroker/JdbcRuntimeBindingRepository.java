@@ -315,6 +315,37 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
+    public RuntimeSessionRecord createSessionTombstone(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord candidate) {
+        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
+                || !jdbcSessions.usesDataSource(dataSource)) {
+            throw new IllegalArgumentException("Retirement requires the same DataSource");
+        }
+        JdbcRuntimeSessionRepository.requireCandidate(candidate);
+        if (candidate.getState() != RuntimeSessionRecord.State.RELEASED) {
+            throw new IllegalArgumentException("Tombstone must be RELEASED");
+        }
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            RuntimeScope scope = candidate.getSession().getScope();
+            lockPlacementDomain(connection, scope.getTenantId());
+            RuntimeBindingRecord binding = selectById(connection, candidate.getBindingId(), true);
+            RuntimeAdmission.requireRelease(binding, candidate);
+            requireHarnessAdmission(connection, scope, candidate.getSession().getHarnessSessionId(),
+                    scope.getLifecycleAuthority(), false, true);
+            RuntimeSessionRecord existing = JdbcRuntimeSessionRepository.selectSession(
+                    connection, scope, candidate.getRuntimeSessionId(), true);
+            if (existing != null) {
+                if (!existing.sameIdentity(candidate)) {
+                    throw new IllegalArgumentException("Session identity differs");
+                }
+                return existing;
+            }
+            JdbcRuntimeSessionRepository.insertSession(connection, candidate);
+            return candidate;
+        });
+    }
+
+    @Override
     public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate) {
         if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
@@ -461,6 +492,11 @@ public final class JdbcRuntimeBindingRepository
 
     private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
             String harnessSessionId, RuntimeLifecycleAuthority authority, boolean legacyHook) throws SQLException {
+        requireHarnessAdmission(connection, scope, harnessSessionId, authority, legacyHook, false);
+    }
+
+    private static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
+            String harnessSessionId, RuntimeLifecycleAuthority authority, boolean legacyHook, boolean retirement) throws SQLException {
         if (!"session".equals(scope.getIsolationClass())) {
             if (authority != null) {
                 throw admissionClosed();
@@ -482,6 +518,9 @@ public final class JdbcRuntimeBindingRepository
                 if (!scope.getTenantId().equals(row.getString("tenant_id"))
                         || !harnessSessionId.equals(row.getString("harness_session_id"))) {
                     throw admissionClosed();
+                }
+                if (retirement && authority == null && "DRAINING".equals(row.getString("phase"))) {
+                    return;
                 }
                 if (legacyHook && authority == null && "DRAINING".equals(row.getString("phase"))
                         && row.getString("operation_id") == null) {
