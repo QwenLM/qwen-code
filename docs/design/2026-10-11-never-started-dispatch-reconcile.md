@@ -90,7 +90,7 @@ not_started_proven` is an admitted execution step, `running → failed`
    record never carries `startReceiptRef`, which is exactly what a
    never-started settlement requires.
 
-## Proposed design
+## Design
 
 ### New module: reconcile-on-open scan
 

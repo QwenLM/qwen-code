@@ -82,7 +82,7 @@ not_started_proven` 是许可的执行步，`running → failed` 是许可的
    `stopReason`。回合内 arm 提交的正是这个 body。记录从不携带
    `startReceiptRef` —— 恰是 never-started 结算所要求的形态。
 
-## 拟议设计
+## 设计
 
 ### 新模块：会话开的对账扫描
 
