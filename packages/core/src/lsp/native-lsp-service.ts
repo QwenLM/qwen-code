@@ -2649,20 +2649,23 @@ export class NativeLspService {
           serverName ? undefined : handle,
         );
 
-        if (response == null) {
+        if (response === undefined) {
           failures.push({
             name,
             handle,
             // Disposed connections resolve undefined, not a clean report.
             error: new Error(
-              'Invalid diagnostic report: server returned no response (disposed connection or null result)',
+              'Invalid diagnostic report: server returned no response (disposed connection)',
             ),
           });
         } else {
+          // Document null is tolerated for compatibility with existing servers.
           const items =
-            typeof response === 'object'
-              ? (response as Record<string, unknown>)['items']
-              : undefined;
+            response === null
+              ? []
+              : typeof response === 'object'
+                ? (response as Record<string, unknown>)['items']
+                : undefined;
           if (!Array.isArray(items)) {
             throw new InvalidDiagnosticReportError(
               'Invalid diagnostic report: server returned an unusable diagnostic report',
@@ -2857,19 +2860,21 @@ export class NativeLspService {
           },
         );
 
-        if (response == null) {
+        if (response === undefined) {
           failures.push({
             name,
             // Disposed connections resolve undefined without changing handle identity.
             error: new Error(
-              'Invalid diagnostic report: server returned no response (disposed connection or null result)',
+              'Invalid diagnostic report: server returned no response (disposed connection)',
             ),
           });
         } else {
           const items =
-            typeof response === 'object'
-              ? (response as Record<string, unknown>)['items']
-              : undefined;
+            response === null
+              ? []
+              : typeof response === 'object'
+                ? (response as Record<string, unknown>)['items']
+                : undefined;
           if (!Array.isArray(items)) {
             throw new InvalidDiagnosticReportError(
               'Invalid diagnostic report: server returned an unusable diagnostic report',

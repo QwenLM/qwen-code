@@ -641,6 +641,40 @@ describe('LspTool', () => {
       },
     );
 
+    it.each(['app.ts', ...(process.platform === 'win32' ? [] : ['a:b.ts'])])(
+      'formats a raw absolute navigation path to %s as an in-scope file',
+      async (name) => {
+        const target = path.resolve(workspaceRoot, 'src', name);
+        const { result } = await run(at('goToDefinition'), (client) =>
+          client.definitions.mockResolvedValue([
+            { uri: target, range: lineSpan(0, 0, 1) },
+          ]),
+        );
+        for (const content of [result.llmContent, result.returnDisplay]) {
+          expect(content).toContain(`${displayPath(target)}:1:1`);
+          expect(content).not.toContain('non-file URI');
+          expect(content).not.toContain('cannot query');
+          expect(content).not.toContain('outside workspace');
+        }
+      },
+    );
+
+    it('marks a raw absolute navigation path outside the workspace', async () => {
+      const target = path.resolve(workspaceRoot, '../outside/lib.ts');
+      const { result } = await run(at('goToDefinition'), (client) =>
+        client.definitions.mockResolvedValue([
+          { uri: target, range: lineSpan(0, 0, 1) },
+        ]),
+      );
+      expectContains(
+        result.llmContent,
+        `${displayPath(target)}:1:1`,
+        'outside workspace',
+        '/directory add',
+      );
+      expect(result.llmContent).not.toContain('non-file URI');
+    });
+
     it('marks an invalid server-produced file URI without failing formatting', async () => {
       const { result } = await run(at('goToDefinition'), (client) =>
         client.definitions.mockResolvedValue([

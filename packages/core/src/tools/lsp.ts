@@ -960,19 +960,21 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     const cached = this.scopeSuffixes.get(uri);
     if (cached !== undefined) return cached;
     let suffix = '';
-    const url = URL.canParse(uri) ? new URL(uri) : undefined;
-    if (url?.protocol !== 'file:' && !/^file:/i.test(uri)) {
+    const url =
+      !path.isAbsolute(uri) && URL.canParse(uri) ? new URL(uri) : undefined;
+    if (url && url.protocol !== 'file:' && url.protocol.length > 2) {
       suffix = ' [non-file URI; cannot query with file operations]';
     } else {
       try {
         this.scopeDirectories ??= this.config
           .getWorkspaceContext()
           .getDirectories();
+        const filePath =
+          url || /^file:/i.test(uri)
+            ? fileURLToPath(url ?? uri)
+            : path.resolve(this.config.getProjectRoot(), uri);
         if (
-          !isSubpaths(
-            this.scopeDirectories,
-            resolveWorkspacePath(fileURLToPath(url ?? uri)),
-          )
+          !isSubpaths(this.scopeDirectories, resolveWorkspacePath(filePath))
         ) {
           suffix =
             ' [outside workspace; add its directory with /directory add before file queries]';

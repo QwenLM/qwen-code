@@ -19,9 +19,12 @@ Advertise `textDocument.diagnostic` with dynamic registration and related-docume
 support disabled. Use the existing pull request, normalization and tool output;
 do not add a push cache just to repair capability negotiation.
 
-Successful document and workspace reports must contain an `items` array. A
-missing or `null` response cannot establish a current clean report; this replaces
-the former null compatibility policy when integrating main's failure accounting.
+Successful non-null document and workspace reports must contain an `items`
+array. A successful literal `null` is an empty report: workspace diagnostics allow
+it in the protocol; document diagnostics tolerate it as a compatibility policy,
+not as a protocol-valid document report. A missing (`undefined`) response cannot
+establish a current clean report. Null follows the same relevance, ownership and
+failure accounting as an empty `items` array.
 Each in-scope file report must contain its own `items` array without diagnostics
 lost during normalization. Empty-string diagnostic messages are valid; missing
 or non-string messages remain invalid. Malformed URI strings and out-of-scope
@@ -65,7 +68,7 @@ out-of-scope filtering are unchanged.
   not `No diagnostics found`; a mock model is clearly distinguished from a real
   model. Missing model authentication and unavailable platforms are disclosed.
 - RPC rejection, timeout or connection closure cannot establish a clean result.
-  Valid empty reports remain usable; null/missing results alone reject. Actual
+  Valid empty and successful null reports remain usable; missing results reject. Actual
   healthy-server diagnostics survive independent RPC failures, but invalid
   payloads and scope/synchronization/scan errors reject even after earlier results.
   A lone unsupported workspace request fails; supported empty sibling reports
@@ -78,7 +81,8 @@ out-of-scope filtering are unchanged.
 
 Diagnostic failures that were previously hidden now become visible. Main's
 partial-result policy preserves actual diagnostics across independent transport
-failures, without certifying completeness. Null responses no longer certify clean
-results. Invalid payloads and unresolved result scope remain hard failures. This repair
-is not full push-diagnostic support or a guarantee that every LSP server supports
+failures, without certifying completeness. Successful null responses are tolerated
+as empty; this does not excuse missing responses or RPC errors. Invalid payloads
+and unresolved result scope remain hard failures. This repair is not full
+push-diagnostic support or a guarantee that every LSP server supports
 pull diagnostics. Existing filesystem race limits remain unchanged.

@@ -128,8 +128,10 @@ can return normally. Diagnostic scan errors advise increasing `limit` above the
 exhausted budget or selecting `serverName`, not narrowing an unused `query`. No persistent path cache
 weakens containment. Output formatting classifies and displays file URIs through
 URL parsing, so accepted padded spellings are not labeled as non-file or
-unqueryable. Malformed file URIs retain their unresolvable marker, and virtual
-URIs remain unchanged. Output formatting snapshots directories and scope decisions
+unqueryable. Returned raw native file paths use the same fresh physical-scope
+check, not a non-file marker; workspace result filtering still rejects bare paths.
+Malformed file URIs retain their unresolvable marker, and virtual URIs remain
+unchanged. Output formatting snapshots directories and scope decisions
 only for one response, labels each affected location, and gives each kind of
 advice once with short tags on subsequent locations. Request descriptions carry
 no result-scope advice. URI-specific notes follow protocol JSON without modifying

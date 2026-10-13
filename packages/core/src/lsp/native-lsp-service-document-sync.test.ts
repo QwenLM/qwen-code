@@ -845,6 +845,7 @@ describe('NativeLspService disk document synchronization', () => {
         {},
         { items: null },
         { items: 'invalid' },
+        { kind: 'full' },
         { error: { code: -32601, message: 'Method not found' } },
         { kind: 'unchanged', resultId: 'unknown' },
       ])(
@@ -879,11 +880,15 @@ describe('NativeLspService disk document synchronization', () => {
         expect(await run(queryDiagnostics())).toEqual([]);
       });
 
-      it('does not certify a null response as clean', async () => {
+      it('accepts a successful null report as empty', async () => {
         connection.request.mockResolvedValue(null);
-        await expect(run(queryDiagnostics())).rejects.toThrow(
-          'server returned no response',
-        );
+        expect(await run(queryDiagnostics())).toEqual([]);
+        const result = await execute(lspTool(), {
+          operation,
+          filePath: file,
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toMatch(/^No diagnostics found/);
       });
 
       it('retains empty-message diagnostics beside real errors', async () => {
@@ -5376,19 +5381,13 @@ describe('NativeLspService disk document synchronization', () => {
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'rejects %s when a connection answers with no response',
       async (operation) => {
-        // `sendRequest` resolves `undefined` once disposed instead of
-        // rejecting, and a JSON-RPC success can carry `result: null`; both
-        // leave the handle looking READY and answerable.
-        for (const response of [undefined, null]) {
-          connection.request.mockResolvedValue(response);
-          await expect(
-            operation === 'diagnostics'
-              ? run(service.diagnostics(uri))
-              : run(service.workspaceDiagnostics()),
-          ).rejects.toThrow(
-            'server returned no response (disposed connection or null result)',
-          );
-        }
+        // Disposed connections resolve undefined while the handle stays READY.
+        connection.request.mockResolvedValue(undefined);
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri))
+            : run(service.workspaceDiagnostics()),
+        ).rejects.toThrow('server returned no response');
       },
     );
 

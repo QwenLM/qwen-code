@@ -6,6 +6,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { NativeLspService } from './native-lsp-service.js';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -531,14 +533,18 @@ describe('NativeLspService Integration Tests', () => {
     });
 
     it('should reject diagnostics when no server is ready', async () => {
-      const uri = 'file:///test/workspace/src/app.ts';
+      const uri = pathToFileURL(
+        path.resolve(mockConfig.rootPath, 'src/app.ts'),
+      ).toString();
       await expect(lspService.diagnostics(uri)).rejects.toThrow(
         'No LSP servers are configured or running',
       );
     });
 
     it('should report unavailable code actions when no server is ready', async () => {
-      const uri = 'file:///test/workspace/src/app.ts';
+      const uri = pathToFileURL(
+        path.resolve(mockConfig.rootPath, 'src/app.ts'),
+      ).toString();
       const context = {
         diagnostics: [],
         only: undefined,
