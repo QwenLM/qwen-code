@@ -48,7 +48,11 @@ const HOST_ENROLLMENT_TTL_MS = 15 * 60 * 1_000;
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
   retries: {
-    retries: 10,
+    // A waiter must outlast one slow holder: a critical section here is an
+    // fsync-bound atomic JSON write, which on an oversubscribed host takes
+    // longer than the old 10-retry (~1s) budget and failed CI with ELOCKED.
+    // 30 retries (~5s worst case) matches the board-lock.ts budget.
+    retries: 30,
     minTimeout: 5,
     maxTimeout: 100,
     factor: 2,
