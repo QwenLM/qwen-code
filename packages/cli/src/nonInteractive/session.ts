@@ -81,6 +81,7 @@ class Session {
   private userMessageQueue: CLIUserMessage[] = [];
   private taskStartedQueue: TaskStartedQueueItem[] = [];
   private taskNotificationQueue: TaskNotificationQueueItem[] = [];
+  private drainNotifications: TaskNotificationQueueItem[] | null = null;
   private pendingContinueTurn: boolean = false;
   private continueTurnInProgress: boolean = false;
   private readonly sessionAbortController: AbortController;
@@ -856,6 +857,10 @@ class Session {
   private enqueueTaskNotification(
     notification: TaskNotificationQueueItem,
   ): void {
+    if (this.drainNotifications) {
+      this.drainNotifications.push(notification);
+      return;
+    }
     this.taskNotificationQueue.push(notification);
     this.ensureProcessingStarted();
   }
@@ -1002,17 +1007,29 @@ class Session {
   private async drainAndShutdown(): Promise<void> {
     debugLogger.debug('[Session] Draining pending work before shutdown');
 
-    // Stop registry callbacks before aborting so cancellation notifications
-    // cannot enqueue a fresh model turn after stdin has closed. Initialization
-    // can install callbacks while the drain waits, so stop them again before
-    // the final abort.
+    // Retain terminal notifications for the SDK after EOF, without starting
+    // another model turn. Work accepted before EOF keeps its normal queue.
+    this.drainNotifications = [];
     this.stopMonitorCallbacks();
-    this.stopBackgroundTaskCallbacks();
     this.abortTaskRegistries();
     await this.waitForAllPendingWork();
     this.stopMonitorCallbacks();
-    this.stopBackgroundTaskCallbacks();
     this.abortTaskRegistries();
+    this.stopBackgroundTaskCallbacks();
+    for (const item of this.drainNotifications) {
+      if (
+        item.monitorId &&
+        item.sdkNotification.status === 'running' &&
+        this.config.getMonitorRegistry().get(item.monitorId)?.status ===
+          'cancelled'
+      ) {
+        continue;
+      }
+      this.outputAdapter.emitSystemMessage(
+        'task_notification',
+        item.sdkNotification,
+      );
+    }
 
     this.finishShutdown();
   }

@@ -2699,6 +2699,9 @@ export async function runNonInteractive(
             // SIGINT abort lands mid-stream. Symmetric with the drain-item
             // loop fix below.
             adapter.finalizeAssistantMessage();
+            await abortBackgroundTasksAndHoldBackNotifications();
+            flushQueuedNotificationsToSdk(localQueue);
+            finalizeOneShotMonitors();
             await routeAbort();
           }
           discardAbandonedAttempt(event, toolCallRequests, () => {
@@ -3042,6 +3045,7 @@ export async function runNonInteractive(
                   // path, so we re-do it inline to preserve the
                   // task_started↔task_notification pairing invariant.
                   adapter.finalizeAssistantMessage();
+                  await abortBackgroundTasksAndHoldBackNotifications();
                   flushQueuedNotificationsToSdk(localQueue);
                   finalizeOneShotMonitors();
                   await routeAbort();
@@ -3519,7 +3523,7 @@ export async function runNonInteractive(
             outputFormat === OutputFormat.STREAM_JSON &&
             (isAlreadyReportedError || !ownsAdapter || recoverableCancellation)
           ) {
-            process.stderr.write(`${message}\n`);
+            process.stderr.write(`${sanitizeTerminalText(message)}\n`);
           }
         }
       }
