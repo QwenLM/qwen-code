@@ -228,7 +228,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             request.put("phase", phase);
             request.put("toolProfile", session.toolProfile());
         }
-        return new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(client().settleLifecycle(ref, request));
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(client().settleLifecycle(ref, request));
+        } catch (DaemonHttpException error) {
+            // A lost detach ACK can leave this reference cached after the
+            // Harness sealed and removed it. Retry through a current-claim
+            // cleanup load; absence never proves resource completion.
+            if (operation.lifecycleProtocolVersion() == 2 && !"effects".equals(phase)
+                    && error.getStatusCode() == 404 && attachments.remove(key, ref)) {
+                pendingRecovery.remove(key);
+            }
+            throw error;
+        }
     }
 
     @Override
@@ -606,6 +617,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public void runChildOperation(String tenantId, String sessionId,
             Map<String, Object> body) {
         try {
+            AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+            if (!attachments.containsKey(key)
+                    && sessions.requireSession(tenantId, sessionId)
+                            .harnessBootId() != null) {
+                // Relay writes reattach the original Session without
+                // driving the parent's parked Turn.
+                createOrLoad(tenantId, sessionId, true, true);
+            }
             // Same ordering as the automation relay: the attachment
             // resolves first, the client reads after it.
             HarnessSessionRef ref = attachment(tenantId, sessionId, true);

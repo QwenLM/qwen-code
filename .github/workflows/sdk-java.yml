@@ -874,6 +874,7 @@ jobs:
             packages/sdk-java/managed-agent-server/target/failsafe-reports/
             packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
             packages/sdk-java/managed-agent-server/target/fg7-cases/
+            packages/sdk-java/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
 
       - name: 'Verify Hosted admission gates'
