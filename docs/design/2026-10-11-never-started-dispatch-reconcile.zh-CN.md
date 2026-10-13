@@ -140,10 +140,11 @@ tool-turn 的 catch 处理 publication 行尚未创建时失败的后台 Shell �
 行存在、unknown、身份不匹配或查询被拒绝时，记录继续未结算；publication
 报错本身永远不是未启动证明。
 
-此后备取证仅适用于后台 Shell 请求。Monitor 派发不创建 `:process` 行，
-继续使用原有 grant-owner 证明。不增加 acquire、release、派发或协议字段。
-记录已证明的 child 终态后，原 Turn 仍报告需要恢复；不宣称批次中的其它
-不确定调用已完成。
+此后备取证仅适用于后台 Shell 请求。Monitor 派发会创建自己的 `:process`
+行，但 `request.background` 会有意排除它们；其结算继续由 Monitor 专属的
+grant 与远程证据路径负责。不增加 acquire、release、派发或协议字段。记录
+已证明的 child 终态后，原 Turn 仍报告需要恢复；不宣称批次中的其它不确定
+调用已完成。
 
 回归用例先拒绝 reserve，再因 publication 缺失拒绝 `close_not_started`。
 只有原进程明确不存在时才要求立即结算 child；进程行存在或 Broker 不可达时，
@@ -178,12 +179,10 @@ if (session.childRuns && brokerOptions)
 - 不做 `monitor_run` arm：monitor 记录在同一窗口搁浅，但 issue 的
   R1 只针对 `child_run`（monitor 的 `dispatchStarted` 连
   `state: 'admitted'` 都不变，是**少报**方向，属 #13377 的镜像 ——
-  另一种症状，不在范围内）。证明本身同样不可迁移：`:process` 账本行
-  只为 `is_background` 派发入账
-  （`RuntimeBrokerService.admitBackgroundProcess`），而 monitor 的输入
-  携带 `is_monitor`、绝不携带 `is_background`，因此根本没有可缺失的
-  行，「缺失即证明」对 `monitor_run` 不成立 —— 向那里扩展必须先找到
-  另一种证明。
+  另一种症状，不在范围内）。Monitor 派发会在
+  `ManagedHoldFamily.MONITOR` 下写入自己的 `:process` 行，但本设计不复用
+  该缺失读取：monitor 记录、hold、停止证据与最终输出分别由专属生命周期
+  负责。向那里扩展前，必须先定义 Monitor 专属的结算契约与见证。
 - reload 扫描器不处理 #13801 R1 Gap A 的存活回合失败路径。该路径由
   上述 #13937 后备取证单独覆盖，保留同一原进程账本的行缺失证明。
 - 不做周期扫描器：按 R1 只做 reload。open 时 Broker 不可达留下的洞，

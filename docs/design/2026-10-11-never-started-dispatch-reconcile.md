@@ -154,9 +154,10 @@ Turn. A present row, unknown result, wrong identity or rejected probe leaves
 the record unresolved. The publication error itself is never proof.
 
 This fallback applies only to background Shell requests. Monitor dispatches
-do not create the `:process` row and keep their existing grant-owner proof.
-It adds no acquire, release, dispatch or protocol field. The original Turn
-still reports recovery required after recording the proven child terminal;
+create their own `:process` rows, but `request.background` deliberately excludes
+them; their settlement stays with the monitor-specific grant and remote-evidence
+paths. It adds no acquire, release, dispatch or protocol field. The original
+Turn still reports recovery required after recording the proven child terminal;
 the fix does not claim the rest of an uncertain batch completed.
 
 The regression refuses reservation, then refuses `close_not_started` for the
@@ -194,14 +195,11 @@ if (session.childRuns && brokerOptions)
 - No `monitor_run` arm: monitor records strand at the same window but the
   issue frames R1 on `child_run` (monitor `dispatchStarted` also keeps
   `state: 'admitted'`, which is the _under_-claiming direction tracked by
-  #13377's mirror — a different symptom, out of scope). The proof itself
-  does not transfer either: the `:process` ledger row is admitted only for
-  an `is_background` dispatch
-  (`RuntimeBrokerService.admitBackgroundProcess`), and a monitor's input
-  carries `is_monitor`, never `is_background`, so no row exists to be
-  absent and the absence read is NOT a never-started proof for
-  `monitor_run` — extending this arm there requires a different proof
-  first.
+  #13377's mirror — a different symptom, out of scope). Monitor dispatches
+  admit their own `:process` rows under `ManagedHoldFamily.MONITOR`, but this
+  design does not reuse that absence read: monitor records, holds, stop
+  evidence and final output have separate lifecycle owners. Extending this
+  arm requires a monitor-specific settlement contract and witness first.
 - The reload scanner does not handle #13801 R1 Gap A, the live in-turn
   failure path. That path is covered separately by the #13937 fallback
   above, retaining the same original-process row-absence proof.

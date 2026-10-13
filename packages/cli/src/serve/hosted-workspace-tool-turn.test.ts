@@ -6163,6 +6163,9 @@ it('settles an in-turn dispatch with no publication and no durable process row',
 it.each(['present', 'unavailable'] as const)(
   'keeps an in-turn dispatch blocked when its process proof is %s',
   async (proof) => {
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const { call, parts } = backgroundCall();
     const rig = backgroundTurnRig(
       { executionStatus: 'success', responseParts: [], capture: null },
@@ -6183,6 +6186,10 @@ it.each(['present', 'unavailable'] as const)(
       'admit',
       'dispatchStarted',
     ]);
+    if (proof === 'unavailable')
+      expect(stderr).toHaveBeenCalledWith(
+        'qwen serve: Background process absence could not be confirmed (status 503, code store_unavailable).',
+      );
   },
 );
 

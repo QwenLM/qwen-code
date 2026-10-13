@@ -8,6 +8,7 @@ import {
   oweHostedTurnCleanup,
   reconcileHostedTurnCleanup,
 } from './hosted-turn-cleanup.js';
+import { rejectionDetail } from './hosted-never-started-reconcile.js';
 
 import {
   readHostedFileHistory,
@@ -4347,16 +4348,16 @@ export class HostedWorkspaceToolTurn {
             proven =
               (await this.broker.backgroundProcessStatus(executionCallId)) ===
               undefined;
-          } catch {
+          } catch (cause) {
             writeStderrLineSafe(
-              'qwen serve: Background process absence could not be confirmed.',
+              `qwen serve: Background process absence could not be confirmed (${rejectionDetail(cause)}).`,
             );
           }
         }
         if (!proven) continue;
-        // The grant owner or original background-process ledger proved
-        // this start never happened. Publication absence alone proves
-        // nothing, and Monitor dispatches do not use that process ledger.
+        // The grant owner proved a Shell or Monitor start never happened,
+        // or the original process ledger proved it for a background Shell.
+        // Publication absence alone proves nothing.
         if (request?.background)
           await this.childRuns
             ?.settleFailed(executionCallId, {
