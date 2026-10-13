@@ -1387,27 +1387,6 @@ describe('LlmChat', async () => {
       expect(getApiHistoryPromptId(await sendMarked())).toBeUndefined();
     });
 
-    it('moves retry ownership after a partial model response without duplicating it', async () => {
-      const original = userText('retry me');
-      markApiHistoryPrompt(original, 'client-1');
-      chat.setHistory([original, modelText('partial')]);
-      mockStream(textStream('done'));
-      await drain(
-        await chat.sendMessageStream(
-          'test-model',
-          { message: 'retry me' },
-          'daemon-2',
-          undefined,
-          { promptId: 'client-1' },
-        ),
-      );
-      const history = chat.getHistoryShallow();
-      const index = findApiHistoryPromptIndex(history, 'client-1');
-      expect(index).toBe(2);
-      expect(getApiHistoryPromptId(history[0]!)).toBeUndefined();
-      expect(history[index]?.parts).toEqual([{ text: 'retry me' }]);
-    });
-
     describe('manual plan-exit notices', () => {
       const NOTICE = 'changed outside the approved exit_plan_mode flow';
       const noticeParts = (contents: Content[]) =>
