@@ -614,6 +614,41 @@ describe('daemon embedded text resources', () => {
     expect(replayed).not.toContain('[truncated]');
   });
 
+  it('keeps a writer-journaled oversized text intact in a MAX_SAFE_INTEGER-budget projection', () => {
+    // R12-2: "no trimming" is spelled two ways in-repo —
+    // Number.POSITIVE_INFINITY (chat-record-transcript) and
+    // Number.MAX_SAFE_INTEGER (projectTrajectoryWindow's NO_TRIM and the
+    // navigation materialization store) — and Number.isFinite accepts the
+    // latter, so the trim-free predicate must recognize both spellings or
+    // the same journaled resource renders at two lengths across surfaces of
+    // one session.
+    const text = 'x'.repeat(150_000);
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxBlocks: Number.MAX_SAFE_INTEGER,
+      maxRetainedBytes: Number.MAX_SAFE_INTEGER,
+    });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: 'context://example/large-text',
+            mimeType: 'text/plain',
+            text,
+          },
+        }),
+      )[0]!,
+    );
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    const replayed = block.embeddedResources?.[0]?.resource.text;
+    expect(replayed).toHaveLength(150_000);
+    expect(replayed).not.toContain('[truncated]');
+  });
+
   it('does not skeletonize a writer-journaled scalar payload on replay', () => {
     // The estimator bills a flat 16 units per number/boolean regardless of
     // JSON width, so an estimate-sized ceiling skeletonizes a scalar-heavy
@@ -668,7 +703,15 @@ describe('daemon embedded text resources', () => {
     );
 
     const snapshot = store.getSnapshot();
-    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    // The documented store ceiling is "budget + one worst-case block":
+    // trimming never evicts the newest block, and the one admitted flood
+    // resource charges max(real JSON bytes, non-text estimate) — up to
+    // MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE (1 MiB) plus the block's own
+    // structural overhead — past this 512 KiB budget on its own, with
+    // nothing evictable.
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(
+      maxRetainedBytes + 1024 * 1024 + 4096,
+    );
     expect(onTruncation).toHaveBeenCalled();
     const block = snapshot.blocks.find((b) => b.kind === 'user');
     if (!block || block.kind !== 'user') {
@@ -676,6 +719,57 @@ describe('daemon embedded text resources', () => {
     }
     expect(block.embeddedResources!.length).toBeLessThan(256);
     expect(block.embeddedResources!.length).toBeGreaterThan(0);
+  });
+
+  it('evicts the older block once retained resource charges cross the byte budget', () => {
+    // R11-2: the block charge must see what a resource pins on the heap. A
+    // `_meta` of 16,000 empty objects is ~48 KB of real JSON — inside both
+    // per-resource admission bounds — but ~1M live estimate units. Charged
+    // in real JSON bytes, both turns below total ~97 KB against the 1.5 MiB
+    // budget and nothing is ever evicted while the store holds ~2M units of
+    // live objects; charged at max(real bytes, non-text estimate), the
+    // second turn crosses the budget and the older block is evicted.
+    const maxRetainedBytes = 1536 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    const flood = (index: number) => ({
+      type: 'resource',
+      resource: {
+        uri: `context://example/flood/${index}`,
+        mimeType: 'application/json',
+        text: '',
+      },
+      _meta: { entries: Array.from({ length: 16_000 }, () => ({})) },
+    });
+    // Distinct prompt and record ids: equal ones would fold both resources
+    // into one newest block (the per-block aggregate cap's case above) and
+    // pin the record snap in trimTranscriptState.
+    const turn = (index: number): DaemonEvent => ({
+      v: 1,
+      id: 10,
+      type: 'session_update',
+      promptId: `prompt-${index}`,
+      originatorClientId: 'client-1',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: flood(index),
+          _meta: {
+            source: 'user',
+            qwenTranscript: { sourceRecordIds: [`record-${index}`] },
+          },
+        },
+      },
+    });
+    store.dispatch(normalizeDaemonEvent(turn(0))[0]!);
+    store.dispatch(normalizeDaemonEvent(turn(1))[0]!);
+
+    const userBlocks = store
+      .getSnapshot()
+      .blocks.filter((block) => block.kind === 'user');
+    expect(userBlocks).toHaveLength(1);
+    expect(userBlocks[0]!.embeddedResources?.[0]?.resource.uri).toBe(
+      'context://example/flood/1',
+    );
   });
 
   it('skeletonizes a scalar flood nested past the estimator depth cap', () => {

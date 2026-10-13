@@ -183,8 +183,14 @@ export const renameCommand: SlashCommand = {
         const recorder = config.getChatRecordingService();
         // Outside projection mode the recorded texts are raw request text,
         // not projections — passing them would drop payload-less turns from
-        // the title input, so fall back to the full history instead.
-        const userDisplayTexts = recorder?.hasDisplayProjectionForTitle?.()
+        // the title input, so fall back to the full history instead. The
+        // recorder's flag decides: its ring can shift every recorded entry
+        // out of a session that is still projected, and re-deriving the mode
+        // from the surviving texts would title from the raw history the
+        // client projected away.
+        const projectionMode =
+          recorder?.hasDisplayProjectionForTitle?.() === true;
+        const userDisplayTexts = projectionMode
           ? (recorder.getUserDisplayTextsForTitle?.() ?? [])
           : [];
         const lastDisplayText = userDisplayTexts.at(-1)?.trim();
@@ -197,6 +203,7 @@ export const renameCommand: SlashCommand = {
           config,
           context.abortSignal ?? new AbortController().signal,
           titleDisplayTexts,
+          projectionMode,
         );
       } finally {
         clearInterval(timer);

@@ -2929,8 +2929,12 @@ export class ChatRecordingService {
           // Outside projection mode the recorded texts must not stand in for
           // the conversation: a raw-text record's displayText is the request
           // text, and projecting only payload-carrying turns would drop every
-          // payload-less turn from the title input.
+          // payload-less turn from the title input. The flag itself is passed
+          // through: the ring can shift every recorded entry out of a session
+          // that is still projected, so the consumer must not re-derive the
+          // mode from the surviving texts.
           this.displayProjectionForTitle ? this.userDisplayTextsForTitle : [],
+          this.displayProjectionForTitle,
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;

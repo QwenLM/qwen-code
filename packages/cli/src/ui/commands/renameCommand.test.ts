@@ -143,6 +143,7 @@ describe('renameCommand', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['你好'],
+      true,
     );
   });
 

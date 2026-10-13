@@ -2732,12 +2732,20 @@ function boundEmbeddedResource(
   block: DaemonTextTranscriptBlock,
   resource: DaemonEmbeddedResource,
 ): DaemonEmbeddedResource {
-  // Both cuts are live-retention bounds: the offline/export projection runs
-  // with an infinite byte budget on purpose (trim-free), so a payload the
+  // Both cuts are live-retention bounds: the offline/export projections run
+  // with an unbounded byte budget on purpose (trim-free), so a payload the
   // writer journaled intact must survive replay there. The writer admits a
   // single block up to MAX_RECORDED_EMBEDDED_RESOURCES_BYTES (256 KiB of
-  // real JSON), above the live store's 100k-unit text cut.
-  const trimFreeByBytes = !Number.isFinite(state.maxRetainedBytes);
+  // real JSON), above the live store's 100k-unit text cut. "Unbounded" is
+  // spelled two ways in-repo — Number.POSITIVE_INFINITY and
+  // Number.MAX_SAFE_INTEGER (projectTrajectoryWindow's NO_TRIM, the
+  // navigation materialization store) — and both are trim-free here: a
+  // MAX_SAFE_INTEGER budget can never be exceeded by the retained estimate,
+  // so the cuts would only drop journaled content, with no onTruncation
+  // wired on those surfaces to report it.
+  const trimFreeByBytes =
+    !Number.isFinite(state.maxRetainedBytes) ||
+    state.maxRetainedBytes >= Number.MAX_SAFE_INTEGER;
   const bounded =
     !trimFreeByBytes && resource.resource.text.length > MAX_TEXT_BLOCK_LENGTH
       ? {
@@ -2918,18 +2926,22 @@ function estimateRetainedBytes(
 export function estimateDaemonTranscriptBlockBytes(
   block: DaemonTranscriptBlock,
 ): number {
-  // A user block's embedded resources are charged in the writer's own unit —
-  // real JSON bytes via `realJsonBytesOf`, the same unit as the per-resource
-  // ceiling and the per-block aggregate cap — so one quantity governs
-  // admission, the block charge, and the store budget. The structural
-  // estimate stays for every other field: charging the estimate here instead
-  // would bill a scalar-heavy but journaled payload several times its real
-  // size, and a real-byte-sized text at half.
+  // A user block's embedded resources are charged at the larger of the two
+  // units the per-resource gate admits: real JSON bytes (the writer's own
+  // unit) and the retention estimate with the separately bounded text arm
+  // excluded. The byte unit alone cannot see the live objects a resource
+  // pins — a `_meta` of empty objects is ~48 KB of JSON but ~1M units of
+  // heap — so a byte-only charge leaves the store's accounting blind to the
+  // flood and the eviction budget never fires. The real-byte side keeps a
+  // text payload at the writer's width instead of the estimator's 2x.
   if (block.kind === 'user' && block.embeddedResources !== undefined) {
     const { embeddedResources, ...rest } = block;
     let total = estimateRetainedBytes(rest);
     for (const resource of embeddedResources) {
-      total += realJsonBytesOf(resource);
+      total += Math.max(
+        realJsonBytesOf(resource),
+        estimateRetainedBytes(resource) - resource.resource.text.length * 2,
+      );
     }
     return total;
   }

@@ -398,6 +398,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['你好'],
+      true,
     );
   });
 
@@ -443,6 +444,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       [undefined, 'visible question'],
+      true,
     );
   });
 
@@ -484,6 +486,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       [],
+      false,
     );
   });
 
@@ -510,6 +513,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       [],
+      false,
     );
   });
 
@@ -600,6 +604,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['', '/advisor check my work'],
+      true,
     );
     expect(findCustomTitleRecord()?.systemPayload).toEqual({
       customTitle: 'Advisor Review Session',
@@ -789,6 +794,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       resumedConfig,
       expect.any(AbortSignal),
       ['你好', '再见'],
+      true,
     );
   });
 
@@ -808,6 +814,47 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(chatRecordingService.getUserDisplayTextsForTitle()[0]).toBe(
       'visible 1',
     );
+  });
+
+  it('keeps projection mode authoritative after the ring shifts every entry out', async () => {
+    // R12-1: the 20-slot ring keeps only the last 20 turns. A session whose
+    // first turn hid instructions behind an empty client projection and
+    // whose next 20 turns carry no payload shifts the recorded '' out
+    // entirely — but the session is still in projection mode. The title
+    // pipeline must receive the authoritative flag beside the (now
+    // all-undefined) texts; re-deriving the mode from the surviving entries
+    // reads as "no projection" and titles from the raw history — the hidden
+    // channel instructions the client projected away. The generation mock
+    // answers the way the real pipeline does for an all-undefined
+    // projection-mode array (empty_history, pinned in sessionTitle.test.ts),
+    // so no title is written.
+    tryGenerateSessionTitleMock.mockResolvedValue({
+      ok: false,
+      reason: 'empty_history',
+    });
+    chatRecordingService.recordUserMessage(
+      [{ text: 'hidden channel instructions' }],
+      undefined,
+      { displayText: '', hookContext: '' },
+    );
+    for (let index = 0; index < 20; index++) {
+      chatRecordingService.recordUserMessage([{ text: `bare ${index}` }]);
+    }
+
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(true);
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual(
+      Array.from({ length: 20 }, () => undefined),
+    );
+
+    await assistantTurn();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      Array.from({ length: 20 }, () => undefined),
+      true,
+    );
+    expect(findCustomTitleRecord()).toBeUndefined();
   });
 
   it('does not trigger in headless CLI mode (non-interactive, non-ACP)', async () => {
