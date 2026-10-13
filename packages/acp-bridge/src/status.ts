@@ -654,7 +654,6 @@ export interface ServeSessionContextStatus {
       | 'interrupted_turn'
       | 'degraded_history';
     canContinue: boolean;
-    cancellationConfirmationId?: string;
   };
   state: {
     models?: unknown;

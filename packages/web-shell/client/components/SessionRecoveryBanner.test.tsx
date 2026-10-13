@@ -11,8 +11,7 @@ const state = vi.hoisted(() => ({
   streaming: 'idle',
   generation: 0,
   recoveryGeneration: 0,
-  continueSession:
-    vi.fn<(options?: { confirmCancellation?: string }) => Promise<void>>(),
+  continueSession: vi.fn<() => Promise<void>>(),
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
@@ -92,25 +91,6 @@ describe('SessionRecoveryBanner', () => {
     expect(state.continueSession).toHaveBeenCalledOnce();
     expect(button.disabled).toBe(true);
     await act(async () => finish());
-  });
-
-  it('asks before continuing a legacy cancellation and carries only its current identity', async () => {
-    state.connection.context!.recovery!.cancellationConfirmationId =
-      'legacy-daemon';
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    render();
-    expect(container.textContent).toContain('reason was not recorded');
-    await act(async () => container.querySelector('button')!.click());
-    expect(confirm).toHaveBeenCalledWith(
-      'This turn may have been stopped intentionally. Do you want to continue it?',
-    );
-    expect(state.continueSession).not.toHaveBeenCalled();
-    confirm.mockReturnValue(true);
-    await act(async () => container.querySelector('button')!.click());
-    expect(state.continueSession).toHaveBeenCalledExactlyOnceWith({
-      confirmCancellation: 'legacy-daemon',
-    });
-    confirm.mockRestore();
   });
 
   it('shows tool interruption in Chinese and history gaps without a button', () => {

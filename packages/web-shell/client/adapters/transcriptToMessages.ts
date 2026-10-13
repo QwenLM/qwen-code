@@ -1387,17 +1387,8 @@ export function transcriptBlocksToDaemonMessages(
           content: promptCancelledText,
           variant: 'info',
           source: 'prompt_cancelled',
-          ...(block.elapsedMs !== undefined || block.reason !== undefined
-            ? {
-                data: {
-                  ...(block.elapsedMs !== undefined
-                    ? { elapsedMs: block.elapsedMs }
-                    : {}),
-                  ...(block.reason !== undefined
-                    ? { reason: block.reason }
-                    : {}),
-                },
-              }
+          ...(block.elapsedMs !== undefined
+            ? { data: { elapsedMs: block.elapsedMs } }
             : {}),
           timestamp: blockTime,
           sourceBlockIds: [block.id],

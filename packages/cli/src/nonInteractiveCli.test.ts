@@ -264,6 +264,7 @@ describe('runNonInteractive', () => {
   let processStderrSpy: MockInstance;
   let mockLlmClient: {
     sendMessageStream: Mock;
+    getTurnCancellation: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
@@ -335,6 +336,7 @@ describe('runNonInteractive', () => {
 
     mockLlmClient = {
       sendMessageStream: vi.fn(),
+      getTurnCancellation: vi.fn().mockReturnValue(undefined),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
       addHistory: vi.fn(),
@@ -3037,36 +3039,12 @@ describe('runNonInteractive', () => {
       expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
 
-    // A `clean` and a `degraded_history` plan spread no
-    // `cancellationConfirmationId`, so a caller that passes the confirmation
-    // it read for a turn that has since settled must still get the no-op
-    // above, not a mismatch error.
-    it('is still a no-op when a confirmation is supplied for a settled turn', async () => {
+    it('refuses direct continuation of an unknown legacy cancellation', async () => {
       setupMetricsMock();
-      mockLlmClient.getChat = vi.fn(() => ({
-        getDebugResponses: mockGetDebugResponses,
-        getHistory: vi
-          .fn()
-          .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
-      }));
-
-      const exitCode = await runNonInteractive(
-        mockConfig,
-        mockSettings,
-        '',
-        'prompt-c4',
-        {
-          continueInterrupted: true,
-          confirmCancellation: 'turn-9',
-        },
-      );
-
-      expect(exitCode).toBe(0);
-      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
-    });
-
-    it('rejects a confirmation that does not match the interrupted turn', async () => {
-      setupMetricsMock();
+      mockLlmClient.getTurnCancellation.mockReturnValue({
+        reason: 'unknown',
+        promptId: 'turn-9',
+      });
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
         getHistory: vi
@@ -3074,24 +3052,15 @@ describe('runNonInteractive', () => {
           .mockReturnValue([
             { role: 'user', parts: [{ text: 'do the thing' }] },
           ]),
-        isLastTurnCancelled: vi.fn().mockReturnValue(false),
-        getLastTurnCancellationConfirmationId: vi
-          .fn()
-          .mockReturnValue('turn-9'),
       }));
-
       const exitCode = await runNonInteractive(
         mockConfig,
         mockSettings,
         '',
         'prompt-c5',
-        {
-          continueInterrupted: true,
-          confirmCancellation: 'turn-8',
-        },
+        { continueInterrupted: true },
       );
-
-      expect(exitCode).toBe(1);
+      expect(exitCode).toBe(0);
       expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
   });

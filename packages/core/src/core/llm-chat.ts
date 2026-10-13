@@ -166,6 +166,8 @@ import {
 } from '../services/session-api-history.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
 
+import { getInvocationContext } from '../utils/invocation-context.js';
+
 export { InvalidStreamError };
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
@@ -2462,50 +2464,6 @@ export class LlmChat {
     this.clearPendingPartialState();
   }
 
-  private cancelledHistory?: {
-    reason: 'user' | 'unknown';
-    confirmationId?: string;
-    history: Content[];
-    length: number;
-    lastEntry: Content | undefined;
-    userPushCount: number;
-  };
-
-  markLastTurnCancelled(
-    reason: 'user' | 'unknown' = 'user',
-    confirmationId?: string,
-  ): void {
-    this.cancelledHistory = {
-      reason,
-      confirmationId,
-      history: this.history,
-      length: this.history.length,
-      lastEntry: this.history.at(-1),
-      userPushCount: this.userContentPushCount,
-    };
-  }
-
-  isLastTurnCancelled(): boolean {
-    return this.getLastTurnCancellationReason() === 'user';
-  }
-
-  getLastTurnCancellationConfirmationId(): string | undefined {
-    return this.getLastTurnCancellationReason() === 'unknown'
-      ? this.cancelledHistory?.confirmationId
-      : undefined;
-  }
-
-  getLastTurnCancellationReason(): 'user' | 'unknown' | undefined {
-    const basis = this.cancelledHistory;
-    return basis !== undefined &&
-      basis.history === this.history &&
-      basis.length === this.history.length &&
-      basis.lastEntry === this.history.at(-1) &&
-      basis.userPushCount === this.userContentPushCount
-      ? basis.reason
-      : undefined;
-  }
-
   /**
    * Creates a new LlmChat instance.
    *
@@ -2917,7 +2875,7 @@ export class LlmChat {
           completedToolCallIds: this.completedToolCallIds,
         });
       }
-      this.setHistory(newHistory, this.completedToolCallIds, true);
+      this.setHistory(newHistory, this.completedToolCallIds);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       try {
@@ -3065,7 +3023,7 @@ export class LlmChat {
         tokens_after: info.newTokenCount,
       }),
     );
-    this.setHistory(newHistory, this.completedToolCallIds, true);
+    this.setHistory(newHistory, this.completedToolCallIds);
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
     this.lastCachedContentTokenCount = 0;
@@ -3482,7 +3440,6 @@ export class LlmChat {
             this.setHistory(
               historyBeforeHardRescue,
               completedToolCallIdsBeforeHardRescue,
-              true,
             );
             // setHistory conservatively cleared loaded-skill tracking; the
             // restored bodies re-arm it on their next invoke.
@@ -3691,6 +3648,14 @@ export class LlmChat {
 
     // Setup can roll the push back; transfer retry ownership only after it succeeds.
     moveApiHistoryPromptId(this.history, currentUserContent!);
+    const client = this.config.getLlmClient?.();
+    if (
+      !this.isForkedChat &&
+      client?.isInitialized?.() &&
+      client.getChat() === this
+    ) {
+      client.acceptTurnInput(getInvocationContext()?.promptId ?? prompt_id);
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
@@ -5834,7 +5799,6 @@ export class LlmChat {
    * Clears the chat history.
    */
   clearHistory(): void {
-    this.cancelledHistory = undefined;
     this.history = [];
     this.completedToolCallIds = [];
     if (!this.isForkedChat) {
@@ -5855,7 +5819,6 @@ export class LlmChat {
    * Adds a new entry to the chat history.
    */
   addHistory(content: Content): void {
-    this.cancelledHistory = undefined;
     this.history.push(content);
     this.syncReviewedSchemasForContent(content);
     // addHistory only runs between sends, so the partial-push marker
@@ -6009,13 +5972,7 @@ export class LlmChat {
   setHistory(
     history: Content[],
     completedToolCallIds?: readonly string[],
-    preserveCancellation = false,
   ): void {
-    const reason = preserveCancellation
-      ? this.getLastTurnCancellationReason()
-      : undefined;
-    const confirmationId = this.getLastTurnCancellationConfirmationId();
-    this.cancelledHistory = undefined;
     this.history = history;
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
@@ -6038,11 +5995,9 @@ export class LlmChat {
         .getToolRegistry()
         ?.syncReviewedDeclarations?.(this.history, this);
     }
-    if (reason) this.markLastTurnCancelled(reason, confirmationId);
   }
 
   truncateHistory(keepCount: number): void {
-    this.cancelledHistory = undefined;
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
     this.setCompletedToolCallIds(this.completedToolCallIds);
@@ -6067,7 +6022,6 @@ export class LlmChat {
   }
 
   stripThoughtsFromHistory(): void {
-    this.cancelledHistory = undefined;
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);

@@ -642,10 +642,14 @@ describe('SessionTranscriptReader', () => {
           sessionId,
           options,
         );
-        expect(projection?.runtime.cancelledLastTurn === true).toBe(
+        expect(projection?.runtime.turnCancellation?.reason === 'user').toBe(
           cancelReason === 'user',
         );
-        expect(projection?.runtime.cancellationConfirmationId).toBe(
+        expect(
+          projection?.runtime.turnCancellation?.reason === 'unknown'
+            ? projection.runtime.turnCancellation.promptId
+            : undefined,
+        ).toBe(
           cancelledAt !== undefined && cancelReason === undefined
             ? user.daemonPromptId
             : undefined,
@@ -730,7 +734,9 @@ describe('SessionTranscriptReader', () => {
       ]);
       for (const options of [NONE, recent(1), all(false)]) {
         const projection = await coldProjection(options);
-        expect(projection?.runtime.cancelledLastTurn === true).toBe(cancelled);
+        expect(projection?.runtime.turnCancellation?.reason === 'user').toBe(
+          cancelled,
+        );
         expect(structuredClone(projection?.runtime.apiHistory)).toEqual([
           user.message,
         ]);
@@ -758,7 +764,7 @@ describe('SessionTranscriptReader', () => {
     };
     await writeRecords([user, terminal, replacement]);
     const projection = await svc().readRestoreProjection(sessionId, NONE);
-    expect(projection?.runtime.cancelledLastTurn).not.toBe(true);
+    expect(projection?.runtime.turnCancellation).toBeUndefined();
     expect(structuredClone(projection?.runtime.apiHistory)).toEqual([
       replacement.message,
     ]);

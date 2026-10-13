@@ -133,6 +133,18 @@ export function getLastApiHistoryPromptId(
   return prompt && getApiHistoryPromptId(prompt);
 }
 
+export function getTurnResultCancellation(
+  result: Omit<Extract<SessionTurnSettlementHint, { kind: 'result' }>, 'kind'>,
+  owned = true,
+): { reason: 'user' | 'unknown'; promptId: string } | undefined {
+  return result.state === 'cancelled' && result.cancelledAt !== undefined
+    ? {
+        reason: owned && result.cancelReason === 'user' ? 'user' : 'unknown',
+        promptId: result.promptId,
+      }
+    : undefined;
+}
+
 /** Client prompt IDs identify history entries; daemon IDs identify terminal outcomes. */
 export function getLastApiPromptCancellation(
   history: readonly Content[],
@@ -141,10 +153,8 @@ export function getLastApiPromptCancellation(
 ): { reason: 'user' | 'unknown'; promptId: string } | undefined {
   const latest = hints.findLast((hint) => hint !== undefined);
   const unknown =
-    latest?.kind === 'result' &&
-    latest.state === 'cancelled' &&
-    latest.cancelledAt !== undefined
-      ? { reason: 'unknown' as const, promptId: latest.promptId }
+    latest?.kind === 'result'
+      ? getTurnResultCancellation(latest, false)
       : undefined;
   const promptId = getLastApiHistoryPromptId(
     history,
@@ -152,20 +162,17 @@ export function getLastApiPromptCancellation(
   );
   if (!promptId || findApiHistoryPromptIndex(history, promptId) === -1)
     return unknown;
-  const matches = hints.flatMap((hint, index) =>
-    hint?.kind === 'prompt' && hint.promptId === promptId
-      ? [{ hint, index }]
-      : [],
+  const matches = hints.filter(
+    (hint) => hint?.kind === 'prompt' && hint.promptId === promptId,
   );
   if (matches.length !== 1) return unknown;
-  let { hint: owner, index: ownerIndex } = matches[0]!;
-  for (let index = ownerIndex + 1; index < hints.length; index++) {
-    const hint = hints[index];
-    if (hint?.kind !== 'attempt') continue;
-    owner = hint;
-    ownerIndex = index;
-  }
+  const original = matches[0]!;
+  const owner =
+    hints
+      .slice(hints.indexOf(original) + 1)
+      .findLast((hint) => hint?.kind === 'attempt') ?? original;
   if (
+    owner.kind === 'result' ||
     owner.promptId !== promptId ||
     !owner.daemonPromptId ||
     hints.filter(
@@ -175,25 +182,19 @@ export function getLastApiPromptCancellation(
     ).length !== 1
   )
     return unknown;
-  const results = hints.flatMap((hint, index) =>
-    hint?.kind === 'result' && hint.promptId === owner.daemonPromptId
-      ? [{ hint, index }]
-      : [],
+  const results = hints.filter(
+    (hint) => hint?.kind === 'result' && hint.promptId === owner.daemonPromptId,
   );
+  const result = results[0];
   if (
     results.length !== 1 ||
-    results[0]!.index <= ownerIndex ||
-    results[0]!.hint.state !== 'cancelled' ||
-    results[0]!.hint.cancelledAt === undefined
+    result?.kind !== 'result' ||
+    hints.indexOf(result) <= hints.indexOf(owner)
   )
     return unknown;
-  const result = results[0]!.hint;
-  if (result.cancelReason === 'user') {
-    return { reason: 'user', promptId: owner.daemonPromptId };
-  }
-  return hints.findLast((hint) => hint?.kind === 'result') === result
-    ? { reason: 'unknown', promptId: result.promptId }
-    : undefined;
+  const cancellation = getTurnResultCancellation(result);
+  if (!cancellation) return unknown;
+  return cancellation;
 }
 
 export interface BuildApiHistoryOptions {
@@ -543,8 +544,7 @@ export function buildSessionHistoryFromConversation(
   apiHistory: Content[];
   completedToolCallIds?: string[];
   trailingSystemNotifications: number;
-  cancelledLastTurn?: boolean;
-  cancellationConfirmationId?: string;
+  turnCancellation?: ReturnType<typeof getLastApiPromptCancellation>;
 } {
   const accumulator = new SessionApiHistoryAccumulator();
   for (const record of conversation.messages) accumulator.add(record);
@@ -567,11 +567,6 @@ export function buildSessionHistoryFromConversation(
     // envelope-shaped real prompt from being trimmed. Omitting it would drop
     // the consumer back to shape-only guessing.
     trailingSystemNotifications,
-    ...(cancellationReason?.reason === 'user'
-      ? { cancelledLastTurn: true }
-      : {}),
-    ...(cancellationReason?.reason === 'unknown'
-      ? { cancellationConfirmationId: cancellationReason.promptId }
-      : {}),
+    ...(cancellationReason ? { turnCancellation: cancellationReason } : {}),
   };
 }

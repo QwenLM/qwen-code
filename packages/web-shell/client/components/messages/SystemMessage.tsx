@@ -274,31 +274,21 @@ export const SystemMessage = memo(function SystemMessage({
       />
     );
   }
-  // A controlled cancellation notice. A user ESC-cancel reads as belonging to
-  // the user side of the transcript; an interruption (deadline, response close,
-  // session teardown, channel steer) keeps its own wording instead of claiming
-  // the user cancelled.
+  // The user ESC-cancelled a live stream. Render it right-aligned and subtle —
+  // a user-initiated stop reads as belonging to the user side of the transcript.
   if (source === 'prompt_cancelled') {
     const elapsedMs =
       data && typeof data === 'object' && 'elapsedMs' in data
         ? data.elapsedMs
         : undefined;
-    const interrupted =
-      data && typeof data === 'object' && 'reason' in data
-        ? data.reason === 'interrupted'
-        : false;
     return (
       <div className={styles.cancelled} role="status">
         <span>
-          {interrupted
-            ? t('turn.interrupted')
-            : typeof elapsedMs === 'number' &&
-                Number.isFinite(elapsedMs) &&
-                elapsedMs >= 0
-              ? t('turn.stoppedAfter', {
-                  seconds: Math.ceil(elapsedMs / 1000),
-                })
-              : t('turn.stopped')}
+          {typeof elapsedMs === 'number' &&
+          Number.isFinite(elapsedMs) &&
+          elapsedMs >= 0
+            ? t('turn.stoppedAfter', { seconds: Math.ceil(elapsedMs / 1000) })
+            : t('turn.stopped')}
         </span>
       </div>
     );

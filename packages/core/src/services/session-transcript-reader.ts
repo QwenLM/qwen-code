@@ -276,8 +276,7 @@ export interface SessionRestoreReplayPage {
 
 export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
-  cancelledLastTurn?: boolean;
-  cancellationConfirmationId?: string;
+  turnCancellation?: ReturnType<typeof getLastApiPromptCancellation>;
   completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
@@ -414,12 +413,7 @@ function buildManagedSessionRestoreProjection(
   );
   const runtime: SessionRuntimeResumeState = {
     apiHistory: restoredHistory.apiHistory,
-    ...(cancellationReason?.reason === 'user'
-      ? { cancelledLastTurn: true }
-      : {}),
-    ...(cancellationReason?.reason === 'unknown'
-      ? { cancellationConfirmationId: cancellationReason.promptId }
-      : {}),
+    ...(cancellationReason ? { turnCancellation: cancellationReason } : {}),
     ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
     uiTelemetryEvents,
     ...(attributionSnapshot ? { attributionSnapshot } : {}),
@@ -3545,12 +3539,7 @@ export class SessionTranscriptReader {
     );
     const runtime: SessionRuntimeResumeState = {
       apiHistory: restoredHistory.apiHistory,
-      ...(cancellationReason?.reason === 'user'
-        ? { cancelledLastTurn: true }
-        : {}),
-      ...(cancellationReason?.reason === 'unknown'
-        ? { cancellationConfirmationId: cancellationReason.promptId }
-        : {}),
+      ...(cancellationReason ? { turnCancellation: cancellationReason } : {}),
       ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts
         ? { resumeTokenCounts: restoredTokenCounts }

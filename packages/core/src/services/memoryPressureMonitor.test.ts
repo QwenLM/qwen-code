@@ -139,12 +139,10 @@ function createMockConfig(
         getHistoryShallow?: () => unknown[];
         getHistory?: () => unknown[];
         setHistory?: (
-          h: Content[],
+          h: unknown[],
           completedToolCallIds?: readonly string[],
         ) => void;
         getCompletedToolCallIds?: () => readonly string[] | undefined;
-        isLastTurnCancelled?: () => boolean;
-        markLastTurnCancelled?: () => void;
       };
     } | null;
     clearContextOnIdle?: {
@@ -163,8 +161,6 @@ function createMockConfig(
             getHistoryShallow: () => [],
             getHistory: () => [],
             setHistory: vi.fn(),
-            isLastTurnCancelled: () => false,
-            markLastTurnCancelled: vi.fn(),
           }),
         }
       : overrides.llmClient;
@@ -294,8 +290,6 @@ function chatClient(
       getHistoryShallow: () => history,
       ...(opts.full && { getHistory: opts.full }),
       setHistory,
-      isLastTurnCancelled: () => false,
-      markLastTurnCancelled: vi.fn(),
     }),
   };
 }
@@ -964,50 +958,6 @@ describe('MemoryPressureMonitor', () => {
   });
 
   describe('compact_history step', () => {
-    it.each([true, false])(
-      'preserves cancellation=%s when idle compaction clears old tool results',
-      async (cancelled) => {
-        const { LlmChat } = await import('../core/llm-chat.js');
-        const chat = new LlmChat(
-          { getToolRegistry: () => undefined } as unknown as Config,
-          {},
-          [
-            ...readFileHistory(),
-            content('user', { text: 'cancelled request' }),
-            content(
-              'model',
-              fnCall('read_file', { path: '/latest.ts' }, 'latest'),
-            ),
-            content(
-              'user',
-              fnResponse('read_file', { output: 'latest' }, 'latest'),
-            ),
-          ],
-        );
-        if (cancelled) chat.markLastTurnCancelled();
-        const monitor = createMonitor({
-          llmClient: { isInitialized: () => true, getChat: () => chat },
-        });
-
-        await checkAt(monitor, 11 * GB);
-
-        expect(
-          chat
-            .getHistory()
-            .some((entry) =>
-              entry.parts?.some(
-                (part) =>
-                  part.functionResponse?.response?.['output'] ===
-                  MICROCOMPACT_CLEARED_MESSAGE,
-              ),
-            ),
-        ).toBe(true);
-        expect(chat.isLastTurnCancelled()).toBe(cancelled);
-        chat.addHistory(content('user', { text: 'new request' }));
-        expect(chat.isLastTurnCancelled()).toBe(false);
-      },
-    );
-
     it('skips compaction when client is not initialized', async () => {
       const setHistory = vi.fn();
       const monitor = createMonitor({
@@ -1200,8 +1150,6 @@ describe('MemoryPressureMonitor', () => {
             getHistoryShallow: () => toolHistory,
             setHistory: vi.fn(),
             getCompletedToolCallIds: () => [],
-            isLastTurnCancelled: () => false,
-            markLastTurnCancelled: vi.fn(),
           }),
         },
       });
@@ -1267,8 +1215,6 @@ describe('MemoryPressureMonitor', () => {
             getHistoryShallow: () => toolHistory,
             setHistory: vi.fn(),
             getCompletedToolCallIds: () => [],
-            isLastTurnCancelled: () => false,
-            markLastTurnCancelled: vi.fn(),
           }),
         },
       });

@@ -17,7 +17,6 @@ import { BaseController } from './baseController.js';
 import type {
   ControlRequestPayload,
   CLIControlInitializeRequest,
-  CLIControlContinueLastTurnRequest,
   CLIControlSetModelRequest,
   CLIControlSetEffortRequest,
   CLIControlGetUsageInfoRequest,
@@ -69,9 +68,7 @@ export class SystemController extends BaseController {
         return this.handleInterrupt();
 
       case 'continue_last_turn':
-        return this.handleContinueLastTurn(
-          payload as CLIControlContinueLastTurnRequest,
-        );
+        return this.handleContinueLastTurn();
 
       case 'set_model':
         return this.handleSetModel(
@@ -487,9 +484,7 @@ export class SystemController extends BaseController {
    * turn. The response reports `{ accepted, interruption }`; the resumed
    * turn's output flows as regular stream messages afterwards.
    */
-  private async handleContinueLastTurn(
-    request: CLIControlContinueLastTurnRequest,
-  ): Promise<Record<string, unknown>> {
+  private async handleContinueLastTurn(): Promise<Record<string, unknown>> {
     if (!this.context.onContinueLastTurn) {
       throw new Error(
         'continue_last_turn callback (onContinueLastTurn) was not registered on ' +
@@ -497,11 +492,7 @@ export class SystemController extends BaseController {
       );
     }
 
-    const result = await this.context.onContinueLastTurn(
-      typeof request.confirmCancellation === 'string'
-        ? request.confirmCancellation
-        : undefined,
-    );
+    const result = await this.context.onContinueLastTurn();
     debugLogger.debug('[SystemController] continue_last_turn handled:', result);
 
     return { subtype: 'continue_last_turn', ...result };

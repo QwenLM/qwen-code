@@ -1001,13 +1001,8 @@ export class Query implements AsyncIterable<SDKMessage> {
    * Continue the most recent unfinished turn without appending a synthetic user
    * message. Output arrives as regular messages on this Query's async iterator.
    */
-  async continueLastTurn(options?: {
-    confirmCancellation?: string;
-  }): Promise<Record<string, unknown> | null> {
-    return this.sendControlRequest(
-      ControlRequestType.CONTINUE_LAST_TURN,
-      options,
-    );
+  async continueLastTurn(): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.CONTINUE_LAST_TURN);
   }
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {

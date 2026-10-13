@@ -3475,7 +3475,6 @@ describe('createDaemonSessionActions', () => {
       await expect(pending).resolves.toBeUndefined();
       expect(session.continueSession).toHaveBeenCalledWith(
         expect.any(AbortSignal),
-        {},
       );
       expect(restartEventStream).toHaveBeenCalledWith('session-a');
       expect(onContinuationAdmitted).toHaveBeenCalledExactlyOnceWith(

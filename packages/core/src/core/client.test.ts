@@ -704,9 +704,6 @@ describe('Gemini Client (client.ts)', () => {
       getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
       getHistory: vi.fn(() => structuredClone(history)),
       getHistoryShallow: vi.fn(() => history.map((c) => ({ ...c }))),
-      getLastTurnCancellationReason: vi.fn(),
-      getLastTurnCancellationConfirmationId: vi.fn(),
-      markLastTurnCancelled: vi.fn(),
       setHistory: vi.fn(),
     });
   /** Installs a message bus answering hook requests with `request`. */
@@ -1075,6 +1072,54 @@ describe('Gemini Client (client.ts)', () => {
     return reg;
   };
 
+  describe('turn cancellation lifecycle', () => {
+    const cancelTurn = () => {
+      client.acceptTurnInput('daemon-1');
+      client.settleTurn({
+        promptId: 'daemon-1',
+        state: 'cancelled',
+        cancelledAt: 0,
+        cancelReason: 'user',
+        endedAt: 1,
+      });
+    };
+
+    it('clears cancellation on accepted new input and ignores a stale terminal', () => {
+      cancelTurn();
+      client.acceptTurnInput('daemon-2');
+      expect(client.getTurnCancellation()).toBeUndefined();
+      client.settleTurn({
+        promptId: 'daemon-1',
+        state: 'cancelled',
+        cancelledAt: 0,
+        cancelReason: 'user',
+        endedAt: 1,
+      });
+      expect(client.getTurnCancellation()).toBeUndefined();
+    });
+
+    it('keeps infrastructure cancellation recoverable without user provenance', () => {
+      client.acceptTurnInput('daemon-1');
+      client.settleTurn({
+        promptId: 'daemon-1',
+        state: 'cancelled',
+        endedAt: 1,
+      });
+      expect(client.getTurnCancellation()).toBeUndefined();
+    });
+
+    it.each(['replace', 'rewind', 'clear'] as const)(
+      'clears cancellation when history is discarded by %s',
+      async (mutation) => {
+        cancelTurn();
+        if (mutation === 'replace') client.setHistory([userText('new input')]);
+        if (mutation === 'rewind') client.truncateHistory(0);
+        if (mutation === 'clear') await client.resetChat();
+        expect(client.getTurnCancellation()).toBeUndefined();
+      },
+    );
+  });
+
   describe('initialize', () => {
     const restoreFromRuntime = (runtime: object) =>
       vi
@@ -1196,31 +1241,40 @@ describe('Gemini Client (client.ts)', () => {
       expectToolBoundaryKept(resumedClient, result);
     });
 
-    it('binds cancellation restored from selective metadata to the new chat', async () => {
-      restoreFromRuntime({
-        apiHistory: [userText('unfinished')],
-        cancelledLastTurn: true,
-        uiTelemetryEvents: [],
-        recording: { lastCompletedUuid: 'terminal', turnParentUuids: [] },
-        goalRecords: [],
-        initialTurn: 1,
-        backgroundNotificationTaskIds: [],
-      });
-      const resumed = await initializedClient();
-      expect(resumed.getChat().isLastTurnCancelled()).toBe(true);
-      const refreshedPrelude = userText(
-        '<system-reminder>\nrefreshed startup\n</system-reminder>',
-      );
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
-        [refreshedPrelude],
-        [],
-      ]);
-      await resumed.refreshStartupContextReminder();
-      expect(resumed.getHistory()[0]).toEqual(refreshedPrelude);
-      expect(resumed.getChat().isLastTurnCancelled()).toBe(true);
-      resumed.setHistory([userText('new input')]);
-      expect(resumed.getChat().isLastTurnCancelled()).toBe(false);
-    });
+    it.each(['user', 'unknown'] as const)(
+      'retains restored %s cancellation through startup context refresh',
+      async (reason) => {
+        restoreFromRuntime({
+          apiHistory: [userText('unfinished')],
+          turnCancellation: { reason, promptId: 'daemon-1' },
+          uiTelemetryEvents: [],
+          recording: { lastCompletedUuid: 'terminal', turnParentUuids: [] },
+          goalRecords: [],
+          initialTurn: 1,
+          backgroundNotificationTaskIds: [],
+        });
+        const resumed = await initializedClient();
+        expect(resumed.getTurnCancellation()).toEqual({
+          reason,
+          promptId: 'daemon-1',
+        });
+        const refreshedPrelude = userText(
+          '<system-reminder>\nrefreshed startup\n</system-reminder>',
+        );
+        vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+          [refreshedPrelude],
+          [],
+        ]);
+        await resumed.refreshStartupContextReminder();
+        expect(resumed.getHistory()[0]).toEqual(refreshedPrelude);
+        expect(resumed.getTurnCancellation()).toEqual({
+          reason,
+          promptId: 'daemon-1',
+        });
+        resumed.setHistory([userText('new input')]);
+        expect(resumed.getTurnCancellation()).toBeUndefined();
+      },
+    );
 
     it('initializes from the selective runtime projection without the full transcript', async () => {
       const skill = stubSkillRestore();
@@ -2118,7 +2172,6 @@ describe('Gemini Client (client.ts)', () => {
       expect(await refreshOver(currentHistory, [])).toHaveBeenCalledWith(
         currentHistory.slice(1),
         undefined,
-        true,
       );
     });
 
@@ -2142,7 +2195,6 @@ describe('Gemini Client (client.ts)', () => {
       expect(setHistory).toHaveBeenCalledWith(
         [newPrelude, ...currentHistory.slice(2)],
         undefined,
-        true,
       );
       const reinstalled = vi.mocked(setHistory).mock.calls[0]![0] as Content[];
       expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
@@ -5351,18 +5403,45 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it.each(['user', 'unknown'] as const)(
-      'carries %s cancellation to the chat created by compression',
+      'retains %s cancellation through full, fast and idle compaction',
       async (reason) => {
+        client.acceptTurnInput('daemon-1');
+        client.settleTurn({
+          promptId: 'daemon-1',
+          state: 'cancelled',
+          cancelledAt: 0,
+          ...(reason === 'user' ? { cancelReason: 'user' as const } : {}),
+          endedAt: 1,
+        });
+        const cancellation = { reason, promptId: 'daemon-1' };
         const originalChat = client.getChat();
-        originalChat.markLastTurnCancelled(reason, 'daemon-1');
         compressLiveChatTo(summaryHistory());
         await client.tryCompressChat('p-cancelled');
         expect(client.getChat()).not.toBe(originalChat);
-        expect(client.getChat().getLastTurnCancellationReason()).toBe(reason);
-        expect(client.getChat().isLastTurnCancelled()).toBe(reason === 'user');
-        expect(client.getChat().getLastTurnCancellationConfirmationId()).toBe(
-          reason === 'unknown' ? 'daemon-1' : undefined,
+        expect(client.getTurnCancellation()).toEqual(cancellation);
+
+        const idleHistory = [
+          userText('question'),
+          content('model', { text: 'reasoning '.repeat(100), thought: true }),
+          content('model', fnCall('read_file', { path: '/old.ts' }, 'old')),
+          content('user', fnResponse('read_file', { output: 'old' }, 'old')),
+          content('model', fnCall('read_file', { path: '/new.ts' }, 'new')),
+          content('user', fnResponse('read_file', { output: 'new' }, 'new')),
+        ];
+        client.getChat().setHistory(structuredClone(idleHistory));
+        expect((await client.tryCompressChatFast()).compressionStatus).toBe(
+          CompressionStatus.COMPRESSED,
         );
+        expect(client.getTurnCancellation()).toEqual(cancellation);
+        client.getChat().setHistory(idleHistory);
+        const cleanup = microcompactHistory(
+          client.getChat().getHistoryShallow(),
+          Date.now() - 1,
+          { toolResultsThresholdMinutes: 0, toolResultsNumToKeep: 1 },
+        );
+        expect(cleanup.meta).toBeDefined();
+        client.getChat().setHistory(cleanup.history);
+        expect(client.getTurnCancellation()).toEqual(cancellation);
       },
     );
 

@@ -3638,11 +3638,7 @@ export class DaemonClient {
   /** Admit an interrupted turn without adding a user message. */
   async continueSession(
     sessionId: string,
-    opts: {
-      clientId?: string;
-      signal?: AbortSignal;
-      confirmCancellation?: string;
-    } = {},
+    opts: { clientId?: string; signal?: AbortSignal } = {},
   ): Promise<DaemonContinueSessionResult> {
     opts.signal?.throwIfAborted();
     return await this.jsonRequest<DaemonContinueSessionResult>(
@@ -3650,9 +3646,6 @@ export class DaemonClient {
       'POST /session/:id/continue',
       {
         method: 'POST',
-        ...(typeof opts.confirmCancellation === 'string'
-          ? { body: { confirmCancellation: opts.confirmCancellation } }
-          : {}),
         clientId: opts.clientId,
         signal: opts.signal,
         mode: 'rest',

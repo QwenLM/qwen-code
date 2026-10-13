@@ -3130,7 +3130,6 @@ export interface DaemonSessionContextStatus {
       | 'interrupted_turn'
       | 'degraded_history';
     canContinue: boolean;
-    cancellationConfirmationId?: string;
   };
 }
 
@@ -3145,7 +3144,6 @@ export type DaemonContinueSessionResult =
   | {
       accepted: false;
       interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
-      cancellationConfirmationId?: string;
     };
 
 export interface DaemonContextCategoryBreakdown {

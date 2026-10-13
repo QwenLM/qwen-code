@@ -55,22 +55,12 @@ export function SessionRecoveryBanner({
 
   const continueSession = async () => {
     if (pendingRef.current) return;
-    const confirmationOwner = ownerGuard.capture({ includeRecovery: true });
-    const confirmCancellation = recovery?.cancellationConfirmationId;
-    if (
-      confirmCancellation &&
-      !window.confirm(t('session.recovery.confirmCancellation'))
-    )
-      return;
-    if (!confirmationOwner.isCurrent()) return;
     const owner = ownerGuard.capture();
     pendingRef.current = owner;
     setPending(true);
     setFailedOwner(null);
     try {
-      await actions.continueSession(
-        confirmCancellation ? { confirmCancellation } : undefined,
-      );
+      await actions.continueSession();
     } catch (error) {
       if (isDaemonTurnError(error)) return;
       if (owner.isCurrent()) {
@@ -92,13 +82,7 @@ export function SessionRecoveryBanner({
     >
       <div>
         {recovery && recovery.kind !== 'clean' && (
-          <p>
-            {t(
-              recovery.cancellationConfirmationId
-                ? 'session.recovery.unknownCancellation'
-                : `session.recovery.${recovery.kind}`,
-            )}
-          </p>
+          <p>{t(`session.recovery.${recovery.kind}`)}</p>
         )}
         {failed && <p role="alert">{t('session.recovery.failed')}</p>}
       </div>

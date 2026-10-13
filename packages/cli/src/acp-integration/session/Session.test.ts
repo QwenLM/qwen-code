@@ -46,7 +46,6 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
-  GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   goalPauseReasonForFailure,
@@ -582,6 +581,9 @@ describe('Session', () => {
     rewind: ReturnType<typeof vi.fn>;
   };
   let mockLlmClient: {
+    acceptTurnInput: ReturnType<typeof vi.fn>;
+    settleTurn: ReturnType<typeof vi.fn>;
+    getTurnCancellation: ReturnType<typeof vi.fn>;
     getChat: ReturnType<typeof vi.fn>;
     getHistoryTail: ReturnType<typeof vi.fn>;
     getTrustedUserAnswers: ReturnType<typeof vi.fn>;
@@ -820,9 +822,6 @@ describe('Session', () => {
         completedToolCallIds = ids;
       }),
       getCompletedToolCallIds: vi.fn(() => completedToolCallIds),
-      isLastTurnCancelled: vi.fn().mockReturnValue(false),
-      getLastTurnCancellationConfirmationId: vi.fn().mockReturnValue(undefined),
-      markLastTurnCancelled: vi.fn(),
       // continueLastTurn classifies from a bounded tail; delegate to getHistory
       // so tests that set getHistory drive detection (fixtures are small).
       getHistoryTail: vi.fn(() => getHistoryMock()),
@@ -843,7 +842,56 @@ describe('Session', () => {
       stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
       setTools: vi.fn(),
     } as unknown as LlmChat;
+    let acceptedTurnId: string | undefined;
+    let cancellation:
+      | { reason: 'user' | 'unknown'; promptId: string }
+      | undefined;
+    const sends = new WeakMap<object, LlmChat['sendMessageStream']>();
+    Object.defineProperty(mockChat, 'sendMessageStream', {
+      configurable: true,
+      get() {
+        return sends.get(this) ?? sends.get(mockChat);
+      },
+      set(send: LlmChat['sendMessageStream']) {
+        sends.set(
+          this,
+          new Proxy(send, {
+            apply(target, receiver, args) {
+              const turnId = core.getInvocationContext()?.promptId ?? args[2];
+              return Promise.resolve(
+                Reflect.apply(target, receiver, args),
+              ).then((stream) => {
+                if (
+                  stream &&
+                  mockLlmClient.isInitialized() &&
+                  mockLlmClient.getChat() === receiver
+                ) {
+                  mockLlmClient.acceptTurnInput(turnId);
+                }
+                return stream;
+              });
+            },
+          }),
+        );
+      },
+    });
+    mockChat.sendMessageStream = vi.fn();
     mockLlmClient = {
+      acceptTurnInput: vi.fn((id: string, preserveCancellation = false) => {
+        acceptedTurnId = id;
+        if (!preserveCancellation) cancellation = undefined;
+      }),
+      settleTurn: vi.fn((result: core.TurnResultRecordPayload) => {
+        if (result.promptId !== acceptedTurnId) return;
+        cancellation =
+          result.state === 'cancelled' && result.cancelledAt !== undefined
+            ? {
+                reason: result.cancelReason === 'user' ? 'user' : 'unknown',
+                promptId: result.promptId,
+              }
+            : undefined;
+      }),
+      getTurnCancellation: vi.fn(() => cancellation),
       getChat: vi.fn().mockReturnValue(mockChat),
       getHistoryTail: vi.fn().mockReturnValue([]),
       getTrustedUserAnswers: vi.fn().mockReturnValue([]),
@@ -6761,7 +6809,6 @@ describe('Session', () => {
     it.each(['snapshot', 'compression'] as const)(
       'marks user content preserved after cancellation during %s',
       async (stage) => {
-        mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
         if (stage === 'snapshot') {
           mockFileHistoryService.makeSnapshot.mockImplementationOnce(
             async () => {
@@ -6788,14 +6835,19 @@ describe('Session', () => {
         expect(mockChat.addHistory).toHaveBeenCalledWith(
           expect.objectContaining({ role: 'user' }),
         );
-        expect(mockChat.markLastTurnCancelled).toHaveBeenCalledOnce();
+        expect(mockLlmClient.acceptTurnInput).toHaveBeenCalledWith(
+          'test-session-id########1',
+        );
+        expect(mockLlmClient.getTurnCancellation()).toEqual({
+          reason: 'user',
+          promptId: 'test-session-id########1',
+        });
       },
     );
 
     it.each([false, true])(
       'marks a pre-send admission cancel only with user intent (upgraded=%s)',
       async (upgraded) => {
-        mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
         const cancellation = new AbortController();
         mockFileHistoryService.makeSnapshot.mockImplementationOnce(async () => {
           cancellation.abort('qwen:prompt-interrupted');
@@ -6816,8 +6868,10 @@ describe('Session', () => {
           ),
         ).resolves.toMatchObject({ stopReason: 'cancelled' });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-        expect(mockChat.markLastTurnCancelled).toHaveBeenCalledTimes(
-          upgraded ? 1 : 0,
+        expect(mockLlmClient.getTurnCancellation()).toEqual(
+          upgraded
+            ? { reason: 'user', promptId: 'test-session-id########1' }
+            : undefined,
         );
       },
     );
@@ -6825,16 +6879,10 @@ describe('Session', () => {
     it.each([false, true])(
       'binds live cancellation to the current chat after clearing its controller (compressed=%s)',
       async (compressed) => {
-        let pushed = 0;
-        mockChat.getUserContentPushCount = vi.fn(() => pushed);
         const currentChat = compressed
           ? (Object.create(mockChat) as LlmChat)
           : mockChat;
         if (compressed) {
-          currentChat.getUserContentPushCount = vi.fn(() => pushed);
-          currentChat.markLastTurnCancelled = vi.fn(() => {
-            currentChat.isLastTurnCancelled = vi.fn().mockReturnValue(true);
-          });
           mockLlmClient.tryCompressChat.mockImplementationOnce(async () => {
             mockLlmClient.getChat.mockReturnValue(currentChat);
             return {
@@ -6854,7 +6902,6 @@ describe('Session', () => {
         });
         currentChat.sendMessageStream = vi.fn().mockResolvedValue(
           (async function* () {
-            pushed++;
             yield {
               type: core.StreamEventType.CHUNK,
               value: { text: 'partial' },
@@ -6877,14 +6924,14 @@ describe('Session', () => {
         await expect(prompt).resolves.toMatchObject({
           stopReason: 'cancelled',
         });
-        expect(currentChat.markLastTurnCancelled).toHaveBeenCalledOnce();
-        if (compressed) {
-          expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
-          expect(session.getRecoveryStatus()).toEqual({
-            kind: 'clean',
-            canContinue: false,
-          });
-        }
+        expect(mockLlmClient.getTurnCancellation()).toEqual({
+          reason: 'user',
+          promptId: 'test-session-id########1',
+        });
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'clean',
+          canContinue: false,
+        });
       },
     );
 
@@ -6911,8 +6958,6 @@ describe('Session', () => {
     });
 
     it('does not mark a superseded turn when its successor is cancelled before sending', async () => {
-      let pushed = 0;
-      mockChat.getUserContentPushCount = vi.fn(() => pushed);
       let firstChunkConsumed!: () => void;
       const consumed = new Promise<void>((resolve) => {
         firstChunkConsumed = resolve;
@@ -6923,7 +6968,6 @@ describe('Session', () => {
       });
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
         (async function* () {
-          pushed += 1;
           yield {
             type: core.StreamEventType.CHUNK,
             value: { text: 'partial' },
@@ -6953,104 +6997,65 @@ describe('Session', () => {
       await expect(first).resolves.toEqual({ stopReason: 'cancelled' });
       await expect(second).resolves.toEqual({ stopReason: 'cancelled' });
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-      expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
-    });
-
-    it('rejects explicitly cancelled history in both status and authoritative re-detection', async () => {
-      vi.mocked(mockChat.getHistory).mockReturnValue([
-        { role: 'user', parts: [{ text: 'unfinished' }] },
-      ]);
-      vi.mocked(mockChat.isLastTurnCancelled).mockReturnValue(true);
-      expect(await session.continueLastTurn()).toEqual({
-        accepted: false,
-        interruption: 'none',
-      });
-      expect(session.getRecoveryStatus()).toEqual({
-        kind: 'clean',
-        canContinue: false,
-      });
-      const result = await session.prompt({
-        sessionId: session.sessionId,
-        prompt: [],
-        _meta: { 'qwen.daemon.continueLastTurn': true },
-      });
-      expect(result.stopReason).toBe('end_turn');
-      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-    });
-
-    it('requires current legacy confirmation at admission and final execution', async () => {
-      vi.mocked(mockChat.getHistory).mockReturnValue([
-        { role: 'user', parts: [{ text: 'unfinished' }] },
-      ]);
-      vi.mocked(mockChat.getLastTurnCancellationConfirmationId).mockReturnValue(
-        'legacy-daemon',
+      expect(mockLlmClient.acceptTurnInput).toHaveBeenCalledTimes(1);
+      expect(mockLlmClient.acceptTurnInput).toHaveBeenCalledWith(
+        'test-session-id########1',
       );
-      expect(session.getRecoveryStatus()).toMatchObject({
-        canContinue: true,
-        cancellationConfirmationId: 'legacy-daemon',
-      });
-      for (const confirmation of [undefined, 'older-daemon']) {
-        expect(await session.continueLastTurn(confirmation)).toEqual({
+      expect(mockLlmClient.getTurnCancellation()).toBeUndefined();
+    });
+
+    it.each(['user', 'unknown'] as const)(
+      'rejects %s cancellation in status and direct continuation',
+      async (reason) => {
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: 'unfinished' }] },
+        ]);
+        mockLlmClient.acceptTurnInput('stopped-daemon');
+        mockLlmClient.settleTurn({
+          promptId: 'stopped-daemon',
+          state: 'cancelled',
+          cancelledAt: 0,
+          ...(reason === 'user' ? { cancelReason: 'user' as const } : {}),
+          endedAt: 1,
+        });
+        mockLlmClient.acceptTurnInput.mockClear();
+        expect(await session.continueLastTurn()).toEqual({
           accepted: false,
-          interruption: 'interrupted_prompt',
-          cancellationConfirmationId: 'legacy-daemon',
+          interruption: 'none',
         });
-        await session.prompt({
-          sessionId: session.sessionId,
-          prompt: [],
-          _meta: {
-            'qwen.daemon.continueLastTurn': true,
-            'qwen.daemon.confirmCancellation': confirmation,
-          },
+        expect(session.getRecoveryStatus()).toEqual({
+          kind: 'clean',
+          canContinue: false,
         });
-      }
-      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-      expect(await session.continueLastTurn('legacy-daemon')).toEqual({
-        accepted: true,
-        interruption: 'interrupted_prompt',
-      });
-      await session.prompt({
-        sessionId: session.sessionId,
-        prompt: [],
-        _meta: {
-          'qwen.daemon.continueLastTurn': true,
-          'qwen.daemon.confirmCancellation': 'legacy-daemon',
-        },
-      });
-      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
-    });
-
-    it('rejects an old confirmation after the boundary becomes an ordinary interruption', async () => {
-      vi.mocked(mockChat.getHistory).mockReturnValue([
-        { role: 'user', parts: [{ text: 'new interrupted work' }] },
-      ]);
-      expect(await session.continueLastTurn('older-daemon')).toEqual({
-        accepted: false,
-        interruption: 'interrupted_prompt',
-      });
-      await session.prompt({
-        sessionId: session.sessionId,
-        prompt: [],
-        _meta: {
-          'qwen.daemon.continueLastTurn': true,
-          'qwen.daemon.confirmCancellation': 'older-daemon',
-        },
-      });
-      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-      expect(await session.continueLastTurn()).toEqual({
-        accepted: true,
-        interruption: 'interrupted_prompt',
-      });
-    });
-
-    it('confirmation never overrides an explicit user cancellation', async () => {
-      vi.mocked(mockChat.isLastTurnCancelled).mockReturnValue(true);
-      expect(await session.continueLastTurn('legacy-daemon')).toEqual({
-        accepted: false,
-        interruption: 'none',
-      });
-      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-    });
+        for (const promptId of ['rejected-continue-1', 'rejected-continue-2']) {
+          const result = await session.prompt(
+            {
+              sessionId: session.sessionId,
+              prompt: [],
+              _meta: { 'qwen.daemon.continueLastTurn': true },
+            },
+            { version: 1, sessionId: session.sessionId, promptId },
+          );
+          expect(result.stopReason).toBe('end_turn');
+          expect(mockLlmClient.getTurnCancellation()).toEqual({
+            reason,
+            promptId: 'stopped-daemon',
+          });
+          expect(await session.continueLastTurn()).toEqual({
+            accepted: false,
+            interruption: 'none',
+          });
+        }
+        expect(mockLlmClient.acceptTurnInput).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordTurnAttempt,
+        ).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordTurnResult,
+        ).not.toHaveBeenCalled();
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      },
+    );
 
     it('returns none and starts no continuation when the last turn ended cleanly', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue([
@@ -12565,7 +12570,6 @@ describe('Session', () => {
               'qwen.promptCancelled': {
                 cancelledAt: 4_500,
                 elapsedMs: 0,
-                reason: 'user',
               },
             },
           });
@@ -12611,7 +12615,7 @@ describe('Session', () => {
           expect(payload.state).toBe('error');
           expect(payload).not.toHaveProperty('cancelledAt');
           expect(payload).not.toHaveProperty('cancelReason');
-          expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
+          expect(mockLlmClient.getTurnCancellation()).toBeUndefined();
         },
       );
 
@@ -12644,6 +12648,8 @@ describe('Session', () => {
               stopReason: 'cancelled',
             });
             expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+            expect(mockLlmClient.acceptTurnInput).not.toHaveBeenCalled();
+            expect(mockLlmClient.getTurnCancellation()).toBeUndefined();
             const payload =
               mockChatRecordingService.recordTurnResult.mock.calls[0][0];
             expect(payload.state).toBe('cancelled');
@@ -12689,7 +12695,7 @@ describe('Session', () => {
             } else {
               expect(payload).not.toHaveProperty('cancelledAt');
               expect(payload).not.toHaveProperty('cancelReason');
-              expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
+              expect(mockLlmClient.getTurnCancellation()).toBeUndefined();
             }
           } finally {
             releaseClose?.();
@@ -12715,18 +12721,12 @@ describe('Session', () => {
           ),
         ).resolves.toMatchObject({
           stopReason: 'cancelled',
-          _meta: {
-            'qwen.promptCancelled': {
-              cancelledAt: expect.any(Number),
-              reason: 'interrupted',
-            },
-          },
         });
         const payload =
           mockChatRecordingService.recordTurnResult.mock.calls[0][0];
         expect(payload.state).toBe('cancelled');
         expect(payload).not.toHaveProperty('cancelledAt');
-        expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
+        expect(mockLlmClient.getTurnCancellation()).toBeUndefined();
       });
 
       it('records admission errors without a startedAt timestamp', async () => {
@@ -12886,12 +12886,15 @@ describe('Session', () => {
           );
           expect(settled).toBe(false);
           releaseFlush();
-          await expect(prompt).resolves.toMatchObject({
-            stopReason: 'cancelled',
-            _meta: {
-              'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
-            },
-          });
+          const response = await prompt;
+          expect(response.stopReason).toBe('cancelled');
+          if (reason === 'qwen:user-cancel') {
+            expect(response._meta?.['qwen.promptCancelled']).toMatchObject({
+              cancelledAt: expect.any(Number),
+            });
+          } else {
+            expect(response._meta?.['qwen.promptCancelled']).toBeUndefined();
+          }
         },
       );
 
@@ -14028,11 +14031,21 @@ describe('Session', () => {
       };
 
       it('honors cancellation for a locally handled command without a work chain', async () => {
+        mockLlmClient.acceptTurnInput('previous-turn');
+        mockLlmClient.settleTurn({
+          promptId: 'previous-turn',
+          state: 'cancelled',
+          cancelledAt: 1_000,
+          cancelReason: 'user',
+          endedAt: 1_000,
+          promptText: 'previous task',
+        });
+        mockLlmClient.acceptTurnInput.mockClear();
         const cancellation = new AbortController();
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
         ).mockImplementationOnce(async () => {
-          cancellation.abort();
+          cancellation.abort('qwen:user-cancel');
           return {
             type: 'message',
             messageType: 'info',
@@ -14050,6 +14063,11 @@ describe('Session', () => {
         );
 
         expect(result.stopReason).toBe('cancelled');
+        expect(mockLlmClient.acceptTurnInput).not.toHaveBeenCalled();
+        expect(mockLlmClient.getTurnCancellation()).toEqual({
+          reason: 'user',
+          promptId: 'previous-turn',
+        });
         expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
         expect(mockConfig.startActiveTodoWorkChain).not.toHaveBeenCalled();
       });
@@ -34429,7 +34447,7 @@ describe('Session', () => {
                 expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
                   expect.objectContaining({
                     action: 'pause',
-                    reason: GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
+                    reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
                   }),
                 ),
               );
@@ -34441,57 +34459,12 @@ describe('Session', () => {
               vi.mocked(mockChat.addHistory).mock.calls.map(([entry]) => entry),
             );
             expect(session.getRecoveryStatus()).toEqual({
-              kind: 'interrupted_prompt',
-              canContinue: true,
+              kind:
+                reason === 'qwen:user-cancel' ? 'clean' : 'interrupted_prompt',
+              canContinue: reason !== 'qwen:user-cancel',
             });
           },
         );
-
-        it('names a cancel that arrives after the model started by its transport reason', async () => {
-          const permit: core.GoalTurnPermit = {
-            goalId: 'goal-1',
-            revision: 1,
-            turnId: 'interrupted-mid-model',
-          };
-          const turnKey = `goal-runtime:${permit.turnId}`;
-          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
-          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
-            key === turnKey ? permit : undefined,
-          );
-          let releaseStream!: () => void;
-          const streamGate = new Promise<void>((resolve) => {
-            releaseStream = resolve;
-          });
-          // Held open past the request, which is what puts the turn on the
-          // post-model settlement path rather than the pre-model one.
-          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-            (async function* () {
-              await streamGate;
-              yield* createEmptyStream();
-            })(),
-          );
-
-          await boundGoalHost!.startGoalTurn({
-            permit,
-            continuationContext: 'write a poem',
-          });
-          await vi.waitFor(() =>
-            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
-          );
-
-          await session.cancelPendingPrompt('qwen:prompt-interrupted');
-          releaseStream();
-
-          await vi.waitFor(() =>
-            expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
-              expect.objectContaining({
-                action: 'pause',
-                reason: GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
-              }),
-            ),
-          );
-          expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
-        });
 
         it('does not record a clean boundary when cancellation arrives during settlement flush', async () => {
           const permit: core.GoalTurnPermit = {

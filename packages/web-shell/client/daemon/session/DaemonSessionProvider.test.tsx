@@ -23453,7 +23453,6 @@ describe('DaemonSessionProvider', () => {
       let ownerGuard: ReturnType<typeof useDaemonSessionOwnerGuard> | undefined;
       let captureSpy: { mockRestore(): void } | undefined;
       let catchObserved = false;
-      let admissionRejected = false;
       let connection: DaemonConnectionState | undefined;
       let streaming: ReturnType<typeof useDaemonStreamingState> | undefined;
       const committedStreaming: Array<typeof streaming> = [];
@@ -23484,7 +23483,7 @@ describe('DaemonSessionProvider', () => {
               return {
                 isCurrent: () => {
                   const current = owner.isCurrent();
-                  if (admissionRejected && !catchObserved) {
+                  if (!catchObserved) {
                     catchObserved = true;
                     queueMicrotask(() => start.resolve());
                   }
@@ -23502,7 +23501,6 @@ describe('DaemonSessionProvider', () => {
         await act(async () => {
           if (mode !== 'coalesced-failure')
             container!.querySelector('button')!.click();
-          admissionRejected = true;
           admission.reject(
             mode === 'definite-rejection'
               ? new DaemonHttpError(403, undefined, 'Continuation rejected')

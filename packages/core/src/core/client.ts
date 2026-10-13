@@ -176,7 +176,14 @@ import {
 } from '../tools/skill-utils.js';
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import { replayUiTelemetryFromConversation } from '../services/sessionService.js';
-import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
+import {
+  buildSessionHistoryFromConversation,
+  getTurnResultCancellation,
+} from '../services/session-api-history.js';
+import {
+  isTurnResultRecordPayload,
+  type TurnResultRecordPayload,
+} from '../services/chatRecordingService.js';
 import { reportError } from '../utils/errorReporting.js';
 import {
   getErrorMessage,
@@ -456,6 +463,10 @@ export function getMainSessionBaseSystemPrompt(
 }
 
 export class LlmClient {
+  private recoveryTurn?: {
+    promptId: string;
+    cancellation?: ReturnType<typeof getTurnResultCancellation>;
+  };
   private chat?: LlmChat;
   private readonly trustedUserAnswers = new TrustedUserAnswers();
   private initializedSessionId: string | undefined;
@@ -647,12 +658,12 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restoreRuntime.completedToolCallIds);
-      if (restoreRuntime.cancelledLastTurn) chat.markLastTurnCancelled();
-      else if (restoreRuntime.cancellationConfirmationId)
-        chat.markLastTurnCancelled(
-          'unknown',
-          restoreRuntime.cancellationConfirmationId,
-        );
+      this.recoveryTurn = restoreRuntime.turnCancellation
+        ? {
+            promptId: restoreRuntime.turnCancellation.promptId,
+            cancellation: restoreRuntime.turnCancellation,
+          }
+        : undefined;
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
         uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
@@ -683,12 +694,12 @@ export class LlmClient {
       await this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restored.completedToolCallIds);
-      if (restored.cancelledLastTurn) chat.markLastTurnCancelled();
-      else if (restored.cancellationConfirmationId)
-        chat.markLastTurnCancelled(
-          'unknown',
-          restored.cancellationConfirmationId,
-        );
+      this.recoveryTurn = restored.turnCancellation
+        ? {
+            promptId: restored.turnCancellation.promptId,
+            cancellation: restored.turnCancellation,
+          }
+        : undefined;
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
@@ -700,6 +711,7 @@ export class LlmClient {
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
+      this.recoveryTurn = undefined;
       if (sessionStartSource !== undefined) {
         await this.startChat(undefined, sessionStartSource, signal);
       } else {
@@ -1210,9 +1222,32 @@ export class LlmClient {
     return result;
   }
 
+  acceptTurnInput(promptId: string, preserveCancellation = false): void {
+    this.recoveryTurn = {
+      promptId,
+      ...(preserveCancellation
+        ? { cancellation: this.recoveryTurn?.cancellation }
+        : {}),
+    };
+  }
+
+  settleTurn(result: TurnResultRecordPayload): void {
+    if (
+      this.recoveryTurn?.promptId === result.promptId &&
+      isTurnResultRecordPayload(result)
+    ) {
+      this.recoveryTurn.cancellation = getTurnResultCancellation(result);
+    }
+  }
+
+  getTurnCancellation(): ReturnType<typeof getTurnResultCancellation> {
+    return this.recoveryTurn?.cancellation;
+  }
+
   setHistory(history: Content[]) {
     this.trustedUserAnswers.clear();
     this.getChat().setHistory(history);
+    this.recoveryTurn = undefined;
     // Replacing history wholesale drops any prior read_file tool
     // results the FileReadCache still believes the model has seen.
     // Without clearing, a follow-up Read of an unchanged file would
@@ -1243,6 +1278,7 @@ export class LlmClient {
     // gets expensive in long-running sessions.
     const prevLen = this.getChat().getHistoryLength();
     this.getChat().truncateHistory(keepCount);
+    this.recoveryTurn = undefined;
     // Decide whether to invalidate based on the *actual* post-truncate
     // length, not on the keepCount argument. Comparing keepCount alone
     // misses pathological inputs (e.g. NaN: slice(0, NaN) returns [],
@@ -1945,6 +1981,7 @@ export class LlmClient {
     await runWithHookExecutionOwner(hookOwner, () =>
       this.startChat(undefined, SessionStartSource.Clear),
     );
+    this.recoveryTurn = undefined;
     this.initializedSessionId = this.config.getSessionId();
 
     const memAfter = process.memoryUsage();
@@ -2075,7 +2112,6 @@ export class LlmClient {
     chat.setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
       chat.getCompletedToolCallIds(),
-      true,
     );
   }
 
@@ -5889,11 +5925,6 @@ export class LlmClient {
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
     const previousChat = this.getChat();
-    // Capture before tryCompress: its setHistory clears the per-instance
-    // basis, and the swap below starts a fresh chat without one.
-    const cancellationReason = previousChat.getLastTurnCancellationReason?.();
-    const cancellationConfirmationId =
-      previousChat.getLastTurnCancellationConfirmationId?.();
     const info = await previousChat.tryCompress(
       prompt_id,
       force,
@@ -5904,15 +5935,6 @@ export class LlmClient {
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
-      // The cancellation basis is per-instance and does not ride along with
-      // the shared history (a new chat starts unmarked); carry it across
-      // the swap like refreshStartupContextReminder does.
-      if (cancellationReason) {
-        this.getChat().markLastTurnCancelled(
-          cancellationReason,
-          cancellationConfirmationId,
-        );
-      }
       this.getChat().setCompletedToolCallIds(
         previousChat.getCompletedToolCallIds(),
       );

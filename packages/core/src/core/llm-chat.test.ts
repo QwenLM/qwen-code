@@ -28,6 +28,7 @@ import {
   StreamEventType,
   type StreamEvent,
 } from './llm-chat.js';
+import { LlmClient } from './client.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   convertResponsesEventToGemini,
@@ -266,100 +267,48 @@ describe('LlmChat', async () => {
   let mockConfig: Config;
   const config: GenerateContentConfig = {};
 
-  describe('cancelled recovery history basis', () => {
-    it('preserves cancellation when failed setup rolls a new user push back', async () => {
-      const original = userText('unfinished');
-      markApiHistoryPrompt(original, 'client-1');
-      chat.setHistory([original]);
-      chat.markLastTurnCancelled();
-      const before = chat.getHistory();
-      const countBefore = chat.getUserContentPushCount();
-      vi.spyOn(
-        chat as unknown as { getRequestHistoryForRoute: () => unknown },
-        'getRequestHistoryForRoute',
-      ).mockImplementation(() => {
-        throw new Error('post-push setup failure');
-      });
-      await expect(
-        chat.sendMessageStream(
-          'test-model',
-          { message: 'new prompt' },
-          'new-prompt',
-          undefined,
-          { promptId: 'client-1' },
-        ),
-      ).rejects.toThrow('post-push setup failure');
-      expect(chat.getHistory()).toEqual(before);
-      expect(chat.getUserContentPushCount()).toBe(countBefore);
-      expect(
-        findApiHistoryPromptIndex(chat.getHistoryShallow(), 'client-1'),
-      ).toBe(0);
-      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
-      expect(chat.isLastTurnCancelled()).toBe(true);
+  it('preserves cancellation when failed setup rolls a new user push back', async () => {
+    const original = userText('unfinished');
+    markApiHistoryPrompt(original, 'client-1');
+    chat.setHistory([original]);
+    const client = new LlmClient(mockConfig);
+    client['chat'] = chat;
+    Object.assign(mockConfig, { getLlmClient: () => client });
+    client.acceptTurnInput('daemon-1');
+    client.settleTurn({
+      promptId: 'daemon-1',
+      state: 'cancelled',
+      cancelledAt: 0,
+      cancelReason: 'user',
+      endedAt: 1,
     });
-
-    it('keeps the marker across history clones and clears it on replacement of equal length', () => {
-      chat.setHistory([userText('unfinished')]);
-      chat.markLastTurnCancelled();
-      expect(chat.isLastTurnCancelled()).toBe(true);
-      expect(chat.getHistory()).toEqual([userText('unfinished')]);
-      expect(chat.isLastTurnCancelled()).toBe(true);
-      chat.setHistory([userText('new unfinished')]);
-      expect(chat.isLastTurnCancelled()).toBe(false);
+    const before = chat.getHistory();
+    const countBefore = chat.getUserContentPushCount();
+    vi.spyOn(
+      chat as unknown as { getRequestHistoryForRoute: () => unknown },
+      'getRequestHistoryForRoute',
+    ).mockImplementation(() => {
+      throw new Error('post-push setup failure');
     });
-    it.each(['clear', 'truncate', 'append', 'thoughts'] as const)(
-      'invalidates cancellation on %s',
-      (mutation) => {
-        chat.setHistory([userText('unfinished')]);
-        chat.markLastTurnCancelled();
-        if (mutation === 'clear') chat.clearHistory();
-        if (mutation === 'truncate') chat.truncateHistory(0);
-        if (mutation === 'append') chat.addHistory(userText('new input'));
-        if (mutation === 'thoughts') chat.stripThoughtsFromHistory();
-        expect(chat.isLastTurnCancelled()).toBe(false);
-      },
-    );
-    it('does not transfer cancellation to another chat using the same history', () => {
-      chat.setHistory([userText('unfinished')]);
-      chat.markLastTurnCancelled();
-      const fresh = new LlmChat(mockConfig, {}, chat.getHistory());
-      expect(fresh.isLastTurnCancelled()).toBe(false);
+    await expect(
+      chat.sendMessageStream(
+        'test-model',
+        { message: 'new prompt' },
+        'new-prompt',
+        undefined,
+        { promptId: 'client-1' },
+      ),
+    ).rejects.toThrow('post-push setup failure');
+    expect(chat.getHistory()).toEqual(before);
+    expect(chat.getUserContentPushCount()).toBe(countBefore);
+    expect(
+      findApiHistoryPromptIndex(chat.getHistoryShallow(), 'client-1'),
+    ).toBe(0);
+    expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    expect(client.getTurnCancellation()).toEqual({
+      reason: 'user',
+      promptId: 'daemon-1',
     });
-
-    it('binds an unknown cancellation confirmation to the current history only', () => {
-      chat.markLastTurnCancelled('unknown', 'legacy-daemon');
-      expect(chat.isLastTurnCancelled()).toBe(false);
-      expect(chat.getLastTurnCancellationConfirmationId()).toBe(
-        'legacy-daemon',
-      );
-      chat.addHistory(userText('new work'));
-      expect(chat.getLastTurnCancellationConfirmationId()).toBeUndefined();
-    });
-
-    it.each(['user', 'unknown'] as const)(
-      'keeps cancellation reason=%s when tryCompress rewrites history',
-      async (reason) => {
-        chat.setHistory([userText('unfinished')]);
-        chat.markLastTurnCancelled(reason, 'daemon-1');
-        vi.spyOn(
-          ChatCompressionService.prototype,
-          'compress',
-        ).mockResolvedValueOnce(
-          compressResult(
-            CompressionStatus.COMPRESSED,
-            [userText('summary')],
-            100_000,
-            30_000,
-          ),
-        );
-        const info = await chat.tryCompress('prompt-keep-mark', true);
-        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-        expect(chat.getLastTurnCancellationReason()).toBe(reason);
-        expect(chat.getLastTurnCancellationConfirmationId()).toBe(
-          reason === 'unknown' ? 'daemon-1' : undefined,
-        );
-      },
-    );
   });
 
   beforeEach(() => {
@@ -4444,29 +4393,6 @@ describe('LlmChat', async () => {
       expectRolledBack(target, recordChatCompression, 176_999, originalHistory);
       expect(target.getCompletedToolCallIds()).toEqual(['ended']);
       expect(target.getHistoryForRecovery()).toEqual([]);
-    });
-
-    it('keeps the cancellation mark when the hard-rescue rollback restores history', async () => {
-      const originalHistory: Content[] = [userText('x'.repeat(720_000))];
-      const { target } = recordingChat();
-      target.setHistory(originalHistory);
-      target.setLastPromptTokenCount(176_999);
-      target.markLastTurnCancelled();
-
-      mockCompressOnce(
-        compressed(180_000, 177_000, [
-          userText('still large summary'),
-          modelText('ack'),
-        ]),
-      );
-
-      await expect(
-        send('continue', 'prompt-id-rollback-keeps-cancel-mark', target),
-      ).rejects.toThrow(/compression status: COMPRESSED/i);
-
-      // The rolled-back array is a copy, so the basis must have been
-      // re-taken against it, not inherited from the pre-rescue history.
-      expect(target.isLastTurnCancelled()).toBe(true);
     });
 
     it('rejects when compressed history is below hard but the pending user message pushes it over', async () => {
@@ -12217,23 +12143,6 @@ describe('LlmChat', async () => {
       }
       return { fastChat, info: fastChat.compressFast().info };
     }
-
-    it.each(['user', 'unknown', undefined] as const)(
-      'keeps cancellation provenance through fast compression (%s)',
-      (reason) => {
-        pinFastCompressionIdleClear();
-        const fastChat = newChat({ history: thoughtHistory() });
-        if (reason) fastChat.markLastTurnCancelled(reason, 'legacy-daemon');
-        expect(fastChat.compressFast().info.compressionStatus).toBe(
-          CompressionStatus.COMPRESSED,
-        );
-        expect(fastChat.getLastTurnCancellationReason()).toBe(reason);
-        expect(fastChat.isLastTurnCancelled()).toBe(reason === 'user');
-        expect(fastChat.getLastTurnCancellationConfirmationId()).toBe(
-          reason === 'unknown' ? 'legacy-daemon' : undefined,
-        );
-      },
-    );
 
     it('replaces history and updates per-chat lastPromptTokenCount on COMPRESSED', async () => {
       mockCompressionService('compressed');

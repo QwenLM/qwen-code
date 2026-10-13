@@ -455,15 +455,6 @@ export function validateGoalPauseReason(reason: string): string | null {
  */
 export const GOAL_PAUSE_REASON_USER_INTERRUPT =
   'Interrupted by the user. Run /goal resume to continue.';
-/**
- * A Goal turn whose prompt the client or host cancelled, not the person
- * reading the card. `getPromptCancelAbortReason` records the interrupted abort
- * reason for any cancellation whose meta names a reason other than `'user'`,
- * so folding it into {@link GOAL_PAUSE_REASON_USER_INTERRUPT} attributed to the
- * user a stop they never caused.
- */
-export const GOAL_PAUSE_REASON_PROMPT_INTERRUPTED =
-  'The client or host cancelled the prompt before the turn finished. Run /goal resume to continue.';
 export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
 export const GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT =
   'The session token limit was exceeded before the model request. Start a new session or increase sessionTokenLimit in settings.json before resuming the Goal.';

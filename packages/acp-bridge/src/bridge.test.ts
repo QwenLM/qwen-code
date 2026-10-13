@@ -16602,7 +16602,6 @@ describe('createAcpSessionBridge', () => {
       // mirroring the POST /prompt 202 contract.
       const decision = await bridge.continueSession(session.sessionId, {
         promptId: 'cont-1',
-        confirmCancellation: 'legacy-daemon',
       });
       expect(decision).toMatchObject({
         accepted: true,
@@ -16622,9 +16621,6 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
       ).toBe(true);
-      expect(
-        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.confirmCancellation'],
-      ).toBe('legacy-daemon');
 
       await bridge.shutdown();
     });
@@ -19528,11 +19524,6 @@ describe('createAcpSessionBridge', () => {
   describe('turn_complete promptCancelled', () => {
     it.each([
       ['cancelled', { cancelledAt: 4_500, elapsedMs: 3_500 }, true],
-      [
-        'cancelled',
-        { cancelledAt: 4_500, elapsedMs: 3_500, reason: 'user' },
-        true,
-      ],
       ['end_turn', { cancelledAt: 4_500, elapsedMs: 3_500 }, false],
       ['cancelled', { cancelledAt: NaN, elapsedMs: 3_500 }, false],
       ['cancelled', { cancelledAt: 4_500, elapsedMs: -1 }, false],
@@ -19569,13 +19560,7 @@ describe('createAcpSessionBridge', () => {
         );
         const terminal = events.find((event) => event.type === 'turn_complete');
         if (valid) {
-          expect(terminal?.data).toHaveProperty('promptCancelled', {
-            ...metadata,
-            reason:
-              'reason' in metadata && metadata.reason === 'user'
-                ? 'user'
-                : 'interrupted',
-          });
+          expect(terminal?.data).toHaveProperty('promptCancelled', metadata);
         } else {
           expect(terminal?.data).not.toHaveProperty('promptCancelled');
         }
