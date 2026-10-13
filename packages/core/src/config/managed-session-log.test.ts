@@ -9,6 +9,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -33,7 +34,9 @@ import {
   type ChatRecord,
 } from '../services/chatRecordingService.js';
 import { SessionExecutionEngineError } from '../services/session-execution-engine.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { SessionService } from '../services/sessionService.js';
+import { SessionTranscriptReader } from '../services/session-transcript-reader.js';
 import {
   getSessionWriterLockPath,
   SessionWriterLease,
@@ -46,7 +49,10 @@ import {
 } from '../managed-runtime/managed-session-records.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
 import type { ManagedSession } from '../managed-runtime/managed-session-assembly.js';
-import { ManagedSessionConflictError } from '../managed-runtime/managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  ManagedSessionConflictError,
+} from '../managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import { ManagedSessionRecordSink } from '../managed-runtime/managed-session-record-sink.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
@@ -956,6 +962,176 @@ describe('Managed Session log recording', () => {
     await restored.closeSessionWriter();
   });
 
+  it('derives navigation turns from the Managed log with the physical builder semantics', async () => {
+    const config = await start(managedConfig());
+    const recorder = config.getChatRecordingService()!;
+    recorder.recordUserMessage(
+      [{ text: 'first prompt' }],
+      undefined,
+      undefined,
+      undefined,
+      'daemon-prompt-1',
+    );
+    recorder.recordTurnResult({
+      promptId: 'turn-result-prompt-1',
+      state: 'completed',
+      endedAt: Date.now(),
+    });
+    recordUser(config, 'second prompt');
+    recorder.recordTurnResult({
+      promptId: 'prompt-2',
+      state: 'completed',
+      endedAt: Date.now(),
+    });
+    await recorder.flush();
+    await config.closeSessionWriter();
+
+    // Same rules as the physical index builder: a daemon prompt id is
+    // filled at the turn record, and a later turn result is first-wins.
+    const page = await new SessionTranscriptReader(
+      projectDir,
+    ).readTurnIndexPage(SESSION_ID);
+    expect(page.turns).toEqual([
+      expect.objectContaining({ kind: 'prompt', promptId: 'daemon-prompt-1' }),
+      expect.objectContaining({ kind: 'prompt', promptId: 'prompt-2' }),
+    ]);
+  });
+
+  it('skips a malformed file-history record instead of failing the managed restore', async () => {
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    await mkdir(path.dirname(transcriptPath), { recursive: true });
+    const sessionKey = localManagedSessionKey(projectDir, SESSION_ID);
+    const store = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: runtimeDir,
+      sessionKey,
+    });
+    const lease = await LocalManagedSessionAuthority.acquireWriter({
+      runtimeBaseDir: runtimeDir,
+      sessionId: SESSION_ID,
+      transcriptPath,
+    });
+    try {
+      const authority = await LocalManagedSessionAuthority.open({
+        lease,
+        sessionKey,
+        cwd: projectDir,
+        version: 'test',
+        resources: store,
+        create: {
+          definitionRef: await store.publish(
+            'managed-definition',
+            Buffer.from('{}', 'utf8'),
+          ),
+          rootSnapshotRef: await store.publish(
+            'managed-root',
+            Buffer.from('{}', 'utf8'),
+          ),
+          createdBy: 'test',
+        },
+      });
+      await authority.installActivation({
+        activationId: 'act-1',
+        workerId: 'worker-1',
+        leaseDurationMs: 60_000,
+      });
+      const sink = new ManagedSessionRecordSink(authority, store, () => ({
+        class: 'harness',
+        activation: { activationId: 'act-1', epoch: 1 },
+      }));
+      await sink.write({
+        uuid: 'rec-user-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: projectDir,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'before the damage' }] },
+      } as ChatRecord);
+      await sink.write({
+        uuid: 'rec-history-1',
+        parentUuid: 'rec-user-1',
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        cwd: projectDir,
+        version: 'test',
+        // A mixed batch pins the skip granularity: the guard is per record,
+        // so the healthy sibling entry is dropped with the torn one rather
+        // than restored on its own.
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'prompt-torn-sibling',
+              trackedFileBackups: {},
+              timestamp: new Date().toISOString(),
+            },
+            null,
+          ],
+        },
+      } as unknown as ChatRecord);
+      // A healthy record after the damaged one: a whole-loop catch would
+      // truncate the projection to the prefix before the damage.
+      await sink.write({
+        uuid: 'rec-user-2',
+        parentUuid: 'rec-user-1',
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: projectDir,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'after the damage' }] },
+      } as ChatRecord);
+      // A valid snapshot after the damaged one: the catch must skip the
+      // damaged record and keep accumulating, so this one survives.
+      await sink.write({
+        uuid: 'rec-history-2',
+        parentUuid: 'rec-user-2',
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        cwd: projectDir,
+        version: 'test',
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'prompt-survivor',
+              trackedFileBackups: {},
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        },
+      } as unknown as ChatRecord);
+
+      const projection = await sessionService().readRestoreProjection(
+        SESSION_ID,
+        { replay: { kind: 'none' } },
+      );
+      expect(projection).toBeDefined();
+      expect(projection?.runtime.apiHistory).toEqual([
+        { role: 'user', parts: [{ text: 'before the damage' }] },
+        { role: 'user', parts: [{ text: 'after the damage' }] },
+      ]);
+      expect(
+        projection?.runtime.fileHistorySnapshots?.map(
+          (snapshot) => snapshot.promptId,
+        ),
+      ).toEqual(['prompt-survivor']);
+      const page = await new SessionTranscriptReader(
+        projectDir,
+      ).readTurnIndexPage(SESSION_ID);
+      expect(page.turns).toEqual([
+        expect.objectContaining({ kind: 'prompt', turnId: 'rec-user-1' }),
+        expect.objectContaining({ kind: 'prompt', turnId: 'rec-user-2' }),
+      ]);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
   it.each<[string, () => Config]>([
     [
       'a restore',
@@ -1336,6 +1512,209 @@ describe('Managed Session log recording', () => {
       SessionWriterUnavailableError,
     );
   });
+
+  it('blocks a restore whose log shows Runtime work that never settled', async () => {
+    const created = await start(managedConfig());
+    await created.getManagedRuntimeOutcomes()!.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    const block = restored.getManagedSessionBlock();
+    expect(block).toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
+    expect(block?.message).toContain('never settled');
+    await restored.closeSessionWriter();
+  });
+
+  it('blocks a restore whose newest checkpoint state cannot be read', async () => {
+    const created = await start(managedConfig());
+    await created.getManagedRuntimeOutcomes()!.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await created.closeSessionWriter();
+
+    // A crash-damaged store: the checkpoint's state body no longer reads.
+    const stateRoot = path.join(runtimeDir, 'resources', SESSION_ID);
+    let zeroed = 0;
+    for (const kind of await readdir(stateRoot)) {
+      const dir = path.join(stateRoot, kind);
+      for (const file of await readdir(dir)) {
+        if (file.startsWith('.')) continue;
+        const candidate = path.join(dir, file);
+        if ((await readFile(candidate)).includes('ckpt-')) {
+          await writeFile(candidate, Buffer.alloc(0));
+          zeroed += 1;
+        }
+      }
+    }
+    expect(zeroed).toBeGreaterThan(0);
+
+    // The restore repair leaves the unreadable checkpoint to the gate: the
+    // session opens blocked rather than failing to open at all.
+    const restored = await start(restoringConfig());
+    const block = restored.getManagedSessionBlock();
+    expect(block).toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
+    expect(block?.message).toContain('cannot be read');
+    await restored.closeSessionWriter();
+  });
+
+  it('restores a log whose Runtime calls settled, without blocking', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await outcomes.settle({
+      functionCallId: 'call-a',
+      executionStatus: 'success',
+      payload: { executionStatus: 'success', responseParts: [] },
+    });
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    await restored.closeSessionWriter();
+  });
+
+  it('proves a call whose settle failed after its receipt committed, on both opens', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    // The crash window: the outcome and the receipt commit, then the
+    // checkpoint's resolve fails.
+    const harness = (
+      outcomes as unknown as {
+        harness: {
+          resolveAwaitRuntime: (id: string, ref: never) => Promise<unknown>;
+        };
+      }
+    ).harness;
+    let sabotaged = false;
+    const settling = harness.resolveAwaitRuntime.bind(harness);
+    harness.resolveAwaitRuntime = async (id, ref) => {
+      if (!sabotaged) {
+        sabotaged = true;
+        throw new Error('crashed between the receipt and the settlement');
+      }
+      return settling(id, ref);
+    };
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await expect(
+      outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: { executionStatus: 'success', responseParts: [] },
+      }),
+    ).rejects.toThrow('crashed between');
+    // The receipt the failure left behind is the durable proof the call took
+    // effect — and what proves a call may never block.
+    expect(outcomes.hasCommittedReceipt('call-a')).toBe(true);
+    expect(outcomes.hasCommittedReceipt('call-b')).toBe(false);
+    await created.closeSessionWriter();
+
+    // The same durable bytes open unblocked: the restore repair settles the
+    // item the failed resolve left in progress.
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    await restored.closeSessionWriter();
+  });
+
+  it('hands the reopen the history its own repair writes', async () => {
+    const created = await start(managedConfig());
+    const outcomes = created.getManagedRuntimeOutcomes()!;
+    const harness = (
+      outcomes as unknown as {
+        harness: {
+          resolveAwaitRuntime: (id: string, ref: never) => Promise<unknown>;
+        };
+      }
+    ).harness;
+    let sabotaged = false;
+    const settling = harness.resolveAwaitRuntime.bind(harness);
+    harness.resolveAwaitRuntime = async (id, ref) => {
+      if (!sabotaged) {
+        sabotaged = true;
+        throw new Error('crashed between the receipt and the settlement');
+      }
+      return settling(id, ref);
+    };
+    recordUser(created, 'read the file');
+    // The model's call is on the log; its result never lands — the crash
+    // window the restore repair exists for.
+    created.getChatRecordingService()!.recordAssistantTurn({
+      model: 'test-model',
+      message: [
+        {
+          functionCall: {
+            id: 'call-a',
+            name: 'read_file',
+            args: { file_path: path.join(projectDir, 'a.txt') },
+          },
+        },
+      ],
+    });
+    await created.getChatRecordingService()!.flush();
+    await outcomes.admit({
+      functionCallId: 'call-a',
+      toolName: 'read_file',
+      promptId: 'prompt-a',
+      params: { file_path: path.join(projectDir, 'a.txt') },
+      toolDefinition: { name: 'read_file', parametersJsonSchema: {} },
+      workerIncarnation: 'incarnation-a',
+    });
+    await expect(
+      outcomes.settle({
+        functionCallId: 'call-a',
+        executionStatus: 'success',
+        payload: {
+          executionStatus: 'success',
+          responseParts: [{ type: 'text', text: 'the recovered answer' }],
+        },
+      }),
+    ).rejects.toThrow('crashed between');
+    await created.closeSessionWriter();
+
+    const restored = await start(restoringConfig());
+    expect(restored.getManagedSessionBlock()).toBeUndefined();
+    // The repair re-records the settled result, and the projection this open
+    // seeds the chat from must carry it: otherwise the first request after a
+    // crash hands the model a functionCall that nothing answers.
+    const apiHistory = restored.getSessionRestoreRuntime()?.apiHistory ?? [];
+    const functionResponses = apiHistory
+      .flatMap((content) => content.parts ?? [])
+      .map((part) => part?.functionResponse)
+      .filter((response) => response !== undefined);
+    expect(functionResponses).toContainEqual(
+      expect.objectContaining({
+        id: 'call-a',
+        name: 'read_file',
+        response: { output: 'the recovered answer' },
+      }),
+    );
+    await restored.closeSessionWriter();
+  });
 });
 
 describe('Managed host tools', () => {
@@ -1671,5 +2050,27 @@ describe('Managed Runtime tools', () => {
     config.blockManagedSession(new Error('second'));
     expect(config.getManagedSessionBlock()).toBe(first);
     expect(deriveConfig(config).getManagedSessionBlock()).toBe(first);
+  });
+
+  it('reports and clears an engine quarantine, also through a derived Config', () => {
+    const onManagedEngineQuarantine = vi.fn();
+    const config = managedConfig({ onManagedEngineQuarantine });
+    const reason = new Error('the stop could not be proven');
+    config.reportManagedEngineQuarantine(reason);
+    expect(onManagedEngineQuarantine).toHaveBeenNthCalledWith(1, true, reason);
+    deriveConfig(config).clearManagedEngineQuarantine(reason);
+    expect(onManagedEngineQuarantine).toHaveBeenNthCalledWith(2, false, reason);
+    expect(onManagedEngineQuarantine).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a quarantine callback for an engine that is not managed', () => {
+    const onManagedEngineQuarantine = vi.fn();
+    const config = managedConfig({
+      sessionExecutionEngine: 'legacy',
+      onManagedEngineQuarantine,
+    });
+    config.reportManagedEngineQuarantine(new Error('irrelevant'));
+    config.clearManagedEngineQuarantine(new Error('irrelevant'));
+    expect(onManagedEngineQuarantine).not.toHaveBeenCalled();
   });
 });

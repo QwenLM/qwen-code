@@ -7,6 +7,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const projectRoot = path.resolve(
   path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..'),
@@ -95,6 +96,17 @@ async function getDependencyLicense(depName, depVersion, packageDir) {
     // and an Apache-style NOTICE file (required by Apache-2.0 §4(d)).
     // Append both so the notices they accompany are actually shipped.
     const extraSections = [];
+    // pako 1.0.11's top-level LICENSE omits its lib/zlib/inflate.js header.
+    // Original: https://registry.npmjs.org/pako/-/pako-1.0.11.tgz
+    if (depName === 'pako' && depVersion === '1.0.11') {
+      const zlibLicense = await fs.readFile(
+        new URL('./licenses/pako-1.0.11-zlib.txt', import.meta.url),
+        'utf-8',
+      );
+      extraSections.push(
+        `--- lib/zlib/inflate.js (Zlib) ---\n\n${zlibLicense.trim()}`,
+      );
+    }
     for (const supplementaryFile of await findSupplementaryLicenseFiles(
       packageDir,
     )) {
@@ -178,6 +190,7 @@ export async function findLicenseFile(packageDir, licenseFileHint) {
     licenseFileHint,
     'LICENSE',
     'LICENSE.md',
+    'LICENSE.markdown',
     'LICENSE.txt',
     'LICENSE-MIT.txt',
     'LICENSE-MIT',
@@ -304,8 +317,8 @@ export function normalizeRepositoryUrl(repository) {
 
 /**
  * Produce fallback license text for packages that declare a known SPDX
- * license but ship no license file. Currently only MIT is covered, as it is
- * the only such declaration in the dependency graph.
+ * license but ship no license file. Only exact MIT declarations use this
+ * fallback; bundled packages with other licenses retain their original texts.
  *
  * @param {unknown} license - The `license` field from package.json
  * @param {unknown} author - The `author` field from package.json
@@ -403,8 +416,40 @@ export async function collectDependencies(
   }
 
   for (const depName of Object.keys(manifest.dependencies ?? {})) {
+    // Web Shell uses ExcelJS's prebuilt browser entry. These Node-only branches
+    // are not in that bundle; its actual embedded packages are inventoried below.
+    if (
+      packageName === 'exceljs' &&
+      ['archiver', 'unzipper', 'tmp'].includes(depName)
+    )
+      continue;
     await collectDependencies(depName, dir, dependenciesMap, visitedDirs);
   }
+}
+
+// ExcelJS ships a prebuilt browser bundle whose embedded dependencies are not
+// discoverable by walking its runtime package.json dependencies.
+export async function getExceljsBrowserNotices(packageDir) {
+  const inventory = JSON.parse(
+    await fs.readFile(
+      new URL('./licenses/exceljs-browser.json', import.meta.url),
+      'utf-8',
+    ),
+  );
+  const manifest = JSON.parse(
+    await fs.readFile(path.join(packageDir, 'package.json'), 'utf-8'),
+  );
+  const bundle = await fs.readFile(path.join(packageDir, inventory.browser));
+  if (
+    manifest.version !== inventory.exceljsVersion ||
+    manifest.browser !== inventory.browser ||
+    createHash('sha256').update(bundle).digest('hex') !== inventory.bundleSha256
+  ) {
+    throw new Error(
+      'ExcelJS browser bundle changed; refresh its bundled license inventory.',
+    );
+  }
+  return inventory.packages;
 }
 
 async function main() {
@@ -430,11 +475,27 @@ async function main() {
 
     const dependencyEntries = Array.from(allDependencies.values());
 
-    const licensePromises = dependencyEntries.map(({ name, version, dir }) =>
-      getDependencyLicense(name, version, dir),
+    const exceljs = dependencyEntries.find(({ name }) => name === 'exceljs');
+    const browserLicenses = exceljs
+      ? await getExceljsBrowserNotices(exceljs.dir)
+      : [];
+    const bundledLicenses = new Map(
+      browserLicenses.map((license) => [
+        `${license.name}@${license.version}`,
+        license,
+      ]),
     );
-
-    const dependencyLicenses = await Promise.all(licensePromises);
+    const licensePromises = dependencyEntries.map(
+      ({ name, version, dir }) =>
+        bundledLicenses.get(`${name}@${version}`) ??
+        getDependencyLicense(name, version, dir),
+    );
+    const dependencyLicenses = [
+      ...(await Promise.all(licensePromises)),
+      ...browserLicenses.filter(
+        ({ name, version }) => !allDependencies.has(`${name}@${version}`),
+      ),
+    ];
 
     let noticeText =
       'This file contains third-party software notices and license terms.\n\n';
@@ -454,7 +515,7 @@ async function main() {
 
     await fs.writeFile(noticeFilePath, noticeText);
     console.log(`NOTICES.txt generated at ${noticeFilePath}`);
-    console.log(`Total dependencies: ${dependencyEntries.length}`);
+    console.log(`Total dependencies: ${dependencyLicenses.length}`);
   } catch (error) {
     console.error('Error generating NOTICES.txt:', error);
     process.exit(1);

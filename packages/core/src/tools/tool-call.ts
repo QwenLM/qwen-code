@@ -61,6 +61,20 @@ function bridgeRefusal(message: string): Error {
   return new Error(`${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${message}`);
 }
 
+/**
+ * Names the target in a validation error its own `build()` raised after
+ * tool_call unwrapped it. Unlabelled, "params must have required property
+ * 'url'" reads as a fault in tool_call's `{name, arguments}` envelope
+ * (#12889). Only relabels a rejection the target already made, so it can never
+ * refuse a call the target would accept.
+ */
+export function describeBridgedArgumentError(
+  targetName: string,
+  message: string,
+): string {
+  return `Deferred tool "${targetName}" (called through ${ToolNames.TOOL_CALL}) rejected the arguments: ${message.replace(/\.$/, '')}. Pass arguments matching the schema returned by ${ToolNames.TOOL_SEARCH} for "${targetName}".`;
+}
+
 export async function resolveDeferredToolCall(
   registry: ToolRegistry,
   envelope: Record<string, unknown>,

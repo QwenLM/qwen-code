@@ -9,7 +9,6 @@ import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
 import {
   useConnection,
-  useWorkspace,
   type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
@@ -38,9 +37,10 @@ import {
   NetworkIcon,
 } from 'lucide-react';
 import { Skeleton } from '../ui/skeleton';
-import { LazyThreadsRoute } from '../workspace-agents/LazyThreadsRoute';
 import { Button } from '../ui/button';
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -58,9 +58,9 @@ import { TurnCallsPanel } from './TurnCallsPanel';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { normalizeTextMediaType } from '../../utils/imageIngestion';
-import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
 import { DialogShell } from '../dialogs/DialogShell';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { ErrorBoundary } from '../ErrorBoundary';
 import { isSafeHref, Markdown } from '../messages/Markdown';
 import {
   DropdownMenu,
@@ -87,6 +87,7 @@ import {
   getImageMimeTypeFromPath,
   getReviewDownloadMimeType,
   isDownloadOnlyWorkspaceArtifact,
+  isExcelFile,
   normalizeArtifactMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
@@ -130,6 +131,8 @@ import {
   MonitorTaskDetail,
   ShellTaskDetail,
 } from '../messages/TasksStatusMessage';
+
+const SpreadsheetPreview = lazy(() => import('./SpreadsheetPreview'));
 
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
 const FREQUENCIES: Frequency[] = [
@@ -338,13 +341,6 @@ export type ArtifactPanelTab =
       sessionId?: string;
     }
   | {
-      id: string;
-      kind: 'agent_activity';
-      title: string;
-      threadId: string;
-      workspaceCwd: string;
-    }
-  | {
       id: 'turn_calls';
       kind: 'turn_calls';
       title: string;
@@ -468,10 +464,6 @@ interface ArtifactPanelProps {
   agentTraceLoading?: boolean;
   agentTraceError?: string;
   onOpenWorkflowAgent?: (task: EnvironmentAgentTask) => void;
-  onOpenCollaborationSession?: (
-    sessionId: string,
-    workspaceCwd: string,
-  ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
   modelManagement?: WebShellModelManagementOptions;
@@ -495,47 +487,6 @@ interface ArtifactPanelProps {
   variant?: 'docked' | 'drawer';
   fullscreen?: boolean;
   onToggleFullscreen?: () => void;
-}
-
-/**
- * A collaboration thread's activity. Reads the workspace here rather than in
- * the panel, so hosts that render the panel without a workspace provider (and
- * never open this tab) do not need one.
- */
-function AgentActivityTab({
-  threadId,
-  workspaceCwd,
-  onOpenCollaborationSession,
-}: {
-  threadId: string;
-  workspaceCwd: string;
-  onOpenCollaborationSession?: (
-    sessionId: string,
-    workspaceCwd: string,
-  ) => void;
-}) {
-  const workspace = useWorkspace();
-  if (
-    !isAgentCollaborationEnabledForWorkspace(
-      workspace.capabilities,
-      workspaceCwd,
-    )
-  ) {
-    return null;
-  }
-  return (
-    <LazyThreadsRoute
-      chat
-      activityOnly
-      initialThreadId={threadId}
-      workspaceCwd={workspaceCwd}
-      onOpenAgentSession={
-        onOpenCollaborationSession
-          ? (sessionId) => onOpenCollaborationSession(sessionId, workspaceCwd)
-          : undefined
-      }
-    />
-  );
 }
 
 export function ArtifactPanel({
@@ -578,7 +529,6 @@ export function ArtifactPanel({
   agentTraceLoading = false,
   agentTraceError,
   onOpenWorkflowAgent,
-  onOpenCollaborationSession,
   onError,
   sessionWorkflowEnabled,
   modelManagement,
@@ -727,8 +677,7 @@ export function ArtifactPanel({
                   >
                     {getArtifactPanelTabKind(tab) === 'review' ? (
                       <TabReviewIcon />
-                    ) : tab.kind === 'workflow' ||
-                      tab.kind === 'agent_activity' ? (
+                    ) : tab.kind === 'workflow' ? (
                       <NetworkIcon
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
@@ -1278,6 +1227,10 @@ export function ArtifactPanel({
             </div>
           ) : activeTab.sourcePreview &&
             activeTab.previewData &&
+            !isExcelFile(
+              activeTab.workspacePath,
+              activeTab.previewMimeType || activeTab.previewData.type,
+            ) &&
             normalizeArtifactMimeType(
               activeTab.previewMimeType || activeTab.previewData.type,
             ) !== 'application/pdf' &&
@@ -1398,13 +1351,6 @@ export function ArtifactPanel({
               {activeTab.loadError ?? t('common.loading')}
             </div>
           )
-        ) : activeTab.kind === 'agent_activity' ? (
-          <AgentActivityTab
-            key={activeTab.id}
-            threadId={activeTab.threadId}
-            workspaceCwd={activeTab.workspaceCwd}
-            onOpenCollaborationSession={onOpenCollaborationSession}
-          />
         ) : activeTab.kind === 'context_usage' ? (
           <ContextUsagePanel
             key={activeTab.id}
@@ -3025,7 +2971,12 @@ function ArtifactDetail({
   }
 
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
-    if (isDownloadOnlyWorkspaceArtifact(artifact)) {
+    if (
+      isDownloadOnlyWorkspaceArtifact(artifact) ||
+      (isExcelFile(artifact.workspacePath, artifact.mimeType) &&
+        artifact.status !== 'available' &&
+        artifact.status !== 'changed')
+    ) {
       return (
         <DownloadableWorkspaceArtifact
           artifact={artifact}
@@ -3040,6 +2991,7 @@ function ArtifactDetail({
         workspaceActions={workspaceActions}
         previewContent={previewContent}
         previewSizeBytes={artifact.sizeBytes}
+        previewMimeType={artifact.mimeType}
         imageMimeType={imageMimeType}
         previewKind={
           isHtmlArtifact(artifact)
@@ -3177,14 +3129,17 @@ function DownloadableWorkspaceArtifact({
   artifact,
   workspaceActions,
 }: {
-  artifact: DaemonSessionArtifact;
+  artifact: Pick<
+    DaemonSessionArtifact,
+    'kind' | 'workspacePath' | 'mimeType' | 'sizeBytes' | 'status'
+  >;
   workspaceActions: ArtifactWorkspaceActions;
 }) {
   const { t } = useI18n();
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const mountedRef = useRef(true);
-  const location = getArtifactLocation(artifact);
+  const location = artifact.workspacePath;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -3414,6 +3369,7 @@ function SourceDetail({
           {t('common.loading')}
         </div>
       ) : data &&
+        !isExcelFile(path, data.type) &&
         data.type !== 'application/pdf' &&
         !normalizeTextMediaType(data.type, path) ? (
         <SourceBlobPreview
@@ -3514,6 +3470,59 @@ function WorkspaceFilePreview({
   previewOnly?: boolean;
   onLoadError?: (error: string) => void;
 }) {
+  const { t } = useI18n();
+  if (isExcelFile(workspacePath, previewMimeType || previewData?.type)) {
+    return (
+      <ErrorBoundary
+        resetKeys={[
+          workspacePath,
+          workspaceActions,
+          previewData,
+          artifactVersion,
+        ]}
+        fallback={
+          <div>
+            <div role="alert" className={styles.previewError}>
+              {t('excel.invalid')}
+            </div>
+            {previewData ? (
+              <SourceBlobPreview
+                data={previewData}
+                title={workspacePath.split(/[/\\]/).pop()!}
+                image={false}
+              />
+            ) : workspaceActions ? (
+              <DownloadableWorkspaceArtifact
+                key={workspacePath}
+                artifact={{
+                  workspacePath,
+                  kind: 'document',
+                  mimeType: previewMimeType,
+                  status: 'available',
+                }}
+                workspaceActions={workspaceActions}
+              />
+            ) : null}
+          </div>
+        }
+      >
+        <Suspense
+          fallback={
+            <div className={styles.empty} role="status">
+              {t('common.loading')}
+            </div>
+          }
+        >
+          <SpreadsheetPreview
+            workspacePath={workspacePath}
+            workspaceActions={workspaceActions}
+            data={previewData}
+            artifactVersion={artifactVersion}
+          />
+        </Suspense>
+      </ErrorBoundary>
+    );
+  }
   if (previewData) {
     return (
       <AttachmentBlobPreview

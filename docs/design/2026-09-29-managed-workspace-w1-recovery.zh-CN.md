@@ -40,7 +40,7 @@ W0 已持久保存 binding，并提供 Runtime 接管与回收。W1 补充的是
 - 保留 `tenantId`、`workspaceId`、`workspaceGeneration`、`storageId`、`cwdRelative`、`contextConfigRef` 和 `contextRevision`。W1 不切换 Session cwd、不改选 Workspace、不替换存储。逻辑变更需要另行准入、W2 或新建 Session。
 - 保留原 command、input、execution 身份、结果回执、日志字节和模型实际消费的消息。挂载迁移和回填都不改写已提交内容，也不重放工具副作用。
 - 区分三件事：原执行结果、旧写入者不能再回来的证据、存储及资源可用的证据。三者互不推导。`ABANDONED` 仍表示结果未知，不是成功结果或自动解锁。
-- W1a 面向 root 具有无歧义持久 birth time 的受信任单主机 OpenJDK 21/Linux local-process 部署的进程重启，以及已保存的 `hosted-workspace-files/1` 或 `hosted-workspace-shell/1` profile。Broker 重启后的下一工具 Turn 需要 `durable-local-process=true`。整机重启后只有登记身份仍匹配才允许恢复，不承诺可跨重启的通用身份。任意配置快照、Legacy 导入、跨主机接管、Kubernetes、同 UID 恶意写入者、磁盘/虚拟机回滚、在线迁移均不在其验收范围。
+- W1a 面向 root 具有无歧义持久 birth time 的受信任单主机 OpenJDK 21/Linux local-process 部署的进程重启，以及已保存的文件或 Shell profile：`hosted-workspace-files/1`、`hosted-workspace-shell/1`，或它们的 `/2` 搜索变体。`/2` 只多了只读的 `glob` 工具，因此保留资源校验不变。Broker 重启后的下一工具 Turn 需要 `durable-local-process=true`。整机重启后只有登记身份仍匹配才允许恢复，不承诺可跨重启的通用身份。任意配置快照、Legacy 导入、跨主机接管、Kubernetes、同 UID 恶意写入者、磁盘/虚拟机回滚、在线迁移均不在其验收范围。
 - 新执行需要当前授权。获授权的历史/导出，以及基于保存身份的清理，不要求挂载正常。撤权必须阻断新工作，同时允许可信清理继续。
 - 公开 Items/Snapshots 不能重建私有 Session authority。O2 的结果字节也不是 Workspace 文件系统备份。
 
@@ -160,7 +160,7 @@ Java 请求路径不递归复制存储，SQL 元数据/SSE 不携带文件字节
 
 先支持已结算、使用相对路径的 Hosted 文件工具 Session。其新文件调用本来就要求相对保存的 cwd，所以不需要重写已提交消息。清点共享 storage 的所有 Session 和资源，包括已归档的 Session。只要存在不支持安全迁移的 profile 或保留资产，就保持旧挂载或拒绝迁移，不能因为当前选中的 Session 可以迁移就破坏其他旧 Session。
 
-首版迁移能力不支持 Shell 命令、MCP/Hook 配置、Workspace 外的文件历史引用、Memory root 及其他不透明绝对路径依赖；这些需要 profile 专属支持。W1c 不能通过升级现有 Session 的不可变 definition 来绕过检查。
+首版迁移能力支持相对路径的 Hosted 文件历史，保留原绝对 QWEN_HOME 与独立备份卷；备份名称和原记录不改写。Shell 命令、MCP/Hook 配置、非 Hosted 或外部绝对历史键、Memory root 和不透明绝对路径仍不支持。详见 [W1c 详细设计](workspace-storage-migration.zh-CN.md)。W1c 不能通过升级不可变 definition 绕过检查。
 
 ### 8.2 持久操作
 

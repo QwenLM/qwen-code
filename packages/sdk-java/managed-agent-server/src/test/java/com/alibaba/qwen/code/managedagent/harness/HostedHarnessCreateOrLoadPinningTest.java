@@ -172,7 +172,8 @@ class HostedHarnessCreateOrLoadPinningTest {
                 Thread.currentThread().interrupt();
             }
             byte[] bytes = ("{\"v\":1,\"mode\":\"http-bridge\","
-                    + "\"features\":[\"hosted_harness_private_v1\"],"
+                    + "\"features\":[\"hosted_harness_private_v1\","
+                    + "\"managed_session_journal_delta_v1\"],"
                     + "\"transports\":[\"rest\"],\"hostedHarness\":{"
                     + "\"protocolVersions\":{\"current\":1,"
                     + "\"supported\":[1]},\"bootId\":\"" + BOOT_ID

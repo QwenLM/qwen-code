@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.25.0",
+  "version": "0.25.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -70,6 +70,7 @@
     "clsx": "^2.1.1",
     "codemirror": "^6.0.0",
     "echarts": "^6.0.0",
+    "exceljs": "4.4.0",
     "fzf": "^0.5.2",
     "katex": "^0.16.47",
     "lucide-react": "^1.24.0",
@@ -81,7 +82,9 @@
     "remark-gfm": "^4.0.0",
     "remark-math": "^6.0.0",
     "shiki": "^1.29.2",
+    "ssf": "0.11.2",
     "tailwind-merge": "^3.6.0",
+    "turndown": "^7.2.4",
     "vaul": "^1.1.2"
   },
   "peerDependencies": {
@@ -91,14 +94,17 @@
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
+    "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@tailwindcss/vite": "^4.3.2",
     "@types/hast": "^3.0.5",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.0.0",
+    "@types/turndown": "^5.0.6",
     "@vitejs/plugin-react": "^4.2.0",
     "jsdom": "^26.1.0",
+    "jszip": "3.10.2",
     "openapi-typescript": "^7.13.0",
     "postcss": "^8.5.17",
     "postcss-selector-parser": "^7.1.4",
