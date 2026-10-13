@@ -1252,19 +1252,68 @@ public class ManagedAgentProperties implements EnvironmentAware {
     }
 
     /**
-     * Broker-backed transport for the authoritative journal wire (design
-     * 2026-10-04-managed-agent-event-transport, phase MQ2b). Default off, so a
-     * flag-off deployment creates no transport bean and stays byte-identical.
-     * The topic must be a LITE topic, and the startup capability-probe group
-     * must be pre-created as a LITE group bound to it — see
-     * EventTransportConfiguration for the deployment prerequisite.
+     * Broker-backed EventTransport (design
+     * 2026-10-04-managed-agent-event-transport): the authoritative journal
+     * wire (phase MQ2b), and the public-event wire and the wake and
+     * materialization consumers (phase MQ2c). Default off, so a flag-off
+     * deployment creates no transport, producer or consumer bean and stays
+     * byte-identical. The topic must be a LITE topic, and the
+     * capability-probe, wake-bootstrap and owner groups must be pre-created
+     * as LITE groups bound to it — see EventTransportConfiguration for the
+     * deployment prerequisites.
      */
     public static class EventTransport {
         private boolean enabled;
         // The RocketMQ proxy gRPC endpoint (e.g. "host:8081").
         private String endpoints = "";
-        // The parent topic the per-Session journal LiteTopics live under.
+        // The parent topic the per-Session LiteTopics (journal and public
+        // envelopes alike) and the wake bootstrap LiteTopic live under.
         private String topic = "";
+        // The one LiteTopic every wake.requested envelope is also sent to, so
+        // a node can learn of a wake nobody owns yet. Session ids are UUIDs,
+        // so this name cannot collide with a Session's LiteTopic.
+        private String wakeBootstrapLiteTopic = "qwen-wake-bootstrap";
+        // Shared by every node; one dispatch reaches one member.
+        private String wakeBootstrapGroup = "qwen-managed-wake-bootstrap";
+        // Shared by every node; each subscribes it to the Sessions it holds.
+        private String ownerGroup = "qwen-managed-session-owner";
+        // How often the owner subscriptions follow this node's held Sessions.
+        // Unit-less operator overrides must bind in the annotated unit.
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration ownerReconcileInterval = Duration.ofSeconds(1);
+
+        public String getWakeBootstrapLiteTopic() {
+            return wakeBootstrapLiteTopic;
+        }
+
+        public void setWakeBootstrapLiteTopic(String wakeBootstrapLiteTopic) {
+            this.wakeBootstrapLiteTopic = wakeBootstrapLiteTopic;
+        }
+
+        public String getWakeBootstrapGroup() {
+            return wakeBootstrapGroup;
+        }
+
+        public void setWakeBootstrapGroup(String wakeBootstrapGroup) {
+            this.wakeBootstrapGroup = wakeBootstrapGroup;
+        }
+
+        public String getOwnerGroup() {
+            return ownerGroup;
+        }
+
+        public void setOwnerGroup(String ownerGroup) {
+            this.ownerGroup = ownerGroup;
+        }
+
+        public Duration getOwnerReconcileInterval() {
+            return ownerReconcileInterval;
+        }
+
+        public void setOwnerReconcileInterval(
+                Duration ownerReconcileInterval) {
+            this.ownerReconcileInterval = ownerReconcileInterval;
+        }
 
         public boolean isEnabled() {
             return enabled;
