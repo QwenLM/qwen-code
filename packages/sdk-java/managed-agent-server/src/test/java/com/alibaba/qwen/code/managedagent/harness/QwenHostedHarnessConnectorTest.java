@@ -901,6 +901,56 @@ class QwenHostedHarnessConnectorTest {
         verify(client).runAutomationOperation(any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
+    void childOperationPassivelyReattachesAfterControlPlaneRestart(String profile) {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        SessionRecord session = mock(SessionRecord.class);
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        when(execution.verifiedRecoveryEnabled()).thenReturn(false);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        when(session.tenantId()).thenReturn("tenant-a");
+        when(session.sessionId()).thenReturn(SESSION_ID);
+        when(session.harnessBootId()).thenReturn(BOOT_ID);
+        when(session.workspace()).thenReturn(new ContextBinding("tenant-a", "workspace", 1,
+                "storage", ".", "config", 1));
+        when(session.toolProfile()).thenReturn(profile);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        DaemonHttpException alreadyAttached = mock(DaemonHttpException.class);
+        when(alreadyAttached.getStatusCode()).thenReturn(409);
+        when(alreadyAttached.getErrorCode()).thenReturn("hosted_session_already_attached");
+        when(client.loadSession(any(LoadHarnessSession.class))).thenAnswer(invocation -> {
+            LoadHarnessSession load = invocation.getArgument(0);
+            Map<String, Object> request = ReflectionTestUtils.invokeMethod(load, "toJson");
+            if (!Boolean.TRUE.equals(request.get("passiveManagedRuntimeRecovery"))) {
+                throw alreadyAttached;
+            }
+            assertThat(request).doesNotContainEntry("driveRuntimeRecovery", true);
+            assertThat(ReflectionTestUtils.getField(load, "harnessSessionId")).isEqualTo(SESSION_ID);
+            return attached;
+        });
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        Map<String, Object> settlement = Map.of("kind", "attach", "childRunId", "run-1");
+
+        assertThatCode(() -> connector.runChildOperation("tenant-a", SESSION_ID, settlement))
+                .doesNotThrowAnyException();
+        connector.runChildOperation("tenant-a", SESSION_ID, settlement);
+        verify(client, times(1)).loadSession(any());
+        verify(client, times(2)).runChildOperation(attached, settlement);
+        verify(execution).authorizePassiveAttachment(session);
+    }
+
     @Test
     void messageOperationsReattachThroughTakeoverAndGateTheVerbsThatWake() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
