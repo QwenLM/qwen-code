@@ -606,20 +606,20 @@ describe('ModelManagementSection issue #13965 discontinued OAuth model', () => {
   // built-in `qwen-oauth` group reaches Settings even when the session runs on
   // an OpenAI-compatible provider. The composer already hides it; Settings did
   // not.
-  function oauthProvider(isRuntime = false): DaemonWorkspaceProviderStatus {
+  function oauthProvider(isCurrent = false): DaemonWorkspaceProviderStatus {
     return {
       kind: 'model_provider',
       status: 'ok',
       authType: 'qwen-oauth',
-      current: false,
+      current: isCurrent,
       models: [
         {
           modelId: 'coder-model(qwen-oauth)',
           baseModelId: 'coder-model',
           name: 'coder-model',
           baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
-          isCurrent: false,
-          isRuntime,
+          isCurrent,
+          isRuntime: false,
         },
       ],
     };
@@ -637,15 +637,31 @@ describe('ModelManagementSection issue #13965 discontinued OAuth model', () => {
     expect(container.textContent).toContain('GPT-4o');
   });
 
-  it('keeps a runtime snapshot of the same entry', () => {
-    // The carve-out `isDiscontinuedModel` makes in the VS Code webview: a
-    // session already authenticated on the model must still see the one it is
-    // running, so only the registry entry is hidden.
+  it('keeps the row when the session is running that model', () => {
+    // The daemon's provider list skips runtime rows and hardcodes
+    // `isRuntime: false`, so `isCurrent` is the only signal that the running
+    // model must stay listed; otherwise Settings would empty the group while
+    // that very model is serving the session.
     const { container } = renderSection({
       providers: [...providers(), oauthProvider(true)],
     });
     expect(container.textContent).toContain('qwen-oauth');
-    expect(container.textContent).toContain('Runtime');
+    expect(
+      container.querySelector('[aria-label="Delete coder-model"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps the running OAuth model when it is the only provider group', () => {
+    // A qwen-oauth-only session: hiding the registry row must not empty the
+    // section and fall through to the empty state.
+    const { container } = renderSection({
+      providers: [oauthProvider(true)],
+      currentModelId: 'coder-model(qwen-oauth)',
+    });
+    expect(container.textContent).toContain('qwen-oauth');
+    expect(
+      container.querySelector('[aria-label="Delete coder-model"]'),
+    ).not.toBeNull();
   });
 
   it('does not resurrect the row through the saved-configuration merge', () => {
