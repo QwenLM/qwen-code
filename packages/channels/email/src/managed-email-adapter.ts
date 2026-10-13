@@ -807,7 +807,15 @@ export class ManagedEmailAdapter {
 
   private async resubmitPending(): Promise<void> {
     const state = this.state!;
-    for (const entry of [...state.pending]) {
+    // Probe held claims first: the stall lifts only on a held claim's
+    // fresh admission, and the held entry is always the last push (the
+    // admit that armed the stall), so push order lets an earlier claim
+    // whose answer never comes shadow the one probe per poll — wedging
+    // the mailbox across restarts (R9-1). The sort is stable: unheld
+    // claims keep their uid order.
+    for (const entry of [...state.pending].sort(
+      (a, b) => Number(b.held === true) - Number(a.held === true),
+    )) {
       if (!this.running) return;
       let event = this.pendingEvents.get(entry.uid);
       if (event === undefined) {
