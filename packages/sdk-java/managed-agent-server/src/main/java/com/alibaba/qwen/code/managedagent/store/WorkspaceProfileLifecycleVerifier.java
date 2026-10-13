@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
@@ -119,6 +120,7 @@ public class WorkspaceProfileLifecycleVerifier {
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
                 operation.tenantId(), operation.sessionId()).stream().map(this::source)
                 .collect(Collectors.groupingBy(ManagedToolResultStore.Source::executionCallId));
+        var fileInputs = nativeFileInputs(operation);
         for (ToolExecutionRecord execution : executions.values()) {
             if (!execution.isSettled()) {
                 unsettled();
@@ -127,6 +129,12 @@ public class WorkspaceProfileLifecycleVerifier {
                 continue;
             }
             var sources = sourcesByCall.getOrDefault(execution.getExecutionCallId(), List.of());
+            if (sources.isEmpty() && "deferred".equals(execution.getReference().get("dispatchMode"))
+                    && execution.getReference().get("runtimeProtocol") == null
+                    && execution.getReference().get("publicationId") == null
+                    && fileInputs.contains(execution.getRuntimeSessionId() + ":" + execution.getRequestDigest())) {
+                continue;
+            }
             if (sources.size() != 1) {
                 unsettled();
             }
@@ -248,6 +256,32 @@ public class WorkspaceProfileLifecycleVerifier {
                 }
             }
         }
+    }
+
+    private java.util.Set<String> nativeFileInputs(OperationRecord operation) {
+        var inputs = new java.util.HashSet<String>();
+        var refs = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256"
+                + " FROM qwen_managed_session_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                + " AND kind = 'managed-tool-input' AND state = 'REFERENCED' FOR UPDATE",
+                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
+                operation.tenantId(), operation.sessionId());
+        for (var row : refs) {
+            var ref = JSON.createObjectNode().put("resourceId", row.get("resource_id").toString())
+                    .put("kind", "managed-tool-input").put("schemaVersion", ((Number) row.get("schema_version")).intValue())
+                    .put("byteLength", ((Number) row.get("byte_length")).longValue()).put("digest", row.get("sha256").toString());
+            JsonNode input = records.readRecordResource(operation.tenantId(), operation.sessionId(), ref);
+            if (!operation.sessionId().equals(input.path("harnessSessionId").asText())
+                    || !input.path("runtimeSessionId").isTextual() || !input.path("payloadJson").isTextual()) {
+                continue;
+            }
+            byte[] payload = input.path("payloadJson").textValue().getBytes(StandardCharsets.UTF_8);
+            JsonNode call = ToolPublicationContract.readJson(payload);
+            if (call.size() == 2 && call.path("input").isObject()
+                    && List.of("read_file", "write_file", "edit", "glob").contains(call.path("toolName").asText())) {
+                inputs.add(input.path("runtimeSessionId").textValue() + ":sha256:" + ToolPublicationContract.sha256(payload));
+            }
+        }
+        return inputs;
     }
 
     private List<ToolExecutionRecord> executions(OperationRecord operation) {

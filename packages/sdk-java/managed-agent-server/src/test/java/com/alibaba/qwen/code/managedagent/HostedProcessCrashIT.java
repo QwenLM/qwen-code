@@ -52,7 +52,10 @@ class HostedProcessCrashIT {
         JdbcTemplate jdbc = new JdbcTemplate(source);
         jdbc.setQueryTimeout(10);
         var database = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
-        assertThat(database.toString().toLowerCase()).containsAnyOf("mysql", "mariadb");
+        try (var connection = source.getConnection()) {
+            assertThat(connection.getMetaData().getDatabaseProductName())
+                    .containsAnyOf("MySQL", "MariaDB");
+        }
         System.out.println("FG6C_DATABASE " + JSON.writeValueAsString(database));
         String selected = System.getProperty("qwen.fg6c.case");
         if (selected != null) {
