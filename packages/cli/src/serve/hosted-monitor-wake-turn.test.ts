@@ -66,6 +66,23 @@ describe('withChildAgentConsumption', () => {
     expect(agents.markConsumed).toHaveBeenCalledTimes(1);
   });
 
+  // #13803 (K2): a workflow child's acceptance notification consumes
+  // through the same gate — its wake source names the record's own kind.
+  it('marks a workflow child result consumed the same way', async () => {
+    const { session, agents } = world();
+    const turn = withChildAgentConsumption(
+      harness(session, async () => ({
+        systemPayload: { state: 'completed' },
+      })),
+      session,
+    );
+    await expect(turn({ ...TURN, source: 'workflow' })).resolves.toBe(
+      'settled',
+    );
+    expect(agents.markConsumed).toHaveBeenCalledWith('run-1');
+    expect(agents.markConsumed).toHaveBeenCalledTimes(1);
+  });
+
   // R1-74: a cancelled or errored wake burns the input, so the pump still
   // advances — but the acceptance stays at accepting: the consumption
   // gate only fires for a turn that actually completed.

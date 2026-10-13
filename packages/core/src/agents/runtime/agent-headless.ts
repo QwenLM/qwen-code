@@ -97,6 +97,58 @@ function boundModelErrorText(text: string, max: number): string {
   return `${text.slice(0, end)}…`;
 }
 
+/**
+ * Copy of `cause` with every `message` on the chain replaced by its
+ * `collapseModelErrorText` copy. Cleaning only `message` left the fold itself
+ * raw, and `getErrorMessage` head-caps the composed `<message> (cause: …)` at
+ * 1 000 RAW characters before the collapse (#13717): escape bytes in the cause
+ * then spent the cap on themselves and the 997-character slice landed
+ * mid-sequence, evicting the reason a 9-character message had room for.
+ *
+ * Only what `describeErrorCause` reads is rebuilt: the cleaned `.message`, the
+ * own enumerable properties `Object.assign` carries over (`.code` above all,
+ * which `describeSingleError` prefixes), `.name` (its fallback when a subclass
+ * sets one), `.cause`, and an `AggregateError`'s `.errors` — into a real
+ * `AggregateError`, because the unwrap path tests `instanceof` and
+ * `AggregateError instanceof Error` is already true, so an `instanceof Error`
+ * guard does not keep one out. `.cause` and `.errors` recurse rather than
+ * flatten, on `describeCodedCause`'s own limits (depth 8, `visited` set): that
+ * walk prefers the *deepest* link carrying a `code`, so cleaning only the outer
+ * link would leave the one actually reported raw. Anything that is not an
+ * `Error` passes through untouched, like the rethrow below.
+ */
+function cleanModelErrorCause(
+  cause: unknown,
+  depth = 0,
+  visited = new Set<object>(),
+): unknown {
+  if (!(cause instanceof Error) || depth >= 8 || visited.has(cause)) {
+    return cause;
+  }
+  visited.add(cause);
+
+  const message = collapseModelErrorText(cause.message);
+  const isAggregate =
+    cause instanceof AggregateError && Array.isArray(cause.errors);
+  const cleaned = isAggregate
+    ? new AggregateError([], message)
+    : new Error(message);
+  // Own enumerable properties only: `message`, `stack` and a spec-installed
+  // `cause`/`errors` are non-enumerable, so the three below are the ones that
+  // have to be re-set explicitly after this copy.
+  Object.assign(cleaned, cause);
+  cleaned.name = cause.name;
+  if ('cause' in cause) {
+    cleaned.cause = cleanModelErrorCause(cause.cause, depth + 1, visited);
+  }
+  if (isAggregate) {
+    (cleaned as AggregateError).errors = (cause as AggregateError).errors.map(
+      (error) => cleanModelErrorCause(error, depth + 1, visited),
+    );
+  }
+  return cleaned;
+}
+
 // ─── Utilities (unchanged, re-exported for consumers) ────────
 
 /**
@@ -488,7 +540,10 @@ export class AgentHeadless implements SubagentExecutor {
         // shorter message still evict the folded cause. A message that cleans
         // to nothing falls back to the name rather than to the raw Error, which
         // would spend that same cap on the very escape bytes the cleaning
-        // removed and leave the parent the truthy stub `...`.
+        // removed and leave the parent the truthy stub `...`. The folded
+        // `cause` is cleaned for the same reason (#13717): it is composed onto
+        // the message *inside* that 1 000-RAW-character cap, so leaving it raw
+        // let an ANSI-coloured cause evict itself.
         const cleanedMessage =
           error instanceof Error ? collapseModelErrorText(error.message) : '';
         const bounded =
@@ -498,7 +553,7 @@ export class AgentHeadless implements SubagentExecutor {
                   cleanedMessage || error.name || 'Error',
                   MAX_MODEL_VISIBLE_MESSAGE_LENGTH,
                 ),
-                cause: error.cause,
+                cause: cleanModelErrorCause(error.cause),
               }
             : error;
         const clean = collapseModelErrorText(getErrorMessage(bounded));
