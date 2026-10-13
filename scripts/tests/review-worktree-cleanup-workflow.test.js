@@ -114,6 +114,24 @@ const executableCleanCopies = [
   { id: 'ci.yml', run: ciCleanSteps[0].run },
   { id: 'qwen-code-pr-review.yml', run: reviewPreCheckoutSweepStep },
 ];
+// The #13951 reset lives inside the `.git` probe, which the review-workflow
+// sweep does not carry, and every fixture above builds a workspace with no
+// `.git` at all — so the new lines had no behavioural witness whatsoever
+// (review R3-8). Select the copies that actually hold the reset by content
+// rather than by index: the byte-identity pin above already forces all six
+// ci.yml copies to match, so executing the first is executing all of them.
+const gitResetCopies = ciCleanSteps.filter(({ run }) =>
+  run.includes('pre-checkout-git-reset.md#pcr-001'),
+);
+// The reset's own contract is documented in a sibling design record (the
+// size ratchet forbids carrying the rationale inline in twelve copies), and
+// the pointer is the only thing a reader debugging a checkout failure sees.
+// Pin it the way qwen-autofix's pointers are pinned: a pointer that resolves
+// nowhere is worse than no pointer, and an orphaned section is dead prose.
+const gitResetDoc = readFileSync(
+  '.github/workflows/pre-checkout-git-reset.md',
+  'utf8',
+);
 // The step's owner-extraction awk is not a worktree filter: anchor on the
 // filter's shape, not the first awk in the step. Derive it once here so the
 // pinning test and the behavioral test always execute the same filter.
@@ -506,6 +524,167 @@ describe('review worktree cleanup steps', () => {
       }
     },
   );
+
+  it.skipIf(!sweepToolsAvailable)(
+    'drops the whole inherited .git store so the depth-1 fetch cannot negotiate against it',
+    () => {
+      // A REUSED workspace hands actions/checkout a `.git` whose object store
+      // no longer matches its refs, so the next `--depth=1` fetch advertises
+      // `have` lines for commits whose subtrees are gone and the server builds
+      // a thin pack against a delta base the client cannot resolve (#13951).
+      // Dropping `.git/shallow` alone does not clear that state — measured, a
+      // depth-1 fetch after `rm -f .git/shallow .git/commondir` still fails
+      // rc=128 on all three retries — so the reset drops the store itself and
+      // lets the Checkout below re-clone. This fixture is the only thing in
+      // the repository that executes those lines: deleting the `rm -rf`, or
+      // narrowing it back to a boundary file, must turn it red.
+      expect(gitResetCopies.length).toBeGreaterThan(0);
+      for (const { id, run } of gitResetCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'qwen-ci-gitreset-'));
+        const workspace = join(root, 'workspace');
+        // A depth-1 checkout always writes `.git/shallow`, so the fixture
+        // models the warm-pool state rather than a pristine clone.
+        mkdirSync(join(workspace, '.git', 'objects'), { recursive: true });
+        writeFileSync(join(workspace, '.git', 'HEAD'), 'ref: refs/heads/x\n');
+        writeFileSync(
+          join(workspace, '.git', 'shallow'),
+          `${'a'.repeat(40)}\n`,
+        );
+        writeFileSync(join(workspace, '.git', 'commondir'), '../elsewhere\n');
+        try {
+          // Mirror the runner's flags: Actions executes the step under
+          // errexit, so an unguarded `rm` must redden this test exactly as it
+          // reddens the job (review R1-2). The step's own `set -uo pipefail`
+          // does not turn errexit back off.
+          const result = spawnSync('bash', ['-c', `set -eo pipefail\n${run}`], {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          });
+          expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+          // The store is gone wholesale — the reset the mechanism needs, not
+          // a repair of one file inside it.
+          expect(existsSync(join(workspace, '.git')), id).toBe(false);
+          // The annotation runs BEFORE the reset, or it could never report
+          // anything: it is the only record of the state that was dropped, and
+          // #13951's triage asks for exactly these fields on the failing
+          // runner. The boundary oid here resolves to nothing (there is no
+          // repository behind this fixture), so it must be counted and named.
+          expect(result.stdout, id).toContain('inherited .git before checkout');
+          expect(result.stdout, id).toContain('shallow-boundaries=1');
+          expect(result.stdout, id).toContain('unresolved-locally=1');
+          expect(result.stdout, id).toContain('commondir=yes');
+          expect(result.stdout, id).toContain(
+            `inherited shallow boundary ${'a'.repeat(40)} does not resolve locally`,
+          );
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(!sweepToolsAvailable)(
+    'leaves a workspace with no .git alone and stays quiet about it',
+    () => {
+      // The enclosing `[ -e "$GITHUB_WORKSPACE/.git" ]` guard is what makes
+      // the reset a no-op on a fresh hosted runner. A fixture that only ever
+      // builds a `.git` cannot see a rewrite that moved the reset outside the
+      // guard — it would then annotate and `rm -rf` on every job, including
+      // the ones that never had a store to reset.
+      expect(gitResetCopies.length).toBeGreaterThan(0);
+      for (const { id, run } of gitResetCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'qwen-ci-gitreset-'));
+        const workspace = join(root, 'workspace');
+        mkdirSync(join(workspace, 'keep'), { recursive: true });
+        try {
+          const result = spawnSync('bash', ['-c', `set -eo pipefail\n${run}`], {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          });
+          expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+          expect(result.stdout, id).not.toContain(
+            'inherited .git before checkout',
+          );
+          expect(existsSync(join(workspace, 'keep')), id).toBe(true);
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(!sweepToolsAvailable)(
+    'a store removal that fails warns instead of failing the pre-checkout sweep',
+    () => {
+      // The reset sits on the pre-checkout path of every shared-pool job: an
+      // unguarded failing `rm` there would redden the lane one step before
+      // Checkout, ejecting the merge-queue entry and stalling every PR batched
+      // with it — while leaving the store in place, so #13951 is unfixed
+      // either way. Model the failure with stubbed `rm`/`sudo`; the `.qwen`
+      // loop never calls `rm` (no residue in this fixture), so only the store
+      // removal is under test.
+      expect(gitResetCopies.length).toBeGreaterThan(0);
+      for (const { id, run } of gitResetCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'qwen-ci-gitreset-'));
+        const workspace = join(root, 'workspace');
+        mkdirSync(join(workspace, '.git'), { recursive: true });
+        writeFileSync(
+          join(workspace, '.git', 'shallow'),
+          `${'b'.repeat(40)}\n`,
+        );
+        try {
+          const result = spawnSync(
+            'bash',
+            [
+              '-c',
+              `set -eo pipefail\nrm() { return 1; }\nsudo() { return 1; }\n${run}`,
+            ],
+            {
+              cwd: workspace,
+              env: { ...process.env, GITHUB_WORKSPACE: workspace },
+              encoding: 'utf8',
+            },
+          );
+          expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+          // The store survives, and the step says so rather than dying on the
+          // unlink with no annotation naming the residue.
+          expect(existsSync(join(workspace, '.git')), id).toBe(true);
+          expect(result.stdout, id).toContain(
+            'could not drop the inherited .git store',
+          );
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it('keeps every reset pointer resolving to a live design-record section', () => {
+    // The block is duplicated twelve times, so its rationale lives in a
+    // sibling `.md` (the size ratchet forbids carrying it inline that many
+    // times) and the workflow keeps a pointer. A pointer is the only thing a
+    // reader sees, so it must not rot: it has to resolve, each id must be
+    // allocated once — a duplicate id silently sends one block's readers to
+    // the other block — and no section may drop out of the contents table,
+    // which is how the record stops being readable end to end.
+    const pointers = [...gitResetCopies[0].run.matchAll(/#(pcr-\d+)/g)].map(
+      (m) => m[1],
+    );
+    const anchors = [...gitResetDoc.matchAll(/<a id="(pcr-\d+)"><\/a>/g)].map(
+      (m) => m[1],
+    );
+    expect(pointers.length).toBeGreaterThan(0);
+    expect(
+      [...new Set(pointers)].filter((id) => !anchors.includes(id)),
+    ).toEqual([]);
+    expect(new Set(anchors).size).toBe(anchors.length);
+    const listed = [
+      ...gitResetDoc.matchAll(/^- \[\d+\..*?\]\(#(pcr-\d+)\)$/gm),
+    ].map((m) => m[1]);
+    expect(listed).toEqual(anchors);
+  });
 
   it('sweeps both known qwen state names before the review checkout', () => {
     expect(reviewPreCheckoutSweepStep).toBeDefined();

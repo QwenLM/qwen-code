@@ -309,6 +309,31 @@ jobs:
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
                 done || true
+            # Reset the reused workspace's git store so the depth-1 Checkout
+            # below cannot negotiate against it (#13951). Last in this guard:
+            # the worktree and branch sweeps above need the repository.
+            # Full rationale → pre-checkout-git-reset.md#pcr-001
+            inherited_shallow=0
+            inherited_unresolved=0
+            if [ -s "$GITHUB_WORKSPACE/.git/shallow" ]; then
+              inherited_shallow="$(wc -l < "$GITHUB_WORKSPACE/.git/shallow" | tr -d ' ')"
+              while read -r inherited_oid; do
+                [ -n "$inherited_oid" ] || continue
+                "${GIT_SAFE[@]}" cat-file -e "$inherited_oid" 2>/dev/null ||
+                  {
+                    inherited_unresolved=$((inherited_unresolved + 1))
+                    echo "::warning::inherited shallow boundary $inherited_oid does not resolve locally (#13951)"
+                  }
+              done < "$GITHUB_WORKSPACE/.git/shallow"
+            fi
+            inherited_refs="$("${GIT_SAFE[@]}" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" || inherited_refs=0
+            inherited_commondir=no
+            [ -e "$GITHUB_WORKSPACE/.git/commondir" ] && inherited_commondir=yes
+            echo "::notice::inherited .git before checkout: shallow-boundaries=${inherited_shallow} unresolved-locally=${inherited_unresolved} refs=${inherited_refs} commondir=${inherited_commondir} git=$("${GIT_SAFE[@]}" --version 2>/dev/null || echo unknown) — dropping the whole store so the depth-1 fetch below cannot negotiate against it (#13951)"
+            "${GIT_SAFE[@]}" count-objects -v 2>/dev/null || true
+            rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              sudo -n rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              echo "::warning::could not drop the inherited .git store; the Checkout below may still fail with 'pack has N unresolved delta' (#13951)"
           fi
 
       - name: 'Verify trusted classifier checkout is clean'
@@ -521,6 +546,31 @@ jobs:
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
                 done || true
+            # Reset the reused workspace's git store so the depth-1 Checkout
+            # below cannot negotiate against it (#13951). Last in this guard:
+            # the worktree and branch sweeps above need the repository.
+            # Full rationale → pre-checkout-git-reset.md#pcr-001
+            inherited_shallow=0
+            inherited_unresolved=0
+            if [ -s "$GITHUB_WORKSPACE/.git/shallow" ]; then
+              inherited_shallow="$(wc -l < "$GITHUB_WORKSPACE/.git/shallow" | tr -d ' ')"
+              while read -r inherited_oid; do
+                [ -n "$inherited_oid" ] || continue
+                "${GIT_SAFE[@]}" cat-file -e "$inherited_oid" 2>/dev/null ||
+                  {
+                    inherited_unresolved=$((inherited_unresolved + 1))
+                    echo "::warning::inherited shallow boundary $inherited_oid does not resolve locally (#13951)"
+                  }
+              done < "$GITHUB_WORKSPACE/.git/shallow"
+            fi
+            inherited_refs="$("${GIT_SAFE[@]}" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" || inherited_refs=0
+            inherited_commondir=no
+            [ -e "$GITHUB_WORKSPACE/.git/commondir" ] && inherited_commondir=yes
+            echo "::notice::inherited .git before checkout: shallow-boundaries=${inherited_shallow} unresolved-locally=${inherited_unresolved} refs=${inherited_refs} commondir=${inherited_commondir} git=$("${GIT_SAFE[@]}" --version 2>/dev/null || echo unknown) — dropping the whole store so the depth-1 fetch below cannot negotiate against it (#13951)"
+            "${GIT_SAFE[@]}" count-objects -v 2>/dev/null || true
+            rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              sudo -n rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              echo "::warning::could not drop the inherited .git store; the Checkout below may still fail with 'pack has N unresolved delta' (#13951)"
           fi
 
       # On PRs, check out refs/pull/N/head (the immutable PR head, published the
@@ -1008,6 +1058,31 @@ jobs:
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
                 done || true
+            # Reset the reused workspace's git store so the depth-1 Checkout
+            # below cannot negotiate against it (#13951). Last in this guard:
+            # the worktree and branch sweeps above need the repository.
+            # Full rationale → pre-checkout-git-reset.md#pcr-001
+            inherited_shallow=0
+            inherited_unresolved=0
+            if [ -s "$GITHUB_WORKSPACE/.git/shallow" ]; then
+              inherited_shallow="$(wc -l < "$GITHUB_WORKSPACE/.git/shallow" | tr -d ' ')"
+              while read -r inherited_oid; do
+                [ -n "$inherited_oid" ] || continue
+                "${GIT_SAFE[@]}" cat-file -e "$inherited_oid" 2>/dev/null ||
+                  {
+                    inherited_unresolved=$((inherited_unresolved + 1))
+                    echo "::warning::inherited shallow boundary $inherited_oid does not resolve locally (#13951)"
+                  }
+              done < "$GITHUB_WORKSPACE/.git/shallow"
+            fi
+            inherited_refs="$("${GIT_SAFE[@]}" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" || inherited_refs=0
+            inherited_commondir=no
+            [ -e "$GITHUB_WORKSPACE/.git/commondir" ] && inherited_commondir=yes
+            echo "::notice::inherited .git before checkout: shallow-boundaries=${inherited_shallow} unresolved-locally=${inherited_unresolved} refs=${inherited_refs} commondir=${inherited_commondir} git=$("${GIT_SAFE[@]}" --version 2>/dev/null || echo unknown) — dropping the whole store so the depth-1 fetch below cannot negotiate against it (#13951)"
+            "${GIT_SAFE[@]}" count-objects -v 2>/dev/null || true
+            rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              sudo -n rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              echo "::warning::could not drop the inherited .git store; the Checkout below may still fail with 'pack has N unresolved delta' (#13951)"
           fi
 
       # On PRs, check out refs/pull/N/head (the immutable PR head, published the
@@ -1474,6 +1549,31 @@ jobs:
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
                 done || true
+            # Reset the reused workspace's git store so the depth-1 Checkout
+            # below cannot negotiate against it (#13951). Last in this guard:
+            # the worktree and branch sweeps above need the repository.
+            # Full rationale → pre-checkout-git-reset.md#pcr-001
+            inherited_shallow=0
+            inherited_unresolved=0
+            if [ -s "$GITHUB_WORKSPACE/.git/shallow" ]; then
+              inherited_shallow="$(wc -l < "$GITHUB_WORKSPACE/.git/shallow" | tr -d ' ')"
+              while read -r inherited_oid; do
+                [ -n "$inherited_oid" ] || continue
+                "${GIT_SAFE[@]}" cat-file -e "$inherited_oid" 2>/dev/null ||
+                  {
+                    inherited_unresolved=$((inherited_unresolved + 1))
+                    echo "::warning::inherited shallow boundary $inherited_oid does not resolve locally (#13951)"
+                  }
+              done < "$GITHUB_WORKSPACE/.git/shallow"
+            fi
+            inherited_refs="$("${GIT_SAFE[@]}" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" || inherited_refs=0
+            inherited_commondir=no
+            [ -e "$GITHUB_WORKSPACE/.git/commondir" ] && inherited_commondir=yes
+            echo "::notice::inherited .git before checkout: shallow-boundaries=${inherited_shallow} unresolved-locally=${inherited_unresolved} refs=${inherited_refs} commondir=${inherited_commondir} git=$("${GIT_SAFE[@]}" --version 2>/dev/null || echo unknown) — dropping the whole store so the depth-1 fetch below cannot negotiate against it (#13951)"
+            "${GIT_SAFE[@]}" count-objects -v 2>/dev/null || true
+            rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              sudo -n rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              echo "::warning::could not drop the inherited .git store; the Checkout below may still fail with 'pack has N unresolved delta' (#13951)"
           fi
 
       - name: 'Checkout'
@@ -2045,24 +2145,31 @@ jobs:
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
                 done || true
-            # A reused self-hosted .git keeps the shallow boundary of the
-            # PREVIOUS job. actions/checkout pins gc.auto=0, so no git process
-            # ever repairs or reclaims that boundary between jobs, and the next
-            # depth-1 fetch then negotiates a thin pack whose delta base the
-            # stale boundary claims is still local — "fatal: pack has N
-            # unresolved delta", byte-identical on every internal retry because
-            # the boundary never changes (#13951). Drop the boundary so the next
-            # fetch starts from a clean thin-pack root; .git/commondir is the
-            # file twin of GIT_COMMON_DIR and narrows the object graph the same
-            # way. Neither file exists on a normal actions/checkout, so this is
-            # a no-op on a clean workspace and on hosted runners — the same
-            # idempotent pair resanitize-git-config.sh already removes.
-            GIT_DIR_PATH="$("${GIT_SAFE[@]}" rev-parse --absolute-git-dir 2>/dev/null || echo "$GITHUB_WORKSPACE/.git")"
-            if [ -f "${GIT_DIR_PATH}/shallow" ]; then
-              echo "::notice::dropping stale ${GIT_DIR_PATH}/shallow before checkout (is-shallow-repository=$("${GIT_SAFE[@]}" rev-parse --is-shallow-repository 2>/dev/null || echo unknown))"
-              "${GIT_SAFE[@]}" count-objects -v 2>/dev/null || true
+            # Reset the reused workspace's git store so the depth-1 Checkout
+            # below cannot negotiate against it (#13951). Last in this guard:
+            # the worktree and branch sweeps above need the repository.
+            # Full rationale → pre-checkout-git-reset.md#pcr-001
+            inherited_shallow=0
+            inherited_unresolved=0
+            if [ -s "$GITHUB_WORKSPACE/.git/shallow" ]; then
+              inherited_shallow="$(wc -l < "$GITHUB_WORKSPACE/.git/shallow" | tr -d ' ')"
+              while read -r inherited_oid; do
+                [ -n "$inherited_oid" ] || continue
+                "${GIT_SAFE[@]}" cat-file -e "$inherited_oid" 2>/dev/null ||
+                  {
+                    inherited_unresolved=$((inherited_unresolved + 1))
+                    echo "::warning::inherited shallow boundary $inherited_oid does not resolve locally (#13951)"
+                  }
+              done < "$GITHUB_WORKSPACE/.git/shallow"
             fi
-            rm -f -- "${GIT_DIR_PATH}/shallow" "${GIT_DIR_PATH}/commondir"
+            inherited_refs="$("${GIT_SAFE[@]}" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" || inherited_refs=0
+            inherited_commondir=no
+            [ -e "$GITHUB_WORKSPACE/.git/commondir" ] && inherited_commondir=yes
+            echo "::notice::inherited .git before checkout: shallow-boundaries=${inherited_shallow} unresolved-locally=${inherited_unresolved} refs=${inherited_refs} commondir=${inherited_commondir} git=$("${GIT_SAFE[@]}" --version 2>/dev/null || echo unknown) — dropping the whole store so the depth-1 fetch below cannot negotiate against it (#13951)"
+            "${GIT_SAFE[@]}" count-objects -v 2>/dev/null || true
+            rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              sudo -n rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              echo "::warning::could not drop the inherited .git store; the Checkout below may still fail with 'pack has N unresolved delta' (#13951)"
           fi
 
       - name: 'Checkout'
@@ -2294,6 +2401,31 @@ jobs:
                       echo "::warning::could not remove review branch: $stale_ref"
                   fi
                 done || true
+            # Reset the reused workspace's git store so the depth-1 Checkout
+            # below cannot negotiate against it (#13951). Last in this guard:
+            # the worktree and branch sweeps above need the repository.
+            # Full rationale → pre-checkout-git-reset.md#pcr-001
+            inherited_shallow=0
+            inherited_unresolved=0
+            if [ -s "$GITHUB_WORKSPACE/.git/shallow" ]; then
+              inherited_shallow="$(wc -l < "$GITHUB_WORKSPACE/.git/shallow" | tr -d ' ')"
+              while read -r inherited_oid; do
+                [ -n "$inherited_oid" ] || continue
+                "${GIT_SAFE[@]}" cat-file -e "$inherited_oid" 2>/dev/null ||
+                  {
+                    inherited_unresolved=$((inherited_unresolved + 1))
+                    echo "::warning::inherited shallow boundary $inherited_oid does not resolve locally (#13951)"
+                  }
+              done < "$GITHUB_WORKSPACE/.git/shallow"
+            fi
+            inherited_refs="$("${GIT_SAFE[@]}" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" || inherited_refs=0
+            inherited_commondir=no
+            [ -e "$GITHUB_WORKSPACE/.git/commondir" ] && inherited_commondir=yes
+            echo "::notice::inherited .git before checkout: shallow-boundaries=${inherited_shallow} unresolved-locally=${inherited_unresolved} refs=${inherited_refs} commondir=${inherited_commondir} git=$("${GIT_SAFE[@]}" --version 2>/dev/null || echo unknown) — dropping the whole store so the depth-1 fetch below cannot negotiate against it (#13951)"
+            "${GIT_SAFE[@]}" count-objects -v 2>/dev/null || true
+            rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              sudo -n rm -rf -- "$GITHUB_WORKSPACE/.git" 2>/dev/null ||
+              echo "::warning::could not drop the inherited .git store; the Checkout below may still fail with 'pack has N unresolved delta' (#13951)"
           fi
 
       - name: 'Checkout'
