@@ -6,10 +6,22 @@
 
 import { promises as fs, type PathLike } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import express from 'express';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { ManagedCsiMount, parseManagedCsiMount } from './managed-csi-mount.js';
+import { registerManagedContextRoutes } from './managed-context-worker.js';
+import type { ManagedContextBoot } from './managed-context-envelope.js';
+import { computeManagedContextDigest } from './managed-workspace-binding.js';
+import {
+  WORKSPACE_ACTIVATION_ROUTE,
+  WORKSPACE_CAPABILITY_DIGEST,
+  WORKSPACE_CONTEXT_CONFIG_REF,
+  WORKSPACE_EXECUTION_PROFILE,
+} from './managed-workspace-activation.js';
 
 const qualified =
   '2194 2176 259:8 / /workspace rw,relatime - ext4 /dev/nvme2n1 rw\n';
@@ -194,6 +206,49 @@ describe('ACK Disk mount profile', () => {
 describe.runIf(process.platform !== 'win32')(
   'mount lifetime with owned metadata fixtures (not Linux/CSI qualification)',
   () => {
+    it.each([false, true])(
+      'preserves initial root cleanup failure separately from acquisition refusal (close fails: %s)',
+      async (closeFails) => {
+        const owned = await observationFixture();
+        const fixtureOpen = fs.open;
+        let close: ReturnType<typeof vi.spyOn> | undefined;
+        vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+          const handle = await fixtureOpen(...args);
+          if (args[0] === owned.root) {
+            vi.spyOn(handle, 'stat').mockRejectedValueOnce(
+              new Error('initial root stat failed'),
+            );
+            close = vi.spyOn(handle, 'close');
+            if (closeFails)
+              close.mockRejectedValueOnce(
+                new Error('initial root close failed'),
+              );
+          }
+          return handle;
+        });
+        await expect(owned.mount.observe()).rejects.toThrow('unavailable');
+        expect(owned.mount.isAvailable).toBe(false);
+        expect(close).toHaveBeenCalledTimes(1);
+        const closing = owned.mount.close();
+        expect(owned.mount.close()).toBe(closing);
+        if (closeFails) {
+          await expect(closing).rejects.toMatchObject({
+            message: 'Managed CSI root directory cleanup failed.',
+            errors: [
+              expect.objectContaining({ message: 'initial root stat failed' }),
+              expect.objectContaining({ message: 'initial root close failed' }),
+            ],
+          });
+          expect((await owned.rootHandle!.stat()).isDirectory()).toBe(true);
+          // This explicit test cleanup does not qualify product joining.
+          await owned.rootHandle!.close();
+        } else {
+          await expect(closing).resolves.toBeUndefined();
+          expect(owned.handles.every((handle) => handle.fd === -1)).toBe(true);
+        }
+      },
+    );
+
     it('publishes the original receipt and closes each owned fd once', async () => {
       const owned = await observationFixture();
       const receipt = await owned.mount.observe();
@@ -228,6 +283,276 @@ describe.runIf(process.platform !== 'win32')(
       expect(owned.mount.isAvailable).toBe(true);
       expect(await owned.mount.rootDirectory()).toBe(owned.root);
       expect(owned.rootHandle).toBe(original);
+    });
+
+    it('keeps sibling reads refused when CSI identity fails inside an admitted call', async () => {
+      const owned = await observationFixture();
+      await fs.mkdir(path.join(owned.root, 'sub'));
+      await fs.writeFile(
+        path.join(owned.root, 'sub', 'secret.txt'),
+        'sibling-secret',
+      );
+      await fs.writeFile(path.join(owned.root, 'own.txt'), 'own-content');
+      await owned.mount.observe();
+      const fixture = JSON.parse(
+        await fs.readFile(
+          new URL(
+            './contracts/managed-context-v1.fixtures.json',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ) as { boot: ManagedContextBoot };
+      const boot = {
+        ...fixture.boot,
+        mountRoot: owned.root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      };
+      const app = express();
+      const executor = registerManagedContextRoutes(
+        app,
+        boot,
+        undefined,
+        undefined,
+        owned.mount,
+      );
+      const server = app.listen(0, '127.0.0.1');
+      onTestFinished(async () => {
+        await executor.close();
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        });
+      });
+      await once(server, 'listening');
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const post = (route: string, body: unknown) =>
+        fetch(`${origin}${route}`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${boot.token}`,
+            'cache-control': 'no-store',
+            'content-type': 'application/json',
+            'x-qwen-managed-lease-id': boot.leaseId,
+            'x-qwen-managed-lease-epoch': String(boot.epoch),
+          },
+          body: JSON.stringify(body),
+        });
+      for (const [sessionId, cwdRelative] of [
+        ['root-session', '.'],
+        ['sibling', 'sub'],
+      ]) {
+        const binding = {
+          tenantId: boot.tenantId,
+          workspaceId: boot.workspaceId,
+          workspaceGeneration: boot.workspaceGeneration,
+          storageId: boot.storageId,
+          cwdRelative,
+          contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+          contextRevision: '1',
+        };
+        const contextDigest = computeManagedContextDigest(binding);
+        expect(
+          (
+            await post('/internal/managed-runtime/v3/context', {
+              protocolVersion: 3,
+              managedContext: boot.managedContext,
+              operationId: `install-${sessionId}`,
+              sessionId,
+              binding,
+              contextDigest,
+            })
+          ).status,
+        ).toBe(200);
+        if (sessionId === 'root-session')
+          expect(
+            (
+              await post(WORKSPACE_ACTIVATION_ROUTE.path, {
+                protocolVersion: 1,
+                operation: 'activate',
+                sessionId,
+                contextDigest,
+                contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+                profile: WORKSPACE_EXECUTION_PROFILE,
+              })
+            ).status,
+          ).toBe(200);
+      }
+      const read = async (callId: string, file = 'sub/secret.txt') => {
+        const response = await post('/internal/managed-runtime/v2/execute', {
+          protocolVersion: 2,
+          reference: {
+            sessionId: 'root-session',
+            promptId: 'prompt-1',
+            callId,
+            argsDigest: `digest-${callId}`,
+          },
+          toolName: 'read_file',
+          input: { file_path: file },
+        });
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      const control = await read('control');
+      expect(control.result.executionStatus).toBe('error');
+      expect(control.result.error.message).toBe(
+        "Path 'sub/secret.txt' is not within the Session working directory.",
+      );
+      // Positive control: the caller's own file reads fine, so a wholesale
+      // execute-path failure cannot satisfy the refusal assertions.
+      const own = await read('own', 'own.txt');
+      expect(own.result.executionStatus).toBe('success');
+      expect(JSON.stringify(own)).toContain('own-content');
+      const nativeRoot = owned.mount.rootDirectory.bind(owned.mount);
+      vi.spyOn(owned.mount, 'rootDirectory').mockImplementation(async () => {
+        await fs.writeFile(owned.serial, 'changed-serial\n');
+        return nativeRoot();
+      });
+      const fenced = await read('fenced');
+      expect(owned.mount.isAvailable).toBe(false);
+      expect(fenced.result.executionStatus).toBe('error');
+      expect(fenced.result.error.message).toBe(
+        "Path 'sub/secret.txt' is not within the Session working directory.",
+      );
+      expect(JSON.stringify(fenced)).not.toContain('sibling-secret');
+    });
+
+    it('keeps sibling reads refused when the mount fences inside the sibling loop', async () => {
+      // The caller at `a` reads `a/b/secret.txt` while a sibling owns `a/b`.
+      // The root is still known when the ownership callback reads it, and the
+      // mount fences only inside the sibling's `resolve('a/b')` — the stale
+      // `ownEstate` must not excuse the sibling that the fence made
+      // unlocatable.
+      const owned = await observationFixture();
+      await fs.mkdir(path.join(owned.root, 'a', 'b'), { recursive: true });
+      await fs.writeFile(
+        path.join(owned.root, 'a', 'b', 'secret.txt'),
+        'sibling-secret',
+      );
+      await owned.mount.observe();
+      const fixture = JSON.parse(
+        await fs.readFile(
+          new URL(
+            './contracts/managed-context-v1.fixtures.json',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ) as { boot: ManagedContextBoot };
+      const boot = {
+        ...fixture.boot,
+        mountRoot: owned.root,
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+      };
+      const app = express();
+      const executor = registerManagedContextRoutes(
+        app,
+        boot,
+        undefined,
+        undefined,
+        owned.mount,
+      );
+      const server = app.listen(0, '127.0.0.1');
+      onTestFinished(async () => {
+        await executor.close();
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections();
+        });
+      });
+      await once(server, 'listening');
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const post = (route: string, body: unknown) =>
+        fetch(`${origin}${route}`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${boot.token}`,
+            'cache-control': 'no-store',
+            'content-type': 'application/json',
+            'x-qwen-managed-lease-id': boot.leaseId,
+            'x-qwen-managed-lease-epoch': String(boot.epoch),
+          },
+          body: JSON.stringify(body),
+        });
+      for (const [sessionId, cwdRelative] of [
+        ['caller', 'a'],
+        ['sibling', 'a/b'],
+      ]) {
+        const binding = {
+          tenantId: boot.tenantId,
+          workspaceId: boot.workspaceId,
+          workspaceGeneration: boot.workspaceGeneration,
+          storageId: boot.storageId,
+          cwdRelative,
+          contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+          contextRevision: '1',
+        };
+        const contextDigest = computeManagedContextDigest(binding);
+        expect(
+          (
+            await post('/internal/managed-runtime/v3/context', {
+              protocolVersion: 3,
+              managedContext: boot.managedContext,
+              operationId: `install-${sessionId}`,
+              sessionId,
+              binding,
+              contextDigest,
+            })
+          ).status,
+        ).toBe(200);
+        if (sessionId === 'caller')
+          expect(
+            (
+              await post(WORKSPACE_ACTIVATION_ROUTE.path, {
+                protocolVersion: 1,
+                operation: 'activate',
+                sessionId,
+                contextDigest,
+                contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+                profile: WORKSPACE_EXECUTION_PROFILE,
+              })
+            ).status,
+          ).toBe(200);
+      }
+      const read = async (callId: string) => {
+        const response = await post('/internal/managed-runtime/v2/execute', {
+          protocolVersion: 2,
+          reference: {
+            sessionId: 'caller',
+            promptId: 'prompt-1',
+            callId,
+            argsDigest: `digest-${callId}`,
+          },
+          toolName: 'read_file',
+          input: { file_path: 'b/secret.txt' },
+        });
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      const control = await read('control');
+      expect(control.result.executionStatus).toBe('error');
+      expect(control.result.error.message).toBe(
+        "Path 'b/secret.txt' is not within the Session working directory.",
+      );
+      // Fence the mount at the instant the sibling loop resolves 'a/b'; the
+      // caller's own resolve('a') and the callback's first rootDirectory()
+      // still see the trusted serial.
+      const nativeResolve = owned.mount.resolve.bind(owned.mount);
+      vi.spyOn(owned.mount, 'resolve').mockImplementation(
+        async (cwdRelative) => {
+          if (cwdRelative === 'a/b') {
+            await fs.writeFile(owned.serial, 'changed-serial\n');
+          }
+          return nativeResolve(cwdRelative);
+        },
+      );
+      const fenced = await read('fenced');
+      expect(owned.mount.isAvailable).toBe(false);
+      expect(fenced.result.executionStatus).toBe('error');
+      expect(fenced.result.error.message).toBe(
+        "Path 'b/secret.txt' is not within the Session working directory.",
+      );
+      expect(JSON.stringify(fenced)).not.toContain('sibling-secret');
     });
 
     it('joins the whole callback and rejects its result after close fences new borrows', async () => {
@@ -329,9 +654,70 @@ describe.runIf(process.platform !== 'win32')(
       'a\0b',
     ])('rejects malformed normalized cwd %s before I/O', async (cwd) => {
       const owned = await observationFixture();
+      await owned.mount.observe();
       const count = owned.handles.length;
       expect(await owned.mount.resolve(cwd)).toBeUndefined();
       expect(owned.handles).toHaveLength(count);
+      expect(owned.mount.isAvailable).toBe(true);
+      expect(await owned.mount.resolve('.')).toBe(owned.root);
+    });
+
+    it('refuses a child whose named and descriptor devices both differ from the root', async () => {
+      const owned = await observationFixture();
+      await fs.mkdir(path.join(owned.root, 'foreign'));
+      const foreign = await fs.lstat(path.join(owned.root, 'foreign'), {
+        bigint: true,
+      });
+      Object.defineProperty(foreign, 'dev', { value: owned.stats.dev + 1n });
+      const fixtureLstat = fs.lstat;
+      const fixtureOpen = fs.open;
+      const isChild = (requested: PathLike) =>
+        typeof requested === 'string' &&
+        /^\/proc\/self\/fd\/\d+\/foreign$/.test(requested);
+      vi.spyOn(fs, 'lstat').mockImplementation(async (...args) =>
+        isChild(args[0]) ? foreign : fixtureLstat(...args),
+      );
+      vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await fixtureOpen(...args);
+        if (isChild(args[0]))
+          vi.spyOn(handle, 'stat').mockResolvedValue(foreign);
+        return handle;
+      });
+      expect(await owned.mount.resolve('foreign')).toBeUndefined();
+      expect(owned.mount.isAvailable).toBe(true);
+      expect(owned.handles.filter((handle) => handle.fd !== -1)).toEqual([
+        owned.rootHandle,
+      ]);
+    });
+
+    it('refuses a child whose descriptor device differs from its named device', async () => {
+      // The named lstat keeps the root device, so the root-device arm cannot
+      // decide here — only the descriptor-vs-named device comparison can.
+      // Inode numbers are per-filesystem, so a foreign-device directory with
+      // a colliding inode is exactly what this arm exists to refuse.
+      const owned = await observationFixture();
+      await fs.mkdir(path.join(owned.root, 'foreign'));
+      const descriptorStats = await fs.lstat(path.join(owned.root, 'foreign'), {
+        bigint: true,
+      });
+      Object.defineProperty(descriptorStats, 'dev', {
+        value: owned.stats.dev + 1n,
+      });
+      const fixtureOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await fixtureOpen(...args);
+        if (
+          typeof args[0] === 'string' &&
+          /^\/proc\/self\/fd\/\d+\/foreign$/.test(args[0])
+        )
+          vi.spyOn(handle, 'stat').mockResolvedValue(descriptorStats);
+        return handle;
+      });
+      expect(await owned.mount.resolve('foreign')).toBeUndefined();
+      expect(owned.mount.isAvailable).toBe(true);
+      expect(owned.handles.filter((handle) => handle.fd !== -1)).toEqual([
+        owned.rootHandle,
+      ]);
     });
 
     it.each(['first-symlink', 'leaf-symlink', 'file'])(
@@ -381,6 +767,54 @@ describe.runIf(process.platform !== 'win32')(
       expect(owned.handles.filter((handle) => handle.fd !== -1)).toEqual([
         owned.rootHandle,
       ]);
+      expect(owned.mount.isAvailable).toBe(true);
+      expect(await owned.mount.resolve('.')).toBe(owned.root);
+    });
+
+    it('refuses a child replaced before its descriptor open and restored after', async () => {
+      // The in-walk descriptor check is the only guard for this
+      // interleaving: the walk's lstat sees the original, open(2) gets the
+      // replacement, and the post-walk lstat sees the restored original.
+      const owned = await observationFixture();
+      await fs.mkdir(path.join(owned.root, 'a'));
+      let swapped = false;
+      const fixtureLstat = fs.lstat;
+      vi.spyOn(fs, 'lstat').mockImplementation(async (...args) => {
+        const stats = await fixtureLstat(...args);
+        if (
+          !swapped &&
+          typeof args[0] === 'string' &&
+          /^\/proc\/self\/fd\/\d+\/a$/.test(args[0])
+        ) {
+          swapped = true;
+          await fs.rename(
+            path.join(owned.root, 'a'),
+            path.join(owned.root, 'original-a'),
+          );
+          await fs.mkdir(path.join(owned.root, 'a'));
+        }
+        return stats;
+      });
+      const fixtureOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await fixtureOpen(...args);
+        if (
+          typeof args[0] === 'string' &&
+          /^\/proc\/self\/fd\/\d+\/a$/.test(args[0])
+        ) {
+          await fs.rmdir(path.join(owned.root, 'a'));
+          await fs.rename(
+            path.join(owned.root, 'original-a'),
+            path.join(owned.root, 'a'),
+          );
+        }
+        return handle;
+      });
+      expect(await owned.mount.resolve('a')).toBeUndefined();
+      expect(owned.handles.filter((handle) => handle.fd !== -1)).toEqual([
+        owned.rootHandle,
+      ]);
+      expect(owned.mount.isAvailable).toBe(true);
     });
 
     it('joins other child closes and retains a failed close as a permanent blocker', async () => {
@@ -413,6 +847,90 @@ describe.runIf(process.platform !== 'win32')(
       // Cleanup of this deliberately failed owned handle is not product joining.
       await failed!.close();
     });
+
+    it('retains child and root failures when both descriptor closes reject', async () => {
+      const owned = await observationFixture();
+      await fs.mkdir(path.join(owned.root, 'child'));
+      await owned.mount.observe();
+      const rootFailure = new Error('root close failed');
+      const childFailure = new Error('child close failed');
+      vi.spyOn(owned.rootHandle!, 'close').mockRejectedValueOnce(rootFailure);
+      const fixtureOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await fixtureOpen(...args);
+        if (
+          typeof args[0] === 'string' &&
+          /^\/proc\/self\/fd\/\d+\/child$/.test(args[0])
+        )
+          vi.spyOn(handle, 'close').mockRejectedValueOnce(childFailure);
+        return handle;
+      });
+      expect(await owned.mount.resolve('child')).toBeUndefined();
+      const closing = owned.mount.close();
+      expect(owned.mount.close()).toBe(closing);
+      await expect(closing).rejects.toMatchObject({
+        errors: [
+          expect.objectContaining({ errors: [childFailure] }),
+          rootFailure,
+        ],
+      });
+      expect(owned.mount.isAvailable).toBe(false);
+    });
+
+    it.each([0, 1])(
+      'joins both initial observations when observation %s returns first',
+      async (first) => {
+        const owned = await observationFixture();
+        const entered = [deferred(), deferred()];
+        const release = [deferred(), deferred()];
+        let metadataOpens = 0;
+        const fixtureOpen = fs.open;
+        vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+          const handle = await fixtureOpen(...args);
+          if (args[0] === '/proc/self/mountinfo') {
+            const index = metadataOpens++;
+            entered[index].resolve();
+            await release[index].promise;
+          }
+          return handle;
+        });
+        const observations = [
+          owned.mount.observe().catch((error: unknown) => error),
+        ];
+        try {
+          await entered[0].promise;
+          observations.push(
+            owned.mount.observe().catch((error: unknown) => error),
+          );
+          await Promise.all(entered.map((gate) => gate.promise));
+          expect(owned.rootHandle).toBeUndefined();
+          let closed = false;
+          const closing = owned.mount.close();
+          void closing.then(() => {
+            closed = true;
+          });
+          release[first].resolve();
+          await observations[first];
+          await new Promise(setImmediate);
+          expect(closed).toBe(false);
+          release[1 - first].resolve();
+          const results = await Promise.all(observations);
+          expect(results).toEqual([
+            expect.objectContaining({
+              message: expect.stringContaining('unavailable'),
+            }),
+            expect.objectContaining({
+              message: expect.stringContaining('unavailable'),
+            }),
+          ]);
+          await closing;
+          expect(owned.handles.every((handle) => handle.fd === -1)).toBe(true);
+        } finally {
+          release.forEach((gate) => gate.resolve());
+          await Promise.all(observations);
+        }
+      },
+    );
 
     it.each([1, 2])(
       'joins mountinfo open %s, including before the root fd exists',

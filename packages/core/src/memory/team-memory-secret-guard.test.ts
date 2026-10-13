@@ -94,6 +94,20 @@ describe('checkTeamMemorySecrets', () => {
     }
   });
 
+  it('anchors private team memory inside a workspace below a git root', () => {
+    const workspace = path.join(projectRoot, 'session');
+    fs.mkdirSync(workspace);
+    const file = path.join(workspace, '.qwen/team-memory/note.md');
+
+    expect(getTeamAutoMemoryRoot(workspace)).toBe(
+      path.join(projectRoot, '.qwen/team-memory'),
+    );
+    expect(checkTeamMemorySecrets(file, secret, workspace)).toBeNull();
+    expect(checkWorkspaceTeamMemorySecrets(file, secret, workspace)).toMatch(
+      /team memory is shared/i,
+    );
+  });
+
   it('blocks secrets written through a symlink into team memory', () => {
     const root = getTeamAutoMemoryRoot(projectRoot);
     fs.mkdirSync(root, { recursive: true });

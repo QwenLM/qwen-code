@@ -279,8 +279,9 @@ public final class WorkspaceMigrationStore {
 
     public void failed(String code) {
         String stable = code.matches("[a-z0-9_]{1,64}") ? code : "migration_failed";
-        jdbc.update("UPDATE managed_workspace_migration SET last_error_code = ?, state = CASE WHEN ? = 'source_drift'"
-                + " THEN 'INVALIDATED' ELSE state END, updated_at = CURRENT_TIMESTAMP(6)"
+        jdbc.update("UPDATE managed_workspace_migration SET last_error_code = ?, state = CASE WHEN"
+                + " ? IN ('source_drift', 'resource_collected') THEN 'INVALIDATED' ELSE state END,"
+                + " updated_at = CURRENT_TIMESTAMP(6)"
                 + " WHERE operation_id = ? AND state NOT IN ('COMPLETED', 'ABORTED')", stable, stable, id);
     }
 
@@ -335,6 +336,10 @@ public final class WorkspaceMigrationStore {
         check(count("SELECT COUNT(*) FROM managed_agent_session s JOIN managed_agent_command c"
                 + " ON c.tenant_id = s.tenant_id AND c.session_id = s.session_id WHERE s.tenant_id = ?"
                 + " AND s.workspace_storage_id = ? AND c.command_status = 'PENDING'") == 0,
+                "migration_work_unsettled");
+        check(count("SELECT COUNT(*) FROM managed_agent_session s JOIN managed_session_rename_delivery r"
+                + " ON r.tenant_id = s.tenant_id AND r.session_id = s.session_id WHERE s.tenant_id = ?"
+                + " AND s.workspace_storage_id = ? AND r.delivery_state <> 'COMPLETED'") == 0,
                 "migration_work_unsettled");
         // A child Workspace's worktree records absolute paths of this root
         // (#13753 I1): it must be merged or discarded before the storage

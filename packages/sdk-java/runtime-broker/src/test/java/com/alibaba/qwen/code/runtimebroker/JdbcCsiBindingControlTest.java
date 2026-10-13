@@ -257,7 +257,7 @@ class JdbcCsiBindingControlTest {
             }
             sql(connection, "CREATE TABLE managed_workspace_csi_registration (alias_key VARCHAR(64) PRIMARY KEY,"
                     + " tenant_id VARCHAR(64), storage_id VARCHAR(64), physical_key VARCHAR(64), registration_revision BIGINT)");
-            sql(connection, "CREATE TABLE managed_workspace_execution_lease (storage_key VARCHAR(64) PRIMARY KEY,"
+            sql(connection, "CREATE TABLE IF NOT EXISTS managed_workspace_execution_lease (storage_key VARCHAR(64) PRIMARY KEY,"
                     + " storage_kind VARCHAR(8), csi_phase VARCHAR(16), csi_revision BIGINT, csi_reservation_id VARCHAR(64),"
                     + " csi_registration_key VARCHAR(64), csi_registration_revision BIGINT, binding_id VARCHAR(64),"
                     + " runtime_generation BIGINT, csi_provision_request_id VARCHAR(64))");
@@ -279,7 +279,9 @@ class JdbcCsiBindingControlTest {
         try (var connection = fixture.source().getConnection()) {
             sql(connection, "INSERT INTO managed_workspace_csi_registration VALUES ('" + ALIAS + "', 'tenant', 'storage', '" + PHYSICAL + "', 1)");
             try (var statement = connection.prepareStatement("INSERT INTO managed_workspace_execution_lease"
-                    + " VALUES (?, 'CSI', 'RESERVED', 1, ?, ?, 1, ?, 1, ?)")) {
+                    + " (storage_key, storage_kind, csi_phase, csi_revision, csi_reservation_id,"
+                    + " csi_registration_key, csi_registration_revision, binding_id, runtime_generation,"
+                    + " csi_provision_request_id) VALUES (?, 'CSI', 'RESERVED', 1, ?, ?, 1, ?, 1, ?)")) {
                 statement.setString(1, PHYSICAL);
                 statement.setString(2, RESERVATION);
                 statement.setString(3, ALIAS);

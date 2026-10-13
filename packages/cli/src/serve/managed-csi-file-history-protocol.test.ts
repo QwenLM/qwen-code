@@ -7,14 +7,18 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import {
+  readCsiNativeRequest,
+  readCsiNativeResponse,
+} from './managed-csi-native-readback.js';
 import { csiHistoryPreparationFixture } from './__tests__/csi-history-preparation-fixture.js';
 import { parseManagedCsiFileBoot } from './managed-csi-file-envelope.js';
 import {
-  csiFileHistoryEnvelope,
   readCsiFileHistoryEnvelope,
   readCsiFileHistoryObservation,
   readCsiFileHistoryOperation,
   readCsiPreparationEvidence,
+  csiFileHistoryEnvelope,
   csiHistoryContentDigest,
 } from './managed-csi-file-history-protocol.js';
 
@@ -116,7 +120,7 @@ describe('preparation paths from original resource bytes', () => {
     expect(sample.preparation.paths).not.toContain('read-only.txt');
   });
 
-  it.each(['paths', 'membership', 'owner', 'wrapper'])(
+  it.each(['paths', 'membership', 'owner', 'read-only-path'])(
     'refuses coherent resource hashes with changed %s',
     (fault) => {
       const sample = csiHistoryPreparationFixture();
@@ -133,7 +137,8 @@ describe('preparation paths from original resource bytes', () => {
       if (fault === 'paths') body.preparation.paths = ['caller.txt'];
       if (fault === 'membership') body.preparation.invocations.shift();
       if (fault === 'owner') body.runtimeSessionId = 'foreign';
-      if (fault === 'wrapper') body.preparation.paths.push('read-only.txt');
+      if (fault === 'read-only-path')
+        body.preparation.paths.push('read-only.txt');
       const bytes = Buffer.from(JSON.stringify(body));
       item.bytesBase64 = bytes.toString('base64');
       item.reference['byteLength'] = bytes.length;
@@ -164,5 +169,37 @@ describe('preparation paths from original resource bytes', () => {
         preparation: { ...sample.preparation, paths: ['other.txt'] },
       }),
     ).not.toBe(digest);
+  });
+
+  it('refuses a coherent intent whose request digest differs from the original payload bytes', () => {
+    const sample = csiHistoryPreparationFixture();
+    const evidence = sample.response.evidence;
+    const resources = evidence['resources'] as Array<{
+      reference: Record<string, unknown>;
+      bytesBase64: string;
+    }>;
+    const intent = resources.find(
+      (item) => item.reference['resourceId'] === sample.intentRef.resourceId,
+    )!;
+    const body = JSON.parse(
+      Buffer.from(intent.bytesBase64, 'base64').toString(),
+    );
+    const wrongDigest = `sha256:${'0'.repeat(64)}`;
+    body.preparation.invocations[1].requestDigest = wrongDigest;
+    (evidence['members'] as Array<Record<string, unknown>>)[1]['argsDigest'] =
+      wrongDigest;
+    const bytes = Buffer.from(JSON.stringify(body));
+    intent.bytesBase64 = bytes.toString('base64');
+    intent.reference['byteLength'] = bytes.length;
+    intent.reference['digest'] = createHash('sha256')
+      .update(bytes)
+      .digest('hex');
+    evidence['intentRef'] = intent.reference;
+    const request = readCsiNativeRequest({
+      ...sample.request,
+      subject: intent.reference,
+    });
+    const response = readCsiNativeResponse(sample.response, request);
+    expect(() => readCsiPreparationEvidence(response)).toThrow();
   });
 });

@@ -195,22 +195,24 @@ export function readCsiNativeResponse(
       for (const field of ['identity', 'context', 'installedContext'])
         ensure(isDeepStrictEqual(grant[field], body[field]));
       const bytes = resources(evidence['resources'], required);
-      if (prepared === null) {
-        const input = object(
-          parseManagedSessionRecordJson(
-            bytes.get(inputRef.resourceId)!.toString('utf8'),
-            64 * 1024,
-          ),
-        );
-        ensure(typeof input['payloadJson'] === 'string');
-        const payload = object(
-          parseManagedSessionRecordJson(
-            input['payloadJson'] as string,
-            64 * 1024,
-          ),
-        );
-        ensure(payload['toolName'] === 'read_file');
-      }
+      const input = closed(
+        parseManagedCsiFileJson(bytes.get(inputRef.resourceId)!, 64 * 1024),
+        ['harnessSessionId', 'runtimeSessionId', 'payloadJson'],
+      );
+      ensure(
+        input['harnessSessionId'] === owner &&
+          input['runtimeSessionId'] === owner &&
+          typeof input['payloadJson'] === 'string',
+      );
+      ensure(
+        `sha256:${createHash('sha256').update(input['payloadJson']).digest('hex')}` ===
+          reference['argsDigest'],
+      );
+      const payload = closed(
+        parseManagedSessionRecordJson(input['payloadJson'], 64 * 1024),
+        ['toolName', 'input'],
+      );
+      if (prepared === null) ensure(payload['toolName'] === 'read_file');
       break;
     }
     default:

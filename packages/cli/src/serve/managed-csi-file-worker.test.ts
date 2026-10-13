@@ -30,9 +30,11 @@ import * as finalization from './managed-csi-file-finalize-protocol.js';
 import {
   csiFileHistoryEnvelope,
   CSI_FILE_HISTORY_PATH,
+  type CsiFileHistoryObservation,
 } from './managed-csi-file-history-protocol.js';
 import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
 import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
+import * as historyProtocol from './managed-csi-file-history-protocol.js';
 import type { ManagedCsiFileWorkerHandle } from './managed-csi-file-worker.js';
 import { csiHistoryPreparationFixture } from './__tests__/csi-history-preparation-fixture.js';
 import {
@@ -549,8 +551,33 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
       ).toEqual(fixture.attestationResponse);
       for (let index = 0; index < 2; index++)
         expect(
-          await (await send('context', fixture.installationRequest)).json(),
-        ).toEqual(fixture.installationResponse);
+          await (
+            await send(
+              'context',
+              candidate.version === 5
+                ? {
+                    ...fixture.installationRequest,
+                    context: nativeFixture.valid[0].request.installedContext,
+                  }
+                : fixture.installationRequest,
+            )
+          ).json(),
+        ).toEqual(
+          candidate.version === 5
+            ? {
+                ...(fixture.installationResponse as Record<string, unknown>),
+                context: {
+                  ...(
+                    fixture.installationResponse as {
+                      context: Record<string, unknown>;
+                    }
+                  ).context,
+                  operationId:
+                    nativeFixture.valid[0].request.installedContext.operationId,
+                },
+              }
+            : fixture.installationResponse,
+        );
       for (const route of [
         '/internal/managed-runtime/v3/execute',
         '/internal/managed-runtime/v3/context',
@@ -560,6 +587,9 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
         `${MANAGED_CSI_FILE_PREFIX}/context?alias=1`,
         `${MANAGED_CSI_FILE_PREFIX}/acknowledge`,
         `${MANAGED_CSI_FILE_PREFIX}/history`,
+        ...(candidate.version === 4
+          ? [CSI_FILE_HISTORY_PATH, `${MANAGED_CSI_FILE_PREFIX}/execute`]
+          : []),
       ])
         expect((await send(route, {})).status).toBe(404);
       expect(
@@ -755,7 +785,7 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
 describe('boot5 history HTTP ownership with labelled readback/composer seams', () => {
   const candidate = parseManagedCsiFileBoot(nativeFixture.boot);
   const installed = nativeFixture.valid[0].request.installedContext;
-  const observation = {
+  const observation: CsiFileHistoryObservation = {
     state: {
       ownerSessionId: candidate.identity.sessionId,
       snapshots: [],
@@ -832,9 +862,153 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
     return { observe, historyPrepare, close, compose };
   }
 
-  it('uses fresh original Read input on the private execute route with labelled authority/executor seams', async () => {
+  it('refuses invalid first revisions and reinstall keys before replacing the canonical context', async () => {
     mockMountFixture();
-    retainedHistory(csiHistoryPreparationFixture());
+    const sample = csiHistoryPreparationFixture();
+    retainedHistory(sample);
+    vi.spyOn(nativeReadback, 'readCurrentCsiNative').mockResolvedValue(
+      nativeFixture.valid[0].response,
+    );
+    worker = await startManagedRuntimeAttestationWorker(
+      candidate,
+      undefined,
+      undefined,
+      true,
+    );
+    const revised = { ...installed.binding, contextRevision: '2' };
+    expect(
+      (
+        await send('context', {
+          ...fixture.installationRequest,
+          context: {
+            ...installed,
+            binding: revised,
+            contextDigest: computeManagedContextDigest(revised),
+          },
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await send('context', {
+          ...fixture.installationRequest,
+          context: installed,
+        })
+      ).status,
+    ).toBe(200);
+    expect((await history('bind')).status).toBe(200);
+    expect(
+      (
+        await send('context', {
+          ...fixture.installationRequest,
+          context: { ...installed, operationId: randomUUID() },
+        })
+      ).status,
+    ).toBe(409);
+    expect((await history('snapshot')).status).toBe(200);
+    expect(
+      (
+        await send('context', {
+          ...fixture.installationRequest,
+          context: installed,
+        })
+      ).status,
+    ).toBe(200);
+    expect((await history('bind')).status).toBe(200);
+  });
+
+  it('retries bind authority failure before composing any history', async () => {
+    mockMountFixture();
+    const retained = retainedHistory(csiHistoryPreparationFixture());
+    const read = vi
+      .spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockRejectedValueOnce(new Error('Authority unavailable'))
+      .mockResolvedValue(nativeFixture.valid[0].response);
+    await start();
+    expect((await history('bind')).status).toBe(409);
+    expect(retained.compose).not.toHaveBeenCalled();
+    expect((await history('bind')).status).toBe(200);
+    expect(retained.compose).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries the same prepare reference only while no preimage effects have started', async () => {
+    mockMountFixture();
+    const sample = csiHistoryPreparationFixture();
+    const retained = retainedHistory(sample);
+    vi.spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(nativeFixture.valid[0].response)
+      .mockRejectedValueOnce(new Error('Authority unavailable'))
+      .mockResolvedValue(sample.response);
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    expect((await prepare(sample.intentRef)).status).toBe(409);
+    expect(retained.historyPrepare).not.toHaveBeenCalled();
+    expect((await prepare(sample.intentRef)).status).toBe(200);
+    expect((await prepare(sample.intentRef)).status).toBe(200);
+    expect(retained.historyPrepare).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses projected history capacity before effects and still serves the original snapshot', async () => {
+    mockMountFixture();
+    const initial = structuredClone(observation);
+    const timestamp = new Date().toISOString();
+    const tracked = Object.fromEntries(
+      Array.from({ length: 200 }, (_, i) => [
+        `file-${i}.txt`,
+        { backupFileName: null, version: 1, backupTime: timestamp },
+      ]),
+    );
+    initial.state.snapshots = [
+      { promptId: randomUUID(), timestamp, trackedFileBackups: tracked },
+    ];
+    initial.state.files = Object.fromEntries(
+      Object.keys(tracked).map((file) => [file, null]),
+    );
+    const sample = csiHistoryPreparationFixture(initial);
+    const retained = retainedHistory(csiHistoryPreparationFixture());
+    vi.spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(nativeFixture.valid[0].response)
+      .mockResolvedValue(sample.response);
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    retained.observe.mockResolvedValue({
+      history: initial.state,
+      storage: {
+        backupDirectory: initial.backupDirectory,
+        retainedBackups: [],
+      },
+    });
+    const response = await prepare(sample.intentRef);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toHaveProperty(
+      'code',
+      'managed_csi_history_capacity_exceeded',
+    );
+    expect(retained.historyPrepare).not.toHaveBeenCalled();
+    const snapshot = await history('snapshot');
+    expect(snapshot.status).toBe(200);
+    expect(await snapshot.json()).toHaveProperty('observation', initial);
+  });
+
+  it('keeps preparation input errors retryable when history and storage are unchanged', async () => {
+    mockMountFixture();
+    const sample = csiHistoryPreparationFixture();
+    const retained = retainedHistory(sample);
+    retained.historyPrepare.mockRejectedValueOnce(
+      Object.assign(new Error('Directory target'), { code: 'EISDIR' }),
+    );
+    vi.spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(nativeFixture.valid[0].response)
+      .mockResolvedValue(sample.response);
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    expect((await prepare(sample.intentRef)).status).toBe(409);
+    expect((await history('snapshot')).status).toBe(200);
+    expect((await prepare(sample.intentRef)).status).toBe(200);
+  });
+
+  function readExecutionFixture() {
     const sample = structuredClone(nativeFixture.valid[3]);
     const payloadJson = JSON.stringify({
       toolName: 'read_file',
@@ -860,6 +1034,137 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
       reference: evidence.executionReference.inputRef,
       bytesBase64: bytes.toString('base64'),
     };
+    return sample;
+  }
+
+  it.each(['new request', 'pending readback'])(
+    'refuses %s during preparation without retiring the retained owner',
+    async (timing) => {
+      mockMountFixture();
+      const preparation = csiHistoryPreparationFixture();
+      const retained = retainedHistory(preparation);
+      const read = readExecutionFixture();
+      let releasePreparation!: () => void;
+      const preparing = new Promise<void>((resolve) => {
+        releasePreparation = resolve;
+      });
+      retained.historyPrepare.mockImplementation(() => preparing);
+      let releaseReadback!: () => void;
+      const readback = new Promise<void>((resolve) => {
+        releaseReadback = resolve;
+      });
+      const native = vi
+        .spyOn(nativeReadback, 'readCurrentCsiNative')
+        .mockImplementation(async (_boot, _installed, action) => {
+          if (action === 'execute' && timing === 'pending readback')
+            await readback;
+          return (action === 'bind'
+            ? nativeFixture.valid[0].response
+            : action === 'prepare'
+              ? preparation.response
+              : read.response) as unknown as Awaited<
+            ReturnType<typeof nativeReadback.readCurrentCsiNative>
+          >;
+        });
+      const execute = vi
+        .spyOn(ManagedToolExecutor.prototype, 'execute')
+        .mockResolvedValue({
+          executionStatus: 'success',
+          responseParts: [{ text: 'owned Read result' }],
+        });
+      await start();
+      expect((await history('bind')).status).toBe(200);
+      let reading: Promise<Response> | undefined;
+      let preparingRequest: Promise<Response> | undefined;
+      let response: Response;
+      let executionsDuringPreparation: number;
+      try {
+        if (timing === 'pending readback') {
+          reading = send('execute', read.request);
+          await vi.waitFor(() =>
+            expect(native).toHaveBeenCalledWith(
+              candidate,
+              installed,
+              'execute',
+              read.request.subject,
+            ),
+          );
+        }
+        preparingRequest = prepare(preparation.intentRef);
+        await vi.waitFor(() =>
+          expect(retained.historyPrepare).toHaveBeenCalledTimes(1),
+        );
+        reading ??= send('execute', read.request);
+        releaseReadback();
+        response = await reading;
+        executionsDuringPreparation = execute.mock.calls.length;
+      } finally {
+        releaseReadback();
+        releasePreparation();
+      }
+      expect((await preparingRequest!).status).toBe(200);
+      expect(response!.status).toBe(409);
+      expect(executionsDuringPreparation!).toBe(0);
+      expect((await send('execute', read.request)).status).toBe(200);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect((await history('snapshot')).status).toBe(200);
+      expect((await prepare(preparation.intentRef)).status).toBe(200);
+      expect(retained.historyPrepare).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('refuses preparation before preimage effects while an execution is active and permits the same retry', async () => {
+    mockMountFixture();
+    const preparation = csiHistoryPreparationFixture();
+    const retained = retainedHistory(preparation);
+    const read = readExecutionFixture();
+    vi.spyOn(nativeReadback, 'readCurrentCsiNative').mockImplementation(
+      async (_boot, _installed, action) =>
+        (action === 'bind'
+          ? nativeFixture.valid[0].response
+          : action === 'prepare'
+            ? preparation.response
+            : read.response) as unknown as Awaited<
+          ReturnType<typeof nativeReadback.readCurrentCsiNative>
+        >,
+    );
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const execute = vi
+      .spyOn(ManagedToolExecutor.prototype, 'execute')
+      .mockImplementation(async () => {
+        await pending;
+        return {
+          executionStatus: 'success',
+          responseParts: [{ text: 'owned Read result' }],
+        };
+      });
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    const reading = send('execute', read.request);
+    let response: Response;
+    let preimagesBeforeRetry: number;
+    try {
+      await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+      response = await prepare(preparation.intentRef);
+      preimagesBeforeRetry = retained.historyPrepare.mock.calls.length;
+    } finally {
+      release();
+    }
+    expect((await reading).status).toBe(200);
+    expect(response!.status).toBe(409);
+    expect(preimagesBeforeRetry!).toBe(0);
+    expect((await prepare(preparation.intentRef)).status).toBe(200);
+    expect(retained.historyPrepare).toHaveBeenCalledTimes(1);
+    expect((await history('snapshot')).status).toBe(200);
+  });
+
+  it('uses fresh original Read input on the private execute route with labelled authority/executor seams', async () => {
+    mockMountFixture();
+    retainedHistory(csiHistoryPreparationFixture());
+    const sample = readExecutionFixture();
     const native = vi
       .spyOn(nativeReadback, 'readCurrentCsiNative')
       .mockResolvedValueOnce(nativeFixture.valid[0].response)
@@ -906,6 +1211,29 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
       sample.request.subject,
     );
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('delivers settled results above 64 KiB within the executor result budget', async () => {
+    mockMountFixture();
+    retainedHistory(csiHistoryPreparationFixture());
+    const sample = readExecutionFixture();
+    vi.spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(nativeFixture.valid[0].response)
+      .mockResolvedValue(sample.response);
+    const result = {
+      executionStatus: 'success' as const,
+      responseParts: [{ text: '中'.repeat(25000) }],
+    };
+    vi.spyOn(ManagedToolExecutor.prototype, 'execute').mockResolvedValue(
+      result,
+    );
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    for (let retry = 0; retry < 2; retry++) {
+      const response = await send('execute', sample.request);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toHaveProperty('result', result);
+    }
   });
 
   it.each(['write_file', 'edit'])(
@@ -1086,7 +1414,12 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
     mockMountFixture();
     const sample = csiHistoryPreparationFixture();
     const retained = retainedHistory(sample);
-    retained.historyPrepare.mockRejectedValue(new Error('Owned backup failed'));
+    retained.historyPrepare.mockImplementation(async () => {
+      retained.observe.mockRejectedValueOnce(
+        new Error('Retained effects cannot be accounted for'),
+      );
+      throw new Error('Owned backup failed');
+    });
     const native = vi
       .spyOn(nativeReadback, 'readCurrentCsiNative')
       .mockResolvedValueOnce(
@@ -1101,9 +1434,53 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
     expect((await prepare(sample.intentRef)).status).toBe(409);
     expect(retained.historyPrepare).toHaveBeenCalledTimes(1);
     expect(native).toHaveBeenCalledTimes(2);
-    expect((await history('snapshot')).status).toBe(200);
+    const snapshot = await history('snapshot');
+    expect(snapshot.status).toBe(409);
+    expect(await snapshot.json()).toHaveProperty(
+      'code',
+      'managed_csi_history_retirement_required',
+    );
     const drained = await (await send('drain', fixture.drainRequest)).json();
     expect(drained.workState).toBe('BLOCKED');
+    expect(drained.blockers).toContain('history-prepare-failed');
+  });
+
+  it('refuses an already queued snapshot after an effectful prepare fails', async () => {
+    mockMountFixture();
+    const sample = csiHistoryPreparationFixture();
+    const retained = retainedHistory(sample);
+    let release!: () => void;
+    retained.historyPrepare.mockImplementation(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      retained.observe.mockRejectedValueOnce(
+        new Error('Retained effects cannot be accounted for'),
+      );
+      throw new Error('Post-effect preparation failed');
+    });
+    vi.spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(nativeFixture.valid[0].response)
+      .mockResolvedValue(sample.response);
+    const envelopes = vi.spyOn(historyProtocol, 'readCsiFileHistoryEnvelope');
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    const preparation = prepare(sample.intentRef);
+    await vi.waitFor(() =>
+      expect(retained.historyPrepare).toHaveBeenCalledTimes(1),
+    );
+    const snapshot = history('snapshot');
+    // The producer sits in the parser's own module, so only the worker-side
+    // envelope reads (bind, prepare, snapshot) cross the spied export.
+    await vi.waitFor(() => expect(envelopes).toHaveBeenCalledTimes(3));
+    release();
+    expect((await preparation).status).toBe(409);
+    const response = await snapshot;
+    expect(response.status).toBe(409);
+    expect(await response.json()).toHaveProperty(
+      'code',
+      'managed_csi_history_retirement_required',
+    );
   });
 
   it('refuses changed original observation before preimage I/O', async () => {
@@ -1215,13 +1592,20 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
     expect(drain.workState).toBe('BLOCKED');
     expect(drain.blockers).toContain('retained-history-bound');
     expect((await history('bind')).status).toBe(409);
+    expect(
+      (await prepare(csiHistoryPreparationFixture().intentRef)).status,
+    ).toBe(409);
+    expect((await send('execute', readExecutionFixture().request)).status).toBe(
+      409,
+    );
+    expect(native).toHaveBeenCalledTimes(1);
     expect((await history('snapshot')).status).toBe(200);
     await worker!.close();
     worker = undefined;
     expect(close).toHaveBeenCalledTimes(1);
     expect(mount.close).toHaveBeenCalledTimes(1);
   });
-  it('retains failed bind and refuses to construct another history on retry', async () => {
+  it('refuses every unavailable bind attempt without constructing history', async () => {
     mockMountFixture();
     const native = vi
       .spyOn(nativeReadback, 'readCurrentCsiNative')
@@ -1231,7 +1615,7 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
     expect((await history('bind')).status).toBe(409);
     expect((await history('bind')).status).toBe(409);
     expect((await history('snapshot')).status).toBe(409);
-    expect(native).toHaveBeenCalledTimes(1);
+    expect(native).toHaveBeenCalledTimes(2);
     expect(compose).not.toHaveBeenCalled();
   });
   it('close seals first and joins a pending native read before closing the original mount', async () => {

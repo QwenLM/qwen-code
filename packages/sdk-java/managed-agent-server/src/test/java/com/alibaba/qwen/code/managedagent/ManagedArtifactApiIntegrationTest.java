@@ -83,6 +83,7 @@ class ManagedArtifactApiIntegrationTest {
                 fixture::reader);
         context.registerBean(com.alibaba.qwen.code.managedagent.store.ManagedActionStore.class,
                 () -> mock(com.alibaba.qwen.code.managedagent.store.ManagedActionStore.class));
+        context.registerBean(java.time.Clock.class, () -> java.time.Clock.systemUTC());
         context.registerBean(ManagedAgentService.class, () -> sessions);
         context.refresh();
         context.close();

@@ -23,6 +23,57 @@ afterEach(() => {
 });
 
 describe('JavaManagedAgentClient', () => {
+  it('uses all existing task POST routes with headers, credentials and cancellation', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        jsonResponse({ data: [], hasMore: false, nextCursor: 'floor' }),
+      );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      getHeaders: () => ({ 'x-tenant': 'tenant' }),
+    });
+    const abort = new AbortController();
+    await client.listTasks(
+      { sessionId: 's1', cursor: 'page', limit: 50 },
+      abort.signal,
+    );
+    await client.getTask({ sessionId: 's1', taskId: 'task1' }, abort.signal);
+    await client.listTaskEvents(
+      { sessionId: 's1', taskId: 'task1', after: 'checkpoint', limit: 50 },
+      abort.signal,
+    );
+    await client.cancelTask(
+      {
+        sessionId: 's1',
+        taskId: 'task1',
+        idempotencyKey: 'saved',
+        requestId: 'trace',
+      },
+      abort.signal,
+    );
+    expect(
+      fetchImpl.mock.calls.map(([url]) => String(url).split('/v1')[1]),
+    ).toEqual([
+      '/tasks/query',
+      '/tasks/get',
+      '/tasks/events/query',
+      '/tasks/cancel',
+    ]);
+    for (const [, init] of fetchImpl.mock.calls) {
+      expect(init?.method).toBe('POST');
+      expect(init?.credentials).toBe('include');
+      expect(init?.signal).toBe(abort.signal);
+      expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant');
+    }
+    expect(JSON.parse(String(fetchImpl.mock.calls[2][1]?.body))).toEqual({
+      sessionId: 's1',
+      taskId: 'task1',
+      after: 'checkpoint',
+      limit: 50,
+    });
+  });
   it('binds the default browser fetch to the global object', async () => {
     const fetchImpl = vi.fn(function (this: unknown) {
       if (this !== globalThis) throw new TypeError('Illegal invocation');
@@ -133,6 +184,48 @@ describe('JavaManagedAgentClient', () => {
         .next(),
     ).rejects.toThrow('Failed to fetch');
     expect(onOpenFailure).not.toHaveBeenCalled();
+  });
+
+  it('reports each complete heartbeat to onAlive, and not a trailing fragment', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const encoder = new TextEncoder();
+    const chunks = [
+      ': keepalive\r\n\r\n',
+      'id: 7\r\nevent: item.output_text.delta\r\ndata: {"sequence":7,"eventId":"evt_7","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":7,"data":{"text":"hi"},"terminal":false}\r\n\r\n',
+      ': keepalive\r\n\r\n',
+      // A leftover partial frame at end of stream is a mid-frame
+      // disconnect, never a complete heartbeat: it is not reported.
+      ': keepal',
+    ];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        chunks.forEach((chunk) => controller.enqueue(encoder.encode(chunk)));
+        controller.close();
+      },
+    });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(body, { status: 200 }));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const onAlive = vi.fn();
+
+    const events = [];
+    for await (const event of client.streamEvents(
+      { sessionId: 'session-1', afterSequence: 6 },
+      undefined,
+      undefined,
+      onAlive,
+    )) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      expect.objectContaining({ sequence: 7, data: { text: 'hi' } }),
+    ]);
+    expect(onAlive).toHaveBeenCalledTimes(2);
   });
 
   it('decodes the resync frame that ends an expired stream', async () => {

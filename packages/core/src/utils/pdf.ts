@@ -582,9 +582,11 @@ export async function renderPDFPagesToImages(
   let outputDirectory: FileHandle | undefined;
   let verifyDirectory: (() => Promise<void>) | undefined;
   const removeDescriptorOutput = async (directoryPath: string) => {
-    if (!verifyDirectory)
-      throw new Error('PDF output directory ownership could not be verified.');
-    await verifyDirectory();
+    if (!outputDirectory) {
+      await rm(directoryPath, { recursive: true, force: true }).catch(() => {});
+      return;
+    }
+    await verifyDirectory?.();
     await rm(directoryPath, { recursive: true, force: true });
   };
   try {
@@ -742,8 +744,10 @@ export async function renderPDFPagesToImages(
       if (fileHandle) {
         try {
           await removeDescriptorOutput(tempDir);
+        } catch {
+          // A cleanup failure must not replace the result already produced.
         } finally {
-          await outputDirectory?.close();
+          await outputDirectory?.close().catch(() => undefined);
         }
       } else {
         await rm(tempDir, { recursive: true, force: true }).catch(() => {});

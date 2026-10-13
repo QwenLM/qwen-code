@@ -64,7 +64,7 @@ afterEach(async () => {
 });
 
 describe('reserved private CSI file profile', () => {
-  it('pins the registered manifest without enabling a worker', () => {
+  it('pins the private manifest for the dedicated worker', () => {
     const manifest = JSON.stringify({
       profile: 'csi-files-retirement/1',
       tools: ['read_file', 'write_file', 'edit'],

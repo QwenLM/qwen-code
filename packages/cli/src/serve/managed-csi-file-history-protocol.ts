@@ -181,6 +181,10 @@ export function readCsiPreparationEvidence(
         wrapper['runtimeSessionId'] === owner &&
         typeof wrapper['payloadJson'] === 'string',
     );
+    ensure(
+      `sha256:${createHash('sha256').update(wrapper['payloadJson']).digest('hex')}` ===
+        invocation['requestDigest'],
+    );
     const payload = closed(
       parseManagedSessionRecordJson(wrapper['payloadJson'], 64 * 1024),
       ['toolName', 'input'],

@@ -433,6 +433,11 @@ class WorkspaceCsiSessionMainTest {
             if (type == long.class) {
                 return 1L;
             }
+            // A boxed nullable bound reads as the unbounded legacy form, so
+            // the refusal fires before any bounded-retraction validation.
+            if (type == Long.class) {
+                return null;
+            }
             if (type == int.class) {
                 return 1;
             }
@@ -500,7 +505,7 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(62);
+        assertThat(result).hasSize(67);
         return result;
     }
 

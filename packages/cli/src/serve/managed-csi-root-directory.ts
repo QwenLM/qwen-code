@@ -9,6 +9,16 @@ import type { FileHandle } from 'node:fs/promises';
 
 const UNAVAILABLE = 'Managed CSI root directory is unavailable.';
 
+export class ManagedCsiRootDirectoryCleanupError extends AggregateError {
+  constructor(openError: unknown, closeError: unknown) {
+    super(
+      [openError, closeError],
+      'Managed CSI root directory cleanup failed.',
+    );
+    this.name = 'ManagedCsiRootDirectoryCleanupError';
+  }
+}
+
 export class ManagedCsiRootDirectory {
   readonly rootDevice: string;
   readonly rootInode: string;
@@ -48,7 +58,11 @@ export class ManagedCsiRootDirectory {
       await directory.verify();
       return directory;
     } catch (error) {
-      await (directory ? directory.close() : handle.close());
+      try {
+        await (directory ? directory.close() : handle.close());
+      } catch (closeError) {
+        throw new ManagedCsiRootDirectoryCleanupError(error, closeError);
+      }
       throw error;
     }
   }

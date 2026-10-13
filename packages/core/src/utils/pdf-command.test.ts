@@ -90,7 +90,7 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))(
         await vi.advanceTimersByTimeAsync(100);
         expect(child.kill).toHaveBeenCalledWith('SIGKILL');
         expect(settled).toBe(false);
-        child.emit('close', 0, null);
+        child.emit('close', null, 'SIGTERM');
         expect(await command).toMatchObject({
           code: 1,
           timedOut: cause === 'timeout',
@@ -99,6 +99,20 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))(
         expect(vi.getTimerCount()).toBe(0);
       },
     );
+
+    it('keeps a clean exit that races the timeout timer', async () => {
+      const command = execPDFCommandFromHandle('pdftotext', [], handle, {
+        timeout: 10,
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      child.emit('exit', 0, null);
+      child.emit('close', 0, null);
+      expect(await command).toMatchObject({
+        code: 0,
+        timedOut: false,
+        stdout: '',
+      });
+    });
 
     it('bounds both streams but joins close after overflow', async () => {
       let settled = false;

@@ -5,6 +5,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 const fixtures = JSON.parse(
   readFileSync(
@@ -107,6 +108,36 @@ describe('private CSI native readback', () => {
       ).toThrow();
     });
   }
+  it.each(['harnessSessionId', 'runtimeSessionId', 'extra'])(
+    'refuses a coherent read-only resource with changed wrapper %s',
+    (field) => {
+      const sample = fixtures.valid.find(
+        (candidate: { name: string }) => candidate.name === 'execute-read-only',
+      );
+      const changed = structuredClone(sample.response);
+      const reference = changed.evidence.executionReference;
+      const resource = changed.evidence.resources.find(
+        (candidate: { reference: { resourceId: string } }) =>
+          candidate.reference.resourceId === reference.inputRef.resourceId,
+      );
+      const wrapper = JSON.parse(
+        Buffer.from(resource.bytesBase64, 'base64').toString(),
+      );
+      wrapper[field] = '11111111-1111-4111-8111-111111111111';
+      const bytes = Buffer.from(JSON.stringify(wrapper));
+      resource.bytesBase64 = bytes.toString('base64');
+      resource.reference.byteLength = bytes.length;
+      resource.reference.digest = createHash('sha256')
+        .update(bytes)
+        .digest('hex');
+      reference.inputRef = resource.reference;
+      changed.evidence.grant.executionReference = structuredClone(reference);
+      expect(() =>
+        readCsiNativeResponse(changed, readCsiNativeRequest(sample.request)),
+      ).toThrow();
+    },
+  );
+
   it('refuses duplicates, noncanonical counters and request overflow before decoding', () => {
     for (const value of fixtures.invalidJson)
       expect(() =>

@@ -64,6 +64,7 @@ function launch(): ChildAgentRun {
     rootSessionId: '550e8400-e29b-41d4-a716-446655440000',
     completion: 'sent',
     inputRef: INPUT,
+    workspaceMode: 'shared',
     workingDirectory: '.',
     executionCallId: 'call-1',
     definition: DEFINITION,
@@ -157,11 +158,34 @@ describe('managed child operations (H4b)', () => {
       launchedInScope: 0,
       envelopeBytes: 100,
       workspaceMode: 'shared',
+      childWorkspaces: false,
       sameDefinition: true,
     };
 
     it('admits the default launch', () => {
       expect(admitChildLaunch(base)).toEqual({ admitted: true });
+    });
+
+    it('admits a worktree launch only on a host that serves child Workspaces', () => {
+      expect(
+        admitChildLaunch({
+          ...base,
+          workspaceMode: 'worktree',
+          childWorkspaces: true,
+        }),
+      ).toEqual({ admitted: true });
+      expect(admitChildLaunch({ ...base, workspaceMode: 'worktree' })).toEqual({
+        admitted: false,
+        reason: 'workspace_mode',
+      });
+      // The capability never widens the mode set: snapshot waits for I3.
+      expect(
+        admitChildLaunch({
+          ...base,
+          workspaceMode: 'snapshot',
+          childWorkspaces: true,
+        }),
+      ).toEqual({ admitted: false, reason: 'workspace_mode' });
     });
 
     it('refuses each violation with its own reason', () => {
@@ -233,6 +257,25 @@ describe('managed child operations (H4b)', () => {
         target: 'session',
         state: 'accepting',
       });
+    });
+
+    it('records the launch workspace mode the producer names', () => {
+      const worktree = childLaunchBody({
+        childRunId: 'run-1',
+        ownerScopeId: 'scope-main',
+        rootSessionId: '550e8400-e29b-41d4-a716-446655440000',
+        completion: 'sent',
+        inputRef: INPUT,
+        workspaceMode: 'worktree',
+        workingDirectory: '.',
+        executionCallId: 'call-1',
+        definition: DEFINITION,
+      });
+      expect(isChildRunStart(worktree)).toBe(true);
+      expect((parseChildRun(worktree) as ChildAgentRun).workspaceMode).toBe(
+        'worktree',
+      );
+      expect(worktree).toEqual({ ...launch(), workspaceMode: 'worktree' });
     });
 
     it('builds the cancel cascade as a valid chain', () => {
@@ -392,6 +435,7 @@ describe('managed child operations (H4b)', () => {
         rootSessionId: '550e8400-e29b-41d4-a716-446655440000',
         completion: 'tool',
         inputRef: INPUT,
+        workspaceMode: 'shared',
         workingDirectory: '.',
         executionCallId: 'call-1',
         definition: DEFINITION,
