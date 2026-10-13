@@ -42,7 +42,6 @@ import java.util.Set;
 import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.CannotAcquireLockException;
-import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.http.HttpStatus;
@@ -190,17 +189,16 @@ public class ManagedSessionStore {
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         // Ordinary traffic fences per Session (head row, drain admission);
         // taking the two tenant-wide rows here would let any long holder of
-        // them wedge every Session of the tenant (#13800). The v2 probe also
-        // fences L4 Sessions: an ordinary write without a lifecycle claim
-        // reaches requireClaim below and is refused, never skipped. It runs
-        // on its own connection (R5 P1): through the jdbc handle inside this
-        // transaction a consistent read pins the REPEATABLE READ snapshot
-        // before the guard waits below, so a retry that waited for the winner
-        // misses the winner's commit; a locking read instead row-locks the
-        // Session's own operation row ahead of the guard order and deadlocks
-        // against the claim below.
-        boolean v2 = hasLifecycleV2Operation(tenantId, sessionId);
-        if (authority == null && !v2) {
+        // them wedge every Session of the tenant (#13800). No v2 probe may
+        // run here: a plain consistent read pins the REPEATABLE READ snapshot
+        // before the guard waits below (R5 P1); a row-locking read inverts
+        // against the claim order (guards → operation) of a concurrently
+        // claiming lifecycle (R6 follow-up); and borrowing a second pooled
+        // connection deadlocks the pool under saturation (R6 P1). The fence
+        // that rejects ordinary writes against a v2 Session lives in
+        // requireOrdinaryAdmission, where the caller's own guards are already
+        // held and the same consistent read layer is established.
+        if (authority == null) {
             return;
         }
         lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId,
@@ -208,33 +206,6 @@ public class ManagedSessionStore {
         lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
         WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
-    }
-
-    // The v2 probe is the one read in the guard-order chain that must see
-    // committed state without pinning the caller's snapshot: an ordinary
-    // write decides from it whether the tenant guard rows are touched, so
-    // it can neither share the transaction's snapshot (pinned before the
-    // guard waits) nor row-lock the Session's own operation ahead of the
-    // guard order. A dedicated connection answers both; the flag's content
-    // is committed-state correct because it only moves under a lifecycle
-    // admission the drain/claim chain already serializes.
-    private boolean hasLifecycleV2Operation(String tenantId, String sessionId) {
-        javax.sql.DataSource source = Objects.requireNonNull(
-                jdbc.getDataSource(), "ManagedSessionStore DataSource");
-        try (java.sql.Connection probe = source.getConnection();
-                java.sql.PreparedStatement statement = probe.prepareStatement(
-                        "SELECT o.operation_id FROM managed_agent_operation o JOIN qwen_runtime_harness_drain f"
-                                + " ON o.tenant_id = f.tenant_id AND o.session_id = f.harness_session_id AND o.operation_id = f.operation_id"
-                                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.lifecycle_protocol_version = 2")) {
-            statement.setString(1, tenantId);
-            statement.setString(2, sessionId);
-            try (ResultSet rows = statement.executeQuery()) {
-                return rows.next();
-            }
-        } catch (SQLException error) {
-            throw new DataAccessResourceFailureException(
-                    "managed_agent_operation v2 probe failed", error);
-        }
     }
 
     private static ApiException guardContended() {
@@ -269,7 +240,26 @@ public class ManagedSessionStore {
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
     }
 
+    // An ordinary write against a v2-claimed Session must fail with the
+    // claim's name, and the read that names it must never walk the three
+    // cliffs the earlier probes hit: no plain consistent read ahead of the
+    // guard waits in the calling path (R5 P1 — pinning the snapshot before
+    // the retry learns its winner), no row lock ahead of the claim order
+    // (guards → operation), and no second pooled connection while this
+    // transaction holds its own (R6 P1 — pool saturation self-deadlock).
+    // Every call site invokes this only after its own guard or head row has
+    // been taken, so the consistent read layer the flow required is already
+    // established and the classification costs one lock-free session-scoped
+    // range scan on the caller's own connection.
+    private void requireNoLifecycleClaim(String tenantId, String sessionId) {
+        if (!jdbc.queryForList("SELECT operation_id FROM managed_agent_operation"
+                + " WHERE tenant_id = ? AND session_id = ? AND lifecycle_protocol_version = 2", tenantId, sessionId).isEmpty()) {
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
+        }
+    }
+
     private void requireOrdinaryAdmission(String tenantId, String sessionId) {
+        requireNoLifecycleClaim(tenantId, sessionId);
         if (lifecycleFenced(tenantId, sessionId)) {
             throw conflict("managed_session_lifecycle_active", "Ordinary execution admission is closed.");
         }
@@ -485,6 +475,9 @@ public class ManagedSessionStore {
         validateLeaseMillis(request.leaseMillis());
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        if (authority == null) {
+            requireNoLifecycleClaim(tenantId, sessionId);
+        }
         Timestamp now = databaseNow();
         boolean cleanup = authority != null && WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
         // A resident cleanup writer may outlive its lease while the coordinator
@@ -520,6 +513,9 @@ public class ManagedSessionStore {
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        if (authority == null) {
+            requireNoLifecycleClaim(tenantId, sessionId);
+        }
         if ("SEALED".equals(head.state())
                 && request.writerGeneration() == head.writerGeneration()
                 && request.writerId().equals(head.writerId())
@@ -604,6 +600,9 @@ public class ManagedSessionStore {
         ValidatedCommit validated = validateCommit(request);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        if (authority == null) {
+            requireNoLifecycleClaim(tenantId, sessionId);
+        }
         boolean promotes = ManagedHostedRecoveryRecords.requiresVersionTwo(validated.recordBytes(), request.resources())
                 || validated.resources().stream().anyMatch(resource -> {
                     if (!"managed-action-options".equals(resource.resource().kind()) || resource.bytes() == null) {
@@ -986,6 +985,9 @@ public class ManagedSessionStore {
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        if (authority == null) {
+            requireNoLifecycleClaim(tenantId, sessionId);
+        }
         Timestamp now = databaseNow();
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
         String scopeKey = sessionScopeKey(tenantId, sessionId);

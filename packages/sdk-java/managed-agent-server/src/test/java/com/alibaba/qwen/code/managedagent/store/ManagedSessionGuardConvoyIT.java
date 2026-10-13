@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
@@ -22,13 +24,16 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
@@ -72,6 +77,55 @@ class ManagedSessionGuardConvoyIT {
     void removeSchema() {
         if (admin != null && schema != null) {
             admin.execute("DROP DATABASE IF EXISTS " + schema);
+        }
+    }
+
+    // R6 P1: the v2 probe must never borrow a second pooled connection from
+    // inside a transaction that already holds one — at saturation the pool
+    // self-deadlocks even across distinct tenants with zero database lock
+    // contention. Capping the pool at two and releasing four concurrent
+    // acquires at once reproduces the old shape: every transaction waits on
+    // its second borrow until the pool wait budget lapses. On the caller's
+    // own connection the probe costs nothing.
+    @Test
+    void poolSaturationDoesNotDeadlockConcurrentAcquiresAcrossTenants() throws Exception {
+        String url = System.getProperty("mysql.url");
+        String user = System.getProperty("mysql.user", "root");
+        String password = System.getProperty("mysql.password", "");
+        var pool = new DruidDataSource();
+        pool.setUrl(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema));
+        pool.setUsername(user);
+        pool.setPassword(password);
+        pool.setMaxActive(2);
+        pool.setMaxWait(3_000L);
+        String token = "w".repeat(32);
+        try {
+            var jdbc = new JdbcTemplate(pool);
+            var manager = new DataSourceTransactionManager(pool);
+            var transactions = new TransactionTemplate(manager);
+            var store = new ManagedSessionStore(jdbc);
+            int callers = 4;
+            var ready = new CountDownLatch(callers);
+            var release = new CountDownLatch(1);
+            try (var threads = Executors.newFixedThreadPool(callers)) {
+                var futures = new ArrayList<Future<?>>();
+                for (int i = 0; i < callers; i++) {
+                    String tenant = "tenant-sat-" + i;
+                    futures.add(threads.submit(() -> {
+                        ready.countDown();
+                        release.await();
+                        return transactions.execute(ignored -> store.acquireWriter(tenant, "sat", token,
+                                new AcquireWriterRequest("workspace-sat", "writer-sat-" + tenant, 60_000L)));
+                    }));
+                }
+                assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+                release.countDown();
+                for (var future : futures) {
+                    assertThatCode(() -> future.get(30, TimeUnit.SECONDS)).doesNotThrowAnyException();
+                }
+            }
+        } finally {
+            pool.close();
         }
     }
 
