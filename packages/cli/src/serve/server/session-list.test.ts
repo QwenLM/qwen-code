@@ -17,7 +17,10 @@ import type {
   AcpSessionBridge,
   BridgeSessionSummary,
 } from '../acp-session-bridge.js';
-import { listWorkspaceSessionsForResponse } from './session-list.js';
+import {
+  invalidateWorkspaceSessionListCache,
+  listWorkspaceSessionsForResponse,
+} from './session-list.js';
 
 describe('merged session catalog pagination', () => {
   let directory: string;
@@ -46,26 +49,84 @@ describe('merged session catalog pagination', () => {
     };
   }
 
-  async function persist(session: BridgeSessionSummary): Promise<void> {
+  async function persist(
+    session: BridgeSessionSummary,
+    {
+      prompt = 'stored prompt',
+      goals = [],
+      customTitle,
+    }: {
+      prompt?: string;
+      goals?: Array<string | null>;
+      customTitle?: string;
+    } = {},
+  ): Promise<void> {
     const chats = path.join(
       new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
       'chats',
     );
     await fs.mkdir(chats, { recursive: true });
     const file = path.join(chats, `${session.sessionId}.jsonl`);
+    const base = {
+      parentUuid: null,
+      sessionId: session.sessionId,
+      timestamp: session.createdAt,
+      cwd: workspaceCwd,
+    };
+    const records: unknown[] = prompt
+      ? [
+          {
+            ...base,
+            uuid: `${session.sessionId}-user`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text: prompt }] },
+          },
+        ]
+      : [];
+    for (const [index, objective] of goals.entries()) {
+      records.push({
+        ...base,
+        uuid: `goal-${index}`,
+        type: 'system',
+        subtype: 'goal_state',
+        systemPayload: {
+          v: 2,
+          cause: objective === null ? 'clear' : 'create',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal:
+              objective === null
+                ? null
+                : {
+                    goalId: `goal-${index}`,
+                    revision: 1,
+                    objective,
+                    status: 'active',
+                    evidenceCursor: { recordId: null },
+                    turnCount: 0,
+                    activeTimeMs: 0,
+                    tokensUsed: 0,
+                    createdAt: 1,
+                    updatedAt: 1,
+                  },
+          },
+        },
+      });
+    }
+    if (customTitle)
+      records.push({
+        ...base,
+        uuid: 'title',
+        type: 'system',
+        subtype: 'custom_title',
+        systemPayload: { customTitle, titleSource: 'manual' },
+      });
     await fs.writeFile(
       file,
-      `${JSON.stringify({
-        uuid: `${session.sessionId}-user`,
-        parentUuid: null,
-        sessionId: session.sessionId,
-        timestamp: session.createdAt,
-        type: 'user',
-        message: { role: 'user', parts: [{ text: 'stored prompt' }] },
-        cwd: workspaceCwd,
-      })}\n`,
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
     );
-    const time = new Date(session.createdAt);
+    const time = new Date(Date.parse(session.createdAt) + goals.length);
     await fs.utimes(file, time, time);
   }
 
@@ -76,6 +137,74 @@ describe('merged session catalog pagination', () => {
       bridge: { listWorkspaceSessions: list } as unknown as AcpSessionBridge,
     };
   }
+
+  it.each([false, true])(
+    'labels Goal-only sessions from their latest persisted objective (paginateMerged=%s)',
+    async (paginateMerged) => {
+      const session = summary(0);
+      const goals = ['Old objective', 'Write release notes'];
+      await persist(session, { prompt: '', goals });
+      const { bridge, list } = bridgeFor([session]);
+      const read = () =>
+        listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { size: 20 },
+          { runtimeBaseDir, paginateMerged },
+        );
+
+      expect((await read()).sessions).toEqual([
+        expect.objectContaining({
+          sessionId: session.sessionId,
+          displayName: 'Write release notes',
+          clientCount: 1,
+        }),
+      ]);
+      list.mockReturnValue([]);
+      expect((await read()).sessions[0]?.displayName).toBe(
+        'Write release notes',
+      );
+
+      await persist(session, { prompt: '', goals: [...goals, null] });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir,
+        workspaceCwd,
+        archiveStates: ['active'],
+      });
+      expect((await read()).sessions[0]?.displayName).toBeFalsy();
+    },
+  );
+
+  it.each([
+    {
+      prompt: 'First prompt',
+      customTitle: undefined,
+      expected: 'First prompt',
+    },
+    {
+      prompt: 'First prompt',
+      customTitle: 'Manual title',
+      expected: 'Manual title',
+    },
+  ])(
+    'keeps title and prompt precedence over Goals: $expected',
+    async ({ prompt, customTitle, expected }) => {
+      const session = summary(0);
+      await persist(session, {
+        prompt,
+        customTitle,
+        goals: ['Goal objective'],
+      });
+      const { bridge } = bridgeFor([]);
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { size: 20 },
+        { runtimeBaseDir },
+      );
+      expect(result.sessions[0]?.displayName).toBe(expected);
+    },
+  );
 
   it('paginates persisted and live-only rows without dropping or duplicating merged rows', async () => {
     await persist(summary(0));

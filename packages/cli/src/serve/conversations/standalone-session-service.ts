@@ -477,7 +477,8 @@ function toStandaloneSummary(
   isArchived: boolean,
   source: LoadableConversationSession,
 ): StandaloneSessionSummary {
-  const displayName = item.customTitle || item.prompt || undefined;
+  const displayName =
+    item.customTitle || item.prompt || item.goalObjective || undefined;
   return {
     sessionId: canonicalSessionId,
     workspaceCwd,
