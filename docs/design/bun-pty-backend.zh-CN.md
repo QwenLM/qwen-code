@@ -37,7 +37,10 @@
   产物、不扩大 ABI 面。
 - 输出由**主线程异步 `fs.read` 调用**泵取 master fd。原生 fork 返回的 fd
   本就是非阻塞模式，无数据可读时返回 `EAGAIN`，由一个较短（4 ms）的定时
-  器重试；一次返回了数据的读取会直接链入下一次读取。全程不构造
+  器重试；一次返回了数据的读取会直接链入下一次读取。**任一时刻至多一个
+  在途读取**：in-flight 守卫阻止 `resume()` 在上一次读取尚未返回时链入
+  第二次读取——每次读取共用同一块 64 KiB 缓冲，交叠读取会让一个回调读到
+  另一次读取的字节（输出重复/错位）。全程不构造
   `tty.ReadStream`，因此不存在被运行时误读成关闭的 `EAGAIN`。`EIO`
   （子进程退出、slave 关闭）与 `EBADF`（master 被外部关闭）都会正常结束
   泵。早期的 worker-threads/阻塞读方案已被放弃：worker 触碰 master fd
@@ -50,7 +53,11 @@
   `CustomWriteStream`（字符串写入使用配置的编码）。
 - 退出时序：原生 `onexit(code, signal)` 回调可能早于最后一段输出。后端
   把 exit 事件挂起，等泵结束（先冲出 `StringDecoder` 尾巴）再触发，并以
-  500 ms 销毁超时兜底——对应 wrapper 的 200 ms socket-destroy 兜底。
+  500 ms 兜底——对应 wrapper 的 200 ms socket-destroy 兜底。每一条生命
+  终点路径（泵看到 `EIO`/`EBADF`、500 ms 兜底触发、原生回调晚于泵结束）
+  都执行同一套收尾：decoder 冲刷、重试定时器清理、master fd 关闭，然后
+  恰好一次 `onExit`。兜底定时器刻意不 `unref`——exit 的投递不能依赖一个
+  运行时随时可以丢弃的定时器。
 - POSIX `IPty` 契约逐一镜像，包括消费者依赖的细节：`pid`、`cols`/`rows`、
   `process` 标题（含 darwin 的 `kernel_task`/`spawn_helper` 回退）、
   `onData`/`onExit`（IEvent 风格的可 dispose 订阅）、`write`、`resize`
@@ -63,22 +70,45 @@
   `COLUMNS`、`LINES`）；`PWD` 置为解析后的 cwd，`TERM` 置为
   `options.name || env.TERM || 'xterm'`。
 
-## 暂停期间仍持续读取
+## 暂停期间仍持续读取，且无损
 
 `pause()` 不能让泵停下来，否则会失去退出检测（见上文"退出检测依托泵"
-一条）：读取一停，原生 exit 回调永不触发，`onExit` 永不投递，master fd
+一条）：读取一停，原生 exit 回调永不触发，**且 addon 永不回收子进程**——
+探针证据：子进程退出后 3 秒内 master fd 零读取，exit 回调从未触发，
+子进程一直是未被回收的僵尸（Node 与 Bun 一致），因此任何活性探测
+（`kill(pid, 0)` 看不见僵尸）都无法替代读取。`onExit` 永不投递，master fd
 保持打开，宿主无法收尾——修复前已在 Bun 1.3.14 复现（pause → 子进程
 退出 → 无 exit 事件、fd 打开、自然收尾探针超时）；XOFF 后取消的 FD
 残留报告同源于此，因为 `handleFlowControl: true` 下 XOFF 就是一次
 `pause()`。
 
-因此 `pause()` 改为持有输出而不是停止读取：暂停期间到达的 chunk 进入
-一个有界保持区（1 MiB），`resume()` 按序冲出。超过上限后保持区丢弃
-后续 chunk——wrapper 的做法是靠不读取形成内核背压，本后端做不到这一点
-而不牺牲退出检测。生命终点处保持区被丢弃、暂停中的 decoder 尾巴被跳过，
-与 wrapper 对齐——wrapper 的 exit 兜底销毁 socket 时，暂停中的
-ReadStream 同样丢失已缓冲数据：onExit 仍恰好一次、fd 被释放，但退出后
-resume 不会重放任何内容。
+因此 `pause()` 改为持有输出而不是停止读取，**且无损**：暂停期间到达的
+chunk 全部进入进程内保持区，`resume()` 按序冲出；任何内容都不会被
+丢弃，也没有上限。有字节/逐行对照的回归钉住这一点：2 万行洪流中 500 次
+无间隔 pause/resume 风暴后字节流逐字节复现；约 1.9 MB 洪流全程在暂停中
+产生，resume 后逐字节复原（暂停中洪流 3 MB 后退出的子进程，其 exit 照常
+上报）。生命终点处保持区被丢弃、暂停中的 decoder 尾巴被跳过，与 wrapper
+对齐——wrapper 的 exit 兜底销毁 socket 时，暂停中的 ReadStream 同样丢失
+已缓冲数据：onExit 仍恰好一次、fd 被释放，但退出后 resume 不会重放任何
+内容。
+
+代价是公开的：暂停期间洪流会让保持区无界增长，因为唯一的真背压——停止
+读取——正是本后端做不到的那件事（见上）。退而求其次的"放慢读取"（超过
+高水位后每个定时周期只读一次）已被探针**否决**：对已满的 pty 输出队列
+做部分排空会在内核层面破坏字节流（读边界处多出 `\r`、尾部片段重复，所有
+探测的放慢频率均复现），且每个周期只能推进约 1 KiB（部分读取时 pty 每次
+至多给出一个行级小块）。供决策的选项：
+
+1. **无损保持（已实现）** — 字节精确、退出检测存活；代价是暂停洪流下
+   内存无界。当暂停短暂、由 UI 驱动时可接受（当前消费者只在 XOFF 流控
+   时暂停）。
+2. **真内核背压 + 带外退出检测** — 超过高水位后停止读取，改由外部机制
+   感知子进程死亡（如经 `ps` 轮询僵尸态，或回收看门狗）。内存有界，但
+   需要新增一个 addon 并不提供的平台相关机制，且关闭前仍需最后一次
+   排空。
+3. **有界保持 + 显式溢出策略** — 保留上限，但把溢出以 `error` 事件或
+   自动 resume 的方式显式暴露而不是静默丢弃；数据仍会丢，但是"大声地"
+   丢，且调用方掌握控制权。
 
 探针钉住的参考行为（Node wrapper，pause → 子进程以 code 7 退出）：经
 socket-destroy 兜底在子进程死后约 200 ms 恰好触发一次 `onExit`，此后
@@ -110,15 +140,18 @@ node-pty 包（"getPty() 在 Bun 下返回 null"）。现在 `bun` flavor 也一
   （后端是主线程异步代码，与运行时无关）：输出流、写入、`resize` 后
   子进程的 `stty size`、kill→`onExit` 带 signal、进程回收、pause/resume、
   流控拦截、`encoding: null`、进程标题、`clear()`，以及暂停生命周期
-  回归：子进程在暂停中退出时 exit 恰好一次且 fd 被释放、暂停保持区
-  溢出下退出检测仍存活、XOFF 流控暂停后 `kill()` 释放 fd。
+  回归：子进程在暂停中退出时 exit 恰好一次且 fd 被释放、暂停中 3 MB
+  洪流下退出检测仍存活、2 万行洪流中 500 次无间隔 pause/resume 风暴后
+  字节/逐行对照完全一致、约 1.9 MB 洪流全程暂停保持后 resume 逐字节
+  复原、XOFF 流控暂停后 `kill()` 释放 fd。
 - `packages/core/src/utils/bun-pty.node-bun.test.ts` — 跨运行时一侧
   （S1 harness 模式）：fixture 导入真实的 `getPty.ts`，在真实 `bun`
   二进制（BUN_TEST_BIN）下断言 `qwen-bun-pty` 后端可加载并完成
   spawn/输出/resize/kill round-trip；第二个 fixture 驱动暂停退出
   生命周期（pause → 子进程退出 → `onExit` 恰好一次、fd 释放、宿主自然
-  退出），并在 **Node 与 Bun 两个运行时**下运行。无 `bun` 时与 S1
-  套件一样跳过。
+  退出），并在 **Node 与 Bun 两个运行时**下运行；第三个 fixture 在
+  5000 行洪流中做 300 次无间隔 pause/resume，断言两个运行时下字节流
+  均逐字节且逐行完整。无 `bun` 时与 S1 套件一样跳过。
 - `packages/core/src/utils/getPty.test.ts` — Bun 分支从"返回 null 并报
   disabled 原因"翻转为"加载 `qwen-bun-pty` 且不 spawn"；Bun 下的
   Windows 保持如实门控；可失败分支的按调用 `loadError` 契约（#11881）

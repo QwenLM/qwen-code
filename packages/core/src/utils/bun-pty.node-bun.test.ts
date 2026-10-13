@@ -146,6 +146,57 @@ console.log(
 );
 `;
 
+// The toggle fixture is the automated F1 regression: pause/resume toggles
+// with no gap between them land on top of in-flight master-fd reads, and the
+// full stream must come out byte-exact and line-complete on every runtime.
+const toggleFixtureSource = `
+import { loadPty } from ${JSON.stringify(getPtyDistPath)};
+
+const LINES = 5000;
+const result = await loadPty();
+if (!result.impl) {
+  console.error('loadPty returned no backend: ' + result.loadError);
+  process.exit(1);
+}
+const pty = result.impl.module.spawn(
+  '/bin/sh',
+  ['-c', "awk 'BEGIN{for(i=0;i<" + LINES + ";i++)print \\"LINE \\" i}'; sleep 30"],
+  { cols: 80, rows: 24, cwd: process.cwd(), env: process.env },
+);
+let output = '';
+pty.onData((data) => { output += data; });
+const deadline = Date.now() + 20_000;
+while (output.length === 0 && Date.now() < deadline) {
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+for (let i = 0; i < 300; i += 1) {
+  pty.pause();
+  pty.resume();
+}
+const expected =
+  Array.from({ length: LINES }, (_, i) => 'LINE ' + i).join('\\r\\n') + '\\r\\n';
+while (!output.includes('LINE ' + (LINES - 1)) && Date.now() < deadline) {
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+pty.kill();
+await new Promise((resolve) => setTimeout(resolve, 200));
+const lines = output.split('\\r\\n').filter((l) => l.length > 0);
+const byteExact = output === expected;
+const linesComplete = lines.length === LINES &&
+  lines.every((l, i) => l === 'LINE ' + i);
+if (!byteExact || !linesComplete) {
+  console.error(
+    'stream corrupted: byteExact=' + byteExact + ' linesComplete=' +
+      linesComplete + ' gotLines=' + lines.length + ' expected=' + LINES +
+      ' bytes=' + output.length + '/' + expected.length,
+  );
+  process.exit(1);
+}
+console.log(
+  JSON.stringify({ backend: result.impl.name, byteExact, lines: lines.length }),
+);
+`;
+
 describe.skipIf(!bunAvailable || process.platform === 'win32')(
   'PTY under the real Bun runtime',
   () => {
@@ -237,6 +288,52 @@ describe.skipIf(process.platform === 'win32')(
         expect(parsed.fd).toBe('closed(EBADF)');
         // Reaching a spawnSync result at all proves the host drained: the
         // fixture never calls process.exit on its success path.
+      },
+    );
+  },
+);
+
+describe.skipIf(process.platform === 'win32')(
+  'no-gap pause/resume toggle keeps the stream byte-exact on every runtime',
+  () => {
+    let tempRoot: string;
+    let fixturePath: string;
+
+    beforeEach(() => {
+      tempRoot = mkdtempSync(path.join(tmpdir(), 'bun-pty-toggle-test-'));
+      fixturePath = path.join(tempRoot, 'pty-toggle-fixture.mjs');
+      writeFileSync(fixturePath, toggleFixtureSource);
+    });
+
+    afterEach(() => {
+      rmSync(tempRoot, { recursive: true, force: true });
+    });
+
+    const runtimes: Array<{ name: string; bin: string }> = [
+      { name: 'node', bin: process.execPath },
+    ];
+    if (bunAvailable) runtimes.push({ name: 'bun', bin: bunBin });
+
+    it.each(runtimes)(
+      '$name: 300 no-gap toggles during a 5000-line flood stay byte-exact',
+      { timeout: 60_000 },
+      ({ bin }) => {
+        const result = spawnSync(bin, [fixturePath], {
+          encoding: 'utf8',
+          timeout: 55_000,
+        });
+        if (result.status !== 0) {
+          throw new Error(
+            `toggle fixture failed under ${bin} (code ${result.status}):\n${result.stdout}${result.stderr}`,
+          );
+        }
+        const parsed = JSON.parse(result.stdout.trim()) as {
+          backend: string;
+          byteExact: boolean;
+          lines: number;
+        };
+        expect(parsed.byteExact).toBe(true);
+        expect(parsed.lines).toBe(5000);
       },
     );
   },

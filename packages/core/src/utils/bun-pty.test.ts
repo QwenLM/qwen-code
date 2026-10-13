@@ -141,7 +141,7 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
     expectFdClosed(pty);
   }, 20_000);
 
-  it('keeps exit detection while paused output overflows the hold', async () => {
+  it('keeps exit detection while paused output floods past 3 MB', async () => {
     const pty = spawn('/bin/sh', ['-c', 'yes X | head -c 3000000; exit 0']);
     pty.pause();
     let exits = 0;
@@ -154,6 +154,74 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
     expect(exits).toBe(1);
     expectFdClosed(pty);
   }, 30_000);
+
+  it('delivers a byte-exact stream across rapid no-gap pause/resume toggles', async () => {
+    const LINES = 20_000;
+    const pty = spawn('/bin/sh', [
+      '-c',
+      `awk 'BEGIN{for(i=0;i<${LINES};i++)print "LINE " i}'; sleep 30`,
+    ]);
+    let output = '';
+    pty.onData((data) => (output += data));
+
+    // Toggle while the flood is actively streaming, with no gap between
+    // pause and resume, so resume() lands while a master-fd read is still in
+    // flight — the exact shape of the shared-read-buffer race.
+    expect(await waitFor(() => output.length > 0)).toBe(true);
+    for (let i = 0; i < 500; i += 1) {
+      pty.pause();
+      pty.resume();
+    }
+
+    expect(
+      await waitFor(() => output.includes(`LINE ${LINES - 1}`), 15_000),
+    ).toBe(true);
+    pty.kill();
+
+    const expected =
+      Array.from({ length: LINES }, (_, i) => `LINE ${i}`).join('\r\n') +
+      '\r\n';
+    // Byte-exact: catches duplication, fragmentation, loss and reordering.
+    expect(output).toBe(expected);
+    // Line-by-line: every line value, in order.
+    const lines = output.split('\r\n').filter((line) => line.length > 0);
+    expect(lines.length).toBe(LINES);
+    for (let i = 0; i < LINES; i += 1) {
+      expect(lines[i]).toBe(`LINE ${i}`);
+    }
+  }, 40_000);
+
+  it('holds the entire flood while paused and resumes byte-exact', async () => {
+    const LINES = 200_000;
+    const pty = spawn('/bin/sh', [
+      '-c',
+      `awk 'BEGIN{for(i=0;i<${LINES};i++)print "X" i}'; sleep 30`,
+    ]);
+    let output = '';
+    pty.onData((data) => (output += data));
+
+    // Pause before the flood arrives: ~1.9 MB accumulates in the lossless
+    // hold while the pump keeps reading at full speed (exit detection stays
+    // live), and the child runs to its sleep 30 long before resume.
+    pty.pause();
+    await new Promise((r) => setTimeout(r, 2_000));
+    pty.resume();
+
+    expect(await waitFor(() => output.includes(`X${LINES - 1}`), 20_000)).toBe(
+      true,
+    );
+    pty.kill();
+
+    const expected =
+      Array.from({ length: LINES }, (_, i) => `X${i}`).join('\r\n') + '\r\n';
+    // Nothing dropped while paused — byte-exact, line-exact.
+    expect(output.length).toBe(expected.length);
+    expect(output).toBe(expected);
+    const lines = output.split('\r\n').filter((line) => line.length > 0);
+    expect(lines.length).toBe(LINES);
+    expect(lines[0]).toBe('X0');
+    expect(lines[LINES - 1]).toBe(`X${LINES - 1}`);
+  }, 40_000);
 
   it('releases the fd when flow-control pause is followed by cancel', async () => {
     const pty = spawn('/bin/sh', ['-c', 'sleep 30'], {

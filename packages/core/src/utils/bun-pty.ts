@@ -21,14 +21,17 @@
  * misreads `EAGAIN` into a close. `EAGAIN` (child alive, no data) is retried
  * on a short timer; `EIO` (child exited, slave closed) or `EBADF` ends the
  * pump. The native exit callback of this addon only fires around master-fd
- * read activity (isolated-probe evidence: with zero reads it never fires, on
- * Node and Bun alike), so the pump must keep reading even while paused —
- * `pause()` therefore buffers into a bounded hold instead of stopping reads,
- * and a paused child's exit still reaches `onExit`, closes the fd, and lets
- * the host drain. The observable contract mirrors the POSIX `IPty` surface
- * the consumers use: `pid`, `cols`, `rows`, `process`, `handleFlowControl`,
- * `onData`, `onExit`, `resize`, `clear`, `write`, `kill`, `pause`, `resume`,
- * plus the `error` event that ShellExecutionService subscribes to.
+ * read activity (isolated-probe evidence: with zero reads it never fires, and
+ * the child is left an unreaped zombie — on Node and Bun alike), so the pump
+ * must keep reading even while paused — `pause()` therefore holds output
+ * losslessly for the resume flush (nothing is ever dropped; the price is
+ * unbounded hold growth under a paused flood, the documented tradeoff of
+ * keeping exit detection read-driven), and a paused child's exit still
+ * reaches `onExit`, closes the fd, and lets the host drain. The observable
+ * contract mirrors the POSIX `IPty` surface the consumers use: `pid`, `cols`,
+ * `rows`, `process`, `handleFlowControl`, `onData`, `onExit`, `resize`,
+ * `clear`, `write`, `kill`, `pause`, `resume`, plus the `error` event that
+ * ShellExecutionService subscribes to.
  * POSIX only — Windows keeps the Bun gate in `getPty.ts` until ConPTY is
  * validated under Bun.
  */
@@ -112,12 +115,20 @@ const READ_BUFFER_BYTES = 64 * 1024;
 // covers a pump that stays silent (e.g. a grandchild holding the pty open).
 const EXIT_DRAIN_TIMEOUT_MS = 500;
 
-// While paused the pump keeps reading (see the header: the native exit
-// callback rides on read activity), so output is held here for the resume
-// flush instead. The hold is bounded; past it, paused output is dropped —
-// the wrapper would have applied kernel backpressure by not reading, which
-// this backend cannot afford without losing exit detection.
-const PAUSED_BUFFER_LIMIT = 1024 * 1024;
+// While paused the pump keeps reading at full speed (see the header: the
+// native exit callback only fires around master-fd read activity, and the
+// addon reaps the child on that same path — a dead child stays an unreaped
+// zombie for as long as nothing reads, so no liveness probe can substitute).
+// Paused output is therefore buffered in-process for the resume flush, and
+// nothing is ever dropped. The cost is memory: a flood produced while paused
+// grows the hold without bound, because the only way to apply kernel
+// backpressure is to stop reading, and stopping reads loses exit detection
+// (probe-evidenced). Slowing reads instead — one read per timer tick past a
+// high-water mark — was probed and rejected: partial drains of a full pty
+// output queue corrupt the stream at the kernel level (stray \r at read
+// boundaries, duplicated tail) and throttle to ~1KB per tick. Any true
+// backpressure needs a decision with its own exit-detection mechanism; until
+// then the lossless hold is the only byte-exact choice.
 
 interface LoadedNative {
   addon: NativeAddon;
@@ -225,6 +236,7 @@ export class BunPtyProcess extends EventEmitter {
   private readonly pausedChunks: Buffer[] = [];
   private pausedBytes = 0;
   private pumpActive = false;
+  private readInFlight = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly writeQueue: Array<{ buffer: Buffer; offset: number }> = [];
   private writeActive = false;
@@ -414,10 +426,15 @@ export class BunPtyProcess extends EventEmitter {
 
   private pump(): void {
     // Reads never stop for pause(): the native exit callback only fires
-    // around master-fd read activity, so a paused pump would never learn
-    // about a child exit — no onExit, an open master fd, and a host that
-    // cannot drain. Paused data is held in the bounded pause hold instead.
-    if (!this.pumpActive || this.fdClosed) return;
+    // around master-fd read activity (and reaps the child on that same
+    // path), so a paused pump would never learn about a child exit — no
+    // onExit, an open master fd, and a host that cannot drain. Paused data
+    // is held losslessly in the pause hold instead.
+    // One read at a time: every read targets the shared this.readBuffer, so
+    // a second overlapping read (e.g. resume() chaining straight into pump())
+    // would have its callback observe the other read's bytes.
+    if (!this.pumpActive || this.fdClosed || this.readInFlight) return;
+    this.readInFlight = true;
     fs.read(
       this.fd,
       this.readBuffer,
@@ -425,6 +442,7 @@ export class BunPtyProcess extends EventEmitter {
       this.readBuffer.length,
       null,
       (error, bytesRead) => {
+        this.readInFlight = false;
         if (!this.pumpActive) return;
         if (error) {
           if (error.code === 'EAGAIN') {
@@ -452,9 +470,9 @@ export class BunPtyProcess extends EventEmitter {
   }
 
   private holdPaused(chunk: Buffer): void {
-    if (this.pausedBytes + chunk.byteLength > PAUSED_BUFFER_LIMIT) {
-      return;
-    }
+    // Lossless on purpose: dropping paused output would silently corrupt
+    // terminal streams, and slowing the reads to shed load corrupts the
+    // stream at the kernel level (see the buffer note near the constants).
     this.pausedChunks.push(chunk);
     this.pausedBytes += chunk.byteLength;
   }
@@ -530,13 +548,24 @@ export class BunPtyProcess extends EventEmitter {
     if (this.exited) return;
     this.exited = true;
     if (!this.pumpActive) {
+      // No pump left to drain: still close the fd and flush the decoder so
+      // every exit path ends with the same cleanup (and no leaked master fd).
+      this.closeFd();
+      this.finishOutput();
       this.fireExit(exitCode, signal);
       return;
     }
+    // Park the exit until the pump has delivered the trailing output and
+    // reached EIO (which runs the full endPump cleanup). The fallback below
+    // is kept intentionally ref'd: exit delivery must not depend on a timer
+    // the runtime is free to drop, and its endPump closes the fd and stops
+    // the retry timer so a host blocked on this pty can still drain when the
+    // pump stays silent (e.g. a grandchild holding the slave open).
     const timer = setTimeout(() => {
+      this.pendingExit = null;
+      this.endPump();
       this.fireExit(exitCode, signal);
     }, EXIT_DRAIN_TIMEOUT_MS);
-    timer.unref?.();
     this.pendingExit = { exitCode, signal, timer };
   }
 
@@ -547,6 +576,7 @@ export class BunPtyProcess extends EventEmitter {
     }
     const pending = this.pendingExit;
     if (pending) {
+      this.pendingExit = null;
       clearTimeout(pending.timer);
       this.fireExit(pending.exitCode, pending.signal);
     }
