@@ -680,8 +680,18 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     public Map<String, Object> settleLifecycle(HarnessSessionRef session, Map<String, Object> request) {
         HarnessSessionRef ref = requireSessionRef(session);
-        if (capabilities.getLifecycleProtocolVersion() != 1) {
-            throw new DaemonProtocolException("Hosted lifecycle protocol 1 is required");
+        int version = request.containsKey("protocolVersion") ? JsonSupport.requiredInt(request, "protocolVersion", "lifecycle") : 1;
+        if (version != 1 && version != 2) {
+            throw new DaemonProtocolException("Unknown Hosted lifecycle protocol");
+        }
+        boolean v2 = version == 2;
+        if (v2 && !("hosted-workspace-shell/1".equals(request.get("toolProfile"))
+                || "hosted-workspace-mcp/1".equals(request.get("toolProfile")))) {
+            throw new DaemonProtocolException("Unsupported Hosted lifecycle profile");
+        }
+        if (v2 ? !capabilities.getLifecycleV2Profiles().contains(request.get("toolProfile"))
+                : capabilities.getLifecycleProtocolVersion() != 1) {
+            throw new DaemonProtocolException("Hosted lifecycle capability is required");
         }
         String operation = "POST /session/:id/lifecycle";
         HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/lifecycle",
@@ -689,7 +699,12 @@ public final class HostedHarnessClient implements AutoCloseable {
         requireMutationStatus(response, 200, operation);
         Map<String, Object> receipt = JsonSupport.parseObject(response.getBody(), operation);
         if (!java.util.Objects.equals(request.get("sessionKey"), receipt.get("sessionKey"))
-                || !java.util.Objects.equals(request.get("kind"), receipt.get("kind"))) {
+                || !java.util.Objects.equals(request.get("kind"), receipt.get("kind"))
+                || v2 && (!java.util.Objects.equals(request.get("phase"), receipt.get("phase"))
+                        || JsonSupport.requiredInt(receipt, "protocolVersion", operation) != 2
+                        || !java.util.Objects.equals(request.get("toolProfile"), receipt.get("toolProfile"))
+                        || !java.util.Objects.equals(JsonSupport.requiredObject(request, "authority", operation).get("operationId"),
+                                receipt.get("operationId")))) {
             throw new DaemonProtocolException("Hosted lifecycle receipt identity differs");
         }
         return receipt;
@@ -1003,7 +1018,18 @@ public final class HostedHarnessClient implements AutoCloseable {
                         ? JsonSupport.requiredInt(hosted, "lifecycleProtocolVersion", "capabilities.hostedHarness") : 0,
                 hosted.containsKey("titleProtocolVersion")
                         ? JsonSupport.requiredInt(hosted, "titleProtocolVersion", "capabilities.hostedHarness") : 0,
-                hostedFeatures);
+                hostedFeatures, parseLifecycleV2Profiles(hosted));
+    }
+
+    private static List<String> parseLifecycleV2Profiles(Map<String, Object> hosted) {
+        if (!hosted.containsKey("lifecycleV2Profiles")) {
+            return List.of();
+        }
+        List<Object> values = JsonSupport.optionalList(hosted, "lifecycleV2Profiles");
+        if (values == null || values.stream().anyMatch(value -> !(value instanceof String))) {
+            throw new DaemonProtocolException("lifecycleV2Profiles must be a string array");
+        }
+        return values.stream().map(String.class::cast).distinct().collect(java.util.stream.Collectors.toList());
     }
 
     private HarnessSessionRef parseSession(String body,
