@@ -9,7 +9,7 @@ Status: implemented in MYWO-8 S1 (this change). Audience: S2 (Bun PTY), S3
 
 `process.execPath` conflates two distinct identities:
 
-- the **app launcher** — how a subprocess reaches *this build* of the CLI;
+- the **app launcher** — how a subprocess reaches _this build_ of the CLI;
 - the **JS interpreter** — the binary that runs an arbitrary JavaScript file
   or `-e` snippet as a child.
 
@@ -30,35 +30,35 @@ Classified by which identity the site actually needs.
 
 ### App launcher identity (how to re-invoke this build)
 
-| Site | Mechanism | Notes |
-| --- | --- | --- |
-| `scripts/cli-entry.js` | stamps `QWEN_CODE_CLI` (shim path when `QWEN_CODE_LAUNCHER_PATH` set, else the entry file); captures + deletes `QWEN_CODE_LAUNCHER_PATH` | the launcher source of truth |
-| `packages/core/src/services/shellContextEnv.ts` | propagates `QWEN_CODE_CLI` into shell subprocess env; blanks a set-but-unusable script entry | consumers use `"${QWEN_CODE_CLI:-qwen}"` |
-| `packages/cli/src/cli.ts` (`getShellContextEnvVars` wiring) | same env propagation for every shell the CLI spawns | |
-| `packages/cli/src/serve/routes/daemon-update.ts` | reads `QWEN_CODE_CLI` as the bootstrap for update relaunch | |
-| `packages/cli/src/commands/review/**` | `"${QWEN_CODE_CLI:-qwen}" review …` self-invocation in agent prompts | launcher identity, pinned by tests |
-| `scripts/cli-entry.js` `relaunchAfterUpdate()` | `findLauncher()` prefers `QWEN_CODE_LAUNCHER_PATH`, then PATH scan scored by install prefix | update relaunch |
-| `packages/cli/src/utils/relaunch.ts` (`relaunchAppInChildProcess`) | supervised relaunch: `spawn(process.execPath, [execArgv, argv[1], args], ipc)`; `process.execve` variant when available | same-interpreter fallback of the launcher |
-| `packages/cli/src/utils/processUtils.ts` (`relaunchApp`) | `execve(process.execPath, [execPath, execArgv, argv…])` | same-interpreter fallback |
-| `packages/core/src/agents/arena/ArenaManager.ts` | `command: process.execPath, args: [resolve(argv[1]), …]` per arena agent | app re-invocation in a worktree; must stay launcher-shaped |
-| `packages/cli/src/serve/managed-runtime-session-worker.ts` (`currentCliWorkerLaunch`) | `command: process.execPath, args: [execArgv, QWEN_CLI_ENTRY \|\| argv[1], 'managed-runtime-worker']` | app re-invocation |
-| `packages/cli/src/commands/review/run.ts` (agent runner spawn) | `process.execPath` + entry | app re-invocation |
+| Site                                                                                  | Mechanism                                                                                                                                | Notes                                                      |
+| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `scripts/cli-entry.js`                                                                | stamps `QWEN_CODE_CLI` (shim path when `QWEN_CODE_LAUNCHER_PATH` set, else the entry file); captures + deletes `QWEN_CODE_LAUNCHER_PATH` | the launcher source of truth                               |
+| `packages/core/src/services/shellContextEnv.ts`                                       | propagates `QWEN_CODE_CLI` into shell subprocess env; blanks a set-but-unusable script entry                                             | consumers use `"${QWEN_CODE_CLI:-qwen}"`                   |
+| `packages/cli/src/cli.ts` (`getShellContextEnvVars` wiring)                           | same env propagation for every shell the CLI spawns                                                                                      |                                                            |
+| `packages/cli/src/serve/routes/daemon-update.ts`                                      | reads `QWEN_CODE_CLI` as the bootstrap for update relaunch                                                                               |                                                            |
+| `packages/cli/src/commands/review/**`                                                 | `"${QWEN_CODE_CLI:-qwen}" review …` self-invocation in agent prompts                                                                     | launcher identity, pinned by tests                         |
+| `scripts/cli-entry.js` `relaunchAfterUpdate()`                                        | `findLauncher()` prefers `QWEN_CODE_LAUNCHER_PATH`, then PATH scan scored by install prefix                                              | update relaunch                                            |
+| `packages/cli/src/utils/relaunch.ts` (`relaunchAppInChildProcess`)                    | supervised relaunch: `spawn(process.execPath, [execArgv, argv[1], args], ipc)`; `process.execve` variant when available                  | same-interpreter fallback of the launcher                  |
+| `packages/cli/src/utils/processUtils.ts` (`relaunchApp`)                              | `execve(process.execPath, [execPath, execArgv, argv…])`                                                                                  | same-interpreter fallback                                  |
+| `packages/core/src/agents/arena/ArenaManager.ts`                                      | `command: process.execPath, args: [resolve(argv[1]), …]` per arena agent                                                                 | app re-invocation in a worktree; must stay launcher-shaped |
+| `packages/cli/src/serve/managed-runtime-session-worker.ts` (`currentCliWorkerLaunch`) | `command: process.execPath, args: [execArgv, QWEN_CLI_ENTRY \|\| argv[1], 'managed-runtime-worker']`                                     | app re-invocation                                          |
+| `packages/cli/src/commands/review/run.ts` (agent runner spawn)                        | `process.execPath` + entry                                                                                                               | app re-invocation                                          |
 
 ### JS interpreter identity (how to run an arbitrary JS child)
 
-| Site | Use | Wired to `getJsInterpreterCommand` in this change |
-| --- | --- | --- |
-| `packages/core/src/code-mode/host-client.ts` (`hostCommand`) | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`) | yes |
-| `packages/core/src/sandbox/file-worker-client.ts` | sandbox file-worker child (`sandboxAsset('file-worker')`) | yes |
-| `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor) | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached | yes |
-| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`) | cgroup-v2 launcher child (`--input-type=commonjs --eval LAUNCHER …`) running the hook under its delegated unit | not yet (S3) — Linux only (cgroup v2 platform guard) |
-| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`) | stages the interpreter (`realpathSync(process.execPath)`) into the bubblewrap allowlist; the relay spawns the JS relay under it | not yet (S3) — Linux only (bubblewrap) |
-| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | stages the interpreter into the landlock allowlist; the relay spawns the JS relay under it | not yet (S3) — Linux only (landlock LSM) |
-| `packages/core/src/utils/getPty.ts` (`loadPty`) | Bun detection for the PTY gate (PTY disabled under Bun today — **S2 replaces this branch with a real backend**) | detection via `isBunRuntime()` |
-| `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`) | bundled mem0 MCP child; identity check `server.command !== process.execPath` | not yet; must migrate with its identity check together (S3) |
-| `packages/core/src/agents/arena/ArenaManager.ts` | (also) worker-side in-process runtime | launcher-shaped, see above |
-| `packages/cli/src/serve/pem-certificate-blocks.ts` | helper child spawn | not yet (S3 sweep) |
-| `packages/cli/src/commands/review/test-efficacy.ts` | spawns vitest via `process.execPath` (dev-tooling path) | intentionally not; host-tool identity |
+| Site                                                                  | Use                                                                                                                                      | Wired to `getJsInterpreterCommand` in this change           |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `packages/core/src/code-mode/host-client.ts` (`hostCommand`)          | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`)                                                | yes                                                         |
+| `packages/core/src/sandbox/file-worker-client.ts`                     | sandbox file-worker child (`sandboxAsset('file-worker')`)                                                                                | yes                                                         |
+| `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor)   | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached                                                                             | yes                                                         |
+| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`)           | cgroup-v2 launcher child (`--input-type=commonjs --eval LAUNCHER …`) running the hook under its delegated unit                           | not yet (S3) — Linux only (cgroup v2 platform guard)        |
+| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`)       | stages the interpreter (`realpathSync(process.execPath)`) into the bubblewrap allowlist; the relay spawns the JS relay under it          | not yet (S3) — Linux only (bubblewrap)                      |
+| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | stages the interpreter into the landlock allowlist; the relay spawns the JS relay under it                                               | not yet (S3) — Linux only (landlock LSM)                    |
+| `packages/core/src/utils/getPty.ts` (`loadPty`)                       | Bun detection for the PTY backend selection (under Bun, PTY loads the `qwen-bun-pty` backend — [bun-pty-backend.md](bun-pty-backend.md)) | detection via `isBunRuntime()`                              |
+| `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`)      | bundled mem0 MCP child; identity check `server.command !== process.execPath`                                                             | not yet; must migrate with its identity check together (S3) |
+| `packages/core/src/agents/arena/ArenaManager.ts`                      | (also) worker-side in-process runtime                                                                                                    | launcher-shaped, see above                                  |
+| `packages/cli/src/serve/pem-certificate-blocks.ts`                    | helper child spawn                                                                                                                       | not yet (S3 sweep)                                          |
+| `packages/cli/src/commands/review/test-efficacy.ts`                   | spawns vitest via `process.execPath` (dev-tooling path)                                                                                  | intentionally not; host-tool identity                       |
 
 Rows marked `not yet` are owned by the **S3 migration sweep** (V8/GC/TLS/env
 compatibility stage), which uses this table as its checklist. The
@@ -69,13 +69,13 @@ platform.
 
 ### Update / install identity (must stay host-Node)
 
-| Site | Notes |
-| --- | --- |
-| `packages/cli/src/utils/managed-npm-update.ts` | runs npm's `cli.js` via `process.execPath`; npm **must** run under a Node identity, never the private bundled Bun — keep host Node resolution here |
-| `packages/cli/src/ui/handleAutoUpdate.ts` | picks the update command; Node-identity path |
-| `packages/cli/src/serve/daemon-update-restart.ts` | already disabled under Bun (`process.versions['bun']`) and execve-feature-detected |
-| `packages/cli/src/utils/installationInfo.ts` | reports `process.execPath` as the node path (informational) |
-| `scripts/build-standalone-release.js` / `create-standalone-package.js` | pin Bun 1.3.14, five targets, `manifest.json` (`runtime`, version); layout `bun/bin/bun`, `node/bin/node` |
+| Site                                                                   | Notes                                                                                                                                              |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/utils/managed-npm-update.ts`                         | runs npm's `cli.js` via `process.execPath`; npm **must** run under a Node identity, never the private bundled Bun — keep host Node resolution here |
+| `packages/cli/src/ui/handleAutoUpdate.ts`                              | picks the update command; Node-identity path                                                                                                       |
+| `packages/cli/src/serve/daemon-update-restart.ts`                      | already disabled under Bun (`process.versions['bun']`) and execve-feature-detected                                                                 |
+| `packages/cli/src/utils/installationInfo.ts`                           | reports `process.execPath` as the node path (informational)                                                                                        |
+| `scripts/build-standalone-release.js` / `create-standalone-package.js` | pin Bun 1.3.14, five targets, `manifest.json` (`runtime`, version); layout `bun/bin/bun`, `node/bin/node`                                          |
 
 ### SDK consumers
 
@@ -93,7 +93,7 @@ source installs do not have.
   `getShellContextEnvVars` propagates it. Self-invocation uses
   `"${QWEN_CODE_CLI:-qwen}"` in shells, or the stamped value for direct
   spawns.
-- Re-invoking the app *inside* the same process tree (relaunch, managed
+- Re-invoking the app _inside_ the same process tree (relaunch, managed
   workers, arena agents) keeps the same-interpreter fallback
   `process.execPath + process.argv[1]`, because the entry is a JS file in
   every shipped layout. A compiled flavor must publish its launcher through
@@ -135,18 +135,18 @@ through `QWEN_CODE_CLI` / the entry fallback.
 ## Bun compatibility facts (probed this change)
 
 Probed with Bun 1.4.0 local vs Node 24.19.0 (same fixture, see
-`packages/core/src/utils/runtime-boundary.node-bun.test.ts`). The *shipped*
+`packages/core/src/utils/runtime-boundary.node-bun.test.ts`). The _shipped_
 Bun 1.3.14 pin is verified by the packaging acceptance, not here.
 
-| Behavior | Node 24.19.0 | Bun 1.4.0 |
-| --- | --- | --- |
-| `--expose-gc script.js` → `typeof gc === 'function'` | yes | yes (`--expose-gc` accepted) |
-| `--input-type=commonjs --eval '…'` | yes | yes |
-| Node IPC channel (`spawn stdio:[…,'ipc']`, `process.send` / `on('message')`) | yes | yes, round-trip OK |
-| SIGTERM handler → graceful `exit(0)` | yes | yes |
-| exit-code propagation via `process.exit(n)` | yes | yes |
-| `process.execve` | yes | absent — code must feature-detect (`relaunch.ts`, `processUtils.ts`, `daemon-update-restart.ts` already do) |
-| PTY (`@lydell/node-pty`) | yes | **disabled in `getPty`** — S2 blocker |
+| Behavior                                                                     | Node 24.19.0 | Bun 1.4.0                                                                                                                                 |
+| ---------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `--expose-gc script.js` → `typeof gc === 'function'`                         | yes          | yes (`--expose-gc` accepted)                                                                                                              |
+| `--input-type=commonjs --eval '…'`                                           | yes          | yes                                                                                                                                       |
+| Node IPC channel (`spawn stdio:[…,'ipc']`, `process.send` / `on('message')`) | yes          | yes, round-trip OK                                                                                                                        |
+| SIGTERM handler → graceful `exit(0)`                                         | yes          | yes                                                                                                                                       |
+| exit-code propagation via `process.exit(n)`                                  | yes          | yes                                                                                                                                       |
+| `process.execve`                                                             | yes          | absent — code must feature-detect (`relaunch.ts`, `processUtils.ts`, `daemon-update-restart.ts` already do)                               |
+| PTY                                                                          | yes          | yes via the `qwen-bun-pty` backend (S2, [bun-pty-backend.md](bun-pty-backend.md)); `@lydell/node-pty`'s own wrapper still hangs under Bun |
 
 ## Validation plan
 

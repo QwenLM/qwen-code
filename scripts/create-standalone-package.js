@@ -196,11 +196,9 @@ async function main() {
     copyRuntimeAssets(packageRoot, outDir, args.runtime);
     copyNativeAddon(packageRoot, target);
     copyClipboardAddon(packageRoot, target, args.nativeModulesDir);
-    // getPty() returns null under Bun without touching node-pty, so only the
-    // node runtime needs the PTY packages.
-    if (args.runtime === 'node') {
-      copyNodePtyAddon(packageRoot, target, args.nativeModulesDir);
-    }
+    // Both runtimes need the PTY packages: under Bun, getPty() loads the
+    // qwen-bun-pty backend, which drives the same native addon directly.
+    copyNodePtyAddon(packageRoot, target, args.nativeModulesDir);
     if (args.runtime === 'bun') {
       copyOpenTuiAddon(packageRoot, target, args.opentuiModulesDir);
     }
