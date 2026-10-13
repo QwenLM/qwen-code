@@ -2262,14 +2262,18 @@ describe('PermissionManager', () => {
       );
       pm.initialize();
       // `cd -x` is an invalid option in bash: the command errors and the cwd
-      // never moves, so the write lands in the original cwd and meets the
-      // deny rule. Publishing $HOME instead attributed it outside the
-      // workspace, where no rule could see it.
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'cd -x ; echo {} > .qwen/settings.json',
+      // never moves, so the second cd enters .qwen and the write meets the
+      // deny rule. The two-cd spelling is discriminating: at the merge base
+      // the first cd published $HOME and the verdict was allow (#12280 R4-1).
+      const command = 'cd -x ; cd .qwen ; echo {} > settings.json';
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        expect.objectContaining({
+          filePath: '/repo/.qwen/settings.json',
+          cwdUnknown: true,
         }),
+      ]);
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
       ).toBe('deny');
     });
 
@@ -2304,18 +2308,146 @@ describe('PermissionManager', () => {
         }),
       );
       pm.initialize();
-      // Real bash writes /repo/sub/f here; the escape-everywhere merge walk
-      // used to add a phantom /repo/f this deny rule would cite against a
-      // write the command never performs. The shape is the single-segment
-      // one: the conservative rule splitter keeps the whole command inside
-      // one quoted span, so the per-segment compound pass is skipped and the
-      // verdict isolates the cross-command op set.
+      // bash opens a comment at the first `#` and runs only `echo hi` — no
+      // file is written at all. The escape-everywhere merge walk still reads
+      // a write out of the comment words and publishes it at /repo/sub/f (a
+      // comment-modeling gap tracked under #11882, already present at the
+      // merge base). What this verdict pins is the R1-5 defect proper: that
+      // walk used to misplace the write at /repo/f, where this deny rule
+      // would cite it against a write the command never performs
+      // (#12280 R3-5).
       expect(
         await pm.evaluate({
           toolName: 'run_shell_command',
           command: `echo hi # c 'a\\' ; cd sub ; echo x > f # note '`,
         }),
       ).toBe('allow');
+    });
+
+    it('denies the write a union-only repeated cd used to certify (#12280-R2-1)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // The union split mines a second `cd .qwen` out of the comment text; a
+      // text-membership artifact check certified it and published
+      // .qwen/.qwen/settings.json, outside the denied path. Span matching
+      // keeps it an artifact, so the write stays on the denied path with the
+      // escalation flags.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen ; echo # 'a\\'b' ; cd .qwen\necho x > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write a quoted redirect operator used to relocate (#12280-R3-1)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // `'>'` is a literal operand, not a redirect: bash rejects the first cd
+      // with too many arguments and never leaves /repo, so the write lands on
+      // the denied path. Reading the quoted operator as a real redirect used
+      // to certify $HOME and let the write through.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd '>' sub ; cd .qwen ; echo {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write an empty quoted cd operand used to relocate (#12280-R3-2)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)', 'Bash(bash *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // `cd ''` errors without moving the cwd; erasing the empty operand used
+      // to turn it into a bare `cd` and certify $HOME.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `bash -lc "cd '' ; echo {} > .qwen/settings.json"`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('still denies through a quoted glob cd target (#12280-R3-3)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(app/**)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // Quoting suppresses globbing: bash enters the literal `app/[id]`
+      // directory, so the write is the denied path, not a de-resolved
+      // /repo/page.tsx an attacker could wave through.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd 'app/[id]' && echo {} > page.tsx`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('still denies through a tilde cd target (#12280-R3-3)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(~/.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // `~` and `~/…` expand deterministically via os.homedir(); refusing
+      // them de-resolved the write to /repo and downgraded the deny to ask.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd ~/.qwen && echo {} > settings.json',
+        }),
+      ).toBe('deny');
+    });
+
+    it('still denies through a flag-only cd bash accepts (#12280-R3-4)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(~/.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // `cd -L` is a valid flag-only cd: bash lands in $HOME, so the second
+      // cd enters ~/.qwen and the write meets the home-scoped deny rule.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd -L ; cd .qwen ; echo {} > settings.json',
+        }),
+      ).toBe('deny');
     });
 
     it('denies the write a union-only cd target used to relocate (#12280-R1-3)', async () => {

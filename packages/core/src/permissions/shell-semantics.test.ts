@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import os from 'node:os';
 import {
   extractShellOperations,
   extractShellOperationsAcrossCommand,
@@ -703,14 +704,15 @@ describe('dual quote readings for backslash payloads (#12246 review)', () => {
       `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
     );
     const wrapped = across(
-      `bash -lc "cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json'"`,
+      `bash -lc "cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json"`,
     );
-    // The unwrapped scan ends balanced, so its write keeps the trusted
-    // attribution; the wrapped inner payload ends in an open quote, which
-    // routes it through the merge branch where the collision now unions the
-    // escalation flags instead of dropping them (#12280 R2-3).
+    // Same payload inside and outside the wrapper: the scan ends balanced and
+    // keeps the trusted attribution, and wrapping cannot change the reading
+    // decision the payload gets (#12280 R8-1). A wrapped spelling carrying an
+    // extra quote routes through the merge branch instead and proves nothing
+    // about this payload (#12280 R3-12).
     expect(unwrapped).toEqual([write(REPO_SETTINGS)]);
-    expect(wrapped).toEqual([uncertainWrite(REPO_SETTINGS)]);
+    expect(wrapped).toEqual(unwrapped);
   });
 
   it.each([
@@ -751,10 +753,23 @@ describe('dual quote readings for backslash payloads (#12246 review)', () => {
   });
 
   it('ignores a backslash that only exists inside a heredoc body', () => {
-    // The walks split stripHeredocBodies(command), so a heredoc-only
-    // backslash never reaches a splitter; both readings see the same
-    // `cat > f <<EOF` and the gate must not change the result.
+    // The gate's strip is result-neutral by construction here: the walks strip
+    // heredoc bodies on their own, so this row can only record that, not pin
+    // either call site. The behavioural pin is the divergent shape below
+    // (#12280 R4-2).
     expect(across('cat > f <<EOF\necho a\\b\nEOF')).toEqual([write('/repo/f')]);
+  });
+
+  it('pins the walk-level heredoc strip with a divergent shape (#12280-R4-2)', () => {
+    // bash never runs `cd sub` or the second write: the heredoc terminator
+    // must be a line holding exactly EOF, so the body runs to end of input.
+    // Dropping the walk-level stripHeredocBodies turns this red with a
+    // phantom /repo/sub/settings.json.
+    expect(
+      across(
+        `printf 'x' ; cat > f <<'EOF'\n# note \\\nEOF ; cd sub ; echo {} > settings.json`,
+      ),
+    ).toEqual([write('/repo/f')]);
   });
 
   it('does not trust the first operand of a multi-operand cd (#R7-2)', () => {
@@ -960,17 +975,17 @@ describe('R1 review round: comment desync, union-merge cwd, artifact spans', () 
 describe('R2 review round: comment-continuation desync, merge flag union', () => {
   // The segment splitter suppresses `\<newline>` as a continuation even
   // where the backslash sits inside a `#` comment, but bash ends the comment
-  // at the newline regardless. Emitting that newline from the comment cut
-  // glued the next line's first word onto the `cd` operand list (tokenize
-  // splits on space/tab only), so a `cd` bash really performs de-resolved
-  // to cwdUnknown and a hard deny dropped to an ask. The cut now stops at
-  // such a comment, leaving the remainder as the separate command bash
-  // sees (#12280 R2-2).
+  // at the newline regardless. The walk now removes an odd trailing backslash
+  // from comment text before splitting, so the splitter sees the same
+  // boundary bash does and the comment keeps its own line (#12280 R2-2).
   it.each([
     'cd .qwen # note \\\necho x ; echo {} > settings.json',
     'cd .qwen # note \\\\\\\necho x ; echo {} > settings.json',
     'cd .qwen # note \\\n\techo x ; echo {} > settings.json',
-    'cd .qwen # note \\\n  && echo {} > settings.json',
+    // The continuation line used to start with `&&`, which real bash rejects
+    // as a syntax error, so the row pinned a command that never runs (#12280
+    // R3-10).
+    'cd .qwen # note \\\n  echo x && echo {} > settings.json',
     'pushd .qwen # note \\\necho x ; echo {} > settings.json',
   ])(
     'keeps the cd resolution when a comment ends in backslashes: `%s` (#12280-R2-2)',
@@ -978,6 +993,33 @@ describe('R2 review round: comment-continuation desync, merge flag union', () =>
       expect(across(command)).toEqual([write(REPO_SETTINGS)]);
     },
   );
+
+  // bash runs the `cd` on the line after a backslash-ended comment as its own
+  // command; the glued single segment used to erase it with the comment and
+  // certify the pre-comment cwd (#12280 R2-2).
+  it.each([
+    [
+      'cd .qwen # note \\\ncd docs ; echo {} > settings.json',
+      '/repo/.qwen/docs/settings.json',
+    ],
+    [
+      'cd sub # note \\\ncd .qwen ; echo {} > settings.json',
+      '/repo/sub/.qwen/settings.json',
+    ],
+  ])(
+    'follows a cd on the line after a backslash-ended comment: `%s` (#12280-R2-2)',
+    (command, expectedPath) => {
+      expect(across(command)).toEqual([write(expectedPath)]);
+    },
+  );
+
+  // The same desync dropped every operation on the line after the comment,
+  // not just a `cd`; the de-glued split keeps them all (#12280 R3-6).
+  it('keeps operations on the line after a backslash-ended comment (#12280-R3-6)', () => {
+    expect(
+      across('cd sub # note \\\nrm -rf keepme ; echo {} > settings.json'),
+    ).toEqual([edit('/repo/sub/keepme'), write('/repo/sub/settings.json')]);
+  });
 
   // The merge branch runs only where the bash scan cannot be trusted to
   // have seen the whole command, so a key collision there must not drop the
@@ -1024,6 +1066,70 @@ describe('R2 review round: comment-continuation desync, merge flag union', () =>
     },
   );
 
+  // bash accepts `cd -L`/`-P`/`-e`/`--` and lands in $HOME, so a flag-only
+  // cd keeps its trusted static target; only an option word bash rejects
+  // (`-x`, and `-@` on Linux) escalates (#12280 R3-4).
+  it.each(['-L', '-P', '-e', '--'])(
+    'trusts a flag-only cd bash performs: `cd %s` (#12280-R3-4)',
+    (flag) => {
+      expect(across(`cd ${flag} ; echo {} > .qwen/settings.json`)).toEqual([
+        write(`${process.env['HOME']}/.qwen/settings.json`),
+      ]);
+    },
+  );
+
+  it.each([
+    // A quoted or escaped redirect spelling is a literal operand, not an
+    // operator: bash fails `cd '>'` (`No such file or directory`) and never
+    // moves, so the write stays in the pre-cd directory (#12280 R3-1, R1-6).
+    ["cd '>' ; echo {} > .qwen/settings.json", REPO_SETTINGS],
+    ['cd \\> ; echo {} > .qwen/settings.json', REPO_SETTINGS],
+    ["cd sub '>' ; echo {} > .qwen/settings.json", REPO_SETTINGS],
+    ["cd '>y' realdir ; echo {} > settings.json", '/repo/settings.json'],
+    // An empty quoted operand is still an operand: `cd ''` errors without
+    // moving the cwd; it is not a bare `cd` to $HOME (#12280 R3-2).
+    ["cd '' ; echo {} > .qwen/settings.json", REPO_SETTINGS],
+    ["cd sub '' ; echo {} > .qwen/settings.json", REPO_SETTINGS],
+  ])(
+    'escalates a cd whose operand only looks static: `%s` (#12280-R3-1)',
+    (command, expectedPath) => {
+      expect(across(command)).toEqual([uncertainWrite(expectedPath)]);
+    },
+  );
+
+  // Quoting suppresses globbing, and resolvePath already expands `~` and
+  // `~/…`, so both are directories bash provably enters and stay trusted
+  // (#12280 R3-3).
+  it('keeps quoted glob characters and tilde targets static (#12280-R3-3)', () => {
+    expect(across(`cd 'app/[id]' && echo {} > page.tsx`)).toEqual([
+      write('/repo/app/[id]/page.tsx'),
+    ]);
+    const home = os.homedir().replace(/\\/g, '/');
+    expect(across('cd ~ ; echo {} > settings.json')).toEqual([
+      write(`${home}/settings.json`),
+    ]);
+    expect(across('cd ~/foo ; echo {} > settings.json')).toEqual([
+      write(`${home}/foo/settings.json`),
+    ]);
+  });
+
+  // The union split mines a second `cd .qwen` out of the comment text; its
+  // text repeats the genuine first segment verbatim, so only a span match
+  // keeps it an artifact (#12280 R2-1).
+  it('marks a union-only segment whose text repeats a genuine one (#12280-R2-1)', () => {
+    expect(
+      across(`cd .qwen ; echo # 'a\\'b' ; cd .qwen\necho x > settings.json`),
+    ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+  });
+
+  // A union-only bare `cd` must not certify $HOME and clear the cwdUnknown
+  // an earlier artifact segment just set (#12280 R2-1).
+  it('does not let an artifact bare cd certify $HOME (#12280-R2-1)', () => {
+    expect(across(`cd 'a\\'' ; cd ; echo {} > settings.json`)).toEqual([
+      uncertainWrite('/repo/settings.json'),
+    ]);
+  });
+
   // bash really does swallow the operand into the comment and perform a bare
   // `cd` (to $HOME) here; what the guard must never publish is the raw
   // newline inside a path (#12280 R2-2).
@@ -1032,6 +1138,9 @@ describe('R2 review round: comment-continuation desync, merge flag union', () =>
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ virtualTool: 'write_file' });
     expect(result[0]!.filePath).not.toContain('\n');
+    // Pin the attribution itself, not just its certainty: the branch reads
+    // process.env['HOME'], not os.homedir() (#12280 R3-11).
+    expect(result[0]!.filePath).toBe(`${process.env['HOME']}/settings.json`);
     expect(result[0]!.cwdUnknown).toBeUndefined();
   });
 });
