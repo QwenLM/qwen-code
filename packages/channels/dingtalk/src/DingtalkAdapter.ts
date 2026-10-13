@@ -22,6 +22,7 @@ import {
 } from '@qwen-code/channel-base';
 import {
   DINGTALK_CHUNK_LIMIT,
+  DINGTALK_MAX_CHUNK_LENGTH,
   escapeDingTalkMarkdown,
   normalizeDingTalkMarkdown,
   extractTitle,
@@ -1683,12 +1684,17 @@ export class DingtalkChannel extends ChannelBase {
       sourceLabel && outgoingText.trim().length > 0
         ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
         : '';
-    const contentLimit =
-      DINGTALK_CHUNK_LIMIT - mentionPrefix.length - sourcePrefix.length;
+    const overhead = mentionPrefix.length + sourcePrefix.length;
+    const contentLimit = DINGTALK_CHUNK_LIMIT - overhead;
+    const maxLength = DINGTALK_MAX_CHUNK_LENGTH - overhead;
     if (contentLimit <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
     }
-    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
+    const chunks = normalizeDingTalkMarkdown(
+      outgoingText,
+      contentLimit,
+      maxLength,
+    ).map(
       (chunk, index) =>
         `${index === 0 ? mentionPrefix : ''}${sourcePrefix}${chunk}`,
     );
@@ -1881,14 +1887,53 @@ export class DingtalkChannel extends ChannelBase {
     const sourcePrefix = sourceLabel
       ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
       : '';
+    const title = extractTitle(outgoingText);
+    return {
+      title,
+      chunks: this.createProactiveTextChunks(outgoingText, title, sourcePrefix),
+      nextChunk: 0,
+    };
+  }
+
+  private createProactiveTextChunks(
+    text: string,
+    title: string,
+    sourcePrefix: string,
+  ): string[] {
     const contentLimit = DINGTALK_CHUNK_LIMIT - sourcePrefix.length;
+    const maxLength = DINGTALK_MAX_CHUNK_LENGTH - sourcePrefix.length;
     if (contentLimit <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
     }
-    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
-      (chunk) => `${sourcePrefix}${chunk}`,
+    const fits = (chunk: string) =>
+      Buffer.byteLength(
+        JSON.stringify({
+          title: `${title} (cont.)`,
+          text: sourcePrefix + chunk,
+        }),
+        'utf8',
+      ) <= 15_000;
+    if (!fits('')) {
+      throw new Error(
+        'DingTalk source label exceeds the proactive payload limit.',
+      );
+    }
+    return normalizeDingTalkMarkdown(text, contentLimit, maxLength).flatMap(
+      (chunk) => {
+        let budget = maxLength;
+        let pieces = [chunk];
+        // OpenAPI limits the serialized msgParam, not UTF-16 text length.
+        while (!pieces.every(fits)) {
+          budget = Math.floor(budget / 2);
+          pieces = normalizeDingTalkMarkdown(
+            chunk,
+            Math.min(contentLimit, budget),
+            budget,
+          );
+        }
+        return pieces.map((piece) => sourcePrefix + piece);
+      },
     );
-    return { title: extractTitle(outgoingText), chunks, nextChunk: 0 };
   }
 
   private async deliverProactiveText(
@@ -2887,6 +2932,34 @@ export class DingtalkChannel extends ChannelBase {
               : '');
           plan.chunks[0] =
             prefix + replaceHeader(plan.chunks[0]!.slice(prefix.length));
+          if (
+            replyPlan &&
+            replyPlan.chunks[0]!.length > DINGTALK_MAX_CHUNK_LENGTH
+          ) {
+            replyPlan.chunks.splice(
+              0,
+              1,
+              ...this.createReplyTextDelivery(
+                replyPlan.chunks[0]!.slice(prefix.length),
+                replyPlan.atUserId,
+                target.sourceLabel,
+              ).chunks,
+            );
+          }
+          if (proactivePlan) {
+            proactivePlan.chunks = proactivePlan.chunks.flatMap((chunk) =>
+              Buffer.byteLength(
+                JSON.stringify({ title: `${plan.title} (cont.)`, text: chunk }),
+                'utf8',
+              ) <= 15_000
+                ? [chunk]
+                : this.createProactiveTextChunks(
+                    chunk.slice(prefix.length),
+                    plan.title,
+                    prefix,
+                  ),
+            );
+          }
         }
         if (preparedReplyBody) {
           preparedReplyBody = replaceHeader(preparedReplyBody);

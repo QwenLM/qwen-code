@@ -1,0 +1,403 @@
+import type { Nodes, RootContent } from 'mdast';
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
+import remarkGfm from 'remark-gfm';
+
+export interface MarkdownChunkOptions {
+  targetLength: number;
+  maxLength: number;
+  unit: 'utf16' | 'utf8';
+}
+
+const blocks = unified().use(remarkParse);
+const gfm = unified().use(remarkParse).use(remarkGfm);
+const notice =
+  '> Markdown element exceeds the message limit; original text follows in parts.\n\n';
+
+export function splitMarkdown(
+  text: string,
+  options: MarkdownChunkOptions,
+): string[] {
+  const { targetLength, maxLength, unit } = options;
+  if (
+    !Number.isSafeInteger(targetLength) ||
+    !Number.isSafeInteger(maxLength) ||
+    targetLength <= 0 ||
+    maxLength < targetLength
+  ) {
+    throw new RangeError('Invalid Markdown chunk budget');
+  }
+  return split(
+    text,
+    targetLength,
+    maxLength,
+    (value) =>
+      unit === 'utf8' ? Buffer.byteLength(value, 'utf8') : value.length,
+    0,
+  );
+}
+
+function split(
+  text: string,
+  target: number,
+  maximum: number,
+  size: (value: string) => number,
+  depth: number,
+): string[] {
+  const source = (node: Nodes) =>
+    text.slice(node.position!.start.offset!, node.position!.end.offset!);
+  function cut(value: string, budget: number): number {
+    let lo = 0;
+    let hi = value.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (size(value.slice(0, mid)) <= budget) lo = mid;
+      else hi = mid - 1;
+    }
+    if (
+      lo < value.length &&
+      /[\uD800-\uDBFF]/u.test(value[lo - 1] ?? '') &&
+      /[\uDC00-\uDFFF]/u.test(value[lo]!)
+    )
+      lo--;
+    if (!lo && value)
+      throw new RangeError(
+        'Markdown budget cannot contain one Unicode character',
+      );
+    return lo;
+  }
+  function fence(value: string, info: string): string {
+    const char = info.includes('`') ? '~' : '`';
+    let length = 3;
+    for (const run of value.matchAll(new RegExp(`${char}+`, 'g'))) {
+      length = Math.max(length, run[0].length + 1);
+    }
+    return char.repeat(length);
+  }
+  function plain(value: string, limit: number): string[] {
+    const result: string[] = [];
+    while (value) {
+      // At most two extra copies of the body length are needed for safe fences.
+      const budget = Math.max(
+        size('😀'),
+        Math.floor(
+          (Math.min(target, limit) - size(notice + '```text\n\n```')) / 3,
+        ),
+      );
+      const end = cut(value, budget);
+      const part = value.slice(0, end);
+      const marker = fence(part, 'text');
+      const chunk = `${notice}${marker}text\n${part}\n${marker}`;
+      if (size(chunk) > limit)
+        throw new RangeError(
+          'Markdown budget cannot contain a fenced fragment',
+        );
+      result.push(chunk);
+      value = value.slice(end);
+    }
+    return result;
+  }
+  if (size(text) <= target && !/`{3}|~{3}/u.test(text)) return [text];
+  if (depth >= 16) return plain(text, maximum);
+  const tree = blocks.parse(text);
+  const definitions = tree.children.filter(
+    (node) => node.type === 'definition',
+  );
+  const suffix = definitions.length
+    ? '\n\n' + definitions.map(source).join('\n')
+    : '';
+  const hard = maximum - size(suffix);
+  const soft = Math.min(target, hard);
+  if (hard < size(notice + '```text\n😀\n```')) return plain(text, maximum);
+  const references = new Map(
+    definitions.map((node) => [node.identifier.toUpperCase(), source(node)]),
+  );
+
+  function paragraph(raw: string, preferred: number, limit: number): string[] {
+    const lines = raw.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
+    let offset = 0;
+    for (let i = 1; i < lines.length; i++) {
+      const header = lines[i - 1]! + lines[i]!;
+      // GFM's full table parser is quadratic on large bodies; validate two lines only.
+      if (
+        /^[ \t|:-]+\r?\n?$/u.test(lines[i]!) &&
+        gfm.parse(header).children[0]?.type === 'table'
+      ) {
+        const before = offset
+          ? paragraph(raw.slice(0, offset), preferred, limit)
+          : [];
+        const table = raw.slice(offset);
+        if (size(table) <= limit) return [...before, table];
+        const result = [...before];
+        let current = header;
+        for (const row of lines.slice(i + 1)) {
+          if (size(header + row) > limit) {
+            if (current !== header) result.push(current);
+            result.push(...plain(header + row, limit));
+            current = header;
+          } else {
+            if (current !== header && size(current + row) > preferred) {
+              result.push(current);
+              current = header;
+            }
+            current += row;
+          }
+        }
+        if (current !== header) result.push(current);
+        return result.length ? result : plain(table, limit);
+      }
+      offset += lines[i - 1]!.length;
+    }
+    const context = new Set<string>();
+    for (const match of raw.matchAll(/\[((?:\\.|[^[\]\\])*)\]/gu)) {
+      const id = match[1]!
+        .replace(/[\t\n\r ]+/g, ' ')
+        .trim()
+        .toUpperCase();
+      const definition = references.get(id);
+      if (definition) context.add(definition);
+    }
+    const node = gfm.parse(
+      raw + (context.size ? '\n\n' + [...context].join('\n') : ''),
+    ).children[0];
+    if (
+      node?.type !== 'paragraph' ||
+      node.children.some((child) => !child.position)
+    ) {
+      return size(raw) <= limit ? [raw] : plain(raw, limit);
+    }
+    const result: string[] = [];
+    let current = '';
+    const flush = () => {
+      if (current) result.push(current);
+      current = '';
+    };
+    for (const child of node.children) {
+      let value = raw.slice(
+        child.position!.start.offset!,
+        child.position!.end.offset!,
+      );
+      if (child.type !== 'text') {
+        if (current && size(current + value) > preferred) flush();
+        if (size(value) > limit) {
+          flush();
+          result.push(...plain(value, limit));
+        } else current += value;
+        continue;
+      }
+      while (value) {
+        if (
+          current &&
+          size(current + String.fromCodePoint(value.codePointAt(0)!)) >
+            preferred
+        )
+          flush();
+        let end = cut(
+          value,
+          Math.max(
+            size(String.fromCodePoint(value.codePointAt(0)!)),
+            preferred - size(current),
+          ),
+        );
+        if (end < value.length) {
+          const candidate = value.slice(0, end);
+          const boundary = [
+            ...candidate.matchAll(/[。！？]|[.!?](?=\s)|\s+/gu),
+          ].at(-1);
+          if (boundary) end = boundary.index + boundary[0].length;
+          const amp = value.lastIndexOf('&', end - 1);
+          const entity =
+            amp >= 0
+              ? /^&(?:#\d+|#x[\da-f]+|[a-z][a-z\d]*);/iu.exec(value.slice(amp))
+              : null;
+          if (entity && amp + entity[0].length > end)
+            end = amp || entity[0].length;
+          const escapes = value.slice(0, end).match(/\\+$/u)?.[0].length ?? 0;
+          if (escapes % 2 && /[!-/:-@[-`{-~]/u.test(value[end]!))
+            end = end > 1 ? end - 1 : 2;
+        }
+        const piece = value.slice(0, end);
+        if (size(current + piece) > limit) flush();
+        if (size(piece) > limit) result.push(...plain(piece, limit));
+        else current += piece;
+        value = value.slice(end);
+        if (value) flush();
+      }
+    }
+    const tail = raw.slice(node.children.at(-1)?.position?.end.offset ?? 0);
+    if (size(current + tail) > limit) flush();
+    current += tail;
+    flush();
+    return result;
+  }
+
+  function block(
+    node: RootContent,
+    preferred: number,
+    limit: number,
+  ): string[] {
+    const raw = source(node);
+    if (node.type === 'code') {
+      const opener = /^ {0,3}(`{3,}|~{3,})[^\n]*(?:\n|$)/u.exec(raw);
+      const closed =
+        !opener ||
+        new RegExp(
+          `\\n {0,3}${opener[1]![0]}{${opener[1]!.length},}[ \\t]*\\r?$`,
+          'u',
+        ).test(raw);
+      if (closed && size(raw) <= limit) return [raw];
+      const info = `${node.lang ?? ''}${node.meta ? ` ${node.meta}` : ''}`;
+      const marker = fence(node.value, info);
+      const opening = marker + (info.startsWith(marker[0]!) ? ' ' : '') + info;
+      const wrap = (part: string) =>
+        `${opening}\n${part}${part.endsWith('\n') ? '' : '\n'}${marker}`;
+      if (size(wrap(node.value)) <= limit) return [wrap(node.value)];
+      const overhead = size(wrap(''));
+      if (overhead + size('😀') >= limit) return plain(raw, limit);
+      const budget = Math.max(size('😀'), preferred - overhead);
+      const result: string[] = [];
+      let current = '';
+      for (let line of node.value.match(/[^\n]*\n|[^\n]+$/gu) ?? []) {
+        if (current && size(wrap(current + line)) > preferred) {
+          result.push(wrap(current));
+          current = '';
+        }
+        while (size(line) > Math.min(budget, limit - overhead)) {
+          const end = cut(line, Math.min(budget, limit - overhead));
+          result.push(wrap(line.slice(0, end)));
+          line = line.slice(end);
+        }
+        current += line;
+      }
+      if (current) result.push(wrap(current));
+      return result;
+    }
+    if (size(raw) <= preferred) return [raw];
+    if (node.type === 'paragraph') return paragraph(raw, preferred, limit);
+    if (node.type === 'blockquote') {
+      const body = raw.replace(/^ {0,3}> ?/gm, '');
+      const wrap = (part: string) =>
+        part
+          .split('\n')
+          .map((line) => (line ? `> ${line}` : '>'))
+          .join('\n');
+      return split(
+        body,
+        preferred,
+        limit,
+        (value) => (value ? size(wrap(value)) : 0),
+        depth + 1,
+      ).map(wrap);
+    }
+    if (node.type === 'list') {
+      return node.children.flatMap((item) => {
+        const itemText = source(item);
+        if (size(itemText) <= preferred) return [itemText];
+        const marker = /^(\s*(?:[-+*]|\d+[.)])\s+)(?:\[[ xX]\]\s+)?/u.exec(
+          itemText,
+        )!;
+        const indent = ' '.repeat(marker[1]!.length);
+        const body = itemText
+          .slice(marker[0].length)
+          .replace(/^[ \t]+/gm, (leading) => {
+            let column = 0;
+            let end = 0;
+            while (end < leading.length && column < indent.length) {
+              column += leading[end++] === '\t' ? 4 - (column % 4) : 1;
+            }
+            return (
+              ' '.repeat(Math.max(0, column - indent.length)) +
+              leading.slice(end)
+            );
+          });
+        const wrap = (part: string) => {
+          const head =
+            /^(?:`{3,}|~{3,}|#{1,6}(?:\s|$)|>|\||[-+*] |\d+[.)] )/u.test(part)
+              ? `${marker[1]!.trimEnd()}\n${indent}`
+              : marker[0];
+          return head + part.replace(/\n/g, `\n${indent}`);
+        };
+        return split(
+          body,
+          preferred,
+          limit,
+          (value) => (value ? size(wrap(value)) : 0),
+          depth + 1,
+        ).map(wrap);
+      });
+    }
+    return size(raw) <= limit ? [raw] : plain(raw, limit);
+  }
+
+  const result: string[] = [];
+  let current = '';
+  let heading = '';
+  let previousEnd = 0;
+  const flush = () => {
+    if (current) result.push(current + suffix);
+    current = '';
+  };
+  for (const node of tree.children) {
+    const gap = text.slice(previousEnd, node.position!.start.offset!);
+    previousEnd = node.position!.end.offset!;
+    if (node.type === 'definition') continue;
+    if (node.type === 'heading' && size(heading + gap + source(node)) < soft) {
+      heading += gap + source(node);
+      continue;
+    }
+    const head = heading ? heading + gap : '';
+    const leading = heading ? '' : gap;
+    heading = '';
+    const reserve = size(head + leading);
+    if (reserve >= hard - size(notice + '```text\n😀\n```')) {
+      flush();
+      result.push(...plain(head + source(node) + suffix, maximum));
+      continue;
+    }
+    const pieces = block(node, Math.max(1, soft - reserve), hard - reserve);
+    for (const [index, piece] of pieces.entries()) {
+      let next = index === 0 ? head + piece : piece;
+      const separator =
+        index === 0 ? leading : node.type === 'list' ? '\n' : '\n\n';
+      let prefix = index === 0 ? leading : '';
+      if (
+        current &&
+        ((index > 0 && node.type !== 'list') ||
+          size(current + separator + next) > soft)
+      ) {
+        if (
+          index === 0 &&
+          !/[ \t]$/u.test(separator) &&
+          size(current + separator) <= hard
+        ) {
+          current += separator;
+          prefix = '';
+        }
+        flush();
+      }
+      if (!current) next = prefix + next;
+      if (size(next) > hard) {
+        flush();
+        result.push(...plain(next + suffix, maximum));
+      } else current = current ? current + separator + next : next;
+    }
+  }
+  if (heading) {
+    if (current && size(current + heading) > soft) flush();
+    current += heading;
+  }
+  if (!definitions.length) {
+    const tail = text.slice(previousEnd);
+    if (size(current + tail) <= hard) current += tail;
+    else {
+      flush();
+      result.push(...plain(tail, maximum));
+    }
+  }
+  flush();
+  return result.length
+    ? result
+    : size(text) <= maximum
+      ? [text]
+      : plain(text, maximum);
+}
