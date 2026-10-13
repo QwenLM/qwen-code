@@ -391,6 +391,29 @@ export class ManagedContextInstallations {
     return this.#sessions.get(sessionId)?.binding;
   }
 
+  installation(
+    sessionId: string,
+  ): Readonly<Record<string, unknown>> | undefined {
+    const request = this.#sessions.get(sessionId);
+    return request
+      ? Object.freeze({
+          protocolVersion: PROTOCOL_VERSION,
+          managedContext: MANAGED_CONTEXT_PROTOCOL,
+          ...request,
+        })
+      : undefined;
+  }
+
+  /**
+   * Every installed Session's id and binding. The file-tool boundary check
+   * reads it to tell "inside a sibling Session" from "inside the mount".
+   */
+  bindings(): ReadonlyArray<readonly [string, ManagedContextBinding]> {
+    return [...this.#sessions.entries()].map(
+      ([sessionId, request]) => [sessionId, request.binding] as const,
+    );
+  }
+
   /** Steps 1 to 3: the shape, the digest and the Workspace part. */
   #read(body: unknown): InstallationRequest | ManagedContextRefusal {
     const request = readClosed(body, INSTALLATION_KEYS);

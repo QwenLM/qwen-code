@@ -75,10 +75,24 @@ abstract class DelegatingToolExecutionRepository
     }
 
     @Override
+    public ToolExecutionRecord settlePrepared(ToolExecutionRecord expected,
+            Map<String, Object> result, Instant settlementTime) {
+        return delegate.settlePrepared(expected, result, settlementTime);
+    }
+
+    @Override
     public List<ToolExecutionRecord> findUnsettled(
             RuntimeSessionRecord session, String afterExecutionCallId,
             int limit) {
         return delegate.findUnsettled(session, afterExecutionCallId, limit);
+    }
+
+    @Override
+    public List<ToolExecutionRecord> findBackgroundProcesses(
+            RuntimeSessionRecord session, String afterExecutionCallId,
+            int limit) {
+        return delegate.findBackgroundProcesses(session, afterExecutionCallId,
+                limit);
     }
 
     @Override
@@ -91,6 +105,14 @@ abstract class DelegatingToolExecutionRepository
             long runtimeGeneration, String runtimeSessionId) {
         return delegate.hasActiveByRuntimeSession(bindingId,
                 runtimeGeneration, runtimeSessionId);
+    }
+
+    @Override
+    public boolean hasActiveByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds) {
+        return delegate.hasActiveByRuntimeSession(bindingId,
+                runtimeGeneration, runtimeSessionId, excludingExecutionCallIds);
     }
 
     @Override

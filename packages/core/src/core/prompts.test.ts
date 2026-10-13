@@ -63,6 +63,7 @@ interface PromptOpts {
   todo?: boolean;
   codeMode?: boolean;
   declaredTools?: ReadonlySet<string>;
+  agentReachable?: boolean;
 }
 
 /** getCoreSystemPrompt with named options; omitted ones take their defaults. */
@@ -75,7 +76,9 @@ const corePrompt = (o: PromptOpts = {}) =>
     o.style,
     o.todo,
     o.codeMode,
-    o.declaredTools ? { declaredTools: o.declaredTools } : undefined,
+    o.declaredTools || o.agentReachable !== undefined
+      ? { declaredTools: o.declaredTools, agentReachable: o.agentReachable }
+      : undefined,
   );
 
 /** Asserts `text` contains every `has` entry and none of the `lacks` ones. */
@@ -1372,7 +1375,7 @@ describe('resident tool gating (#12032)', () => {
     return [guidance, examples];
   }
 
-  it('saves about 1.1k characters of policy text for a file-work allowlist', () => {
+  it('saves about 1.1k characters of policy text for a file-work allowlist when Agent is not bridge-reachable', () => {
     const full = promptFor();
     const trimmed = promptFor(FILE_WORK_TOOLS);
 
@@ -1383,6 +1386,30 @@ describe('resident tool gating (#12032)', () => {
     const saved = full.length - trimmed.length;
     expect(saved).toBeGreaterThan(900);
     expect(saved).toBeLessThan(1_500);
+    expect(countExamples(trimmed)).toBe(countExamples(full));
+  });
+
+  it('saves only the monitor policy text for a file-work allowlist when Agent is bridge-reachable', () => {
+    // The bridge-intact trimmed session is the default: tool_search/tool_call
+    // are exempt from `tools.eager`, so Agent stays reachable and §4.6 keeps
+    // both Agent bullets. The only policy text that drops is the monitor
+    // line (317 characters at the commit that added this pin) — the
+    // delegation (448) and codebase-search (368) bullets survive. Goes red
+    // if the Agent bullets start dropping in a bridge-intact session (the
+    // §4.6 regression) or if the monitor line stops dropping.
+    const full = promptFor();
+    const trimmed = corePrompt({
+      model: 'gpt-4',
+      declaredTools: FILE_WORK_TOOLS,
+      agentReachable: true,
+    });
+
+    expect(trimmed).toContain('- **Subagent Delegation:**');
+    expect(trimmed).toContain('- **Codebase Search:**');
+    expect(trimmed).not.toContain('- **Monitor Processes:**');
+    const saved = full.length - trimmed.length;
+    expect(saved).toBeGreaterThan(250);
+    expect(saved).toBeLessThan(450);
     expect(countExamples(trimmed)).toBe(countExamples(full));
   });
 
@@ -1410,8 +1437,11 @@ describe('resident tool gating (#12032)', () => {
   // session leaves it out of `getFunctionDeclarations()` and therefore out of
   // the prompt snapshot built from it. The bullet has to follow the tool:
   // discovery of a still-deferred `monitor` is the startup reminder's job, and
-  // a policy line for a tool the session cannot call directly is exactly what
-  // #12032 gates away.
+  // usage guidance for a deferred tool is exactly what #12032 gates away.
+  // Agent is the one exception (`agentReachable`): its delegation bullets are
+  // the policy that sends the model to the bridge to discover Agent at all, so
+  // gating them whenever Agent is deferred would turn deferral into silent
+  // removal — no other deferred tool's guidance drives its own discovery.
   it('gates the monitor bullet on the session declaring monitor', () => {
     const withMonitor = new Set<string>([
       ...FILE_WORK_TOOLS,
@@ -1465,58 +1495,87 @@ describe('resident tool gating (#12032)', () => {
   });
 
   it('never names an undeclared tool inside the gated sections', () => {
-    const [guidance, examples] = gatedParts(promptFor(NARROW_TOOLS));
-    expect(guidance).not.toBe('');
-    expect(examples).not.toBe('');
-    const gated = `${guidance}\n${examples}`;
+    // Extracted so the bridge-reachable arm below reads the gated text, the
+    // declared set and the regex exactly as this one does.
+    const leakedNames = (
+      declaredTools: ReadonlySet<string>,
+      agentReachable?: boolean,
+    ) => {
+      const [guidance, examples] = gatedParts(
+        corePrompt({ model: 'gpt-4', declaredTools, agentReachable }),
+      );
+      expect(guidance).not.toBe('');
+      expect(examples).not.toBe('');
+      const gated = `${guidance}\n${examples}`;
 
-    // Mechanical sweep rather than hand-picked assertions: it catches
-    // under-gating (a line that survived and should not have) and, read the
-    // other way with a full set, over-gating.
-    const leaked = Object.values(ToolNames).filter(
-      (name) =>
-        name !== ToolNames.TOOL_CALL &&
-        !NARROW_TOOLS.has(name) &&
-        new RegExp(`(?<![a-z_])${name}(?![a-z_])`).test(gated),
-    );
+      // Mechanical sweep rather than hand-picked assertions: it catches
+      // under-gating (a line that survived and should not have) and, read the
+      // other way with a full set, over-gating.
+      return Object.values(ToolNames).filter(
+        (name) =>
+          name !== ToolNames.TOOL_CALL &&
+          !declaredTools.has(name) &&
+          new RegExp(`(?<![a-z_])${name}(?![a-z_])`).test(gated),
+      );
+    };
 
-    expect(leaked).toEqual([]);
+    expect(leakedNames(NARROW_TOOLS)).toEqual([]);
+
+    // The one configuration in which the gated sections may legitimately name
+    // an undeclared tool: a session that withholds `agent` but keeps it
+    // bridge-reachable retains the two Agent bullets (§4.6). Pinned exactly —
+    // a second name leaking through that branch, here or in a future one,
+    // fails this arm instead of shipping.
+    expect(leakedNames(NARROW_TOOLS, true)).toEqual([ToolNames.AGENT]);
   });
 
   it('gates every tool name the gated sections can mention, on every example set', () => {
     const everyTool = new Set<string>(Object.values(ToolNames));
-    const leaked: string[] = [];
 
-    // Withhold one tool at a time, against each model's example set: the
-    // config-independent version of the invariant above, and the check that
-    // would have caught the example notations going ungated.
-    for (const model of ['gpt-4', 'qwen3-coder', 'qwen3-vl', 'gemma4']) {
-      for (const tool of everyTool) {
-        // `ask_user_question` is exempt from `tools.eager`, so it is declared
-        // in practice, and the interaction-mode bullet naming it also carries
-        // the policy for not asking questions — gating that bullet would drop
-        // real guidance. Recorded as residue in the design's §6. `tool_call`
-        // is also the literal protocol marker in every example notation, so a
-        // text scan cannot distinguish that syntax from the bridge tool name.
-        if (
-          tool === ToolNames.ASK_USER_QUESTION ||
-          tool === ToolNames.TOOL_CALL
-        ) {
-          continue;
-        }
-        const declaredTools = new Set(everyTool);
-        declaredTools.delete(tool);
-        const [guidance, examples] = gatedParts(
-          corePrompt({ model, declaredTools }),
-        );
-        const gated = `${guidance}\n${examples}`;
-        if (new RegExp(`(?<![a-z_])${tool}(?![a-z_])`).test(gated)) {
-          leaked.push(`${model}: ${tool}`);
+    // Both arms: with `agentReachable` unset nothing withheld may survive,
+    // and with it set the exception is exactly one name wide. Sweeping only
+    // the unset arm would leave the one configuration where the sections may
+    // legitimately name an undeclared tool — the one the new exception branch
+    // creates — outside the invariant the design's §7 item 3 calls the
+    // config-independent guard.
+    for (const agentReachable of [undefined, true]) {
+      const leaked: string[] = [];
+
+      // Withhold one tool at a time, against each model's example set: the
+      // config-independent version of the invariant above, and the check that
+      // would have caught the example notations going ungated.
+      for (const model of ['gpt-4', 'qwen3-coder', 'qwen3-vl', 'gemma4']) {
+        for (const tool of everyTool) {
+          // `ask_user_question` is exempt from `tools.eager`, so it is declared
+          // in practice, and the interaction-mode bullet naming it also carries
+          // the policy for not asking questions — gating that bullet would drop
+          // real guidance. Recorded as residue in the design's §6. `tool_call`
+          // is also the literal protocol marker in every example notation, so a
+          // text scan cannot distinguish that syntax from the bridge tool name.
+          if (
+            tool === ToolNames.ASK_USER_QUESTION ||
+            tool === ToolNames.TOOL_CALL
+          ) {
+            continue;
+          }
+          const declaredTools = new Set(everyTool);
+          declaredTools.delete(tool);
+          const [guidance, examples] = gatedParts(
+            corePrompt({ model, declaredTools, agentReachable }),
+          );
+          const gated = `${guidance}\n${examples}`;
+          if (new RegExp(`(?<![a-z_])${tool}(?![a-z_])`).test(gated)) {
+            leaked.push(`${model}: ${tool}`);
+          }
         }
       }
-    }
 
-    expect(leaked).toEqual([]);
+      // Distinct names, not occurrences: under the reachable arm the surviving
+      // Agent bullet names `agent` on every model's set, and nothing else may.
+      expect([...new Set(leaked.map((entry) => entry.split(': ')[1]))]).toEqual(
+        agentReachable ? [ToolNames.AGENT] : [],
+      );
+    }
   });
 
   it('leaves CodeModeOnly guidance untouched by the declared set', () => {
@@ -1529,21 +1588,24 @@ describe('resident tool gating (#12032)', () => {
     expect(codeModePrompt(new Set([ToolNames.EXEC]))).toBe(codeModePrompt());
   });
 
-  it('takes the declared set from the Config snapshot', () => {
+  it('keeps Agent guidance when Agent is bridge-reachable', () => {
     const base = {
       ...makeConfig({ interactive: true, acp: false }),
       getModel: () => 'gpt-4',
     };
 
-    // The snapshot is the single source `/context` and the request share, so
-    // the prompt must actually read it rather than recompute from a registry.
+    // `/context` and the request share these session snapshots, so the prompt
+    // must read them rather than recompute from a live registry.
     const gated = getMainSessionBaseSystemPrompt({
       ...base,
-      getPromptToolSnapshot: () => FILE_WORK_TOOLS,
+      getPromptToolSnapshot: () =>
+        new Set([...FILE_WORK_TOOLS, ToolNames.TOOL_CALL]),
+      getPromptAgentReachable: () => true,
     });
     const ungated = getMainSessionBaseSystemPrompt(base);
 
-    expect(gated).not.toContain('- **Subagent Delegation:**');
+    expect(gated).toContain('- **Subagent Delegation:**');
+    expect(gated).toContain('- **Codebase Search:**');
     expect(ungated).toContain('- **Subagent Delegation:**');
     expect(gated.length).toBeLessThan(ungated.length);
   });

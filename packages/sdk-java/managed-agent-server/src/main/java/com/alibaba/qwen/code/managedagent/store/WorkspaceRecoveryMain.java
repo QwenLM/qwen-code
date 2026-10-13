@@ -77,55 +77,60 @@ public final class WorkspaceRecoveryMain {
                 System.out.println(existing);
                 return;
             }
-            var command = new ProcessBuilder(text(request, "nodeExecutable"), text(request, "cliEntry"),
-                    "--workspace-recovery-worker").redirectError(ProcessBuilder.Redirect.INHERIT);
-            command.environment().keySet().removeIf(key -> key.startsWith("W1_") || key.startsWith("OSS_"));
-            Process worker;
-            try {
-                worker = command.start();
-            } catch (java.io.IOException error) {
-                store.workerFailed();
-                throw error;
-            }
-            try (var output = new BufferedInputStream(worker.getInputStream());
-                    var replies = new BufferedWriter(new OutputStreamWriter(worker.getOutputStream(), StandardCharsets.UTF_8))) {
-                long lastId = 0;
-                byte[] line;
-                while ((line = message(output)) != null) {
-                    JsonNode call = WorkspaceRecoveryStore.parse(line);
-                    long callId = WorkspaceRecoveryStore.positive(call, "id");
-                    check(callId == lastId + 1, "worker_protocol_error");
-                    lastId = callId;
-                    ObjectNode response = JSON.createObjectNode().put("id", callId);
-                    try {
-                        response.set("result", store.call(text(call, "method"), call.path("params")));
-                    } catch (RuntimeException error) {
-                        String code = error instanceof WorkspaceRecoveryStore.RecoveryFailure failure
-                                ? failure.code : "recovery_read_failed";
-                        if (!(error instanceof WorkspaceRecoveryStore.RecoveryFailure)) {
-                            store.workerFailed();
-                        }
-                        response.putObject("error").put("code", code).put("message", "Workspace recovery: " + code);
-                    }
-                    replies.write(response.toString());
-                    replies.newLine();
-                    replies.flush();
-                }
-                check(worker.waitFor(30, TimeUnit.SECONDS) && worker.exitValue() == 0, "worker_failed");
-                JsonNode receipt = store.inspect();
-                check(Set.of("SEALED", "VERIFIED").contains(receipt.path("state").asText()), "worker_incomplete");
-                System.out.println(receipt);
-            } catch (Exception error) {
-                store.workerFailed();
-                throw error;
-            } finally {
-                if (worker.isAlive()) {
-                    worker.destroyForcibly();
-                }
-            }
+            executeWorker(request, store, store::call);
+            System.out.println(store.inspect());
         } finally {
             if (oss != null) {
                 oss.shutdown();
+            }
+        }
+    }
+
+    public static void executeWorker(JsonNode request, WorkspaceRecoveryStore store,
+            java.util.function.BiFunction<String, JsonNode, JsonNode> calls) throws Exception {
+        var command = new ProcessBuilder(text(request, "nodeExecutable"), text(request, "cliEntry"),
+                "--workspace-recovery-worker").redirectError(ProcessBuilder.Redirect.INHERIT);
+        command.environment().keySet().removeIf(key -> key.startsWith("W1_") || key.startsWith("OSS_"));
+        Process worker;
+        try {
+            worker = command.start();
+        } catch (java.io.IOException error) {
+            store.workerFailed();
+            throw error;
+        }
+        try (var output = new BufferedInputStream(worker.getInputStream());
+                var replies = new BufferedWriter(new OutputStreamWriter(worker.getOutputStream(), StandardCharsets.UTF_8))) {
+            long lastId = 0;
+            byte[] line;
+            while ((line = message(output)) != null) {
+                JsonNode call = WorkspaceRecoveryStore.parse(line);
+                long callId = WorkspaceRecoveryStore.positive(call, "id");
+                check(callId == lastId + 1, "worker_protocol_error");
+                lastId = callId;
+                ObjectNode response = JSON.createObjectNode().put("id", callId);
+                try {
+                    response.set("result", calls.apply(text(call, "method"), call.path("params")));
+                } catch (RuntimeException error) {
+                    String code = error instanceof WorkspaceRecoveryStore.RecoveryFailure failure
+                            ? failure.code : "recovery_read_failed";
+                    if (!(error instanceof WorkspaceRecoveryStore.RecoveryFailure)) {
+                        store.workerFailed();
+                    }
+                    response.putObject("error").put("code", code).put("message", "Workspace recovery: " + code);
+                }
+                replies.write(response.toString());
+                replies.newLine();
+                replies.flush();
+            }
+            check(worker.waitFor(30, TimeUnit.SECONDS) && worker.exitValue() == 0, "worker_failed");
+            JsonNode receipt = store.inspect();
+            check(Set.of("SEALED", "VERIFIED").contains(receipt.path("state").asText()), "worker_incomplete");
+        } catch (Exception error) {
+            store.workerFailed();
+            throw error;
+        } finally {
+            if (worker.isAlive()) {
+                worker.destroyForcibly();
             }
         }
     }

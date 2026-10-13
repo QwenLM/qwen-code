@@ -8,7 +8,9 @@ import {
   type ReactNode,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { createPortal } from 'react-dom';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
+const editorAddTags = vi.hoisted(() => vi.fn());
 import type {
   ContextUsageControls,
   RegisterContextUsageControls,
@@ -658,6 +660,15 @@ const {
       messages: [] as unknown[],
       streamingTailMessages: undefined as unknown[] | undefined,
       queuedPromptHoldHistory: [] as boolean[],
+      queuedPrompts: [] as Array<{ id: number; text: string }>,
+      queuedPromptSendNow: (async () => {}) as (id: number) => Promise<void>,
+      latestQueuedPromptDisplayProps: null as Record<string, unknown> | null,
+      transcriptHasMore: false,
+      promptSettledListeners: new Set<
+        (
+          event: import('./daemon/session/types').DaemonPromptSettledEvent,
+        ) => void
+      >(),
       queuedPromptWriteBlocked: false,
       queuedPromptDispatchError: undefined as
         | ((text: string) => string | undefined)
@@ -788,6 +799,7 @@ const {
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
       } | null,
+      artifactPanelExtra: null as ReactNode,
       captureArtifactPanelOnly: false,
       latestArtifactPanelProps: null as React.ComponentProps<
         typeof ArtifactPanel
@@ -888,7 +900,10 @@ vi.mock('./components/artifacts/ArtifactPanel', async (importOriginal) => {
     ArtifactPanel: (props: React.ComponentProps<typeof ArtifactPanel>) => {
       testState.latestArtifactPanelProps = props;
       return testState.captureArtifactPanelOnly ? null : (
-        <actual.ArtifactPanel {...props} />
+        <>
+          <actual.ArtifactPanel {...props} />
+          {testState.artifactPanelExtra}
+        </>
       );
     },
   };
@@ -968,7 +983,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
     useStreamingState: () => testState.streamingState,
     useTranscriptBlocks: () => testState.blocks,
     useTranscriptHistory: () => ({
-      hasMore: false,
+      hasMore: testState.transcriptHasMore,
       loading: false,
       capacityReached: false,
       paginationError: false,
@@ -1093,9 +1108,10 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
     testState.queuedPromptSessionHasActivePrompt =
       args.sessionHasActivePrompt === true;
     return {
-      queuedPrompts: [],
+      queuedPrompts: testState.queuedPrompts,
       queuedTexts,
       enqueuePrompt: rawEnqueuePrompt,
+      sendQueuedPromptNow: testState.queuedPromptSendNow,
       removeQueuedPrompt: vi.fn(),
       editQueuedPrompt: vi.fn(),
       editLastQueuedPrompt,
@@ -1108,6 +1124,38 @@ vi.mock('./utils/systemInfo', () => ({
   collectSystemInfo: mockCollectSystemInfo,
 }));
 
+// The harness replaces the provider, so the prompt settlement bus is driven by
+// the tests through `testState.promptSettledListeners`.
+vi.mock('./daemon/session/DaemonSessionProvider', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./daemon/session/DaemonSessionProvider')
+    >();
+  const React = await import('react');
+  return {
+    ...actual,
+    useDaemonPromptSettled: (
+      listener:
+        | ((
+            event: import('./daemon/session/types').DaemonPromptSettledEvent,
+          ) => void)
+        | undefined,
+    ) => {
+      const listenerRef = React.useRef(listener);
+      listenerRef.current = listener;
+      React.useEffect(() => {
+        const forward = (
+          event: import('./daemon/session/types').DaemonPromptSettledEvent,
+        ) => listenerRef.current?.(event);
+        testState.promptSettledListeners.add(forward);
+        return () => {
+          testState.promptSettledListeners.delete(forward);
+        };
+      }, []);
+    },
+  };
+});
+
 vi.mock('./components/ChatEditor', async () => {
   const React = await import('react');
   const { useWebShellCustomization } = await import('./customization');
@@ -1117,6 +1165,7 @@ vi.mock('./components/ChatEditor', async () => {
         props: ChatEditorTestProps,
         ref: React.ForwardedRef<{
           clear: () => void;
+          addTags: (tags: unknown, options?: unknown) => void;
           hasAttachments: () => boolean;
           hasInput: () => boolean;
           insertText: (text: string) => void;
@@ -1167,6 +1216,7 @@ vi.mock('./components/ChatEditor', async () => {
                 testState.inputAnnotations?.length,
             ),
           hasInput: () => testState.prompt.trim().length > 0,
+          addTags: editorAddTags,
           insertText: editorInsertText,
           getText: () => testState.prompt,
           setText: (text) => {
@@ -2569,24 +2619,27 @@ vi.doMock('./components/terminal/TerminalPanel', async () => {
       }),
   };
 });
-vi.doMock(
-  './components/workspace-agents/ThreadsRoute',
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import('./components/workspace-agents/ThreadsRoute')
-      >();
-    const React = await import('react');
-    return {
-      ...actual,
-      ThreadsRoute: () =>
-        React.createElement('div', {
-          'data-testid': 'workspace-agent-thread-route',
-        }),
-    };
-  },
-);
-mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
+vi.doMock('./components/QueuedPromptDisplay', async () => {
+  const React = await import('react');
+  return {
+    QueuedPromptDisplay: (props: Record<string, unknown>) => {
+      testState.latestQueuedPromptDisplayProps = props;
+      return React.createElement('div');
+    },
+  };
+});
+// Agents' live runs read the daemon over fetch + SSE; inert here so a test
+// that turns collaboration on opens no real connection.
+vi.doMock('./components/workspace-agents/session-agents-api', () => ({
+  createSessionAgentsHttpApi: () => ({
+    listRuns: () => Promise.resolve({ frames: [] }),
+    mention: () => Promise.resolve({ recordId: '', runs: [] }),
+    cancelRun: () => Promise.resolve({}),
+    stopAll: () => Promise.resolve({}),
+    respondToPermission: () => Promise.resolve({}),
+    subscribe: () => () => {},
+  }),
+}));
 
 const {
   App,
@@ -5838,6 +5891,172 @@ describe('task activity key', () => {
     );
   });
 
+  it.each([
+    'same-session',
+    'session',
+    'workspace',
+    'client',
+    'context',
+  ] as const)('isolates trajectory recovery for %s changes', async (change) => {
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(600);
+    mockWorkspace.client.getSessionTranscriptPage.mockImplementation(
+      async (_sessionId, options) => {
+        const page = Number(options?.cursor ?? 0);
+        return {
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: '' },
+                _meta: {
+                  timing: {
+                    kind: 'request',
+                    durationMs: 100,
+                    startedAt: 10000 - page * 1000,
+                    promptId: `prompt-${page}`,
+                    model: 'qwen-test',
+                    status: 'ok',
+                  },
+                  qwenTranscript: { sourceRecordIds: [`record-${page}`] },
+                },
+              },
+            },
+          ],
+          hasMore: page < 7,
+          nextCursor: String(page + 1),
+        };
+      },
+    );
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'trajectory:session-1',
+          tabs: [
+            {
+              id: 'trajectory:session-1',
+              kind: 'trajectory',
+              title: 'Trajectory',
+              sessionId: 'session-1',
+            },
+            {
+              id: 'file:README.md',
+              kind: 'file',
+              title: 'README.md',
+              workspacePath: 'README.md',
+            },
+          ],
+        },
+      }),
+    );
+    const props = { rightPanel: { items: ['trajectory' as const] } };
+    const { container, rerender } = renderApp(props);
+    await flush();
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-older"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(container.textContent).toContain('Historical window');
+    const input = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'qwen-test');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
+        .click(),
+    );
+    const selected = container.querySelector(
+      '[data-testid="trajectory-selected"]',
+    )!.textContent;
+    const rows = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-rows"]',
+    )!;
+    await act(async () => {
+      rows.scrollTop = 118;
+      rows.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalledTimes(
+      8,
+    );
+    mockConnection.loadingTranscript = true;
+    if (change === 'session') mockConnection.sessionId = 'session-2';
+    if (change === 'workspace') mockConnection.workspaceCwd = '/tmp/other';
+    if (change === 'client') mockWorkspace.client = { ...mockWorkspace.client };
+    if (change === 'context')
+      mockConnection.sessionContext = { kind: 'standalone' };
+    rerender(props);
+    await flush();
+    if (change !== 'same-session') {
+      expect(
+        container.querySelector('[data-testid="trajectory-rows"]'),
+      ).not.toBe(rows);
+      return;
+    }
+    mockConnection.status = 'disconnected';
+    rerender(props);
+    await flush();
+    mockConnection.loadingTranscript = false;
+    rerender(props);
+    await flush();
+    mockConnection.status = 'connected';
+    rerender(props);
+    await flush();
+    expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalledTimes(
+      8,
+    );
+    expect(container.textContent).toContain('Historical window');
+    expect(
+      container.querySelector<HTMLInputElement>('input[type="search"]')!.value,
+    ).toBe('qwen-test');
+    expect(
+      container.querySelector('[data-testid="trajectory-selected"]')!
+        .textContent,
+    ).toBe(selected);
+    expect(container.querySelector('[data-testid="trajectory-rows"]')).toBe(
+      rows,
+    );
+    expect(rows.scrollTop).toBe(118);
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).toContain('History may have changed while disconnected');
+    expect(
+      Array.from(
+        container.querySelectorAll('[role="tablist"] [role="tab"]'),
+      ).map((tab) => tab.getAttribute('title')),
+    ).toEqual(['Trajectory', 'README.md']);
+    expect(container.querySelector('button[title="README.md"]')).not.toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-latest"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).not.toContain('History may have changed while disconnected');
+  });
+
   it('drops a restored trajectory tab when the host stopped listing it', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
@@ -5878,7 +6097,9 @@ describe('task activity key', () => {
         '/tmp/project\0session-1': { open: true, activeTabId: null, tabs: [] },
       }),
     );
-    const { container } = renderApp({ rightPanel: { items: ['trajectory'] } });
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['trajectory'] },
+    });
     await flush();
     await flush();
 
@@ -5892,6 +6113,16 @@ describe('task activity key', () => {
     expect(
       container.querySelector('button[title="Trajectory"]'),
     ).not.toBeNull();
+    const panel = container.querySelector('[data-testid="trajectory-panel"]');
+    mockConnection.loadingTranscript = true;
+    rerender({ rightPanel: { items: ['trajectory'] } });
+    await flush();
+    expect(container.querySelector('[data-testid="trajectory-panel"]')).toBe(
+      panel,
+    );
+    mockConnection.loadingTranscript = false;
+    rerender({ rightPanel: { items: ['trajectory'] } });
+    await flush();
     const persisted = JSON.parse(
       window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
         '{}',
@@ -5908,6 +6139,12 @@ describe('task activity key', () => {
         sessionId: 'session-1',
       },
     ]);
+    mockConnection.loadingTranscript = true;
+    rerender({ rightPanel: { items: ['review'] } });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="trajectory-panel"]'),
+    ).toBeNull();
   });
 
   it('reclaims pane-bound token usage tabs restored outside a split view', async () => {
@@ -9816,6 +10053,36 @@ describe('artifact panel fullscreen', () => {
       await Promise.resolve();
     });
     expect(document.activeElement).toBe(last);
+
+    const treeHost = document.createElement('div');
+    const treeShadow = treeHost.attachShadow({ mode: 'open' });
+    const treeRow = document.createElement('button');
+    treeShadow.appendChild(treeRow);
+    surface!.appendChild(treeHost);
+    first.focus();
+    await act(async () => {
+      first.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(treeShadow.activeElement).toBe(treeRow);
+    await act(async () => {
+      treeRow.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(document.activeElement).toBe(first);
+    treeHost.remove();
   });
 
   it('pulls focus back into the docked fullscreen surface when it escapes', async () => {
@@ -9850,6 +10117,16 @@ describe('artifact panel fullscreen', () => {
     expect(exitFullscreen).not.toBeNull();
     exitFullscreen!.focus();
     expect(document.activeElement).toBe(exitFullscreen);
+
+    const treeHost = document.createElement('div');
+    const treeShadow = treeHost.attachShadow({ mode: 'open' });
+    const treeRow = document.createElement('button');
+    treeRow.setAttribute('role', 'treeitem');
+    treeShadow.appendChild(treeRow);
+    surface!.appendChild(treeHost);
+    treeRow.focus({ preventScroll: true });
+    expect(treeShadow.activeElement).toBe(treeRow);
+    treeHost.remove();
 
     // A Tab past the preview's last focusable lands focus natively outside
     // the surface: the keydown that moved it never reached the surface's
@@ -9892,6 +10169,110 @@ describe('artifact panel fullscreen', () => {
     expect(
       document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
+  });
+
+  it('tabs into and out of shadow-root rows in the floating panel', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    testState.artifactPanelExtra = createPortal(
+      <div role="dialog">
+        <button data-testid="portalled-dialog-button">Dialog control</button>
+      </div>,
+      document.body,
+    );
+    const { container } = renderApp();
+    await flush();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+    await flush();
+    const surface = document.querySelector<HTMLElement>(
+      '[data-slot="drawer-content"] aside[aria-label="Right panel"]',
+    )!;
+    expect(surface).not.toBeNull();
+    const input = document.createElement('input');
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    const row = document.createElement('button');
+    row.setAttribute('role', 'treeitem');
+    shadow.appendChild(row);
+    const trailing = document.createElement('button');
+    trailing.textContent = 'after shadow';
+    surface.append(input, host, trailing);
+    const tab = async (target: HTMLElement, shiftKey = false) => {
+      await act(async () => {
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Tab',
+            shiftKey,
+            bubbles: true,
+            composed: true,
+            cancelable: true,
+          }),
+        );
+      });
+    };
+    input.focus();
+    await tab(input);
+    expect(shadow.activeElement).toBe(row);
+    await tab(row, true);
+    expect(document.activeElement).toBe(input);
+    row.focus();
+    await tab(row);
+    expect(document.activeElement).toBe(trailing);
+    const prevented = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    input.focus();
+    prevented.preventDefault();
+    await act(async () => {
+      input.dispatchEvent(prevented);
+    });
+    expect(document.activeElement).toBe(input);
+    const portalEvent = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      document
+        .querySelector('[data-testid="portalled-dialog-button"]')!
+        .dispatchEvent(portalEvent);
+    });
+    expect(portalEvent.defaultPrevented).toBe(false);
+    const reversePortalEvent = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      document
+        .querySelector('[data-testid="portalled-dialog-button"]')!
+        .dispatchEvent(reversePortalEvent);
+    });
+    expect(reversePortalEvent.defaultPrevented).toBe(false);
+    trailing.focus();
+    await tab(trailing);
+    expect(document.activeElement).toBe(
+      surface.querySelector('button:not([disabled])'),
+    );
+    host.remove();
+    input.remove();
+    trailing.remove();
   });
 
   it('keeps the docked fullscreen surface keyboard-operable in shadow-DOM portal mode', async () => {
@@ -11591,6 +11972,10 @@ beforeEach(() => {
   testState.messages = [];
   testState.streamingTailMessages = undefined;
   testState.queuedPromptHoldHistory = [];
+  testState.queuedPrompts = [];
+  testState.latestQueuedPromptDisplayProps = null;
+  testState.transcriptHasMore = false;
+  testState.promptSettledListeners.clear();
   testState.queuedPromptStreamingState = 'idle';
   testState.queuedPromptSessionHasActivePrompt = false;
   testState.chatEditorRenderCount = 0;
@@ -11636,6 +12021,7 @@ beforeEach(() => {
   testState.latestWorkflowRunsProps = null;
   testState.latestSplitViewProps = null;
   testState.latestArtifactPanelProps = null;
+  testState.artifactPanelExtra = null;
   testState.captureArtifactPanelOnly = false;
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
@@ -13260,6 +13646,31 @@ describe('App conversation indicator keep-alive (#9487)', () => {
     pressEscape(); // arm the two-press cancel
     pressEscape(); // confirm it
     expect(mockSessionActions.cancel).toHaveBeenCalled();
+  });
+});
+
+describe('App queued prompt send-now', () => {
+  it('offers send-now on queued rows only when the daemon advertises it', async () => {
+    const features = mockConnection.capabilities.features;
+    testState.queuedPrompts = [{ id: 1, text: 'follow up' }];
+    try {
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      expect(testState.latestQueuedPromptDisplayProps).toMatchObject({
+        canSendMidTurnNow: false,
+        onSendNow: testState.queuedPromptSendNow,
+      });
+
+      mockConnection.capabilities.features = ['session_mid_turn_send_now'];
+      rerender({ language: 'en' });
+      await flush();
+      expect(testState.latestQueuedPromptDisplayProps).toMatchObject({
+        canSendMidTurnNow: true,
+        onSendNow: testState.queuedPromptSendNow,
+      });
+    } finally {
+      mockConnection.capabilities.features = features;
+    }
   });
 });
 
@@ -16680,6 +17091,262 @@ describe('App session callbacks', () => {
     expect(header?.parentElement?.contains(artifactDock ?? null)).toBe(false);
   });
 
+  it.each([true, false])(
+    'keeps Files ownership distinct across workspace switches (advertised=%s)',
+    async (advertised) => {
+      const workspaces = [
+        { id: 'first', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'second', cwd: '/tmp/second', primary: false, trusted: true },
+      ];
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        ...(advertised ? { workspaces } : {}),
+      } as typeof mockWorkspace.capabilities;
+      testState.captureArtifactPanelOnly = true;
+      const { container, rerender } = renderApp({
+        rightPanel: { items: ['files'] },
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      const firstId = testState.latestArtifactPanelProps?.activeTabId;
+      mockConnection.workspaceCwd = '/tmp/second';
+      if (!advertised)
+        mockWorkspace.capabilities = {
+          workspaceCwd: '/tmp/second',
+        } as typeof mockWorkspace.capabilities;
+      rerender();
+      await flush();
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      expect(testState.latestArtifactPanelProps?.activeTabId).not.toBe(firstId);
+      expect(testState.latestArtifactPanelProps?.tabs).toContainEqual(
+        expect.objectContaining({
+          kind: 'files',
+          workspaceCwd: '/tmp/second',
+          id: advertised ? 'files:second' : 'files:/tmp/second',
+        }),
+      );
+    },
+  );
+
+  it('references a file inline and exits docked fullscreen without closing Files', async () => {
+    editorAddTags.mockClear();
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'owner', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    testState.captureArtifactPanelOnly = true;
+    const { container } = renderApp({ rightPanel: { items: ['files'] } });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+    act(() => testState.latestArtifactPanelProps?.onToggleFullscreen?.());
+    expect(testState.latestArtifactPanelProps?.fullscreen).toBe(true);
+    expect(testState.latestArtifactPanelProps?.onReferenceFile).toBeDefined();
+    act(() =>
+      testState.latestArtifactPanelProps?.onReferenceFile?.('src/app.ts'),
+    );
+    expect(testState.latestArtifactPanelProps?.fullscreen).toBe(false);
+    expect(testState.latestArtifactPanelProps?.tabs).toContainEqual(
+      expect.objectContaining({ kind: 'files' }),
+    );
+    expect(editorAddTags).toHaveBeenCalledWith(
+      [expect.objectContaining({ serialized: '@src/app.ts' })],
+      { placement: 'inline', position: 'end' },
+    );
+    act(() => testState.latestChatEditorProps?.onSubmit('/model'));
+    await flush();
+    expect(
+      container.querySelector('[data-testid="model-select"]'),
+    ).not.toBeNull();
+    expect(testState.latestArtifactPanelProps?.onReferenceFile).toBeUndefined();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-select"]')
+        ?.click(),
+    );
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click(),
+    );
+    await act(async () =>
+      testState.latestSessionOverviewProps?.onOpenSplit?.([
+        'session-1',
+        'session-2',
+      ]),
+    );
+    await flush();
+    expect(testState.latestSplitViewProps).not.toBeNull();
+    expect(testState.latestArtifactPanelProps?.onReferenceFile).toBeUndefined();
+  });
+
+  it('opens one files tab per workspace when configured', () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'project-workspace',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    testState.captureArtifactPanelOnly = true;
+    const { container } = renderApp({ rightPanel: { items: ['files'] } });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+    expect(testState.latestArtifactPanelProps?.onOpenFiles).toBeDefined();
+    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+    expect(testState.latestArtifactPanelProps?.tabs).toEqual([
+      expect.objectContaining({
+        kind: 'files',
+        workspaceCwd: '/tmp/project',
+        title: 'Files',
+      }),
+    ]);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[0]?.id,
+    );
+    act(() =>
+      testState.latestArtifactPanelProps?.onOpenFilePreview(
+        'README.md',
+        '/tmp/project',
+        'project-workspace',
+      ),
+    );
+    expect(testState.latestArtifactPanelProps?.tabs).toEqual([
+      expect.objectContaining({ kind: 'files' }),
+      expect.objectContaining({
+        kind: 'file',
+        workspacePath: 'README.md',
+        workspaceCwd: '/tmp/project',
+        workspaceId: 'project-workspace',
+      }),
+    ]);
+    expect(testState.latestArtifactPanelProps?.tabs[1]).not.toHaveProperty(
+      'previewContent',
+    );
+  });
+
+  it.each(['disabled', 'untrusted', 'unknown'] as const)(
+    'does not expose files for an unavailable workspace (%s)',
+    async (reason) => {
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        workspaces:
+          reason === 'unknown'
+            ? []
+            : [
+                {
+                  id: 'owner',
+                  cwd: '/tmp/project',
+                  primary: true,
+                  trusted: reason !== 'untrusted',
+                },
+              ],
+      } as typeof mockWorkspace.capabilities;
+      window.localStorage.setItem(
+        'qwen-code-web-shell-right-panel-state',
+        JSON.stringify({
+          v: 1,
+          ['/tmp/project\0session-1']: {
+            open: true,
+            activeTabId: 'files:stored',
+            tabs: [
+              {
+                id: 'files:stored',
+                kind: 'files',
+                title: 'Files',
+                workspaceCwd: '/tmp/project',
+                workspaceId: 'owner',
+              },
+            ],
+          },
+        }),
+      );
+      testState.captureArtifactPanelOnly = true;
+      const { container } = renderApp({
+        rightPanel: { items: reason === 'disabled' ? ['review'] : ['files'] },
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      await flush();
+      await flush();
+      expect(
+        testState.latestArtifactPanelProps?.tabs.some(
+          (tab) => tab.kind === 'files',
+        ),
+      ).toBe(false);
+      expect(testState.latestArtifactPanelProps).toBeDefined();
+      expect(testState.latestArtifactPanelProps?.onOpenFiles).toBeUndefined();
+    },
+  );
+
+  it.each(['/tmp/project', '', 42, null])(
+    'round trips valid persisted files tabs and rejects malformed cwd (%s)',
+    async (workspaceCwd) => {
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'owner', cwd: '/tmp/project', primary: true, trusted: true },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      testState.captureArtifactPanelOnly = true;
+      const tab = {
+        id: 'files:stored',
+        kind: 'files',
+        title: 'Files',
+        workspaceCwd,
+        workspaceId: 'owner',
+      };
+      const key = 'qwen-code-web-shell-right-panel-state';
+      const sessionKey = '/tmp/project\0session-1';
+      window.localStorage.setItem(
+        key,
+        JSON.stringify({
+          v: 1,
+          [sessionKey]: { open: true, activeTabId: tab.id, tabs: [tab] },
+        }),
+      );
+      renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      await flush();
+      const expected = workspaceCwd === '/tmp/project' ? [tab] : [];
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual(expected);
+      expect(
+        JSON.parse(window.localStorage.getItem(key) ?? '{}')[sessionKey]?.tabs,
+      ).toEqual(expected);
+    },
+  );
+
   it('shows the manual terminal action when configured and advertised', () => {
     mockConnection.capabilities.features = ['web_terminal'];
     const { container } = renderApp({
@@ -17607,6 +18274,700 @@ describe('App session callbacks', () => {
       'recover connection',
       expect.objectContaining({ images: undefined }),
     );
+  });
+
+  describe('cancelling a prompt before it produced anything', () => {
+    const snapshot = (turnIndex: number) => ({
+      promptId: `prompt-${turnIndex}`,
+      turnIndex,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
+    });
+    const PROMPT_ID = 'http-prompt-1';
+
+    let settleSend: (result: { stopReason: string }) => void;
+
+    beforeEach(() => {
+      testState.blocks = [
+        { id: 'u0', kind: 'user', text: 'first' },
+        { id: 'a0', kind: 'assistant', text: 'answer' },
+      ];
+      settleSend = () => {};
+      mockSessionActions.sendPrompt.mockImplementation((text, options) => {
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 'u1', kind: 'user', text },
+        ];
+        options?.onAdmissionStarted?.();
+        options?.onAdmitted?.({ promptId: PROMPT_ID });
+        return new Promise((resolve) => {
+          settleSend = resolve;
+        });
+      });
+      // The real cancel aborts the in-flight send before the daemon answers.
+      mockSessionActions.cancel.mockImplementation(async () => {
+        settleSend({ stopReason: 'cancelled' });
+        await Promise.resolve();
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 'c1', kind: 'prompt_cancelled' },
+        ];
+      });
+      mockSessionActions.getRewindSnapshots.mockResolvedValue({
+        snapshots: [snapshot(0), snapshot(1)],
+      });
+      mockSessionActions.rewindSession.mockResolvedValue(undefined);
+    });
+
+    // The daemon's terminal event for the turn, published after every block
+    // it produced has been applied.
+    async function settleTurn(
+      outcome: 'cancelled' | 'completed' | 'failed' = 'cancelled',
+      promptId = PROMPT_ID,
+      // `null`: a frame without an originator, as a scripted peer produces.
+      originatorClientId: string | null = mockConnection.clientId,
+    ) {
+      await act(async () => {
+        for (const listener of testState.promptSettledListeners) {
+          listener({
+            sessionId: 'session-1',
+            promptId,
+            outcome,
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+      });
+      await flush();
+    }
+
+    async function submitAndCancel(
+      beforeCancel?: () => void,
+      images?: Array<{ data: string; media_type: string }>,
+      text = 'oops typo',
+    ) {
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit(text, images);
+      });
+      await vi.waitFor(() =>
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+      );
+      testState.prompt = '';
+      beforeCancel?.();
+      await flush();
+      await act(async () => {
+        testState.latestChatEditorProps?.onCancel?.();
+      });
+      await vi.waitFor(() =>
+        expect(mockSessionActions.cancel).toHaveBeenCalledOnce(),
+      );
+      await flush();
+    }
+
+    function expectPlainStop(composer = '') {
+      expect(testState.prompt).toBe(composer);
+      expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+    }
+
+    it('hands the prompt back to the composer and rewinds the turn once it settles', async () => {
+      const images = [{ data: 'aGVsbG8=', media_type: 'image/png' }];
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel(() => {
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 't1', kind: 'thought', text: 'thinking' },
+        ];
+      }, images);
+
+      // Nothing moves until the daemon reports the turn as ended.
+      expectPlainStop();
+      await settleTurn();
+
+      expect(testState.prompt).toBe('oops typo');
+      expect(editorRestoreImages).toHaveBeenCalledWith(images);
+      await vi.waitFor(() =>
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledWith(
+          'prompt-1',
+          { rewindFiles: false, silent: true },
+        ),
+      );
+      expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledWith({
+        silent: true,
+      });
+    });
+
+    it('keeps the answer when it only arrives after the cancel returned', async () => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      // The daemon had already produced the answer; its event was still on
+      // the way when the cancel and the transcript check could have run.
+      testState.blocks = [
+        ...testState.blocks.slice(0, -1),
+        { id: 'a1', kind: 'assistant', text: 'late answer' },
+        { id: 'c1', kind: 'prompt_cancelled' },
+      ];
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
+    it('takes back a prompt whose block only lands once it is admitted', async () => {
+      mockSessionActions.sendPrompt.mockImplementation(
+        async (text, options) => {
+          // Attachments upload first; the transcript block follows admission.
+          await Promise.resolve();
+          testState.blocks = [
+            ...testState.blocks,
+            { id: 'u1', kind: 'user', text },
+          ];
+          options?.onAdmissionStarted?.();
+          options?.onAdmitted?.({ promptId: PROMPT_ID });
+          return new Promise((resolve) => {
+            settleSend = resolve;
+          });
+        },
+      );
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn();
+
+      expect(testState.prompt).toBe('oops typo');
+      await vi.waitFor(() =>
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+      );
+    });
+
+    describe('a prompt cancelled before its admission returned', () => {
+      beforeEach(() => {
+        mockSessionActions.sendPrompt.mockImplementation((text) => {
+          testState.blocks = [
+            ...testState.blocks,
+            { id: 'u1', kind: 'user', text },
+          ];
+          return new Promise((resolve) => {
+            settleSend = resolve;
+          });
+        });
+      });
+
+      it('is taken back when a turn of this client settles cancelled', async () => {
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        // The daemon took the prompt anyway; its terminal frame names this
+        // client as the originator.
+        await settleTurn('cancelled', 'http-prompt-unseen');
+
+        expect(testState.prompt).toBe('oops typo');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
+      });
+
+      it("is only stopped when another client's turn settles", async () => {
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn('cancelled', 'http-prompt-unseen', 'client-other');
+        await settleTurn('cancelled', 'http-prompt-unseen-2', null);
+
+        expectPlainStop();
+      });
+
+      it('is only stopped when the daemon never took it', async () => {
+        mockSessionActions.getRewindSnapshots.mockResolvedValue({
+          snapshots: [snapshot(0)],
+        });
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+
+        // No terminal event ever comes for it.
+        expectPlainStop();
+      });
+    });
+
+    it.each([
+      [
+        'the answer had started',
+        () => {
+          testState.blocks = [
+            ...testState.blocks,
+            { id: 'a1', kind: 'assistant', text: 'partial' },
+          ];
+        },
+        '',
+      ],
+      [
+        'a new draft is in the composer',
+        () => {
+          testState.prompt = 'new draft';
+        },
+        'new draft',
+      ],
+    ])('only stops the turn when %s', async (_name, arrange, composer) => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel(arrange);
+      await settleTurn();
+
+      expectPlainStop(composer);
+    });
+
+    it.each([
+      ['finished on its own', 'completed'],
+      ['failed on its own', 'failed'],
+    ] as const)('keeps a turn that %s', async (_name, outcome) => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn(outcome);
+
+      expectPlainStop();
+    });
+
+    it('ignores the settlement of another prompt', async () => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn('cancelled', 'http-prompt-other');
+
+      expectPlainStop();
+      await settleTurn();
+      expect(testState.prompt).toBe('oops typo');
+    });
+
+    it('lets a take-back lapse when the turn takes too long to settle', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        vi.advanceTimersByTime(10_001);
+        await settleTurn();
+
+        expectPlainStop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('only stops the turn while session writes are blocked', async () => {
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      try {
+        await submitAndCancel(() => {
+          mockConnection.loadingTranscript = true;
+          rerender({ language: 'en' });
+        });
+        await settleTurn();
+
+        expectPlainStop();
+      } finally {
+        mockConnection.loadingTranscript = false;
+      }
+    });
+
+    it('only stops the turn when a follow-up is queued', async () => {
+      const { rerender } = renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel(() => {
+        testState.queuedPrompts = [{ id: 1, text: 'follow up' }];
+        rerender({ language: 'en' });
+      });
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
+    it('only stops a turn this client did not send', async () => {
+      testState.blocks = [
+        ...testState.blocks,
+        { id: 'u1', kind: 'user', text: 'from another client' },
+      ];
+      testState.prompt = '';
+      renderApp({ language: 'en' });
+      await flush();
+      await act(async () => {
+        testState.latestChatEditorProps?.onCancel?.();
+      });
+      await flush();
+      await settleTurn();
+
+      expect(mockSessionActions.cancel).toHaveBeenCalledOnce();
+      expectPlainStop();
+    });
+
+    it('only stops the turn when another prompt already followed it', async () => {
+      mockSessionActions.cancel.mockImplementation(async () => {
+        settleSend({ stopReason: 'cancelled' });
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 'c1', kind: 'prompt_cancelled' },
+          { id: 'u2', kind: 'user', text: 'from another client' },
+        ];
+      });
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
+    it('only stops a slash command turn', async () => {
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel(undefined, undefined, '/deploy staging');
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
+    it('only stops the turn when a prompt from elsewhere landed before admission', async () => {
+      let admit: () => void = () => {};
+      mockSessionActions.sendPrompt.mockImplementation((text, options) => {
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 'u1', kind: 'user', text },
+        ];
+        admit = () => options?.onAdmitted?.({ promptId: PROMPT_ID });
+        return new Promise((resolve) => {
+          settleSend = resolve;
+        });
+      });
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel(() => {
+        testState.blocks = [
+          ...testState.blocks,
+          { id: 'u2', kind: 'user', text: 'from another client' },
+        ];
+        admit();
+      });
+      await settleTurn();
+
+      expectPlainStop();
+    });
+
+    it('keeps the turn in history when older history is not loaded', async () => {
+      testState.transcriptHasMore = true;
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn();
+
+      expect(testState.prompt).toBe('oops typo');
+      expect(mockSessionActions.getRewindSnapshots).not.toHaveBeenCalled();
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+    });
+
+    it('keeps the turn in history when the newest snapshot is an earlier turn', async () => {
+      mockSessionActions.getRewindSnapshots.mockResolvedValue({
+        snapshots: [snapshot(0)],
+      });
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+      await settleTurn();
+
+      expect(testState.prompt).toBe('oops typo');
+      await vi.waitFor(() =>
+        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce(),
+      );
+      await flush();
+      expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+    });
+
+    it('leaves everything alone when the cancel itself fails', async () => {
+      mockSessionActions.cancel.mockRejectedValue(new Error('not generating'));
+      renderApp({ language: 'en' });
+      await flush();
+      await submitAndCancel();
+
+      expectPlainStop();
+    });
+
+    describe('holding prompts back while the turn is taken back', () => {
+      const corrected = async () => {
+        await act(async () => {
+          testState.latestChatEditorProps?.onSubmit('corrected prompt');
+        });
+        await flush();
+      };
+
+      it('does not send a correction before the snapshots are read', async () => {
+        let readSnapshots: () => void = () => {};
+        mockSessionActions.getRewindSnapshots.mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              readSnapshots = () =>
+                resolve({ snapshots: [snapshot(0), snapshot(1)] });
+            }),
+        );
+        const { rerender } = renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        expect(testState.prompt).toBe('oops typo');
+
+        // Refused, the draft stays: the turn it would follow is going away.
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+        expect(testState.queuedPromptWriteBlocked).toBe(true);
+
+        await act(async () => {
+          readSnapshots();
+        });
+        await flush();
+        expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce();
+        // The `session_rewound` event drops the turn.
+        testState.blocks = testState.blocks.slice(0, 2);
+        rerender({ language: 'en' });
+        await flush();
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not send a correction before the rewind reached the transcript', async () => {
+        const { rerender } = renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        // The rewind call returned, its `session_rewound` has not arrived.
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+        expect(testState.queuedPromptWriteBlocked).toBe(true);
+
+        testState.blocks = testState.blocks.slice(0, 2);
+        rerender({ language: 'en' });
+        await flush();
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+
+      it('releases prompts when the daemon refuses the rewind', async () => {
+        mockSessionActions.rewindSession.mockRejectedValue(
+          new DaemonHttpError(400, {}, 'unavailable for SSH workspaces'),
+        );
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        expect(testState.prompt).toBe('oops typo');
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+
+      describe('when the rewind fails for an unknown reason', () => {
+        // The daemon's listing before and after it applied the rewind.
+        const listedBefore = { snapshots: [snapshot(0), snapshot(1)] };
+        const listedAfter = { snapshots: [snapshot(0)] };
+
+        const failRewind = async () => {
+          mockSessionActions.rewindSession.mockRejectedValue(
+            new TypeError('fetch failed'),
+          );
+          const rendered = renderApp({ language: 'en' });
+          await flush();
+          await submitAndCancel();
+          await settleTurn();
+          await vi.waitFor(() =>
+            expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+          );
+          await flush();
+          return rendered;
+        };
+
+        it('holds prompts until the event arrives when the daemon no longer lists the turn', async () => {
+          mockSessionActions.getRewindSnapshots
+            .mockResolvedValueOnce(listedBefore)
+            .mockResolvedValue(listedAfter);
+          vi.useFakeTimers({ toFake: ['Date'] });
+          try {
+            const { rerender } = await failRewind();
+            await vi.waitFor(() =>
+              expect(
+                mockSessionActions.getRewindSnapshots,
+              ).toHaveBeenCalledTimes(2),
+            );
+            await flush();
+
+            // The daemon did rewind; no amount of waiting makes the correction
+            // safe to send before its event has dropped the turn.
+            expect(testState.queuedPromptWriteBlocked).toBe(true);
+            vi.setSystemTime(Date.now() + 2_100);
+            await corrected();
+            expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+            expect(testState.queuedPromptWriteBlocked).toBe(true);
+            expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+              2,
+            );
+
+            testState.blocks = testState.blocks.slice(0, 2);
+            rerender({ language: 'en' });
+            await flush();
+            expect(testState.queuedPromptWriteBlocked).toBe(false);
+            await corrected();
+            expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('releases prompts once the daemon has twice listed the turn as still there', async () => {
+          mockSessionActions.getRewindSnapshots.mockResolvedValue(listedBefore);
+          await failRewind();
+
+          // One reading can predate a rewind still queued at the daemon.
+          await vi.waitFor(() =>
+            expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+              2,
+            ),
+          );
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(true);
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+
+          await act(async () => {
+            await vi.waitFor(
+              () =>
+                expect(
+                  mockSessionActions.getRewindSnapshots,
+                ).toHaveBeenCalledTimes(3),
+              { timeout: 2_000 },
+            );
+            await flush();
+          });
+          expect(testState.queuedPromptWriteBlocked).toBe(false);
+          expect(testState.prompt).toBe('oops typo');
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+            3,
+          );
+        });
+
+        it('keeps asking while the daemon cannot be reached', async () => {
+          mockSessionActions.getRewindSnapshots
+            .mockResolvedValueOnce(listedBefore)
+            .mockRejectedValueOnce(new TypeError('fetch failed'))
+            .mockResolvedValue(listedAfter);
+          const { rerender } = await failRewind();
+
+          await vi.waitFor(
+            () =>
+              expect(
+                mockSessionActions.getRewindSnapshots,
+              ).toHaveBeenCalledTimes(3),
+            { timeout: 2_000 },
+          );
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(true);
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+
+          testState.blocks = testState.blocks.slice(0, 2);
+          rerender({ language: 'en' });
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(false);
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+        });
+
+        it('stops asking once the transcript shows the rewind', async () => {
+          let answerSnapshots: () => void = () => {};
+          mockSessionActions.getRewindSnapshots
+            .mockResolvedValueOnce(listedBefore)
+            .mockImplementation(
+              () =>
+                new Promise((resolve) => {
+                  answerSnapshots = () => resolve(listedBefore);
+                }),
+            );
+          const { rerender } = await failRewind();
+          await vi.waitFor(() =>
+            expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+              2,
+            ),
+          );
+
+          // The event lands while the daemon is still being asked.
+          testState.blocks = testState.blocks.slice(0, 2);
+          rerender({ language: 'en' });
+          await flush();
+          expect(testState.queuedPromptWriteBlocked).toBe(false);
+          await act(async () => {
+            answerSnapshots();
+          });
+          await flush();
+          await corrected();
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+          // Long enough for a recheck to have been due.
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledTimes(
+            2,
+          );
+        });
+      });
+
+      it('releases prompts when the snapshots cannot be read', async () => {
+        mockSessionActions.getRewindSnapshots.mockRejectedValue(
+          new TypeError('fetch failed'),
+        );
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        // No rewind was issued, so none can land.
+        expect(testState.prompt).toBe('oops typo');
+        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce();
+      });
+
+      it('releases prompts when no rewind is issued', async () => {
+        mockSessionActions.getRewindSnapshots.mockResolvedValue({
+          snapshots: [snapshot(0)],
+        });
+        renderApp({ language: 'en' });
+        await flush();
+        await submitAndCancel();
+        await settleTurn();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce(),
+        );
+        await flush();
+
+        expect(testState.queuedPromptWriteBlocked).toBe(false);
+        await corrected();
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+    });
   });
 
   describe('inline user message edits', () => {
@@ -23576,6 +24937,7 @@ describe('App session callbacks', () => {
       setEnabled: vi.fn(),
       refreshPermission: vi.fn(),
       syncLanguage,
+      requestPermissionOnce: vi.fn(),
     });
     const { rerender } = renderApp();
     await flush();
@@ -29204,6 +30566,91 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
     expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
   });
+
+  it.each([false, true])(
+    'creates and reopens a side task in the secondary workspace (busy=%s)',
+    async (busy) => {
+      const workspaceCwd = '/tmp/secondary';
+      mockWorkspace.capabilities.workspaces = [
+        { id: 'primary', cwd: '/tmp/project', primary: true },
+        { id: 'secondary', cwd: workspaceCwd, primary: false },
+      ];
+      mockConnection.workspaceCwd = workspaceCwd;
+      mockConnection.capabilities.features = ['session_side_task'];
+      testState.streamingState = busy ? 'responding' : 'idle';
+      testState.sessionHasActivePrompt = busy;
+      mockWorkspace.client.createSideTaskSession.mockResolvedValueOnce({
+        sessionId: 'secondary-side-task',
+        clientId: 'side-client',
+        workspaceCwd,
+        displayName: 'Secondary side task',
+      });
+      const { container } = renderApp();
+      await flush();
+
+      testState.prompt = '/btw side inspect the secondary project';
+      await clickSubmit(container);
+      await flush();
+
+      expect(
+        mockWorkspace.client.createSideTaskSession,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'session-1',
+        { name: 'Side task' },
+        'client-1',
+      );
+      expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mockWorkspace.client.detachSession).toHaveBeenCalledWith(
+        'secondary-side-task',
+        'side-client',
+      );
+      expect(sessionCatalogController.sessionCreated).toHaveBeenCalledWith(
+        workspaceCwd,
+        'secondary-side-task',
+      );
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual([
+        expect.objectContaining({
+          kind: 'side_task',
+          sessionId: 'secondary-side-task',
+          parentSessionId: 'session-1',
+          workspaceCwd,
+          initialPrompt: 'inspect the secondary project',
+        }),
+      ]);
+      expect(mockWorkspace.client.listWorkspaceSessions).toHaveBeenCalledWith(
+        workspaceCwd,
+        expect.objectContaining({
+          sourceType: 'side_task',
+          sourceId: 'session-1',
+        }),
+      );
+
+      const panel = testState.latestArtifactPanelProps!;
+      act(() => panel.onCloseTab(panel.tabs[0]!.id));
+      await flush();
+      expect(
+        container.querySelector('button[title="Secondary side task"]'),
+      ).toBeNull();
+      act(() => {
+        panel.onOpenSideTask?.({
+          sessionId: 'secondary-side-task',
+          title: 'Secondary side task',
+          workspaceCwd,
+        });
+      });
+      await flush();
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual([
+        expect.objectContaining({
+          kind: 'side_task',
+          sessionId: 'secondary-side-task',
+          parentSessionId: 'session-1',
+          workspaceCwd,
+        }),
+      ]);
+      expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledOnce();
+    },
+  );
 
   it('refuses a host-disabled model setup side task before provisioning', async () => {
     mockConnection.capabilities.features = ['session_side_task'];
@@ -44242,27 +45689,15 @@ it('runtime-stop does not leak shell drain lock', async () => {
   );
 });
 
-it('does not restore a workspace-agent thread when collaboration is disabled', async () => {
-  sessionStorage.setItem(
-    'qwen:team-conversation',
-    JSON.stringify({
-      id: 'thread-1',
-      cwd: '/tmp/project',
-      server: mockWorkspace.baseUrl,
-    }),
-  );
-
+it('offers the Agents entry only where collaboration is enabled', async () => {
   const { container, rerender } = renderApp();
   await flush();
-
-  expect(
-    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
-  ).toBeNull();
-  expect(
+  const hasAgents = () =>
     container
       .querySelector('[data-testid="sidebar"]')
-      ?.getAttribute('data-has-open-agents'),
-  ).toBe('false');
+      ?.getAttribute('data-has-open-agents');
+
+  expect(hasAgents()).toBe('false');
 
   mockWorkspace.capabilities = {
     ...mockWorkspace.capabilities,
@@ -44280,15 +45715,8 @@ it('does not restore a workspace-agent thread when collaboration is disabled', a
   };
   rerender();
   await flush();
-
-  expect(
-    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
-  ).toBeNull();
-  expect(
-    container
-      .querySelector('[data-testid="sidebar"]')
-      ?.getAttribute('data-has-open-agents'),
-  ).toBe('false');
+  // Another workspace opting in does not open it here.
+  expect(hasAgents()).toBe('false');
 
   mockWorkspace.capabilities = {
     ...mockWorkspace.capabilities,
@@ -44299,18 +45727,8 @@ it('does not restore a workspace-agent thread when collaboration is disabled', a
     ),
   };
   rerender();
-  await act(async () => {
-    await vi.dynamicImportSettled();
-  });
-
-  expect(
-    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
-  ).not.toBeNull();
-  expect(
-    container
-      .querySelector('[data-testid="sidebar"]')
-      ?.getAttribute('data-has-open-agents'),
-  ).toBe('true');
+  await flush();
+  expect(hasAgents()).toBe('true');
 });
 
 function mockRuntimeStopChoice() {

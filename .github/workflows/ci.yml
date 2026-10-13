@@ -530,6 +530,11 @@ jobs:
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1017,6 +1022,11 @@ jobs:
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1247,18 +1257,21 @@ jobs:
           fi
           echo "Settings schema is up-to-date"
 
-      - name: 'Generate VS Code companion notices'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run generate:notices --workspace=qwen-code-vscode-ide-companion'
-
-      - name: 'Check VS Code companion notices are up-to-date'
+      - name: 'Generate Web Shell and VS Code companion notices'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
-          if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt) ]]; then
+          npm run generate:notices --workspace=@qwen-code/web-shell
+          npm run generate:notices --workspace=qwen-code-vscode-ide-companion
+
+      - name: 'Check Web Shell and VS Code companion notices are up-to-date'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt) ]]; then
             echo "Error: NOTICES.txt is out of date."
             echo "Please run: npm run generate:notices --workspace=qwen-code-vscode-ide-companion"
+            echo "And: npm run generate:notices --workspace=@qwen-code/web-shell"
             echo "Then commit the updated file."
-            git diff --stat packages/vscode-ide-companion/NOTICES.txt
+            git diff --stat packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt
             exit 1
           fi
           echo "NOTICES.txt is up-to-date"
@@ -2047,6 +2060,11 @@ jobs:
                 done || true
           fi
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -2277,6 +2295,11 @@ jobs:
                   fi
                 done || true
           fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3

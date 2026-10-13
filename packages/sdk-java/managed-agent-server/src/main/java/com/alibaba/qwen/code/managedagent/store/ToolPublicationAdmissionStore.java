@@ -135,8 +135,11 @@ public final class ToolPublicationAdmissionStore {
                 "Original referenced publication conflicts");
         long revision = positiveCounter(publication.get("receipt_revision"));
         long sequence = positiveCounter(publication.get("receipt_sequence"));
-        var head = jdbc.queryForMap("SELECT journal_revision, committed_sequence FROM qwen_managed_session_journal_head"
+        var head = jdbc.queryForMap("SELECT journal_revision, committed_sequence, storage_version FROM qwen_managed_session_journal_head"
                 + " WHERE tenant_id = ? AND session_id = ?" + suffix, text(key, "tenantId"), text(key, "sessionId"));
+        require(((Number) head.get("storage_version")).intValue() >= 1
+                && ((Number) head.get("storage_version")).intValue() <= ManagedSessionReaderVersion.SUPPORTED,
+                "Managed Session storage version is unsupported");
         require(positiveCounter(head.get("journal_revision")) >= revision
                 && positiveCounter(head.get("committed_sequence")) >= sequence,
                 "Original receipt exceeds the committed Session head");
@@ -303,6 +306,11 @@ public final class ToolPublicationAdmissionStore {
 
     public JsonNode commitReceipt(JsonNode key, String publicationId, String writerToken,
             CommitTransactionRequest request) {
+        return commitReceipt(key, publicationId, writerToken, request, null);
+    }
+
+    public JsonNode commitReceipt(JsonNode key, String publicationId, String writerToken,
+            CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         data.requireStagedCall(key, publicationId);
         require(request != null && text(key, "workspaceId").equals(request.workspaceId()),
                 "Receipt Workspace conflicts");
@@ -322,6 +330,7 @@ public final class ToolPublicationAdmissionStore {
                 && ("FINISHED".equals(candidate.get("producer_phase"))
                 || "REFERENCED".equals(candidate.get("producer_phase"))),
                 "Admission root is not verified");
+        data.lockStagedPlacement(key, publicationId);
         String resourceId = (String) candidate.get("resource_id");
         byte[] admissionBytes = data.readResource(key, publicationId, resourceId);
         JsonNode outcome = ToolPublicationContract.readJson(admissionBytes);
@@ -355,11 +364,13 @@ public final class ToolPublicationAdmissionStore {
             lockTenant(key);
             sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                     text(key, "sessionId"), request.writerId(), request.writerGeneration(), writerToken);
-            Map<String, Object> publication = jdbc.queryForMap("SELECT producer_phase,"
+            Map<String, Object> publication = jdbc.queryForMap("SELECT producer_phase, binding_json, binding_digest,"
                     + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined, admission_resource_id,"
                     + " receipt_sequence, receipt_revision, finish_digest, terminal_resource_id"
-                    + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
-                    scope, publicationId);
+                    + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? AND tenant_id = ?"
+                    + " AND workspace_id = ? AND session_id = ? FOR UPDATE", scope, publicationId,
+                    text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"));
+            ToolPublicationStore.requireLockedBinding(publication, finished.path("binding"));
             require(resourceId.equals(publication.get("admission_resource_id"))
                     && candidate.get("terminal_resource_id").equals(publication.get("terminal_resource_id"))
                     && ((Number) publication.get("quarantined")).intValue() == 0,
@@ -375,7 +386,7 @@ public final class ToolPublicationAdmissionStore {
                     "Admission resource changed");
             if ("REFERENCED".equals(publication.get("producer_phase"))) {
                 var committed = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
-                        writerToken, request);
+                        writerToken, request, authority);
                 require(committed.journalRevision() == ((Number) publication.get("receipt_revision")).longValue()
                         && committed.lastSequence() == ((Number) publication.get("receipt_sequence")).longValue(),
                         "Receipt replay conflicts with original transaction");
@@ -389,7 +400,7 @@ public final class ToolPublicationAdmissionStore {
                 installManifestResource(key, request, manifestRef, manifestBytes);
             }
             var receipt = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
-                    writerToken, request);
+                    writerToken, request, authority);
             jdbc.update("UPDATE qwen_tool_publication SET producer_phase = 'REFERENCED',"
                             + " admission_held_bytes = admission_used_bytes, receipt_sequence = ?,"
                             + " receipt_revision = ?, accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",

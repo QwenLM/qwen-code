@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 import {
   getHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -354,6 +355,7 @@ describe('ManagedToolRuntime', () => {
     config.isLsToolEnabled = () => false;
     const childConfig = Object.assign(Object.create(config) as Config, {
       getTargetDir: () => '/managed-child',
+      getFileSystemService: () => new StandardFileSystemService(),
       getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
       getWorkspaceContext: () => ({ isPathWithinWorkspace: () => true }),
       getPlansDir: () => '/managed-child/plans',
@@ -714,6 +716,218 @@ describe('ManagedToolRuntime', () => {
       result: rawResult,
     });
     expect(tool.invocations).toHaveLength(1025);
+  });
+
+  it('refuses a new turn while an invocation is prepared but not yet executed', async () => {
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    expect(() =>
+      runtime.beginTurn({ ...identity, promptId: 'prompt-2' }),
+    ).toThrow('unfinished');
+    expect(runtime.status(ref).state).toBe('prepared');
+    expect(runtime.hasActiveWork()).toBe(true);
+  });
+
+  it('refuses a new turn while an invocation is still executing and preserves access to it', async () => {
+    const gate = deferred<ToolResult>();
+    tool.setup = (invocation) =>
+      invocation.execute.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    await runtime.preflight(ref);
+    const executing = runtime.execute(ref);
+    const next = { ...identity, promptId: 'prompt-2' };
+    try {
+      expect(() => runtime.beginTurn(next)).toThrow('unfinished');
+      expect(runtime.status(ref).state).toBe('executing');
+      expect(runtime.hasActiveWork()).toBe(true);
+    } finally {
+      gate.resolve(rawResult);
+      await executing;
+    }
+    expect((await executing).executionStatus).toBe('success');
+    expect(runtime.status(ref).state).toBe('settled');
+    await runtime.beginTurn(next);
+    expect(() => runtime.status(ref)).toThrow('identity does not match');
+  });
+
+  it('refuses a new turn while a cancellation is confirming', async () => {
+    const gate = deferred<void>();
+    tool.setup = (invocation) =>
+      invocation.onConfirm.mockReturnValue(gate.promise);
+    const ref = await prepare();
+    const confirming = runtime.confirm(
+      ref,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    const rejection = confirming.catch((error: unknown) => error);
+    try {
+      await vi.waitFor(() =>
+        expect(tool.invocations[0].onConfirm).toHaveBeenCalledTimes(1),
+      );
+      expect(runtime.cancel(ref).state).toBe('cancel_requested');
+      expect(() =>
+        runtime.beginTurn({ ...identity, promptId: 'prompt-2' }),
+      ).toThrow('unfinished');
+      expect(runtime.status(ref).state).toBe('cancel_requested');
+      expect(runtime.hasActiveWork()).toBe(true);
+    } finally {
+      gate.resolve();
+    }
+    expect(await rejection).toMatchObject({
+      message: expect.stringContaining('cancelled'),
+    });
+    await vi.waitFor(() => expect(runtime.status(ref).state).toBe('settled'));
+    expect(runtime.status(ref).result?.executionStatus).toBe('not_started');
+  });
+
+  it.each([
+    ['a replacement', { shouldProceed: true }, { value: 'rewritten' }],
+    ['an empty replacement', { shouldProceed: true }, {}],
+    ['an identical replacement', { shouldProceed: true }, input],
+    ['an ask replacement', { shouldProceed: false, blockType: 'ask' }, {}],
+  ])(
+    'refuses %s without running the tool',
+    async (_label, decision, updatedInput) => {
+      hooks.pre.mockResolvedValue({
+        ...decision,
+        additionalContext: 'ctx',
+        updatedInput,
+      });
+      tool.setup = (invocation) => {
+        invocation.getDefaultPermission.mockResolvedValue('ask');
+      };
+      const ref = await prepare();
+      await runtime.confirm(ref, ToolConfirmationOutcome.ProceedOnce);
+
+      const result = await runtime.preflight(ref);
+      expect(result).toEqual({
+        shouldProceed: false,
+        blockType: 'denied',
+        blockReason: expect.stringContaining('not supported'),
+        additionalContext: 'ctx',
+      });
+      expect(await runtime.preflight(ref)).toEqual(result);
+      await expect(
+        runtime.confirm(
+          ref,
+          ToolConfirmationOutcome.ProceedOnce,
+          undefined,
+          'preflight',
+        ),
+      ).rejects.toThrow('did not request');
+      expect(() => runtime.execute(ref)).toThrow('preflight');
+      expect(hooks.pre).toHaveBeenCalledTimes(1);
+      expect(tool.invocations[0].execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['denied', 'policy'],
+    ['stop', 'halt'],
+  ])(
+    'keeps a %s reason that comes with a replacement',
+    async (blockType, blockReason) => {
+      hooks.pre.mockResolvedValue({
+        shouldProceed: false,
+        blockType,
+        blockReason,
+        updatedInput: { value: 'rewritten' },
+      });
+      const ref = await prepare();
+      expect(await runtime.preflight(ref)).toEqual({
+        shouldProceed: false,
+        blockType,
+        blockReason,
+      });
+      expect(() => runtime.execute(ref)).toThrow('preflight');
+    },
+  );
+
+  it('refuses a real command hook replacement through the hook pipeline', async () => {
+    const { HookSystem } = await import('../hooks/hookSystem.js');
+    const { PermissionMode } = await import('../hooks/types.js');
+    const actual = await vi.importActual<
+      typeof import('../core/toolHookTriggers.js')
+    >('../core/toolHookTriggers.js');
+    hooks.pre.mockImplementation(actual.firePreToolUseHook);
+    const { mkdtemp, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const outputFile = join(
+      await mkdtemp(join(tmpdir(), 'managed-hook-')),
+      'output.json',
+    );
+    await writeFile(
+      outputFile,
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          updatedInput: { value: 'rewritten' },
+        },
+      }),
+    );
+    Object.assign(config, {
+      getAllowedHttpHookUrls: () => [],
+      getAllowPrivateNetworkHooks: () => false,
+      getSystemHooks: () => ({}),
+      getUserHooks: () => ({
+        PreToolUse: [
+          {
+            hooks: [
+              {
+                type: 'command',
+                command: `cat '${outputFile}'`,
+              },
+            ],
+          },
+        ],
+      }),
+      getProjectHooks: () => ({}),
+      getExtensions: () => [],
+      isTrustedFolder: () => true,
+      getTranscriptPath: () => '/tmp/transcript',
+      getWorkingDir: () => process.cwd(),
+      getSessionSourceType: () => undefined,
+      getSessionSourceId: () => undefined,
+      getUsageStatisticsEnabled: () => false,
+    });
+    const system = new HookSystem(config);
+    config.getHookSystem = () => system;
+    await system.initialize();
+    const owner = { runtimeId: system.runtimeId, sessionId, agentId: null };
+    const request = vi.fn(
+      async (
+        message: import('../confirmation-bus/types.js').HookExecutionRequest,
+      ) => ({
+        success: true,
+        output: await runWithHookExecutionOwner(message.owner, () =>
+          system.firePreToolUseEvent(
+            String(message.input['tool_name']),
+            message.input['tool_input'] as Record<string, unknown>,
+            String(message.input['tool_use_id']),
+            PermissionMode.Default,
+          ),
+        ),
+      }),
+    );
+    config.getMessageBus = () =>
+      ({ request, publish: vi.fn() }) as unknown as ReturnType<
+        Config['getMessageBus']
+      >;
+    const ref = await runWithHookExecutionOwner(owner, () => prepare());
+    const result = await runWithHookExecutionOwner(owner, () =>
+      runtime.preflight(ref),
+    );
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      shouldProceed: false,
+      blockType: 'denied',
+      blockReason: expect.stringContaining('not supported'),
+    });
+    expect(result).not.toHaveProperty('updatedInput');
+    expect(() => runtime.execute(ref)).toThrow('preflight');
+    expect(tool.invocations[0].execute).not.toHaveBeenCalled();
   });
 
   it('runs the preflight hook once across the second confirmation bounce', async () => {

@@ -5,20 +5,19 @@
  */
 
 import { useI18n } from '../../i18n';
-import { AddRuntimeDialog, type JoinToken } from './add-runtime-dialog';
+import {
+  AddRuntimeDialog,
+  type ConnectExistingInput,
+  type JoinCoordinatorInput,
+  type JoinToken,
+} from './add-runtime-dialog';
 import {
   ShareAgentDialog,
   type AgentShare,
   type AgentShareSummary,
 } from './share-agent-dialog';
-import { useMemo, useState, type FormEvent } from 'react';
-import {
-  ChevronRightIcon,
-  MessagesSquareIcon,
-  MoreHorizontalIcon,
-  PlusIcon,
-  ServerIcon,
-} from 'lucide-react';
+import { useState, type FormEvent } from 'react';
+import { MoreHorizontalIcon, PlusIcon, ServerIcon } from 'lucide-react';
 
 import { AuthorAvatar } from '../messages/AuthorAvatar';
 import { Badge } from '../ui/badge';
@@ -40,24 +39,15 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from '../ui/dialog';
-import {
-  explainSkip,
-  groupThreads,
-  needsAttention,
   programLabel,
-  statusReasonLabel,
-  summarizePreview,
+  runtimePrograms,
   type AgentProgramView,
-  type RoutingPreviewTarget,
-  type ThreadGroup,
-  type ThreadSummaryView,
 } from './agents-view-logic';
+import {
+  SquadsEmpty,
+  SquadsSection,
+  type SquadsSectionProps,
+} from './squads-section';
 import styles from './ThreadsPage.module.css';
 
 /**
@@ -72,7 +62,11 @@ export interface AgentConfigPatch {
   agentType?: string | null;
   maxConcurrentRuns?: number | null;
   execution?:
-    | { mode: 'local' }
+    | {
+        mode: 'local';
+        /** Program on this computer; Qwen Code when absent. */
+        provider?: AgentProgramView;
+      }
     | {
         mode: 'managed-host';
         hostIds: string[];
@@ -80,29 +74,19 @@ export interface AgentConfigPatch {
       };
 }
 
-/** What every agent in this workspace may do. A property of the subsystem. */
-export interface AgentCapabilitiesView {
-  readOnly: boolean;
-  allowed: readonly string[];
-  threadTools: readonly string[];
-}
-
 export interface ThreadsPageProps {
-  onConnectRemoteHost?: (input: {
-    remoteUrl: string;
-    remoteToken: string;
-    remoteCwd: string;
-    serverUrl: string;
-    provider: 'qwen';
-    allowHttp: boolean;
-  }) => Promise<boolean>;
-  createError?: string;
+  onConnectRemoteHost?: (input: ConnectExistingInput) => Promise<boolean>;
+  /** Joins this daemon to another coordinator as one of its runtimes. */
+  onJoinCoordinator?: (input: JoinCoordinatorInput) => Promise<boolean>;
   agents: readonly WorkspaceAgentSummaryView[];
-  threads: readonly ThreadSummaryView[];
   runtimes?: readonly WorkspaceAgentRuntimeView[];
   view: AgentWorkspaceView;
   onViewChange: (view: AgentWorkspaceView) => void;
-  onOpenThread: (threadId: string) => void;
+  /**
+   * Puts `@name ` into the chat composer. Absent hides the agent card's
+   * mention button.
+   */
+  onMentionAgent?: (name: string) => void;
   onDeleteAgent: (agentId: string) => void;
   onSetAgentEnabled: (agentId: string, enabled: boolean) => void;
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
@@ -118,13 +102,14 @@ export interface ThreadsPageProps {
     list: (agentId: string) => Promise<AgentShareSummary[]>;
     revoke: (agentId: string, callerId: string) => Promise<unknown>;
   };
-  capabilities?: AgentCapabilitiesView;
-  onCreateThread: (input: NewThread) => Promise<boolean> | void;
-  workspaceCwd?: string;
-  workspaces?: readonly { cwd: string }[];
-  onWorkspaceChange?: (cwd: string) => void;
-  onPreviewThread?: (assignee?: string) => void;
-  createPreview?: readonly RoutingPreviewTarget[];
+  /**
+   * The workspace's squads and their actions. Absent (a daemon without squad
+   * routes, or not loaded yet) shows the Squads view empty, with no New squad.
+   */
+  squads?: Pick<
+    SquadsSectionProps,
+    'squads' | 'onCreate' | 'onUpdate' | 'onRetire'
+  >;
   pending?: boolean;
 }
 
@@ -141,16 +126,12 @@ export interface WorkspaceAgentSummaryView {
   maxConcurrentRuns?: number;
   execution?: AgentConfigPatch['execution'];
   enabled: boolean;
-  status: 'offline' | 'idle' | 'working' | 'blocked' | 'error';
+  status: 'offline' | 'idle' | 'working' | 'error';
   /** Absent from a daemon older than runtimes; that agent runs here. */
   runtime?: WorkspaceAgentRuntimeView;
   /** Set once the identity is retired: it keeps its posts and takes no work. */
   retiredAt?: number;
-  workingOn?: {
-    id: string;
-    title: string;
-    state: 'working' | 'finishing' | 'stopping';
-  };
+  /** Queued session-agent runs waiting for this agent. */
   waiting: number;
 }
 
@@ -159,12 +140,14 @@ export interface WorkspaceAgentRuntimeView {
   kind: 'local' | 'external';
   label: string;
   provider: string;
-  /** Program ids the runtime reported it can run. */
+  /**
+   * Program ids (`qwen` | `claude` | `codex`) the runtime reported it can run,
+   * the local daemon included (from its program probe). None means Qwen Code.
+   */
   programs?: readonly string[];
   status: 'online' | 'offline';
   workspaceId?: string;
   workspaceCwd?: string;
-  hostSessionId?: string;
   lastSeenAt?: number;
   agentCount?: number;
   sessionCount?: number;
@@ -172,7 +155,7 @@ export interface WorkspaceAgentRuntimeView {
   queuedTaskCount?: number;
 }
 
-export type AgentWorkspaceView = 'agents' | 'tasks' | 'runtime';
+export type AgentWorkspaceView = 'agents' | 'squads' | 'runtime';
 
 export interface NewWorkspaceAgent {
   name: string;
@@ -184,112 +167,26 @@ export interface NewWorkspaceAgent {
   execution?: AgentConfigPatch['execution'];
 }
 
-export type ThreadPriorityChoice = 'urgent' | 'high' | 'normal' | 'low';
-
-export interface NewThread {
-  title: string;
-  body: string;
-  /** What "done" means. Sent only when written, so a blank stays absent. */
-  acceptanceCriteria?: string;
-  priority?: ThreadPriorityChoice;
-  assignee?: string;
-  /** The first post; the assignee starts from it. */
-  message?: string;
-}
-
 const AGENT_STATUSES = new Set([
   'online',
   'idle',
   'working',
-  'blocked',
   'offline',
   'error',
-  'finishing',
-  'stopping',
 ]);
 
-function ThreadRow({
-  thread,
-  onOpen,
-}: {
-  thread: ThreadSummaryView;
-  onOpen: (threadId: string) => void;
-}) {
-  const { t } = useI18n();
-  return (
-    <button
-      type="button"
-      className={styles.row}
-      data-attention={needsAttention(thread) || undefined}
-      onClick={() => onOpen(thread.id)}
-    >
-      <span className={styles.rowText}>
-        <span className={styles.rowTitle}>{thread.title}</span>
-        {/* The status sentence comes from the server's resolver. The UI only
-            translates it one for one; it must not derive a second, shorter
-            vocabulary, which would win because it is the one on screen. */}
-        <span className={styles.rowReason}>
-          {statusReasonLabel(thread.reason, t)}
-        </span>
-      </span>
-      <ChevronRightIcon aria-hidden="true" className={styles.rowChevron} />
-    </button>
-  );
-}
-
-function Group({
-  group,
-  onOpenThread,
-  hidden,
-}: {
-  group: ThreadGroup;
-  onOpenThread: (threadId: string) => void;
-  hidden?: boolean;
-}) {
-  const { t } = useI18n();
-  const [collapsed, setCollapsed] = useState(group.collapsedByDefault);
-  const collapsible = group.collapsedByDefault;
-  return (
-    <section className={styles.group} hidden={hidden}>
-      <button
-        type="button"
-        className={
-          collapsible
-            ? `${styles.groupHeading} ${styles.groupHeadingToggle}`
-            : styles.groupHeading
-        }
-        onClick={collapsible ? () => setCollapsed((open) => !open) : undefined}
-        aria-expanded={collapsible ? !collapsed : undefined}
-        disabled={!collapsible}
-      >
-        {t(`collab.group.${group.key}`)}
-        <span className={styles.groupCount}>{group.threads.length}</span>
-      </button>
-      {!collapsed && (
-        <div className={styles.list}>
-          {group.threads.map((thread) => (
-            <ThreadRow key={thread.id} thread={thread} onOpen={onOpenThread} />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
 /**
- * The thread list, grouped by what each thread needs.
- *
- * Recency sorting is the obvious default and it buries the two threads that
- * need a person under twenty that do not. Grouping answers the question
- * someone actually opens this page with.
+ * The Agents page: the workspace's agent roster, its squads, and the runtimes
+ * agents run on.
+ * Agents are addressed by @-mention in a chat session; this page only manages
+ * who they are and where they run.
  */
 export function ThreadsPage({
   agents,
-  threads,
   runtimes,
   view,
   onViewChange,
-  onOpenThread,
+  onMentionAgent,
   onDeleteAgent,
   onSetAgentEnabled,
   onUpdateAgent,
@@ -298,32 +195,23 @@ export function ThreadsPage({
   onCreateJoinToken,
   onRemoveRuntime,
   onConnectRemoteHost,
+  onJoinCoordinator,
   hostServerUrl,
   shares,
-  capabilities,
-  onCreateThread,
-  workspaceCwd,
-  workspaces,
-  onWorkspaceChange,
-  createError,
-  onPreviewThread,
-  createPreview,
+  squads,
   pending,
 }: ThreadsPageProps) {
-  const groups = useMemo(() => groupThreads(threads), [threads]);
   const runtimeEntries = runtimes ?? [];
-  const [creating, setCreating] = useState<'thread'>();
   const [configuring, setConfiguring] = useState<{
     id: string;
     hostIds: string[];
   }>();
-  const [openAgentId, setOpenAgentId] = useState<string>();
   const { t } = useI18n();
   const [addingRuntime, setAddingRuntime] = useState(false);
   const [replacingRuntime, setReplacingRuntime] =
     useState<WorkspaceAgentRuntimeView>();
   const [sharing, setSharing] = useState<{ id: string; name: string }>();
-  const [taskAssignee, setTaskAssignee] = useState('');
+  const [creatingSquad, setCreatingSquad] = useState(false);
   const statusLabel = (status: string) =>
     AGENT_STATUSES.has(status) ? t(`collab.agentStatus.${status}`) : status;
   const hostLabel = (entry?: WorkspaceAgentRuntimeView) =>
@@ -332,11 +220,7 @@ export function ThreadsPage({
       : entry.label;
   // "Program · Runtime": what the agent runs as, then where.
   const agentPlace = (agent: WorkspaceAgentSummaryView) =>
-    `${programLabel(
-      agent.execution?.mode === 'managed-host'
-        ? agent.execution.provider
-        : undefined,
-    )} · ${hostLabel(agent.runtime)}`;
+    `${programLabel(agent.execution?.provider)} · ${hostLabel(agent.runtime)}`;
 
   const submitConfig =
     (agentId: string) => (event: FormEvent<HTMLFormElement>) => {
@@ -362,6 +246,12 @@ export function ThreadsPage({
       const placementChanged =
         hostIds.length !== currentHostIds.length ||
         hostIds.some((hostId) => !currentHostIds.includes(hostId));
+      // Moving an agent keeps the program it is bound to, wherever the new
+      // place offers it.
+      const currentProgram = current?.execution?.provider;
+      const localRuntime = runtimeEntries.find(
+        (entry) => entry.kind === 'local',
+      );
       onUpdateAgent(agentId, {
         description: field('description'),
         model: field('model'),
@@ -375,49 +265,26 @@ export function ThreadsPage({
                   ? ({
                       mode: 'managed-host',
                       hostIds,
-                      // Moving an agent keeps the program it is bound to.
-                      ...(current?.execution?.mode === 'managed-host' &&
-                      current.execution.provider
-                        ? { provider: current.execution.provider }
-                        : {}),
+                      ...(currentProgram ? { provider: currentProgram } : {}),
                     } as const)
-                  : ({ mode: 'local' } as const),
+                  : ({
+                      mode: 'local',
+                      ...(currentProgram &&
+                      localRuntime &&
+                      runtimePrograms(localRuntime).includes(currentProgram)
+                        ? { provider: currentProgram }
+                        : {}),
+                    } as const),
             }
           : {}),
       });
       setConfiguring(undefined);
     };
 
-  const submitThread = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const assignee = String(data.get('assignee') ?? '');
-    const acceptanceCriteria = String(
-      data.get('acceptanceCriteria') ?? '',
-    ).trim();
-    const priority = String(data.get('priority') ?? '');
-    const created = await onCreateThread({
-      title: String(data.get('title') ?? '').trim(),
-      body: String(data.get('body') ?? '').trim(),
-      // Left out when blank or ordinary, so the thread records a decision
-      // only where one was made.
-      ...(acceptanceCriteria ? { acceptanceCriteria } : {}),
-      ...(priority && priority !== 'normal'
-        ? { priority: priority as ThreadPriorityChoice }
-        : {}),
-      ...(assignee ? { assignee } : {}),
-    });
-    if (created === false) return;
-    onPreviewThread?.(undefined);
-    setCreating(undefined);
-  };
-
   const openView = (next: AgentWorkspaceView) => {
     onViewChange(next);
-    setCreating(undefined);
     setConfiguring(undefined);
-    setOpenAgentId(undefined);
-    onPreviewThread?.(undefined);
+    setCreatingSquad(false);
   };
 
   // Laid out as the role templates view it swaps with: title and actions,
@@ -445,6 +312,12 @@ export function ThreadsPage({
               {t('collab.agent.new')}
             </Button>
           ) : null}
+          {view === 'squads' && squads ? (
+            <Button disabled={pending} onClick={() => setCreatingSquad(true)}>
+              <PlusIcon data-icon="inline-start" />
+              {t('collab.squad.new')}
+            </Button>
+          ) : null}
           {view === 'runtime' && onCreateJoinToken ? (
             <Button
               variant="outline"
@@ -456,18 +329,6 @@ export function ThreadsPage({
             >
               <PlusIcon data-icon="inline-start" />
               {t('collab.runtime.addTitle')}
-            </Button>
-          ) : null}
-          {view === 'tasks' ? (
-            <Button
-              onClick={() => {
-                setCreating('thread');
-                setTaskAssignee('');
-                onPreviewThread?.(undefined);
-              }}
-            >
-              <PlusIcon data-icon="inline-start" />
-              {t('collab.thread.new')}
             </Button>
           ) : null}
         </div>
@@ -482,176 +343,13 @@ export function ThreadsPage({
         size="sm"
         aria-label={t('agents.title')}
       >
-        {(['agents', 'tasks', 'runtime'] as const).map((item) => (
+        {(['agents', 'squads', 'runtime'] as const).map((item) => (
           <ToggleGroupItem key={item} value={item}>
             {t(`collab.tabs.${item}`)}
           </ToggleGroupItem>
         ))}
       </ToggleGroup>
       <div className="contents">
-        <Dialog
-          open={view === 'tasks' && creating === 'thread'}
-          onOpenChange={(open) => {
-            if (!open && !pending) setCreating(undefined);
-          }}
-        >
-          <DialogContent className="sm:max-w-2xl">
-            <DialogHeader>
-              <DialogTitle>{t('collab.thread.new')}</DialogTitle>
-              <DialogDescription>
-                {t('collab.thread.newHint')}
-              </DialogDescription>
-            </DialogHeader>
-            <form
-              className="flex flex-col gap-4"
-              onSubmit={(event) => void submitThread(event)}
-            >
-              {createError && (
-                <p role="alert" className="text-sm text-destructive">
-                  {createError}
-                </p>
-              )}
-              <label className="text-xs text-muted-foreground">
-                {t('collab.form.project')}
-                <select
-                  className={styles.field}
-                  value={workspaceCwd ?? ''}
-                  disabled={pending}
-                  onChange={(event) => {
-                    setTaskAssignee('');
-                    onWorkspaceChange?.(event.target.value);
-                  }}
-                >
-                  {workspaceCwd &&
-                    !workspaces?.some(
-                      (entry) => entry.cwd === workspaceCwd,
-                    ) && (
-                      <option value={workspaceCwd}>
-                        {workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1)}
-                      </option>
-                    )}
-                  {workspaces?.map((entry) => (
-                    <option key={entry.cwd} value={entry.cwd}>
-                      {entry.cwd.split(/[\\/]/).filter(Boolean).at(-1)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <p className="text-xs text-muted-foreground">
-                <span className="block break-all">{workspaceCwd}</span>
-                {t('collab.form.projectHint')}
-              </p>
-              <input
-                className="w-full border-0 bg-transparent text-xl font-medium outline-none"
-                name="title"
-                aria-label={t('collab.form.titleLabel')}
-                placeholder={t('collab.form.title')}
-                required
-              />
-              <textarea
-                className={styles.field}
-                name="body"
-                aria-label={t('collab.form.bodyLabel')}
-                rows={6}
-                placeholder={t('collab.form.body')}
-                required
-              />
-              <textarea
-                className={styles.field}
-                name="acceptanceCriteria"
-                aria-label={t('collab.form.criteriaLabel')}
-                placeholder={t('collab.form.criteria')}
-              />
-              <select
-                className={styles.field}
-                name="priority"
-                aria-label={t('collab.form.priority')}
-                defaultValue="normal"
-              >
-                {(['urgent', 'high', 'normal', 'low'] as const).map((level) => (
-                  <option key={level} value={level}>
-                    {t(`collab.priority.${level}`)}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-muted-foreground">
-                {t('collab.form.priorityHint')}
-              </p>
-              <select
-                className={styles.field}
-                name="assignee"
-                key={workspaceCwd}
-                aria-label={t('collab.form.assignee')}
-                defaultValue={taskAssignee}
-                onChange={(event) => {
-                  setTaskAssignee(event.target.value);
-                  onPreviewThread?.(event.target.value || undefined);
-                }}
-              >
-                <option value="">{t('collab.form.noAssignee')}</option>
-                {agents
-                  .filter((agent) => agent.enabled && !agent.retiredAt)
-                  .map((agent) => (
-                    <option key={agent.id} value={agent.name}>
-                      {agent.name} · {agentPlace(agent)}
-                    </option>
-                  ))}
-              </select>
-              {!taskAssignee && (
-                <p className="text-xs text-muted-foreground">
-                  {t('collab.form.noAssigneeHint')}
-                </p>
-              )}
-              {createPreview ? (
-                <div
-                  role="status"
-                  className="space-y-1 text-xs text-muted-foreground"
-                >
-                  <strong>
-                    {taskAssignee
-                      ? summarizePreview(createPreview, t)
-                      : t('collab.form.saveOnly')}
-                  </strong>
-                  {createPreview
-                    .filter((target) => !target.willWake)
-                    .map((target) => {
-                      const explained = explainSkip(
-                        target.reason ?? '',
-                        target.agentName,
-                        t,
-                      );
-                      return (
-                        <p
-                          key={`${target.agentName}:${target.reason ?? 'unknown'}`}
-                        >
-                          {explained}
-                        </p>
-                      );
-                    })}
-                </div>
-              ) : null}
-              <div className={styles.formActions}>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setCreating(undefined);
-                    onPreviewThread?.(undefined);
-                  }}
-                >
-                  {t('collab.form.cancel')}
-                </Button>
-                <Button type="submit" size="sm" disabled={pending}>
-                  {pending
-                    ? t('collab.form.creating')
-                    : t('collab.form.create')}
-                </Button>
-              </div>
-            </form>
-          </DialogContent>
-        </Dialog>
-
         <section className={styles.roster} hidden={view !== 'agents'}>
           {agents.length === 0 ? (
             <Empty className="border">
@@ -682,18 +380,7 @@ export function ThreadsPage({
                   <div className={styles.agentMain}>
                     <div className={styles.agentTitleLine}>
                       <CardTitle className="min-w-0 truncate">
-                        <button
-                          type="button"
-                          className={styles.agentName}
-                          aria-expanded={openAgentId === agent.id}
-                          onClick={() =>
-                            setOpenAgentId(
-                              openAgentId === agent.id ? undefined : agent.id,
-                            )
-                          }
-                        >
-                          {agent.name}
-                        </button>
+                        {agent.name}
                       </CardTitle>
                       <Badge
                         variant="secondary"
@@ -701,18 +388,14 @@ export function ThreadsPage({
                         data-status={
                           agent.retiredAt || !agent.enabled
                             ? 'off'
-                            : agent.workingOn
-                              ? 'working'
-                              : agent.status
+                            : agent.status
                         }
                       >
                         {agent.retiredAt
                           ? t('collab.agentStatus.retired')
                           : !agent.enabled
                             ? t('collab.agentStatus.paused')
-                            : agent.workingOn
-                              ? statusLabel(agent.workingOn.state)
-                              : statusLabel(agent.status)}
+                            : statusLabel(agent.status)}
                       </Badge>
                       {agent.waiting ? (
                         <Badge variant="outline" className="text-[10px]">
@@ -726,33 +409,19 @@ export function ThreadsPage({
                     <span className="truncate text-xs text-muted-foreground">
                       {agentPlace(agent)}
                     </span>
-                    {agent.workingOn ? (
-                      <button
-                        type="button"
-                        className={styles.agentActivityLink}
-                        onClick={() => onOpenThread(agent.workingOn!.id)}
-                      >
-                        {t('collab.agent.workingOn', {
-                          title: agent.workingOn.title,
-                        })}
-                      </button>
-                    ) : null}
                   </div>
                   {agent.retiredAt ? null : (
                     <div className={styles.agentActions}>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!agent.enabled || pending}
-                        onClick={() => {
-                          openView('tasks');
-                          setTaskAssignee(agent.name);
-                          setCreating('thread');
-                          onPreviewThread?.(agent.name);
-                        }}
-                      >
-                        {t('collab.agent.mentionIt')}
-                      </Button>
+                      {onMentionAgent ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={!agent.enabled || pending}
+                          onClick={() => onMentionAgent(agent.name)}
+                        >
+                          {t('collab.agent.mentionIt')}
+                        </Button>
+                      ) : null}
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button
@@ -803,7 +472,9 @@ export function ThreadsPage({
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
                             variant="destructive"
-                            disabled={Boolean(agent.workingOn || agent.waiting)}
+                            disabled={
+                              agent.status === 'working' || agent.waiting > 0
+                            }
                             onSelect={() => {
                               if (
                                 window.confirm(
@@ -894,10 +565,8 @@ export function ThreadsPage({
                                 checked={configuring.hostIds.includes(entry.id)}
                                 disabled={
                                   !configuring.hostIds.includes(entry.id) &&
-                                  !entry.programs?.includes(
-                                    agent.execution?.mode === 'managed-host'
-                                      ? (agent.execution.provider ?? 'qwen')
-                                      : 'qwen',
+                                  !runtimePrograms(entry).includes(
+                                    agent.execution?.provider ?? 'qwen',
                                   )
                                 }
                                 onChange={(event) => {
@@ -909,8 +578,11 @@ export function ThreadsPage({
                                   setConfiguring({ id: agent.id, hostIds });
                                 }}
                               />{' '}
-                              {hostLabel(entry)} · {entry.provider} ·{' '}
-                              {statusLabel(entry.status)}
+                              {hostLabel(entry)} ·{' '}
+                              {runtimePrograms(entry)
+                                .map(programLabel)
+                                .join(', ')}{' '}
+                              · {statusLabel(entry.status)}
                             </label>
                           ))}
                         <span className={styles.configNote}>
@@ -940,80 +612,25 @@ export function ThreadsPage({
                     </div>
                   </form>
                 ) : null}
-                {openAgentId === agent.id ? (
-                  <section className={styles.agentWorkspace}>
-                    <div className={styles.agentWorkspaceHeader}>
-                      <strong>{t('collab.agent.assigned')}</strong>
-                      <span>
-                        {hostLabel(agent.runtime)} · {statusLabel(agent.status)}
-                      </span>
-                    </div>
-                    {threads.some(
-                      (thread) => thread.assigneeName === agent.name,
-                    ) ? (
-                      threads
-                        .filter((thread) => thread.assigneeName === agent.name)
-                        .sort((a, b) => b.updatedAt - a.updatedAt)
-                        .map((thread) => (
-                          <ThreadRow
-                            key={thread.id}
-                            thread={thread}
-                            onOpen={onOpenThread}
-                          />
-                        ))
-                    ) : (
-                      <p className={styles.emptyRoster}>
-                        {t('collab.agent.noneAssigned')}
-                      </p>
-                    )}
-                  </section>
-                ) : null}
               </Card>
             ))
           )}
-          {capabilities ? (
-            <div className={styles.ceiling}>
-              <h3 className={styles.ceilingTitle}>
-                {t('collab.ceiling.title')}
-              </h3>
-              <p className={styles.ceilingText}>
-                {capabilities.readOnly
-                  ? t('collab.ceiling.readOnly')
-                  : t('collab.ceiling.open')}
-              </p>
-              <details>
-                <summary className="cursor-pointer text-xs text-muted-foreground">
-                  {t('collab.ceiling.tools')}
-                </summary>
-                <p className={styles.ceilingTools}>
-                  {capabilities.allowed.join(', ')}
-                </p>
-              </details>
-            </div>
-          ) : null}
         </section>
 
-        {groups.length === 0 ? (
-          <Empty className="border" hidden={view !== 'tasks'}>
-            {/* An empty screen is an invitation, not a shrug. */}
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <MessagesSquareIcon />
-              </EmptyMedia>
-              <EmptyTitle>{t('collab.empty.lead')}</EmptyTitle>
-              <EmptyDescription>{t('collab.empty.hint')}</EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-        ) : (
-          groups.map((group) => (
-            <Group
-              key={group.key}
-              group={group}
-              onOpenThread={onOpenThread}
-              hidden={view !== 'tasks'}
+        {view === 'squads' ? (
+          squads ? (
+            <SquadsSection
+              {...squads}
+              agents={agents}
+              pending={pending}
+              creating={creatingSquad}
+              onCreatingChange={setCreatingSquad}
+              {...(onMentionAgent ? { onMention: onMentionAgent } : {})}
             />
-          ))
-        )}
+          ) : (
+            <SquadsEmpty />
+          )
+        ) : null}
 
         {view === 'runtime' && runtimeEntries.length > 0 ? (
           runtimeEntries.map((runtimeEntry) => (
@@ -1077,7 +694,9 @@ export function ThreadsPage({
               <dl className={styles.runtimeFacts}>
                 <div>
                   <dt>{t('collab.runtime.programs')}</dt>
-                  <dd>{runtimeEntry.provider}</dd>
+                  <dd>
+                    {runtimePrograms(runtimeEntry).map(programLabel).join(', ')}
+                  </dd>
                 </div>
                 {runtimeEntry.workspaceCwd ? (
                   <div>
@@ -1105,13 +724,6 @@ export function ThreadsPage({
                   {t('collab.runtime.technical')}
                 </summary>
                 <p>{t('collab.runtime.id', { id: runtimeEntry.id })}</p>
-                {runtimeEntry.hostSessionId && (
-                  <p>
-                    {t('collab.runtime.hostSession', {
-                      id: runtimeEntry.hostSessionId,
-                    })}
-                  </p>
-                )}
                 <p>
                   {t('collab.runtime.sessions', {
                     count: runtimeEntry.sessionCount ?? 0,
@@ -1158,6 +770,7 @@ export function ThreadsPage({
           {...(onConnectRemoteHost
             ? { onConnectExisting: onConnectRemoteHost }
             : {})}
+          {...(onJoinCoordinator ? { onJoinCoordinator } : {})}
           {...(onOpenAgentBuilder
             ? {
                 onCreateAgentOn: (runtimeId: string) => {

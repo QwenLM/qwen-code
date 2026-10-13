@@ -1594,6 +1594,67 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void answersTheDetachedCaptureFamilyOfAV3Settle() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        // The background start settles its delivery blocked: the handle
+        // reaches the model through the session history, not the store.
+        Map<String, Object> capturedResult = new LinkedHashMap<>();
+        capturedResult.put("captureStatus", "detached");
+        capturedResult.put("captureReason", null);
+        capturedResult.put("manifest", null);
+        capturedResult.put("previewTruncated", false);
+        capturedResult.put("deliveryStatus", "blocked");
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("executionStatus", "success");
+        envelope.put("responseParts", List.of());
+        envelope.put("capture", capturedResult);
+        reply.set(json(200, JsonCodec.encode(Map.of(
+                "protocolVersion", 3,
+                "toolResult", "managed-tool-result/1",
+                "state", "settled",
+                "result", envelope))));
+        Map<String, Object> body = transport.statusV3(lease, session,
+                reference, 0).toCompletableFuture().get(2, TimeUnit.SECONDS);
+        assertEquals("settled", body.get("state"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result =
+                (Map<String, Object>) body.get("result");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> capture =
+                (Map<String, Object>) result.get("capture");
+        assertEquals("detached", capture.get("captureStatus"));
+        assertNull(capture.get("manifest"));
+        assertEquals("blocked", capture.get("deliveryStatus"));
+    }
+
+    @Test
+    void refusesADetachedCaptureStillNamingAManifestOrAReason() throws Exception {
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        RuntimeSession session = toolSession();
+        Map<String, Object> reference = toolReference();
+        for (String broken : List.of(
+                "{\"captureStatus\":\"detached\",\"captureReason\":null,"
+                        + "\"previewTruncated\":false,\"deliveryStatus\":\"blocked\","
+                        + "\"manifest\":{\"resourceId\":\"res-1\","
+                        + "\"kind\":\"managed-tool-result-manifest\",\"schemaVersion\":1,"
+                        + "\"byteLength\":4,\"digest\":\"" + "a".repeat(64) + "\"}}",
+                "{\"captureStatus\":\"detached\",\"captureReason\":\"storage_failed\","
+                        + "\"previewTruncated\":false,\"deliveryStatus\":\"blocked\","
+                        + "\"manifest\":null}")) {
+            reply.set(json(200, ("{\"protocolVersion\":3,\"toolResult\":"
+                    + "\"managed-tool-result/1\",\"state\":\"settled\",\"result\":"
+                    + "{\"executionStatus\":\"success\",\"responseParts\":[],"
+                    + "\"capture\":" + broken + "}}")
+                    .getBytes(StandardCharsets.UTF_8)));
+            assertThrows(ExecutionException.class, () -> transport.statusV3(
+                    lease, session, reference, 0).toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS), broken);
+        }
+    }
+
+    @Test
     void rejectsExplicitNullAndEmptyOptionalResponseFields() throws Exception {
         ObjectNode settled = (ObjectNode) findIn(toolSuite("execute"), "success")
                 .required("expected").required("body").deepCopy();
@@ -1657,18 +1718,23 @@ class HttpRuntimeTransportTest {
         RuntimeSession session = toolSession();
         Map<String, Object> reference = toolReference();
 
+        // Six 1 MiB loopback exchanges; on a contended CI host a healthy
+        // exchange can outlast a short wait, so budget past the transport's
+        // own 30 s request deadline and let a wedge surface as the client's
+        // classified failure instead of a bare test timeout.
         transport.execute(lease, session, reference)
-                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                .toCompletableFuture().get(60, TimeUnit.SECONDS);
         transport.status(lease, session, reference, 0)
-                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                .toCompletableFuture().get(60, TimeUnit.SECONDS);
         transport.cancel(lease, session, reference)
-                .toCompletableFuture().get(5, TimeUnit.SECONDS);
+                .toCompletableFuture().get(60, TimeUnit.SECONDS);
 
         reply.set(json(200, Arrays.copyOf(padded, limit + 1)));
         for (String operation : List.of("execute", "status", "cancel")) {
             assertEquals(limit, toolRoute(operation)
                     .required("responseBodyLimitBytes").intValue());
-            RuntimeBrokerException failure = awaitToolFailure(operation);
+            RuntimeBrokerException failure = awaitToolFailure(operation, 60,
+                    TimeUnit.SECONDS);
             assertEquals(413, failure.getStatusCode());
             assertEquals("managed_runtime_attestation_too_large",
                     failure.getCode());
@@ -1745,6 +1811,11 @@ class HttpRuntimeTransportTest {
     }
 
     private RuntimeBrokerException awaitToolFailure(String operation) {
+        return awaitToolFailure(operation, 5, TimeUnit.SECONDS);
+    }
+
+    private RuntimeBrokerException awaitToolFailure(String operation,
+            long timeout, TimeUnit unit) {
         RuntimeLease lease = toolLease(server.getAddress().getPort());
         RuntimeSession session = toolSession();
         Map<String, Object> reference = toolReference();
@@ -1752,14 +1823,14 @@ class HttpRuntimeTransportTest {
                 () -> {
                     switch (operation) {
                         case "execute" -> transport.execute(lease, session,
-                                reference).toCompletableFuture().get(5,
-                                        TimeUnit.SECONDS);
+                                reference).toCompletableFuture().get(timeout,
+                                        unit);
                         case "status" -> transport.status(lease, session,
-                                reference, 0).toCompletableFuture().get(5,
-                                        TimeUnit.SECONDS);
+                                reference, 0).toCompletableFuture()
+                                .get(timeout, unit);
                         case "cancel" -> transport.cancel(lease, session,
-                                reference).toCompletableFuture().get(5,
-                                        TimeUnit.SECONDS);
+                                reference).toCompletableFuture().get(timeout,
+                                        unit);
                         default -> throw new AssertionError(
                                 "unknown operation");
                     }
