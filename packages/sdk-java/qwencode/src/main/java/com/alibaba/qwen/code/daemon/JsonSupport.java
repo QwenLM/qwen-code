@@ -13,6 +13,7 @@ import java.math.MathContext;
 import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,8 +42,12 @@ final class JsonSupport {
      * form diverges from ECMAScript outside [0.001, 1e7), so the digest
      * substrate is canonicalized here, not at each call site. Contract JSON
      * values (Map, List, String, Boolean, null, and finite numbers) render
-     * directly; key order follows each map's own iteration order, as the
-     * builders of these blocks use LinkedHashMap. Every other value — a
+     * directly. A map's keys come in the order JSON.stringify enumerates an
+     * object's own keys: array-index keys ascending first, then the rest in
+     * the map's iteration order (the builders of these blocks use
+     * LinkedHashMap). The daemon re-parses a body and stringifies it in that
+     * order, so a map built or read in any other order would digest
+     * differently on the two sides. Every other value — a
      * Jackson tree a caller read from a store column (the channel policy of
      * a `submit_input` body), a record, an enum — is the same request body
      * this encoder replaced fastjson2 for, so it renders as fastjson2
@@ -55,8 +60,7 @@ final class JsonSupport {
         } else if (value instanceof Map) {
             out.append('{');
             boolean first = true;
-            for (Map.Entry<String, ?> entry
-                    : ((Map<String, ?>) value).entrySet()) {
+            for (Map.Entry<?, ?> entry : ownKeyOrder((Map<?, ?>) value)) {
                 if (!first) {
                     out.append(',');
                 }
@@ -87,6 +91,50 @@ final class JsonSupport {
             writeCanonical(parseValue(JSON.toJSONString(value),
                     "JSON value of type " + value.getClass().getName()), out);
         }
+    }
+
+    /**
+     * A map's entries in ECMAScript's OrdinaryOwnPropertyKeys order, the
+     * order JSON.stringify writes an object's keys in: every array-index key
+     * ("0" through "4294967294", no leading zero) in ascending numeric order,
+     * then every other key in the map's own iteration order.
+     */
+    private static Iterable<? extends Map.Entry<?, ?>> ownKeyOrder(
+            Map<?, ?> map) {
+        List<Map.Entry<?, ?>> indexed = new ArrayList<>();
+        List<Map.Entry<?, ?>> named = new ArrayList<>();
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (arrayIndex(String.valueOf(entry.getKey())) < 0) {
+                named.add(entry);
+            } else {
+                indexed.add(entry);
+            }
+        }
+        if (indexed.isEmpty()) {
+            return map.entrySet();
+        }
+        indexed.sort(Comparator.comparingLong(
+                entry -> arrayIndex(String.valueOf(entry.getKey()))));
+        indexed.addAll(named);
+        return indexed;
+    }
+
+    /** The key's value as an ECMAScript array index, or -1 if it is none. */
+    private static long arrayIndex(String key) {
+        int length = key.length();
+        if (length == 0 || length > 10
+                || (length > 1 && key.charAt(0) == '0')) {
+            return -1;
+        }
+        long index = 0;
+        for (int i = 0; i < length; i++) {
+            char digit = key.charAt(i);
+            if (digit < '0' || digit > '9') {
+                return -1;
+            }
+            index = index * 10 + (digit - '0');
+        }
+        return index < 0xFFFF_FFFFL ? index : -1;
     }
 
     /** A JSON string with the escapes JSON.stringify performs. */
