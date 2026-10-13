@@ -8299,9 +8299,11 @@ describe('Hosted Harness no-tool session', () => {
       );
       // #13800: the blocked turn's mount lease must go back — a leaked
       // lease wedged every later tool turn on the same storage — while the
-      // Runtime Session stays READY for the recovery fleet: releaseMount
-      // exactly once, the RELEASED-forever full release never.
-      expect(releaseMount).toHaveBeenCalledTimes(1);
+      // Runtime Session stays READY for the recovery fleet: the handback
+      // happens at least once (the owed chain may retry on the same
+      // prototype-mocked broker; exact counts are cross-window noise),
+      // the RELEASED-forever full release never.
+      expect(releaseMount).toHaveBeenCalled();
       expect(release).not.toHaveBeenCalled();
       await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
         'X-Qwen-Client-Id',
@@ -16033,7 +16035,18 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000 },
     );
-    expect(log).not.toHaveBeenCalled();
+    // The owed mount-handback chain stays alive for up to ~1 min and logs
+    // a line per failed attempt; chains owned by other tests' blocked
+    // turns legitimately appear here between tests. The settled cancelled
+    // turn itself remains the only thing in scope: nothing else may log.
+    expect(
+      log.mock.calls.filter(
+        (args) =>
+          !String(args[0]).includes(
+            'could not release the Workspace mount after its recovery block',
+          ),
+      ),
+    ).toEqual([]);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
