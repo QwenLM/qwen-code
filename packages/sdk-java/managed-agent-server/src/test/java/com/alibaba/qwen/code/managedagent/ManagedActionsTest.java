@@ -18,12 +18,15 @@ import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ManagedActionService;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
@@ -46,6 +49,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.convention.TestBean;
@@ -76,6 +83,7 @@ import java.util.concurrent.atomic.AtomicInteger;
             "qwen.managed-agent.dispatch.scan-delay=50ms"
         })
 @AutoConfigureMockMvc
+@Import(ManagedActionsTest.Configuration.class)
 class ManagedActionsTest {
     @Autowired private MockMvc mvc;
     @Autowired private ObjectMapper json;
@@ -83,6 +91,7 @@ class ManagedActionsTest {
     @Autowired private ManagedSessionStore journals;
     @Autowired private ManagedActionStore actions;
     @Autowired private AgentStateStore sessions;
+    @Autowired private ManagedAgentStore store;
 
     @TestBean(methodName = "createHarness")
     private HarnessConnector harness;
@@ -104,6 +113,17 @@ class ManagedActionsTest {
         logged.stop();
     }
 
+    @TestConfiguration
+    static class Configuration {
+        @Bean @Primary
+        ManagedAgentStore actionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry,
+                Clock clock, com.alibaba.qwen.code.managedagent.store.CommittedEventPublisher publisher) {
+            var properties = new ManagedAgentProperties();
+            properties.getHarness().setWorkspaceFilesEnabled(true);
+            return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry, properties);
+        }
+    }
+
     private static final Map<String, Answer<Void>> responses = new ConcurrentHashMap<>();
 
     static HarnessConnector createHarness() {
@@ -123,7 +143,8 @@ class ManagedActionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"read_file", "write_file", "edit", "run_shell_command",
-            "team_create", "task_create", "task_update"})
+            "team_create", "task_create", "task_update", "workflow",
+            "request_shutdown"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
         String tenant = tenant();
         String session = session(tenant);
@@ -135,6 +156,8 @@ class ManagedActionsTest {
             case "team_create" -> "{ \"team_name\" : \"review\" }";
             case "task_create" -> "{ \"subject\" : \"Audit\", \"description\" : \"the diff\" }";
             case "task_update" -> "{ \"taskId\" : \"1\", \"status\" : \"in_progress\", \"owner\" : \"alice\" }";
+            case "workflow" -> "{ \"script\" : \"return 1;\" }";
+            case "request_shutdown" -> "{ \"to\" : \"alice\" }";
             default -> throw new AssertionError(tool);
         };
         String payload = " { \"toolName\" : \"" + tool + "\", \"input\" : " + arguments + " } ";
@@ -571,11 +594,30 @@ class ManagedActionsTest {
                 .andExpect(status().isBadRequest());
     }
 
-    @Test
-    void ownerResponseReplaysAcrossSurfacesAndUsesCommittedDecisionAfterLostAnswer()
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void ownerResponseReplaysAcrossSurfacesAndUsesCommittedDecisionAfterLostAnswer(boolean shell)
             throws Exception {
         String tenant = tenant();
         String session = session(tenant);
+        if (shell) {
+            assertThat(store.workspaceFilesEnabled()).isTrue();
+            assertThat(store.workspaceShellEnabled()).isFalse();
+            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+                    + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-actions', 1, 'storage', 'workspace', ?, ?, 'ACTIVE')",
+                    tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+            for (String actor : List.of("owner", "other")) {
+                jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, 'workspace-actions', ?, 'OPERATOR')", tenant, actor.getBytes(StandardCharsets.UTF_8));
+            }
+            jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = 'storage', workspace_id = 'workspace-actions',"
+                    + " workspace_generation = 1, cwd_relative = '.', context_config_ref = ?, context_revision = 1,"
+                    + " workspace_config_ref = ?, workspace_policy_ref = ?, tool_profile = 'hosted-workspace-shell/1', approval_mode = 'default'"
+                    + " WHERE tenant_id = ? AND session_id = ?", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                    WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF, tenant, session);
+            assertThat(store.requireSession(tenant, session).toolProfile()).isEqualTo("hosted-workspace-shell/1");
+            assertThat(store.requireSession(tenant, session).approvalMode()).isEqualTo("default");
+        }
         ActionJournal journal =
                 action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
         AtomicInteger delivered = new AtomicInteger();
@@ -623,6 +665,9 @@ class ManagedActionsTest {
                                 .validate("/components/schemas/PublicCommandOperation", result))
                 .isEmpty();
         assertThat(result.at("/action_resolution/outcome").asText()).isEqualTo("decided");
+        var decision = actions.find(tenant, session, journal.id).orElseThrow();
+        assertThat(decision.state()).isEqualTo("decided");
+        assertThat(decision.decisionReceiptId()).isEqualTo(result.at("/action_resolution/decision_receipt_id").asText());
         assertThat(result.at("/action_resolution/decision_receipt_id").asText())
                 .startsWith("decision_");
         JsonNode replay =
@@ -873,7 +918,10 @@ class ManagedActionsTest {
         CountDownLatch release = new CountDownLatch(1);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getDispatch().setLeaseDuration(Duration.ofMillis(300));
-        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(50));
+        // 400ms > leaseDuration/3, so the coordinator's clamp (min → 100ms)
+        // is what picks the period. Inverting the clamp (max → 400ms) starves
+        // the 300ms lease and the competing replica must win it.
+        properties.getDispatch().setLeaseRenewInterval(Duration.ofMillis(400));
         AtomicInteger calls = new AtomicInteger();
         ActionResponseCoordinator first = null;
         ActionResponseCoordinator sibling = null;

@@ -37,7 +37,7 @@ public class ManagedActionService {
     private static final Set<String> PREVIEW_TOOLS =
             Set.of("read_file", "write_file", "edit", "run_shell_command",
                     "agent", "send_message", "team_create", "task_create",
-                    "task_update");
+                    "task_update", "workflow", "request_shutdown");
     private final ManagedAgentService sessions;
     private final ManagedActionStore actions;
     private final ManagedExtensionRecordStore resources;
@@ -267,7 +267,7 @@ public class ManagedActionService {
         JsonNode options = action.options();
         String tool = options.path("toolName").asText();
         if (!"requested".equals(action.state())
-                || options.path("v").asLong() != 2
+                || !List.of(2L, 3L).contains(options.path("v").asLong())
                 || !PREVIEW_TOOLS.contains(tool)) {
             return null;
         }

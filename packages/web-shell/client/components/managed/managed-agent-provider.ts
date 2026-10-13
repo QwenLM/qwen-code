@@ -21,6 +21,7 @@ export type ManagedAgentRuntimeState =
 
 export interface ManagedAgentSessionSummary {
   sessionId: string;
+  agentId?: string;
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
@@ -40,6 +41,7 @@ export interface ManagedAgentSessionSummary {
     canSend: boolean;
     canCancel: boolean;
     actions?: boolean;
+    tasks?: boolean;
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
@@ -105,6 +107,13 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
 }
 
 export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
+export type ManagedTask = components['schemas']['WebShellTask'];
+export type ManagedTaskPage = components['schemas']['WebShellTaskPage'];
+export type ManagedTaskEvent = components['schemas']['WebShellTaskEvent'];
+export type ManagedTaskEventPage =
+  components['schemas']['WebShellTaskEventPage'];
+export type ManagedTaskCancelOperation =
+  components['schemas']['WebShellCommandOperation'] & { type: 'task_cancel' };
 
 /** A Hosted tool approval waiting for the Session owner's answer. */
 export interface ManagedAgentPendingAction {
@@ -139,6 +148,35 @@ export interface ManagedAgentProvider {
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  readonly tasks?: {
+    list(
+      sessionId: string,
+      options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
+    ): Promise<ManagedTaskPage>;
+    get(
+      sessionId: string,
+      taskId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedTask>;
+    listEvents(
+      sessionId: string,
+      taskId: string,
+      options: ManagedAgentRequestOptions & { after?: string; limit?: number },
+    ): Promise<ManagedTaskEventPage>;
+    readonly cancel?: {
+      submit(
+        sessionId: string,
+        taskId: string,
+        options: ManagedAgentCommandOptions,
+      ): Promise<ManagedTaskCancelOperation>;
+      query(
+        sessionId: string,
+        taskId: string,
+        operationId: string,
+        options: ManagedAgentRequestOptions,
+      ): Promise<ManagedTaskCancelOperation>;
+    };
+  };
   readonly cwdChange?: {
     submit(
       sessionId: string,
@@ -153,6 +191,8 @@ export interface ManagedAgentProvider {
   };
   readonly workspaceBinding?: {
     readonly agentId: string;
+    /** Host-published model-specific AgentDefinitions available for new Sessions. */
+    readonly modelPresets?: readonly { agentId: string; label: string }[];
     list(
       options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
     ): Promise<{
@@ -167,6 +207,15 @@ export interface ManagedAgentProvider {
     ): Promise<ManagedAgentWorkspace>;
     createEmpty(
       request: { agentId: string; workspaceId: string; cwdRelative: string },
+      options: ManagedAgentCommandOptions,
+    ): Promise<{ sessionId: string }>;
+    createSession?(
+      request: {
+        agentId: string;
+        workspaceId: string;
+        cwdRelative: string;
+        text: string;
+      },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
   };

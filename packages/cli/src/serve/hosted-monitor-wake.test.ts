@@ -31,6 +31,7 @@ import {
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 
 // monitor_run is enabled by the H3 enablement slice; the close-side settle
 // rig commits a notification input ahead of it, like the funnel suite does.
@@ -533,6 +534,7 @@ describe('createMonitorWakeRunTurn', () => {
     ['tool', () => new HostedToolRecoveryRequiredError(new Error('parked'))],
     ['mcp', () => new HostedMcpRecoveryRequiredError()],
     ['hook', () => new HostedHookRecoveryRequiredError()],
+    ['model preparation', () => new LlmRequestPreparationError('store lost')],
   ])(
     'leaves a %s recovery-required input unsettled rather than consuming it',
     async (_kind, makeCause) => {
@@ -1353,6 +1355,63 @@ describe('settlePendingMonitorInputs', () => {
           authority.eventsInSequenceRange(1, authority.committedSequence),
         ).map((input) => input.turnId),
       ).toEqual(['run-1:accept:notify']);
+      const settled = await settlePendingMonitorInputs({
+        authority,
+        sink: session.sink,
+        sessionId,
+        cwd: '/workspace',
+      });
+      expect(settled).toBe(1);
+      const settledEvents = authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled');
+      expect(settledEvents).toHaveLength(1);
+      expect(settledEvents[0].payload).toMatchObject({
+        turnId: 'run-1:accept:notify',
+        outcome: 'cancelled',
+        stopReason: 'session_closing',
+      });
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  // #13803 (K2): a workflow child's acceptance notification reads as a
+  // monitor-family source through the default sources list — the close drain
+  // never has to name it.
+  it('pins the fallback: a workflow child notification also settles through the default sources list (production never takes it, the close drain names its own capability list)', async () => {
+    const { session, lease } = await openRootedSession();
+    try {
+      const authority = session.authority;
+      const store = session.resources;
+      await authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'run-1:accept:notify',
+          sessionKey,
+          contentDigest: 'b'.repeat(64),
+        },
+        {
+          inputId: 'run-1:accept:notify',
+          turnId: 'run-1:accept:notify',
+          source: 'workflow',
+          contentRef: await store.publish(
+            'managed-input',
+            Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+          ),
+          deadline: null,
+          admissionRef: await store.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          wakeReason: 'input',
+        },
+      );
       const settled = await settlePendingMonitorInputs({
         authority,
         sink: session.sink,

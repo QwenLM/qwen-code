@@ -5,6 +5,7 @@ import type {
 import {
   useWorkspace,
   useWorkspaceActions,
+  type DaemonDirectoryListing,
   type DaemonFileStat,
   type DaemonWorkspaceActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -15,6 +16,7 @@ export type ArtifactWorkspaceActions = Pick<
   | 'readWorkspaceFile'
   | 'readFileBytes'
   | 'stat'
+  | 'listDirectory'
   | 'listScheduledTasks'
   | 'updateScheduledTask'
   | 'deleteScheduledTask'
@@ -143,6 +145,16 @@ export function useArtifactWorkspaceTarget(
       return current;
     };
     return {
+      async listDirectory(path) {
+        const current = requireOwner();
+        const result = await (current.id
+          ? (workspace.client
+              .workspaceByCwd(current.cwd)
+              .dirList(path) as Promise<DaemonDirectoryListing>)
+          : primaryActions.listDirectory(path));
+        requireOwner();
+        return result;
+      },
       async readWorkspaceFile(filePath, opts) {
         const current = requireOwner();
         const result = await (current.primary

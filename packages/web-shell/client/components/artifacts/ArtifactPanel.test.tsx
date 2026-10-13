@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, StrictMode } from 'react';
+import { act, StrictMode, useEffect } from 'react';
 import { Blob as NodeBlob } from 'node:buffer';
 import { createRoot, type Root } from 'react-dom/client';
 import { EditorView } from 'codemirror';
@@ -38,6 +38,7 @@ const {
     readWorkspaceFile: vi.fn(),
     readWorkspaceFileBytes: vi.fn(),
     fileStat: vi.fn(),
+    dirList: vi.fn(),
   };
   return {
     mockActions: {
@@ -48,6 +49,7 @@ const {
       readFileBytes: vi.fn(),
       readWorkspaceFile: vi.fn(),
       stat: vi.fn(),
+      listDirectory: vi.fn(),
       listScheduledTasks: vi.fn(),
       updateScheduledTask: vi.fn(),
       deleteScheduledTask: vi.fn(),
@@ -94,6 +96,70 @@ vi.mock(
   }),
 );
 
+const reloadPolicy = vi.hoisted(() => ({
+  standalone: true,
+  token: undefined as string | undefined,
+  survives: true,
+}));
+vi.mock('../../config/daemon-target', () => ({
+  useDaemonTargetOptional: () =>
+    reloadPolicy.standalone ? { activeToken: reloadPolicy.token } : undefined,
+}));
+vi.mock('../../config/daemon', async (original) => ({
+  ...(await original<typeof import('../../config/daemon')>()),
+  hasReloadSurvivableDaemonToken: () => reloadPolicy.survives,
+}));
+
+const fileBrowserProps = vi.hoisted(() => ({
+  loadError: undefined as Error | undefined,
+  sourceError: undefined as Error | undefined,
+  loadAttempts: 0,
+  previewPath: undefined as string | undefined,
+  current: undefined as
+    | { workspaceCwd: string; onReferenceFile?: (path: string) => void }
+    | undefined,
+}));
+
+vi.mock('./WorkspaceFileBrowser', () => {
+  const WorkspaceFileBrowser = (props: {
+    workspaceCwd: string;
+    onReferenceFile?: (path: string) => void;
+    actions: ArtifactWorkspaceTarget['actions'];
+    renderPreview: (
+      path: string,
+      source: boolean,
+      version: number,
+    ) => React.ReactNode;
+  }) => {
+    fileBrowserProps.current = props;
+    useEffect(() => {
+      void props.actions.listDirectory('.').catch(() => {});
+    }, [props.actions]);
+    return (
+      <div data-testid="workspace-file-browser" data-cwd={props.workspaceCwd}>
+        {fileBrowserProps.previewPath &&
+          props.renderPreview(fileBrowserProps.previewPath, true, 0)}
+      </div>
+    );
+  };
+  return {
+    get WorkspaceFileBrowser() {
+      fileBrowserProps.loadAttempts++;
+      if (fileBrowserProps.loadError) throw fileBrowserProps.loadError;
+      return WorkspaceFileBrowser;
+    },
+  };
+});
+
+vi.mock('./PierreFilePreview', () => ({
+  default: function MockFileSource() {
+    useEffect(() => {
+      if (fileBrowserProps.sourceError) throw fileBrowserProps.sourceError;
+    }, []);
+    return <div data-testid="recovered-file-source" />;
+  },
+}));
+
 vi.mock('../terminal/TerminalPanel', () => ({
   TerminalPanel: ({ terminalId }: { terminalId: string }) => (
     <div data-testid="terminal-panel" data-terminal-id={terminalId} />
@@ -123,8 +189,14 @@ const { useArtifactWorkspaceTarget } = await import(
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 let latestArtifactWorkspaceTarget: ArtifactWorkspaceTarget | undefined;
 
-function ArtifactWorkspaceTargetProbe({ revision }: { revision: number }) {
-  latestArtifactWorkspaceTarget = useArtifactWorkspaceTarget('/secondary');
+function ArtifactWorkspaceTargetProbe({
+  revision,
+  workspaceCwd = '/secondary',
+}: {
+  revision: number;
+  workspaceCwd?: string;
+}) {
+  latestArtifactWorkspaceTarget = useArtifactWorkspaceTarget(workspaceCwd);
   return <span data-revision={revision} />;
 }
 
@@ -346,6 +418,13 @@ function scheduledTaskPanel(
 }
 
 afterEach(() => {
+  reloadPolicy.standalone = true;
+  reloadPolicy.token = undefined;
+  reloadPolicy.survives = true;
+  fileBrowserProps.loadError = undefined;
+  fileBrowserProps.sourceError = undefined;
+  fileBrowserProps.previewPath = undefined;
+  fileBrowserProps.loadAttempts = 0;
   vi.unstubAllGlobals();
   sideTaskPanelProps.current = undefined;
   // The boundary matrix spies on DOMParser.prototype per row; restore it so
@@ -372,12 +451,14 @@ afterEach(() => {
   mockWorkspaceActions.readFileBytes.mockReset();
   mockWorkspaceActions.readWorkspaceFile.mockReset();
   mockWorkspaceActions.stat.mockReset();
+  mockWorkspaceActions.listDirectory.mockReset();
   mockWorkspaceActions.listScheduledTasks.mockReset();
   mockWorkspaceActions.updateScheduledTask.mockReset();
   mockWorkspaceActions.deleteScheduledTask.mockReset();
   mockSecondaryWorkspaceActions.readWorkspaceFile.mockReset();
   mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReset();
   mockSecondaryWorkspaceActions.fileStat.mockReset();
+  mockSecondaryWorkspaceActions.dirList.mockReset();
   mockWorkspace.client.workspaceByCwd.mockClear();
   mockWorkspace.capabilities.features = [];
   latestArtifactWorkspaceTarget = undefined;
@@ -567,6 +648,96 @@ describe('ArtifactPanel web previews', () => {
 });
 
 describe('artifact workspace authority', () => {
+  it.each(['/primary', '/secondary'])(
+    'lists directories through the advertised owner for %s',
+    async (cwd) => {
+      const listing = {
+        kind: 'list',
+        path: 'src',
+        entries: [],
+        truncated: false,
+      };
+      mockSecondaryWorkspaceActions.dirList.mockResolvedValue(listing);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd={cwd} />,
+        ),
+      );
+      await expect(
+        latestArtifactWorkspaceTarget?.actions.listDirectory('src'),
+      ).resolves.toEqual(listing);
+      expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(cwd);
+      expect(mockSecondaryWorkspaceActions.dirList).toHaveBeenCalledWith('src');
+      expect(mockWorkspaceActions.listDirectory).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the primary directory route only for legacy capabilities', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/primary',
+      features: [],
+    } as unknown as typeof mockWorkspace.capabilities;
+    const listing = { kind: 'list', path: '', entries: [], truncated: false };
+    mockWorkspaceActions.listDirectory.mockResolvedValue(listing);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <ArtifactWorkspaceTargetProbe revision={0} workspaceCwd="/primary" />,
+      ),
+    );
+    await expect(
+      latestArtifactWorkspaceTarget?.actions.listDirectory(''),
+    ).resolves.toEqual(listing);
+    expect(mockWorkspaceActions.listDirectory).toHaveBeenCalledWith('');
+    expect(mockWorkspace.client.workspaceByCwd).not.toHaveBeenCalled();
+  });
+
+  it('rejects a pending directory result and captured actions after owner replacement', async () => {
+    let resolveRead:
+      | ((value: {
+          kind: string;
+          path: string;
+          entries: [];
+          truncated: boolean;
+        }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.dirList.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const actions = latestArtifactWorkspaceTarget!.actions;
+    const read = actions.listDirectory('');
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: mockWorkspace.capabilities.workspaces.map((owner) =>
+        owner.cwd === '/secondary' ? { ...owner, id: 'replacement-id' } : owner,
+      ),
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+    resolveRead?.({ kind: 'list', path: '', entries: [], truncated: false });
+    await expect(read).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+    await expect(actions.listDirectory('secret')).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+    expect(mockSecondaryWorkspaceActions.dirList).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.listDirectory).not.toHaveBeenCalled();
+  });
+
   it('keeps an in-flight read across an equivalent capabilities refresh', async () => {
     let resolveRead:
       | ((file: { content: string; truncated: boolean }) => void)
@@ -1092,19 +1263,18 @@ describe('ArtifactPanel code review artifacts', () => {
             artifacts={[]}
             tabs={[
               {
-                id: 'attachment:report.xlsx',
+                id: 'attachment:report.xls',
                 kind: 'file',
-                title: 'report.xlsx',
-                workspacePath: 'report.xlsx',
+                title: 'report.xls',
+                workspacePath: 'report.xls',
                 previewData: new Blob(['PK'], {
-                  type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                  type: 'application/vnd.ms-excel',
                 }),
-                previewMimeType:
-                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                previewMimeType: 'application/vnd.ms-excel',
                 previewOnly: true,
               },
             ]}
-            activeTabId="attachment:report.xlsx"
+            activeTabId="attachment:report.xls"
             reviewChanges={[]}
             selectedReviewPath={null}
             onSelectTab={() => {}}
@@ -1146,20 +1316,19 @@ describe('ArtifactPanel code review artifacts', () => {
             artifacts={[]}
             tabs={[
               {
-                id: 'attachment:report.xlsx',
+                id: 'attachment:report.xls',
                 kind: 'file',
-                title: 'report.xlsx',
-                workspacePath: 'report.xlsx',
+                title: 'report.xls',
+                workspacePath: 'report.xls',
                 previewData: new Blob(['PK'], {
-                  type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                  type: 'application/vnd.ms-excel',
                 }),
-                previewMimeType:
-                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                previewMimeType: 'application/vnd.ms-excel',
                 previewOnly: true,
                 sourcePreview: true,
               },
             ]}
-            activeTabId="attachment:report.xlsx"
+            activeTabId="attachment:report.xls"
             reviewChanges={[]}
             selectedReviewPath={null}
             onSelectTab={() => {}}
@@ -1178,7 +1347,7 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.querySelector('.cm-content')).toBeNull();
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
     const download = container.querySelector<HTMLAnchorElement>(
-      'a[download="report.xlsx"]',
+      'a[download="report.xls"]',
     );
     expect(download?.href).toBe('blob:source-binary');
     act(() => root.render(null));
@@ -2192,6 +2361,496 @@ describe('ArtifactPanel add menu', () => {
     expect(sideTask?.disabled).toBe(true);
     act(() => sideTask?.click());
     expect(onCreateSideTask).not.toHaveBeenCalled();
+  });
+
+  it('exposes the opt-in files action on the empty page and add menu', () => {
+    const onOpenFiles = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderPanel = (tabs: ArtifactPanelTab[]) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={tabs}
+          activeTabId={tabs[0]?.id ?? null}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          items={['files']}
+          workspaceCwd="/primary"
+          onOpenFiles={onOpenFiles}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+    act(() => root.render(renderPanel([])));
+    const action = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Browse workspace files'),
+    );
+    expect(action).toBeDefined();
+    act(() => action?.click());
+    expect(onOpenFiles).toHaveBeenCalledTimes(1);
+    act(() =>
+      root.render(
+        renderPanel([
+          { id: 'terminal-one', kind: 'terminal', title: 'Terminal' },
+        ]),
+      ),
+    );
+    openAddMenu(container);
+    const menuItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Files');
+    expect(menuItem).toBeDefined();
+    act(() => menuItem?.click());
+    expect(onOpenFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it('hides Files in both entry points when the item is not opted in', () => {
+    const onOpenFiles = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderPanel = (tabs: ArtifactPanelTab[]) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={tabs}
+          activeTabId={tabs[0]?.id ?? null}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          items={['review']}
+          workspaceCwd="/primary"
+          onOpenFiles={onOpenFiles}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+    act(() => root.render(renderPanel([])));
+    expect(container.textContent).not.toContain('Browse workspace files');
+    act(() =>
+      root.render(
+        renderPanel([
+          { id: 'terminal:test', kind: 'terminal', title: 'Terminal' },
+        ]),
+      ),
+    );
+    openAddMenu(container);
+    expect(
+      Array.from(document.body.querySelectorAll('[role="menuitem"]')).some(
+        (item) => item.textContent === 'Files',
+      ),
+    ).toBe(false);
+  });
+
+  it.each(['browser import', 'source initialization'] as const)(
+    'contains a failed %s inside the files pane and offers recovery',
+    async (failure) => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      if (failure === 'browser import') {
+        fileBrowserProps.loadError = new Error('File tree chunk unavailable');
+      } else {
+        fileBrowserProps.previewPath = 'app.ts';
+        fileBrowserProps.sourceError = new Error('File renderer unavailable');
+        mockWorkspaceActions.stat.mockResolvedValue({
+          type: 'file',
+          sizeBytes: 16,
+          modifiedMs: 1,
+        });
+        mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+          content: 'const value = 1;',
+          truncated: false,
+        });
+      }
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <ArtifactPanel
+              artifacts={[]}
+              tabs={[
+                {
+                  id: 'files:primary',
+                  kind: 'files',
+                  title: 'Files',
+                  workspaceCwd: '/primary',
+                  workspaceId: 'primary-id',
+                },
+              ]}
+              activeTabId="files:primary"
+              reviewChanges={[]}
+              selectedReviewPath={null}
+              workspaceCwd="/primary"
+              onSelectTab={() => {}}
+              onCloseTab={() => {}}
+              onOpenFilePreview={() => {}}
+              onClose={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      await vi.waitFor(() =>
+        expect(container.querySelector('[role="alert"]')).not.toBeNull(),
+      );
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('button[aria-label="Close Files"]'),
+      ).not.toBeNull();
+      const browser = container.querySelector(
+        '[data-testid="workspace-file-browser"]',
+      );
+      if (failure === 'browser import') {
+        expect(container.textContent).toContain('Reload page');
+        expect(container.textContent).not.toContain('Try again');
+        expect(fileBrowserProps.loadAttempts).toBeGreaterThan(0);
+        return;
+      }
+      fileBrowserProps.loadError = undefined;
+      fileBrowserProps.sourceError = undefined;
+      const retry = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Try again',
+      )!;
+      await act(async () => retry.click());
+      await vi.waitFor(() =>
+        expect(container.querySelector('[role="alert"]')).toBeNull(),
+      );
+      expect(
+        container.querySelector('[data-testid="workspace-file-browser"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="recovered-file-source"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="workspace-file-browser"]'),
+      ).toBe(browser);
+    },
+  );
+
+  it.each(['embedded', 'memory-token'] as const)(
+    'does not reload the host for an import failure (%s)',
+    async (mode) => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      reloadPolicy.standalone = mode !== 'embedded';
+      reloadPolicy.token = 'test-memory-only';
+      reloadPolicy.survives = false;
+      fileBrowserProps.loadError = new Error('Chunk unavailable');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <ArtifactPanel
+              artifacts={[]}
+              tabs={[
+                {
+                  id: 'files:primary',
+                  kind: 'files',
+                  title: 'Files',
+                  workspaceCwd: '/primary',
+                  workspaceId: 'primary-id',
+                },
+              ]}
+              activeTabId="files:primary"
+              reviewChanges={[]}
+              selectedReviewPath={null}
+              workspaceCwd="/primary"
+              onSelectTab={() => {}}
+              onCloseTab={() => {}}
+              onOpenFilePreview={() => {}}
+              onClose={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      await vi.waitFor(() =>
+        expect(container.querySelector('[role="alert"]')).not.toBeNull(),
+      );
+      expect(container.textContent).toContain(
+        'Reloading could lose your connection',
+      );
+      expect(container.textContent).not.toContain('Reload page');
+      expect(container.textContent).not.toContain('Try again');
+    },
+  );
+
+  it('refuses oversized source files before reading any content bytes', async () => {
+    fileBrowserProps.previewPath = 'huge.log';
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: 90 * 1024 * 1024,
+      modifiedMs: 1,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    await act(async () =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'files:primary',
+                kind: 'files',
+                title: 'Files',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="files:primary"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            workspaceCwd="/primary"
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('4 MiB source preview limit'),
+    );
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+  });
+
+  it('retains files panes across tab switches and revokes a hidden workspace owner', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const files: ArtifactPanelTab = {
+      id: 'files:secondary',
+      kind: 'files',
+      title: 'Files',
+      workspaceCwd: '/secondary',
+      workspaceId: 'secondary-id',
+    };
+    const terminal: ArtifactPanelTab = {
+      id: 'terminal',
+      kind: 'terminal',
+      title: 'Terminal',
+    };
+    const renderPanel = (activeTabId: string, tabs = [files, terminal]) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={tabs}
+          activeTabId={activeTabId}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          workspaceCwd="/primary"
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+    await act(async () => root.render(renderPanel(files.id)));
+    const browser = container.querySelector(
+      '[data-testid="workspace-file-browser"]',
+    );
+    expect(browser).not.toBeNull();
+    expect(browser?.getAttribute('data-cwd')).toBe('/secondary');
+    act(() => root.render(renderPanel(terminal.id)));
+    expect(
+      container.querySelector('[data-testid="workspace-file-browser"]'),
+    ).toBe(browser);
+    expect(browser?.closest('[hidden]')).not.toBeNull();
+    act(() => root.render(renderPanel(files.id)));
+    expect(
+      container.querySelector('[data-testid="workspace-file-browser"]'),
+    ).toBe(browser);
+    expect(browser?.closest('[hidden]')).toBeNull();
+    act(() => root.render(renderPanel(terminal.id)));
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: mockWorkspace.capabilities.workspaces.map((owner) =>
+        owner.id === 'secondary-id' ? { ...owner, trusted: false } : owner,
+      ),
+    };
+    act(() => root.render(renderPanel(terminal.id)));
+    expect(
+      container.querySelector('[data-testid="workspace-file-browser"]'),
+    ).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'removed',
+    );
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: mockWorkspace.capabilities.workspaces.map((owner) =>
+        owner.id === 'secondary-id' ? { ...owner, trusted: true } : owner,
+      ),
+    };
+    await act(async () => root.render(renderPanel(files.id)));
+    expect(
+      container.querySelector('[data-testid="workspace-file-browser"]'),
+    ).not.toBeNull();
+    const restored = container.querySelector(
+      '[data-testid="workspace-file-browser"]',
+    );
+    expect(restored).not.toBe(browser);
+    expect(restored?.getAttribute('data-cwd')).toBe('/secondary');
+    act(() => root.render(renderPanel(terminal.id, [terminal])));
+    expect(
+      container.querySelector('[data-testid="workspace-file-browser"]'),
+    ).toBeNull();
+  });
+
+  it.each([undefined, 'old-owner'])(
+    'allows reopening files when a persisted owner is stale (%s)',
+    async (workspaceId) => {
+      const onOpenFiles = vi.fn();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <ArtifactPanel
+              artifacts={[]}
+              tabs={[
+                {
+                  id: 'files:old',
+                  kind: 'files',
+                  title: 'Files',
+                  workspaceCwd: '/primary',
+                  workspaceId,
+                },
+              ]}
+              activeTabId="files:old"
+              workspaceCwd="/primary"
+              reviewChanges={[]}
+              selectedReviewPath={null}
+              items={['files']}
+              onOpenFiles={onOpenFiles}
+              onSelectTab={() => {}}
+              onCloseTab={() => {}}
+              onOpenFilePreview={() => {}}
+              onClose={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      expect(
+        container.querySelector('[data-testid="workspace-file-browser"]'),
+      ).toBeNull();
+      openAddMenu(container);
+      const item = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent === 'Files');
+      expect(item).toBeDefined();
+      act(() => item?.click());
+      expect(onOpenFiles).toHaveBeenCalledOnce();
+      expect(mockSecondaryWorkspaceActions.dirList).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['/primary', '/secondary'])(
+    'only exposes file references for the active workspace (%s)',
+    async (workspaceCwd) => {
+      const onReferenceFile = vi.fn();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      fileBrowserProps.current = undefined;
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <ArtifactPanel
+              artifacts={[]}
+              tabs={[
+                {
+                  id: 'files:secondary',
+                  kind: 'files',
+                  title: 'Files',
+                  workspaceCwd: '/secondary',
+                  workspaceId: 'secondary-id',
+                },
+              ]}
+              activeTabId="files:secondary"
+              workspaceCwd={workspaceCwd}
+              reviewChanges={[]}
+              selectedReviewPath={null}
+              items={['files']}
+              onReferenceFile={onReferenceFile}
+              onSelectTab={() => {}}
+              onCloseTab={() => {}}
+              onOpenFilePreview={() => {}}
+              onClose={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      expect(fileBrowserProps.current).toBeDefined();
+      if (workspaceCwd === '/secondary') {
+        fileBrowserProps.current?.onReferenceFile?.('src/app.ts');
+        expect(onReferenceFile).toHaveBeenCalledWith('src/app.ts');
+      } else {
+        expect(fileBrowserProps.current?.onReferenceFile).toBeUndefined();
+      }
+    },
+  );
+
+  it('rejects a restored files tab with a different workspace ID before mounting the tree', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'files:old-owner',
+                kind: 'files',
+                title: 'Files',
+                workspaceCwd: '/primary',
+                workspaceId: 'old-owner',
+              },
+            ]}
+            activeTabId="files:old-owner"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            items={['files']}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'removed',
+    );
+    expect(mockSecondaryWorkspaceActions.dirList).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="workspace-file-browser"]'),
+    ).toBeNull();
   });
 
   it('opens the latest review from the empty page', () => {
@@ -3839,7 +4498,7 @@ describe('ArtifactPanel workspace artifact previews', () => {
           source: 'tool',
           status: 'available',
           title: 'Q3 workbook',
-          workspacePath: 'reports/q3.xlsx',
+          workspacePath: 'reports/q3.xls',
           retention: 'ephemeral',
           clientRetained: false,
           createdAt: '2026-08-18T00:00:00.000Z',
@@ -3885,6 +4544,9 @@ describe('ArtifactPanel workspace artifact previews', () => {
     );
     expect(download).toBeTruthy();
     expect(download).toHaveProperty('disabled', true);
+    expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('does not read workspace bytes when stat says the path is a directory', async () => {

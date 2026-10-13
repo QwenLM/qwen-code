@@ -929,6 +929,7 @@ describe('migration profile evidence', () => {
     { toolProfile: 'hosted-workspace-files/2' },
     { toolProfile: 'hosted-workspace-shell/1' },
     { toolProfile: 'hosted-workspace-shell/2' },
+    { toolProfile: 'hosted-workspace-team-lead/1' },
     { toolProfile: 'hosted-workspace-files/1', hookCatalog: {} },
     { toolProfile: 'hosted-workspace-files/1', captureBytes: 1024 },
   ])('rejects unsupported frozen definition %j', async (definition) => {
@@ -972,6 +973,56 @@ describe('verifyRecoverySession', () => {
     await expect(
       verifyRecoverySession(corrupt.source, corrupt.io),
     ).rejects.toThrow('resource bytes conflict');
+  });
+
+  it('refuses agent instructions over the 64 KiB cap with a self-consistent digest', async () => {
+    const bytes = Buffer.alloc(64 * 1024 + 1, 0x20);
+    const instructionsRef: ManagedSessionDurableRef = {
+      resourceId: 'agent-instructions',
+      kind: 'managed-agent-instructions',
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: hash(bytes),
+    };
+    const definition = {
+      toolProfile: 'hosted-workspace-files/1',
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        instructionsRef,
+      },
+    };
+    const f = fixture(definition);
+    f.resources.set(instructionsRef.resourceId, bytes);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'agent instructions exceed 64 KiB',
+    );
+  });
+
+  it('refuses agent instructions bytes that are not valid UTF-8 with a self-consistent digest', async () => {
+    const bytes = Buffer.from([0xff, 0xfe, 0xfd]);
+    const instructionsRef: ManagedSessionDurableRef = {
+      resourceId: 'agent-instructions',
+      kind: 'managed-agent-instructions',
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: hash(bytes),
+    };
+    const definition = {
+      toolProfile: 'hosted-workspace-files/1',
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        instructionsRef,
+      },
+    };
+    const f = fixture(definition);
+    f.resources.set(instructionsRef.resourceId, bytes);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'The encoded data was not valid for encoding utf-8',
+    );
   });
 
   it.each([
@@ -1604,6 +1655,7 @@ describe('verifyRecoverySession', () => {
     { toolProfile: 'hosted-workspace-files/2' },
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-team-lead/1', captureBytes: 1024 },
   ])('recovers every saved Workspace profile (%j)', async (definition) => {
     // One refused profile would abort recovery for the whole Workspace,
     // so recovery reads the same profile vocabulary creation persists.
