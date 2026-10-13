@@ -145,7 +145,10 @@ export interface HostedFileHistorySettlement {
  */
 export async function canSettleHostedFileHistory(
   session: ManagedSession,
-  record: HostedFileHistoryRecord,
+  record: Pick<
+    HostedFileHistoryRecord,
+    'pendingTurn' | 'pendingUndo' | 'pendingMessageId'
+  >,
 ): Promise<HostedFileHistorySettlement | null> {
   if (record.pendingUndo) return { blocker: 'undo_pending' };
   if (!record.pendingTurn) return { blocker: 'no_pending_turn' };

@@ -141,6 +141,7 @@ const domainEnablement = vi.hoisted(() => ({
   childRun: true,
   monitorRun: true,
   teams: false,
+  teamPlan: false,
 }));
 
 vi.mock(
@@ -162,6 +163,7 @@ vi.mock(
             'domain monitor_run is registered but not enabled for submission.',
           );
         }
+        if (domain === 'team_plan' && domainEnablement.teamPlan) return;
         actual.assertManagedSessionDomainEnabled(domain);
       },
       // H4b: record commits gate per kind, beside the admission mock. The
@@ -7704,8 +7706,9 @@ describe('Hosted Harness no-tool session', () => {
 
   // H4e-b1: the reopen verifier admits the lead's team roster and board, so
   // a Session that led a team reopens with its own committed history.
-  it('reopens a Session whose journal carries its team and board', async () => {
+  it('reopens a Session whose journal carries its team, board and plan with the plan gate off', async () => {
     domainEnablement.childRun = true;
+    domainEnablement.teamPlan = true;
     try {
       const key = {
         tenantId: 'tenant',
@@ -7775,11 +7778,22 @@ describe('Hosted Harness no-tool session', () => {
           workingDirectory: '.',
           executionCallId: 'run-1',
         });
-        await teams.join({ ...member, childRunId: 'run-1' });
+        await teams.join({
+          ...member,
+          childRunId: 'run-1',
+          planModeRequired: true,
+        });
+        await children.dispatchStarted('run-1', {
+          dispatchId: 'plan-dispatch',
+          runtime: { runtimeBindingId: 'plan-binding', generation: '1' },
+        });
+        await children.attach('run-1', CHILD_SESSION_ID);
+        await teams.submitPlan('cmd_reopen_plan', 'run-1', 'Read then edit');
+        domainEnablement.teamPlan = false;
         await children.settleFailed('run-1', {
-          stopReason: 'creation_failed',
+          stopReason: 'child_failed',
           reason: null,
-          started: false,
+          started: true,
         });
         await teams.run(
           'task_create',
@@ -7804,7 +7818,12 @@ describe('Hosted Harness no-tool session', () => {
           .filter((event) => event.kind === 'domain.committed')
           .map((event) => event.payload['domain']),
       ).toEqual(
-        expect.arrayContaining(['team_state', 'team_task', 'child_run']),
+        expect.arrayContaining([
+          'team_state',
+          'team_task',
+          'team_plan',
+          'child_run',
+        ]),
       );
       expect(
         (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
@@ -7812,6 +7831,7 @@ describe('Hosted Harness no-tool session', () => {
       ).toBe(204);
     } finally {
       domainEnablement.childRun = true;
+      domainEnablement.teamPlan = false;
     }
   });
 
