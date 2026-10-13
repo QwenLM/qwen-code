@@ -19,6 +19,12 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 import { TrajectoryPanel } from './TrajectoryPanel';
+import { createTrajectoryPageLoader } from '../../trajectory/transcriptPageLoader';
+import { TrajectoryLiveContext } from '../../trajectory/trajectory-live-context';
+import {
+  createTrajectoryLiveStore,
+  type TrajectoryLiveStore,
+} from '../../trajectory/trajectory-live-store';
 import styles from './TrajectoryPanel.module.css';
 import type {
   TrajectoryPageLoader,
@@ -130,6 +136,8 @@ afterEach(() => {
 
 async function render(
   loadPage: TrajectoryPageLoader | undefined,
+  liveStore: TrajectoryLiveStore | null = null,
+  historyGapRevision = 0,
 ): Promise<HTMLElement> {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -138,7 +146,12 @@ async function render(
   await act(async () => {
     root.render(
       <I18nProvider language="en">
-        <TrajectoryPanel loadPage={loadPage} />
+        <TrajectoryLiveContext.Provider value={liveStore}>
+          <TrajectoryPanel
+            loadPage={loadPage}
+            historyGapRevision={historyGapRevision}
+          />
+        </TrajectoryLiveContext.Provider>
       </I18nProvider>,
     );
   });
@@ -218,6 +231,134 @@ const metricsOf = (container: HTMLElement) =>
   ).map((node) => node.textContent ?? '');
 
 describe('TrajectoryPanel', () => {
+  it('discloses incomplete lifecycle details separately from page truncation', async () => {
+    const store = createTrajectoryLiveStore();
+    store.begin(
+      {},
+      { sessionId: 's', scope: 'scope', events: [], incomplete: true },
+    );
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage: async () => page(REAL_EVENTS) },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).toContain(
+      'Lifecycle details may be incomplete or outside the retained limit.',
+    );
+  });
+
+  it('shows the matched live request lifecycle in recorded details', async () => {
+    const lifecycle = {
+      v: 1,
+      kind: 'request',
+      phase: 'ended',
+      executionId: 'exec-matched',
+      sessionId: 's',
+      promptId: 'p',
+      model: 'model',
+      startedAt: 10,
+      endedAt: 20,
+      durationMs: 10,
+      outcome: 'success',
+    };
+    const store = createTrajectoryLiveStore();
+    store.begin(
+      {},
+      {
+        sessionId: 's',
+        scope: 'scope',
+        incomplete: false,
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: { executionLifecycle: lifecycle },
+            },
+          },
+        ],
+      },
+    );
+    const loader = createTrajectoryPageLoader(
+      {
+        getSessionTranscriptPage: async () =>
+          page([
+            timingFrame(
+              {
+                kind: 'request',
+                executionId: 'exec-matched',
+                promptId: 'p',
+                model: 'model',
+                startedAt: 10,
+                durationMs: 10,
+                status: 'ok',
+              },
+              'record',
+            ),
+          ]),
+      },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    act(() =>
+      container
+        .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
+        .click(),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-selected"] + button',
+        )!
+        .click(),
+    );
+    const details = container.querySelector(
+      '[data-testid="trajectory-inspector"] pre',
+    );
+    expect(details?.textContent).toContain('"executionId": "exec-matched"');
+    expect(details?.textContent).toContain('"outcome": "success"');
+  });
+
+  it('keeps the gap warning after failed refresh until a successful refresh', async () => {
+    let failLatest = false;
+    const loader = vi.fn(async ({ cursor }: { cursor?: string }) => {
+      if (!cursor && failLatest) throw new Error('offline');
+      const index = Number(cursor ?? 0);
+      return page([userText(`page-${index}`, `record-${index}`)], {
+        hasMore: index < 7,
+        nextCursor: String(index + 1),
+      });
+    });
+    const container = await render(loader, null, 1);
+    failLatest = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).toContain('History may have changed while disconnected');
+    failLatest = false;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(loader).toHaveBeenCalledTimes(9);
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).not.toContain('History may have changed while disconnected');
+  });
+
   it('opens record details and invalidates them when a refreshed window reuses the key', async () => {
     let textValue = 'first payload';
     let failRefresh = false;
@@ -574,9 +715,9 @@ describe('TrajectoryPanel', () => {
   it('renders an empty session without a grid', async () => {
     const container = await render(async () => page([]));
 
-    expect(text(container.querySelector('[role="status"]'))).toContain(
-      'No records',
-    );
+    expect(
+      text(container.querySelector(`.${styles.placeholder}[role="status"]`)),
+    ).toContain('No records');
     expect(container.querySelector('[role="grid"]')).toBeNull();
   });
 
@@ -1177,16 +1318,16 @@ describe('TrajectoryPanel', () => {
     expect(container.textContent).not.toContain('shell_output');
   });
 
-  it('says the page left history out, outside the scrolled rows', async () => {
+  it('explains a missing history cursor outside the scrolled rows', async () => {
     const container = await render(async () =>
       page(REAL_EVENTS, { hasMore: true }),
     );
     const scroll = container.querySelector('[role="grid"]') as HTMLElement;
     const notice = container.querySelector(
-      '[data-testid="trajectory-truncated"]',
+      '[data-testid="trajectory-older-failed"]',
     );
 
-    expect(text(notice)).toContain('most recent records');
+    expect(text(notice)).toContain('page cursor did not advance');
     // Inside the scrolled box its height would offset every virtual row from
     // the coordinates the virtualizer hands out.
     expect(scroll.contains(notice)).toBe(false);
@@ -1319,16 +1460,16 @@ describe('TrajectoryPanel', () => {
     });
 
     it('does not start a second walk while one is under way', async () => {
-      let releaseNewest: ((value: TrajectoryPageResult) => void) | undefined;
+      let releaseOlder: ((value: TrajectoryPageResult) => void) | undefined;
       let reads = 0;
       const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
         reads += 1;
-        if (cursor) throw new Error('down');
-        if (reads === 1) {
+        if (cursor && reads === 2) throw new Error('down');
+        if (!cursor) {
           return page(prompts('newer', 1), { hasMore: true, nextCursor: 'c1' });
         }
         return new Promise<TrajectoryPageResult>((resolve) => {
-          releaseNewest = resolve;
+          releaseOlder = resolve;
         });
       });
       const container = await render(loadPage);
@@ -1349,7 +1490,7 @@ describe('TrajectoryPanel', () => {
       expect(loadPage.mock.calls.length).toBe(during);
 
       await act(async () => {
-        releaseNewest?.(page(prompts('newer', 1)));
+        releaseOlder?.(page(prompts('newer', 1)));
       });
     });
   });
@@ -2137,3 +2278,51 @@ it('retains filters when overview reveals a context request hidden only by a col
     ),
   ).not.toBeNull();
 });
+
+it.each([false, true])(
+  'retries the failed cursor when the initial prefix has no visible rows (filtered=%s)',
+  async (filtered) => {
+    let olderFails = true;
+    const loadPage = vi.fn(async ({ cursor }: { cursor?: string }) => {
+      if (!cursor) {
+        return page(filtered ? REAL_EVENTS : [], {
+          hasMore: true,
+          nextCursor: 'c1',
+        });
+      }
+      if (olderFails) throw new Error('socket hang up');
+      return page([userText('Recovered older row', 'recovered-row')]);
+    });
+    const container = await render(loadPage);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    if (filtered) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(input, 'no-such-trajectory-text');
+        input!.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }
+    expect(container.querySelector('[role="grid"]')).toBeNull();
+    const retry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-older-retry"]',
+    )!;
+    expect(retry).not.toBeNull();
+    expect(retry.getAttribute('aria-disabled')).toBe('false');
+    olderFails = false;
+    await act(async () => retry.click());
+    expect(loadPage.mock.calls.map(([request]) => request.cursor)).toEqual([
+      undefined,
+      'c1',
+      'c1',
+    ]);
+    expect(
+      container.querySelector('[data-testid="trajectory-older-retry"]'),
+    ).toBeNull();
+    if (filtered) expect(input!.value).toBe('no-such-trajectory-text');
+    else expect(container.querySelector('[role="grid"]')).not.toBeNull();
+  },
+);

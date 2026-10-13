@@ -162,7 +162,6 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
-  DAEMON_AGENT_RUN_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
@@ -180,6 +179,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_SEND_NOW_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
@@ -7755,6 +7755,8 @@ export function createSessionControlPlane(
     BridgeRestoredSession,
     | 'compactedReplay'
     | 'liveJournal'
+    | 'lifecycleReplay'
+    | 'lifecycleReplayIncomplete'
     | 'lastEventId'
     | 'eventEpoch'
     | 'replayDegraded'
@@ -8011,9 +8013,56 @@ export function createSessionControlPlane(
               compactedReplay = [...page.events, turnErrorEvent];
             }
           }
+          const lifecycleSnapshot = entry.events.snapshotReplay();
+          const lifecycleReplay: BridgeEvent[] = [];
+          let lifecycleReplayIncomplete =
+            lifecycleSnapshot === undefined ||
+            lifecycleSnapshot.degraded === true;
+          if (lifecycleSnapshot) {
+            for (const event of [
+              ...lifecycleSnapshot.compactedTurns,
+              ...lifecycleSnapshot.liveJournal,
+            ]) {
+              if (event.type === 'history_truncated')
+                lifecycleReplayIncomplete = true;
+              if (event.type !== 'session_update' || !isRecord(event.data))
+                continue;
+              const update = isRecord(event.data['update'])
+                ? event.data['update']
+                : event.data;
+              const meta = update['_meta'];
+              if (!isRecord(meta)) continue;
+              if (
+                !isRecord(meta['executionLifecycle']) &&
+                !isRecord(meta['toolLifecycle'])
+              )
+                continue;
+              lifecycleReplay.push({
+                v: 1,
+                type: 'session_update',
+                ...(event.id !== undefined ? { id: event.id } : {}),
+                data: {
+                  _meta: {
+                    ...(isRecord(meta['executionLifecycle'])
+                      ? { executionLifecycle: meta['executionLifecycle'] }
+                      : {}),
+                    ...(isRecord(meta['toolLifecycle'])
+                      ? { toolLifecycle: meta['toolLifecycle'] }
+                      : {}),
+                  },
+                },
+              });
+            }
+          }
+          if (lifecycleReplay.length > 1024) {
+            lifecycleReplay.splice(0, lifecycleReplay.length - 1024);
+            lifecycleReplayIncomplete = true;
+          }
           return {
             compactedReplay,
             liveJournal: [],
+            lifecycleReplay,
+            lifecycleReplayIncomplete,
             lastEventId,
             eventEpoch,
             ...(page.partial === true ? { partial: true as const } : {}),
@@ -9246,9 +9295,25 @@ export function createSessionControlPlane(
             workspaceAccess: 'metadata-only',
           })),
         );
-        const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
+      } else {
+        artifactRestoreWarnings.push(
+          ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
+        );
+      }
+      const legacyOnlyDrop = entry.artifacts.consumeLegacyOnlyRestore();
+      for (const warning of artifactRestoreWarnings) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
+      const artifactRestoreFailed =
+        legacyOnlyDrop ||
+        artifactRestoreWarnings.some((warning) =>
           isArtifactRestoreFailureWarning(warning),
         );
+      if (deferArtifactWorkspace) {
         entry.pendingArtifactRestore = {
           ...(restoredArtifactSnapshot !== undefined
             ? { snapshot: restoredArtifactSnapshot }
@@ -9259,21 +9324,7 @@ export function createSessionControlPlane(
               : [],
           warnings: artifactRestoreWarnings,
         };
-      } else {
-        artifactRestoreWarnings.push(
-          ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
-        );
       }
-      for (const warning of artifactRestoreWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
-            warning,
-          )}`,
-        );
-      }
-      const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
-        isArtifactRestoreFailureWarning(warning),
-      );
       if (replayUpdates.length > 0) {
         await ci.client.seedSessionUpdates(entry, replayUpdates, {
           ingestArtifacts:
@@ -11330,11 +11381,6 @@ export function createSessionControlPlane(
                   delete meta[DAEMON_CONTINUE_META_KEY];
                   delete meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
-                  // Stripped from every caller for the same reason as the
-                  // delivery above: an agent's thread tools act on whatever
-                  // this names, so a caller that could set it could make one
-                  // agent post under another's name.
-                  delete meta[DAEMON_AGENT_RUN_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[SUBMITTED_PROMPT_META_KEY];
                   delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
@@ -11376,9 +11422,6 @@ export function createSessionControlPlane(
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
-                  }
-                  if (context?.agentRun) {
-                    meta[DAEMON_AGENT_RUN_META_KEY] = context.agentRun;
                   }
                   if (promptDisplayText !== undefined) {
                     meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] =
@@ -14934,9 +14977,6 @@ export function createSessionControlPlane(
         eventDetailMode,
         messageId,
         text: trimmed,
-        ...(options?.queueOnly && !originatorClientId && context?.agentRun
-          ? { agentRun: context.agentRun }
-          : {}),
         ...(mediaBlocks.length > 0 ? { content: mediaBlocks } : {}),
         originatorClientId,
         ...(options?.queueOnly
@@ -14968,6 +15008,27 @@ export function createSessionControlPlane(
         }
       }
       return { accepted: true, messageId };
+    },
+
+    sendMidTurnMessagesNow(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      // Only the user's own messages ask for this; queue-only steering keeps
+      // its tool-boundary delivery unless user input travels with it.
+      if (!entry.midTurnMessageQueue.some((message) => !message.queueOnly)) {
+        return { requested: false };
+      }
+      // Best-effort: an agent without the method still drains the queue at its
+      // next tool boundary.
+      void entry.connection
+        .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
+        .catch((error: unknown) => {
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
+          );
+        });
+      return { requested: true };
     },
 
     removeMidTurnMessage(sessionId, messageId, context) {
@@ -15559,9 +15620,9 @@ export function createSessionControlPlane(
                   preserveLiveEphemeral: true,
                 })
               : [];
-        const artifactRestoreFailed = artifactRestoreWarnings.some(
-          isArtifactRestoreFailureWarning,
-        );
+        const artifactRestoreFailed =
+          entry.artifacts.consumeLegacyOnlyRestore() ||
+          artifactRestoreWarnings.some(isArtifactRestoreFailureWarning);
         const shouldRecordArtifactSnapshot =
           shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
         const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
