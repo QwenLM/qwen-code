@@ -1,4 +1,8 @@
 import {
+  FILES_MESSAGES_EN,
+  FILES_MESSAGES_ZH,
+} from './components/artifacts/files-messages.js';
+import {
   createContext,
   useContext,
   useMemo,
@@ -15,6 +19,7 @@ import {
   TRAJECTORY_WINDOW_MESSAGES_ZH,
 } from './trajectory/window-messages.js';
 
+import { VOICE_MESSAGES_EN, VOICE_MESSAGES_ZH } from './voice/messages.js';
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
   COLLAB_MESSAGES_EN,
@@ -24,6 +29,11 @@ import {
   SETTINGS_MESSAGES_EN,
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
+
+import {
+  MANAGED_TASK_MESSAGES_EN,
+  MANAGED_TASK_MESSAGES_ZH,
+} from './components/managed/managed-task-messages.js';
 
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
@@ -188,8 +198,39 @@ const EN: Messages = {
   'managed.phase.created': 'Created',
   'managed.workspaceCreateTitle': 'Create a Workspace session',
   'managed.workspaceLabel': 'Workspace',
+  'managed.modelPreset': 'Model / Agent preset',
+  'managed.modelDefault': 'Server default model',
+  'managed.modelPinned':
+    'This model is fixed for the new session. Start a new session to use another model or Workspace.',
   'managed.workspaceChoose': 'Choose a Workspace',
   'managed.workspaceDirectory': 'Relative directory',
+  'managed.cwd.change': 'Change directory',
+  'managed.cwd.path': 'Directory relative to Workspace root',
+  'managed.cwd.description':
+    'Enter a path relative to the Workspace root. Use . for the root. Future tasks run in the new directory; conversation history is kept.',
+  'managed.cwd.close': 'Close',
+  'managed.cwd.changing': 'Changing directory…',
+  'managed.cwd.confirm': 'Continue confirming',
+  'managed.cwd.unconfirmed':
+    'The directory change is not confirmed yet. Continue confirming the original request.',
+  'managed.cwd.unconfirmedForbidden':
+    'Your account cannot confirm this change. Its result remains unconfirmed, and sending stays blocked until the server settles it or you open a new tab.',
+  'managed.cwd.busy':
+    'Finish the active task, approval or unconfirmed request before changing directory.',
+  'managed.cwd.invalid': 'The directory is invalid or cannot be accessed.',
+  'managed.cwd.conflict':
+    'The current directory has changed. Review it before submitting again.',
+  'managed.cwd.unavailable':
+    'The Workspace is currently unavailable for a directory change.',
+  'managed.cwd.forbidden':
+    'Your account does not have permission to change this directory.',
+  'managed.cwd.storage':
+    'Browser session storage is unavailable. The directory change cannot start safely.',
+  'managed.cwd.failed':
+    'The directory change failed. Review the current directory before trying again.',
+  'managed.cwd.updated': (v) =>
+    `The current directory changed to ${v?.cwd ?? ''}. Confirm this context before submitting.`,
+  'managed.cwd.useCurrent': 'Use the current directory context',
   'managed.workspaceCreate': 'Create session',
   'managed.workspaceBound': 'Bound Workspace',
   'managed.workspaceExecutionUnavailable':
@@ -213,6 +254,8 @@ const EN: Messages = {
   'managed.workspaceAbandon': 'Abandon local confirmation',
   'managed.workspaceAbandonWarning':
     'The original empty session may still exist. Abandoning this record does not delete it.',
+  'managed.workspaceAbandonInputWarning':
+    'A session with this input may already exist or be running. Abandoning this record does not cancel it. Sending it again starts a new request and may repeat its effects.',
   'managed.workspaceSwitchTitle': 'Switch Workspace?',
   'managed.workspaceSwitchDescription':
     'Switching resets the relative directory to the Workspace root.',
@@ -733,6 +776,20 @@ const EN: Messages = {
   'common.downloadFailed': (v) => `Download failed: ${v?.message ?? ''}`,
   'common.open': 'Open',
   'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
+  'excel.worksheet': 'Worksheet',
+  'excel.row': 'Row',
+  'excel.truncated': (v) =>
+    `Preview limited to ${v?.cells} cells per worksheet. Download the original for all content.`,
+  'excel.previousWorksheets': 'Previous worksheets',
+  'excel.nextWorksheets': 'Next worksheets',
+  'excel.empty': 'This worksheet is empty.',
+  'excel.notCalculated': 'Not calculated',
+  'excel.tooLarge':
+    'Excel preview supports files up to 10 MiB. Download the original to open it.',
+  'excel.invalid':
+    'Unable to preview this workbook. It may be damaged, password protected, too complex, or unsupported by this browser. You can download the original.',
+  'excel.timeout':
+    'This workbook took too long to preview. Download the original to open it.',
   'artifact.openLink': 'Open link',
   'artifact.longDocument': 'File is large. Source is shown by default.',
   'artifact.renderFullPreview': 'Render full preview',
@@ -755,15 +812,6 @@ const EN: Messages = {
   'mermaid.label': 'mermaid',
   'mermaid.errorLabel': 'mermaid (error)',
   'user.uploadedImage': (v) => `User uploaded image ${v?.index ?? 1}`,
-  'voice.noSpeech': 'No speech detected.',
-  'voice.stopDictation': 'Stop dictation',
-  'voice.transcribing': 'Transcribing…',
-  'voice.starting': 'Starting…',
-  'voice.errorRetry': (v) =>
-    `Voice error — click to retry${v?.message ? `: ${v.message}` : ''}`,
-  'voice.noSpeechRetry': 'No speech detected — click to retry',
-  'voice.startDictation': 'Start voice dictation',
-  'voice.error': 'Voice error',
   'resume.failedToLoad': 'Failed to load sessions',
   'toast.dismiss': 'Dismiss notification',
   'toast.dismissShort': 'Dismiss',
@@ -814,6 +862,9 @@ const EN: Messages = {
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'Branch',
   'assistant.copy': 'Copy',
+  'assistant.selectionCopy': 'Copy selection',
+  'assistant.copyPlainText': 'Copy plain text',
+  'assistant.copyMarkdown': 'Copy Markdown',
   'assistant.dissatisfied': 'Not satisfied',
   'assistant.satisfied': 'Satisfied',
   // A workspace agent's reply in a chat session. These render in exported
@@ -1819,6 +1870,7 @@ const EN: Messages = {
     'Which workspace this conversation belongs to is not known yet.',
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
+  ...FILES_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -2151,6 +2203,10 @@ const EN: Messages = {
   'queue.insertFailed': 'Failed to insert queued message',
   'queue.insertTip': 'Insert into the current turn',
   'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
+  'queue.sendNow': 'Send now',
+  'queue.sendNowTip':
+    "Send queued messages now, cutting the model's current response short unless it has started a tool call; running tools finish first",
+  'queue.sendNowFailed': 'Failed to send queued messages now',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
@@ -3374,6 +3430,10 @@ const EN: Messages = {
   'trajectory.noStart':
     'Recorded durations have no start time, so no bars can be plotted.',
   'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
+  'trajectory.historyGap':
+    'History may have changed while disconnected. Refresh the latest window to update.',
+  'trajectory.lifecycleIncomplete':
+    'Lifecycle details may be incomplete or outside the retained limit.',
   'trajectory.selected.label': 'Selected',
   'trajectory.selected.none': 'Choose a record',
   'trajectory.selected.noTiming': 'no request or tool timing',
@@ -4277,9 +4337,9 @@ const EN: Messages = {
   'localControl.disabledHint':
     'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
   'localControl.openSettings': 'Open Settings',
-  'browserNotifications.label': 'Browser task notifications',
+  'browserNotifications.label': 'Task notifications',
   'browserNotifications.description':
-    'Notify when the current chat or a split-view chat finishes or fails while this page is in the background or unfocused. Shows the session title, prompt and reply excerpts. Saved for this browser site only; the page must remain open.',
+    'Notify when the current chat or a split-view chat finishes, fails, needs approval or waits for your answer while this page is in the background or unfocused. Completed turns show prompt and reply excerpts; action reminders show the session title and waiting status. Saved for this browser site only; the page must remain open.',
   'browserNotifications.prompt': (v) => `Prompt: ${v?.text ?? ''}`,
   'browserNotifications.reply': (v) => `Reply: ${v?.text ?? ''}`,
   'browserNotifications.completed': 'This turn has completed.',
@@ -4287,7 +4347,22 @@ const EN: Messages = {
     'This turn failed. Return to view the details.',
   'browserNotifications.ended':
     'This turn has ended. Return to check the result.',
+  'browserNotifications.approval':
+    'This session needs your approval. Return to review the request.',
+  'browserNotifications.question':
+    'This session is waiting for your answer. Return to respond.',
   'browserNotifications.allow': 'Allow notifications',
+  'browserNotifications.enable': 'Enable notifications',
+  'browserNotifications.helpEnabled': 'Enabled for this site.',
+  'browserNotifications.helpWaiting': 'Notifications are not authorized yet.',
+  'browserNotifications.helpWhen':
+    'While this page is in the background or you switch to another tab, get reminders when the current chat needs approval, waits for your answer, finishes or fails. Clicking a notification returns to its chat without approving or answering.',
+  'browserNotifications.helpSystem':
+    'If no reminders appear, follow the steps below to check system notifications.',
+  'browserNotifications.helpMac':
+    'Open System Settings → Notifications. Select your browser (for Chrome, also check Google Chrome Helper (Alerts) if listed), enable notifications and desktop banners/alerts. Check Focus and whether notifications are allowed during screen sharing.',
+  'browserNotifications.helpWindows':
+    'Open Settings → System → Notifications (Windows 10: Notifications & actions). Enable notifications and your browser, including notification banners. Turn off Do not disturb / Focus assist, or allow your browser through its rules.',
   'browserNotifications.enabled': 'Enabled.',
   'browserNotifications.disabled': 'Disabled.',
   'browserNotifications.waiting': 'Waiting for browser permission.',
@@ -4306,9 +4381,11 @@ const EN: Messages = {
   'welcome.prompt': 'What would you like to do?',
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
+  ...VOICE_MESSAGES_EN,
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
+  ...MANAGED_TASK_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
@@ -4443,8 +4520,31 @@ const ZH: Messages = {
   'managed.phase.created': '已创建',
   'managed.workspaceCreateTitle': '创建工作区会话',
   'managed.workspaceLabel': '工作区',
+  'managed.modelPreset': '模型 / Agent 预设',
+  'managed.modelDefault': '服务端默认模型',
+  'managed.modelPinned': '模型在新会话中固定；更换模型或工作区请新建会话。',
   'managed.workspaceChoose': '选择工作区',
   'managed.workspaceDirectory': '相对目录',
+  'managed.cwd.change': '切换目录',
+  'managed.cwd.path': '相对于 Workspace 根目录的路径',
+  'managed.cwd.description':
+    '输入相对于 Workspace 根目录的路径，. 表示根目录。后续任务在新目录执行，对话历史保留。',
+  'managed.cwd.close': '关闭',
+  'managed.cwd.changing': '正在切换目录…',
+  'managed.cwd.confirm': '继续确认',
+  'managed.cwd.unconfirmed': '目录切换结果尚未确认，请继续确认原请求。',
+  'managed.cwd.unconfirmedForbidden':
+    '当前账号无权确认此操作，切换结果仍待确认；在服务器给出最终结果或新开标签页之前，发送将保持禁用。',
+  'managed.cwd.busy': '请先完成正在执行的任务、审批或未确认请求，再切换目录。',
+  'managed.cwd.invalid': '目录无效或无法访问。',
+  'managed.cwd.conflict': '当前目录已变化，请检查后重新提交。',
+  'managed.cwd.unavailable': 'Workspace 当前无法切换目录。',
+  'managed.cwd.forbidden': '当前账号没有切换此目录的权限。',
+  'managed.cwd.storage': '浏览器会话存储不可用，无法安全发起目录切换。',
+  'managed.cwd.failed': '目录切换失败，请检查当前目录后重试。',
+  'managed.cwd.updated': (v) =>
+    `当前目录已变为 ${v?.cwd ?? ''}，请先确认此上下文再提交。`,
+  'managed.cwd.useCurrent': '使用当前目录上下文',
   'managed.workspaceCreate': '创建会话',
   'managed.workspaceBound': '已绑定工作区',
   'managed.workspaceExecutionUnavailable':
@@ -4466,6 +4566,8 @@ const ZH: Messages = {
   'managed.workspaceAbandon': '放弃本地确认记录',
   'managed.workspaceAbandonWarning':
     '原空会话可能已经存在；放弃记录不会删除服务端会话。',
+  'managed.workspaceAbandonInputWarning':
+    '包含该输入的会话可能已存在或仍在运行；放弃记录不会取消它。再次发送会开启新请求，可能重复执行。',
   'managed.workspaceSwitchTitle': '切换工作区？',
   'managed.workspaceSwitchDescription': '切换后相对目录将重置为工作区根目录。',
   'managed.workspaceKeep': '保留原选择',
@@ -5045,6 +5147,18 @@ const ZH: Messages = {
   'common.downloadFailed': (v) => `下载失败：${v?.message ?? ''}`,
   'common.open': '打开',
   'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
+  'excel.worksheet': '工作表',
+  'excel.row': '行',
+  'excel.truncated': (v) =>
+    `每个工作表最多预览 ${v?.cells} 个单元格。下载原文件查看全部内容。`,
+  'excel.previousWorksheets': '上一组工作表',
+  'excel.nextWorksheets': '下一组工作表',
+  'excel.empty': '此工作表为空。',
+  'excel.notCalculated': '未计算',
+  'excel.tooLarge': 'Excel 预览支持最大 10 MiB 的文件，请下载原文件打开。',
+  'excel.invalid':
+    '无法预览此工作簿，文件可能已损坏、受密码保护、复杂度过高，或当前浏览器不支持。你可以下载原文件。',
+  'excel.timeout': '工作簿预览超时，请下载原文件打开。',
   'artifact.openLink': '打开链接',
   'artifact.longDocument': '文件过大，默认展示源码。',
   'artifact.renderFullPreview': '完整排版预览',
@@ -5065,15 +5179,6 @@ const ZH: Messages = {
   'mermaid.label': 'mermaid',
   'mermaid.errorLabel': 'mermaid（错误）',
   'user.uploadedImage': (v) => `用户上传的图片 ${v?.index ?? 1}`,
-  'voice.noSpeech': '未检测到语音。',
-  'voice.stopDictation': '停止语音输入',
-  'voice.transcribing': '正在转录…',
-  'voice.starting': '正在启动…',
-  'voice.errorRetry': (v) =>
-    `语音错误 — 点击重试${v?.message ? `：${v.message}` : ''}`,
-  'voice.noSpeechRetry': '未检测到语音 — 点击重试',
-  'voice.startDictation': '开始语音输入',
-  'voice.error': '语音错误',
   'resume.failedToLoad': '加载会话失败',
   'toast.dismiss': '关闭通知',
   'toast.dismissShort': '关闭',
@@ -5123,6 +5228,9 @@ const ZH: Messages = {
   'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '分叉',
   'assistant.copy': '复制',
+  'assistant.selectionCopy': '复制所选内容',
+  'assistant.copyPlainText': '复制纯文本',
+  'assistant.copyMarkdown': '复制 Markdown',
   'assistant.dissatisfied': '不满意',
   'assistant.satisfied': '满意',
   'agentMessage.status.failed': '失败',
@@ -6045,6 +6153,7 @@ const ZH: Messages = {
   'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
+  ...FILES_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -6346,6 +6455,10 @@ const ZH: Messages = {
   'queue.insertFailed': '插入排队消息失败',
   'queue.insertTip': '插入当前回合',
   'queue.insertCommandDisabled': '命令不能插入当前回合',
+  'queue.sendNow': '立即发送',
+  'queue.sendNowTip':
+    '立即发送排队的消息，并截断模型当前的回复（回复已开始调用工具时不截断）；正在运行的工具会先执行完',
+  'queue.sendNowFailed': '立即发送排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
   'queue.fileCount': (v) => `（+${v?.count ?? 0} 个文件）`,
@@ -7472,6 +7585,8 @@ const ZH: Messages = {
   'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
   'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
   'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
+  'trajectory.historyGap': '断线期间历史记录可能已变化，请刷新最新窗口。',
+  'trajectory.lifecycleIncomplete': '生命周期详情可能不完整或超出保留上限。',
   'trajectory.selected.label': '所选',
   'trajectory.selected.none': '请选择一条记录',
   'trajectory.selected.noTiming': '无请求或工具计时',
@@ -8310,15 +8425,28 @@ const ZH: Messages = {
   'localControl.disabledHint':
     '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
   'localControl.openSettings': '打开设置',
-  'browserNotifications.label': '浏览器任务通知',
+  'browserNotifications.label': '任务通知',
   'browserNotifications.description':
-    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。通知包含会话标题、提问和回复摘录。仅保存在此浏览器站点；网页需保持打开。',
+    '页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束、失败、需要审批或等待回答。回合结束通知包含提问和回复摘录；待处理提醒只显示会话标题和等待状态。仅保存在此浏览器站点；网页需保持打开。',
   'browserNotifications.prompt': (v) => `提问：${v?.text ?? ''}`,
   'browserNotifications.reply': (v) => `回复：${v?.text ?? ''}`,
   'browserNotifications.completed': '本轮已完成。',
   'browserNotifications.failed': '本轮执行失败，请返回查看。',
   'browserNotifications.ended': '本轮已结束，请返回查看结果。',
+  'browserNotifications.approval': '此会话需要你的审批，请返回查看请求。',
+  'browserNotifications.question': '此会话正在等待你的回答，请返回处理。',
   'browserNotifications.allow': '允许通知',
+  'browserNotifications.enable': '开启通知',
+  'browserNotifications.helpEnabled': '已为此站点开启通知。',
+  'browserNotifications.helpWaiting': '尚未获得浏览器通知授权。',
+  'browserNotifications.helpWhen':
+    '页面在后台或者切换到其他页签时，当前聊天需要审批、等待回答、回合结束或失败会发送提醒，点击通知返回对应聊天，不会自动审批或回答。',
+  'browserNotifications.helpSystem':
+    '如果没有收到提醒，请按下方指引检查系统通知',
+  'browserNotifications.helpMac':
+    '打开“系统设置 → 通知”，选择浏览器（Chrome 如列有 Google Chrome Helper (Alerts)，也需检查），开启允许通知及桌面横幅／提醒。检查专注模式，以及屏幕共享时是否允许通知。',
+  'browserNotifications.helpWindows':
+    '打开“设置 → 系统 → 通知”（Windows 10 为“通知和操作”），开启通知及浏览器通知，并允许显示通知横幅。关闭“请勿打扰／专注助手”，或在其规则中允许浏览器通知。',
   'browserNotifications.enabled': '已开启。',
   'browserNotifications.disabled': '未开启。',
   'browserNotifications.waiting': '等待浏览器授权。',
@@ -8331,9 +8459,11 @@ const ZH: Messages = {
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
+  ...VOICE_MESSAGES_ZH,
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
+  ...MANAGED_TASK_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };

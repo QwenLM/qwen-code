@@ -242,6 +242,52 @@ class HostedHarnessClientTest {
         }
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"effects", "prepare_resources", "settle_resources"})
+    void lifecycleV2RequiresExactCapabilityAndReceiptIdentity(String phase) {
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\"],"));
+        createSessionRoute();
+        AtomicInteger calls = new AtomicInteger();
+        AtomicBoolean wrongPhase = new AtomicBoolean();
+        server.createContext("/session/" + SESSION_ID + "/lifecycle", exchange -> {
+            calls.incrementAndGet();
+            var request = JsonSupport.parseObject(readBody(exchange), "lifecycle");
+            var receipt = new java.util.LinkedHashMap<>(request);
+            receipt.remove("authority");
+            receipt.put("operationId", "close-2");
+            if (wrongPhase.get()) receipt.put("phase", "other");
+            sendSessionJson(exchange, 200, JsonSupport.encode(receipt));
+        });
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            var request = Map.<String, Object>of("protocolVersion", 2, "phase", phase,
+                    "toolProfile", "hosted-workspace-shell/1", "kind", "close",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", SESSION_ID),
+                    "authority", Map.of("operationId", "close-2", "claimGeneration", 3));
+            assertEquals("close-2", client.settleLifecycle(session, request).get("operationId"));
+            wrongPhase.set(true);
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, request));
+            var unsupported = new java.util.LinkedHashMap<>(request);
+            unsupported.put("toolProfile", "hosted-workspace-shell/2");
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
+            unsupported.put("protocolVersion", 3);
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
+            assertEquals(2, calls.get());
+        }
+    }
+
+    @Test
+    void oldHarnessDoesNotAdvertiseLifecycleV2() {
+        createSessionRoute();
+        try (HostedHarnessClient client = newClient()) {
+            var session = createSession(client);
+            assertTrue(client.capabilities().getLifecycleV2Profiles().isEmpty());
+            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session,
+                    Map.of("protocolVersion", 2, "toolProfile", "hosted-workspace-shell/1")));
+        }
+    }
+
     @Test
     void successorLifecycleDetachNeedsNoNewAttachmentOrLifecycleDispatch() {
         AtomicReference<Map<String, Object>> detach = new AtomicReference<>();
@@ -1040,6 +1086,43 @@ class HostedHarnessClientTest {
         client.close();
 
         assertEquals(0, deleted.get());
+    }
+
+    @Test
+    void refusesVersionedTitleBeforeSendingToAnOlderHarness() {
+        createSessionRoute();
+        AtomicInteger writes = new AtomicInteger();
+        server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
+            writes.incrementAndGet();
+            sendSessionJson(exchange, 200, "{}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            assertThrows(DaemonProtocolException.class, () -> client.updateSessionTitle(session, "A", 1));
+        }
+        assertEquals(0, writes.get());
+    }
+
+    @Test
+    void sendsAndChecksTheDurableTitleRevision() {
+        createSessionRoute();
+        server.removeContext("/capabilities");
+        server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
+                capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                        "\"hostedHarness\":{\"titleProtocolVersion\":1,\"features\":[\"hosted_approval_resume_v1\",\"hosted_model_round_recovery_v1\"],"), false));
+        AtomicReference<String> body = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/title", exchange -> {
+            body.set(readBody(exchange));
+            sendSessionJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID
+                    + "\",\"persisted\":true,\"managedRenameRevision\":\"7\"}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            assertEquals(1, client.capabilities().getTitleProtocolVersion());
+            assertEquals(List.of("hosted_approval_resume_v1", "hosted_model_round_recovery_v1"),
+                    client.capabilities().getFeatures());
+            client.updateSessionTitle(createSession(client), "A", 7);
+        }
+        assertTrue(body.get().contains("\"managedRenameRevision\":\"7\""));
     }
 
     @Test

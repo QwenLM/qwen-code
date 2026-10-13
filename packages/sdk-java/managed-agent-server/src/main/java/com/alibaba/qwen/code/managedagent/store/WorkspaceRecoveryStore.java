@@ -512,7 +512,8 @@ public final class WorkspaceRecoveryStore {
                 + " AND workspace_storage_id = ?" + (lockSources ? " FOR UPDATE" : ""), tenant, session, storage);
         check(rows.size() == 1, "source_drift");
         Map<String, Object> row = rows.getFirst();
-        check("qwen-code".equals(row.get("agent_id")) && Set.of("ACTIVE", "CLOSED", "ARCHIVED", "DELETED")
+        check(("qwen-code".equals(row.get("agent_id")) || row.get("agent_definition_digest") != null)
+                && Set.of("ACTIVE", "CLOSED", "ARCHIVED", "DELETED")
                 .contains(row.get("status")), "source_drift");
         var receipts = jdbc.queryForList("SELECT actor_id, idempotency_key, request_digest, turn_id, created_at"
                 + " FROM managed_workspace_create_command WHERE tenant_id = ? AND session_id = ?", tenant, session);
@@ -533,6 +534,9 @@ public final class WorkspaceRecoveryStore {
         }
         check(binding.path("workspaceGeneration").asLong() > 0 && binding.path("contextRevision").asLong() > 0, "source_drift");
         fields(source, row, "configRef", "workspace_config_ref", "policyRef", "workspace_policy_ref", "approvalMode", "approval_mode");
+        // The pinned definition identity (D8c-1); null for qwen-code.
+        fields(source, row, "agentRevision", "agent_revision",
+                "agentDefinitionDigest", "agent_definition_digest");
         ObjectNode product = source.putObject("publicSession");
         fields(product, row, "version", "version", "status", "status", "lastSequence", "last_sequence",
                 "harnessBootId", "harness_boot_id", "harnessEventEpoch", "harness_event_epoch",
@@ -563,7 +567,7 @@ public final class WorkspaceRecoveryStore {
             Timestamp lease = (Timestamp) head.get("writer_lease_until");
             check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now(jdbc)), "source_drift");
             check(Set.of("ACTIVE", "SEALED", "DELETING", "DELETED").contains(head.get("state"))
-                    && ((Number) head.get("storage_version")).intValue() == 1
+                    && List.of(1, 2).contains(((Number) head.get("storage_version")).intValue())
                     && ((Number) head.get("compacted_through_revision")).longValue() == 0
                     && "READY".equals(head.get("recovery_status")), "source_drift");
             ObjectNode value = source.putObject("head");

@@ -179,6 +179,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_SEND_NOW_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
@@ -7754,6 +7755,8 @@ export function createSessionControlPlane(
     BridgeRestoredSession,
     | 'compactedReplay'
     | 'liveJournal'
+    | 'lifecycleReplay'
+    | 'lifecycleReplayIncomplete'
     | 'lastEventId'
     | 'eventEpoch'
     | 'replayDegraded'
@@ -8010,9 +8013,56 @@ export function createSessionControlPlane(
               compactedReplay = [...page.events, turnErrorEvent];
             }
           }
+          const lifecycleSnapshot = entry.events.snapshotReplay();
+          const lifecycleReplay: BridgeEvent[] = [];
+          let lifecycleReplayIncomplete =
+            lifecycleSnapshot === undefined ||
+            lifecycleSnapshot.degraded === true;
+          if (lifecycleSnapshot) {
+            for (const event of [
+              ...lifecycleSnapshot.compactedTurns,
+              ...lifecycleSnapshot.liveJournal,
+            ]) {
+              if (event.type === 'history_truncated')
+                lifecycleReplayIncomplete = true;
+              if (event.type !== 'session_update' || !isRecord(event.data))
+                continue;
+              const update = isRecord(event.data['update'])
+                ? event.data['update']
+                : event.data;
+              const meta = update['_meta'];
+              if (!isRecord(meta)) continue;
+              if (
+                !isRecord(meta['executionLifecycle']) &&
+                !isRecord(meta['toolLifecycle'])
+              )
+                continue;
+              lifecycleReplay.push({
+                v: 1,
+                type: 'session_update',
+                ...(event.id !== undefined ? { id: event.id } : {}),
+                data: {
+                  _meta: {
+                    ...(isRecord(meta['executionLifecycle'])
+                      ? { executionLifecycle: meta['executionLifecycle'] }
+                      : {}),
+                    ...(isRecord(meta['toolLifecycle'])
+                      ? { toolLifecycle: meta['toolLifecycle'] }
+                      : {}),
+                  },
+                },
+              });
+            }
+          }
+          if (lifecycleReplay.length > 1024) {
+            lifecycleReplay.splice(0, lifecycleReplay.length - 1024);
+            lifecycleReplayIncomplete = true;
+          }
           return {
             compactedReplay,
             liveJournal: [],
+            lifecycleReplay,
+            lifecycleReplayIncomplete,
             lastEventId,
             eventEpoch,
             ...(page.partial === true ? { partial: true as const } : {}),
@@ -14958,6 +15008,27 @@ export function createSessionControlPlane(
         }
       }
       return { accepted: true, messageId };
+    },
+
+    sendMidTurnMessagesNow(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      // Only the user's own messages ask for this; queue-only steering keeps
+      // its tool-boundary delivery unless user input travels with it.
+      if (!entry.midTurnMessageQueue.some((message) => !message.queueOnly)) {
+        return { requested: false };
+      }
+      // Best-effort: an agent without the method still drains the queue at its
+      // next tool boundary.
+      void entry.connection
+        .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
+        .catch((error: unknown) => {
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
+          );
+        });
+      return { requested: true };
     },
 
     removeMidTurnMessage(sessionId, messageId, context) {

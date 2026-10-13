@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { LlmPreparedRequestCallback } from './llm-chat.js';
+
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -92,7 +94,10 @@ import {
 } from './turn.js';
 
 // Services
-import { LoopDetectionService } from '../services/loopDetectionService.js';
+import {
+  isAttemptRestartEvent,
+  LoopDetectionService,
+} from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
 
@@ -107,6 +112,10 @@ import {
   type CompletedToolOutcome,
   type ExperienceSignals,
 } from '../memory/experience-signals.js';
+import {
+  getToolExplorationKind,
+  ToolExplorationBudget,
+} from '../services/tool-exploration-budget.js';
 import {
   renderAutoMemoryFocusedSubtree,
   toAutoMemoryRef,
@@ -255,6 +264,7 @@ interface StopHookChain {
 }
 
 export interface SendMessageOptions {
+  onPreparedRequest?: LlmPreparedRequestCallback;
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
@@ -521,6 +531,12 @@ export class LlmClient {
   private readonly interactionStartTypes = new Map<string, SendMessageType>();
 
   private readonly loopDetector: LoopDetectionService;
+  private readonly toolExplorationBudget = new ToolExplorationBudget();
+  // The prompt/turn that owns the exploration phase. A concurrent `/btw`
+  // side query reaches this same client with the full tool set, so the phase
+  // is bound to its owning interaction: every budget entrypoint below is a
+  // no-op for an invocation that does not own it.
+  private toolExplorationBudgetPromptId: string | undefined;
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -3289,7 +3305,9 @@ export class LlmClient {
       response.executionStatus === 'error' ||
       response.executionStatus === 'cancelled'
     ) {
-      this.recordedExperienceCallIds.add(response.callId);
+      if (response.modelFacing !== false) {
+        this.recordedExperienceCallIds.add(response.callId);
+      }
       // Cancellation cannot undo a skill write that already reached disk.
       if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
         const filePath =
@@ -3299,10 +3317,12 @@ export class LlmClient {
           isProjectSkillPath(filePath, this.config.getProjectRoot())
         ) {
           this.skillsModifiedInSession = true;
+          this.recordedExperienceCallIds.add(response.callId);
         }
       }
     }
     if (
+      response.modelFacing === false ||
       response.status === 'cancelled' ||
       response.executionStatus === 'cancelled'
     )
@@ -3908,8 +3928,13 @@ export class LlmClient {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
       // A side question asked while a turn is running is not a new turn: it
-      // must not move the running turn's starting point or drop its target.
+      // must not move the running turn's starting point or drop its target —
+      // nor take over (or clear) the running turn's exploration phase, which
+      // the ownership check below every budget entrypoint enforces for the
+      // side turn's tool results too.
       if (!options?.isConcurrentSideQuery) {
+        this.toolExplorationBudget.reset();
+        this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
       }
       // New input starts this interaction, so its first Stop is not
@@ -4276,6 +4301,14 @@ export class LlmClient {
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
     let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
+    // A concurrent `/btw` side query runs through this same client and its
+    // tool-result continuation is submitted without the flag, so ownership is
+    // carried by the prompt id the interaction claimed at its start: a
+    // non-owner invocation leaves the running turn's phase untouched (it
+    // neither records into it nor drains its pending reminder).
+    const ownsExplorationBudget =
+      !options?.isConcurrentSideQuery &&
+      prompt_id === this.toolExplorationBudgetPromptId;
     // The delivery was prepared before the request went out, so commit vs
     // discard rides on whether the model accepted the request (any streamed
     // event). A loop-detection halt after acceptance must commit: the memory
@@ -4603,6 +4636,7 @@ export class LlmClient {
         // stays unmarked, so a replaced identified turn fails closed.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
         options?.retractDeliveredOutputOnRetry,
+        options?.onPreparedRequest,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -4898,6 +4932,14 @@ export class LlmClient {
         const activeTodoReminder = carriesAgentToolResult
           ? this.config.takeActiveTodoReminder(prompt_id, true)
           : this.config.takeActiveTodoReminder(prompt_id);
+        const explorationReminder =
+          this.loopDetector.isDisabledForSession() || !ownsExplorationBudget
+            ? undefined
+            : this.toolExplorationBudget.takeReminder(
+                this.config.getMaxToolCallsPerTurn(),
+              );
+        if (explorationReminder)
+          requestToSend.push({ text: explorationReminder });
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -5017,10 +5059,7 @@ export class LlmClient {
           }
           if (event.type === LlmEventType.ToolCallRequest) {
             hasToolCalls = true;
-          } else if (
-            event.type === LlmEventType.Retry ||
-            event.type === LlmEventType.ModelFallback
-          ) {
+          } else if (isAttemptRestartEvent(event)) {
             modelRequestAccepted = false;
             hasToolCalls = false;
             loopGuardFedCallIds.clear();
@@ -5065,6 +5104,38 @@ export class LlmClient {
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
             this.loopDetector.checkAlwaysOnSafeties(event);
+          // Exploration-budget lifecycle, recorded before the halt handling
+          // below takes effect: a halted batch's over-count is harmless only
+          // because every core halt is terminal (the halt branch returns the
+          // turn, and the next interaction resets the budget). Keep any
+          // future non-terminal core halt from silently counting calls that
+          // never executed. Ownership-gated like every other entrypoint: a
+          // concurrent side turn's stream neither feeds this turn's phase nor
+          // rolls it back.
+          if (ownsExplorationBudget) {
+            if (
+              event.type === LlmEventType.ToolCallRequest &&
+              !duplicateLoopGuardRequest
+            ) {
+              this.toolExplorationBudget.record(
+                getToolExplorationKind(
+                  this.config.getToolRegistry(),
+                  event.value.name,
+                  event.value.args,
+                ),
+              );
+            } else if (event.type === LlmEventType.Finished) {
+              this.toolExplorationBudget.commit();
+            } else if (isAttemptRestartEvent(event)) {
+              // A retry re-streams the failed attempt's calls, so its reads
+              // must not stay counted. A fallback attempt cannot have
+              // streamed calls (the chain only runs when the failed attempt
+              // yielded no candidate output), so its rollback is a no-op kept
+              // for symmetry — and harmless, because a rollback never goes
+              // below the committed floor.
+              this.toolExplorationBudget.rollback();
+            }
+          }
           if (alwaysOnLoop) {
             // Drop every tool call collected before the guard fired so the run
             // halts here instead of spawning a continuation that re-trips it.
@@ -5391,6 +5462,7 @@ export class LlmClient {
             };
 
             this.loopDetector.reset(prompt_id);
+            if (ownsExplorationBudget) this.toolExplorationBudget.reset();
             const hookTurnBudget = boundedTurns - 1;
             const pendingSteer = await takeSteerInput(hookTurnBudget);
             for (const goalEvent of takePendingGoalEvents()) {
@@ -5499,6 +5571,7 @@ export class LlmClient {
           // protection is preserved: the cap still bounds each iteration, and
           // the chain itself is bounded by stopHookBlockingCap.
           this.loopDetector.reset(prompt_id);
+          if (ownsExplorationBudget) this.toolExplorationBudget.reset();
 
           const hookTurnBudget = boundedTurns - 1;
           const pendingSteer = await takeSteerInput(hookTurnBudget);

@@ -14,11 +14,13 @@ import { managedRequestId } from './managed-session-storage';
 import { browserArtifactSave } from './managed-artifact-download';
 import type { ManagedArtifactSave } from './managed-tool-result-types';
 import type {
+  ManagedAgentCommandOptions,
   ManagedAgentPendingAction,
   ManagedAgentProvider,
   ManagedAgentRuntimeState,
   ManagedAgentSessionPhase,
   ManagedAgentSessionSummary,
+  ManagedTaskCancelOperation,
 } from './managed-agent-provider';
 
 export interface JavaManagedAgentProviderOptions
@@ -28,6 +30,7 @@ export interface JavaManagedAgentProviderOptions
   /** Include tenant and actor identity; replace this scope/provider when either changes. Token refresh alone can use getHeaders. */
   productScope?: string;
   enableWorkspaceBinding?: boolean;
+  modelPresets?: readonly { agentId: string; label: string }[];
   /** Acquire a streaming save target during the user gesture, then call openStream. */
   saveArtifact?: ManagedArtifactSave;
 }
@@ -93,11 +96,130 @@ export function createJavaManagedAgentProvider(
   if (options.enableWorkspaceBinding && !options.productScope?.trim()) {
     throw new Error('Workspace binding requires an explicit productScope');
   }
+  async function createWorkspaceSession(
+    request: {
+      agentId: string;
+      workspaceId: string;
+      cwdRelative: string;
+      text?: string;
+    },
+    command: ManagedAgentCommandOptions,
+  ) {
+    const result = await client.createSession(
+      {
+        requestId: managedRequestId(),
+        idempotencyKey: command.idempotencyKey,
+        agentId: request.agentId,
+        input:
+          request.text === undefined
+            ? []
+            : [{ type: 'input_text', text: request.text }],
+        metadata: { clientId: command.clientId },
+        workspace: {
+          workspaceId: request.workspaceId,
+          cwdRelative: request.cwdRelative,
+        },
+      },
+      command.signal,
+    );
+    if (!result.sessionId || (request.text !== undefined && !result.turnId))
+      throw new Error(
+        'Managed Agent create response is missing admission identity',
+      );
+    return { sessionId: result.sessionId };
+  }
   return {
     kind: 'java',
     storageKey: storageKey(options),
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    tasks: {
+      list: (sessionId, request) =>
+        client.listTasks(
+          { sessionId, cursor: request.cursor, limit: request.limit },
+          request.signal,
+        ),
+      async get(sessionId, taskId, request) {
+        const task = await client.getTask(
+          { sessionId, taskId },
+          request.signal,
+        );
+        if (task.sessionId !== sessionId || task.taskId !== taskId)
+          throw new Error('Task identity mismatch');
+        return task;
+      },
+      listEvents: (sessionId, taskId, request) =>
+        client.listTaskEvents(
+          { sessionId, taskId, after: request.after, limit: request.limit },
+          request.signal,
+        ),
+      ...(options.productScope?.trim()
+        ? {
+            cancel: {
+              async submit(sessionId, taskId, command) {
+                return requireTaskCancelOperation(
+                  await client.cancelTask(
+                    {
+                      sessionId,
+                      taskId,
+                      idempotencyKey: command.idempotencyKey,
+                      requestId: managedRequestId(),
+                    },
+                    command.signal,
+                  ),
+                  sessionId,
+                  taskId,
+                );
+              },
+              async query(sessionId, taskId, operationId, request) {
+                const operation = requireTaskCancelOperation(
+                  await client.queryOperation(
+                    { sessionId, operationId },
+                    request.signal,
+                  ),
+                  sessionId,
+                  taskId,
+                );
+                if (operation.operationId !== operationId)
+                  throw new Error('Task cancel operation identity mismatch');
+                return operation;
+              },
+            },
+          }
+        : {}),
+    },
+    ...(options.productScope?.trim()
+      ? {
+          cwdChange: {
+            async submit(sessionId, request, command) {
+              return requireCwdOperation(
+                await client.changeCwd(
+                  {
+                    ...request,
+                    sessionId,
+                    idempotencyKey: command.idempotencyKey,
+                    requestId: managedRequestId(),
+                  },
+                  command.signal,
+                ),
+                sessionId,
+              );
+            },
+            async query(sessionId, operationId, request) {
+              const result = requireCwdOperation(
+                await client.queryOperation(
+                  { sessionId, operationId },
+                  request.signal,
+                ),
+                sessionId,
+              );
+              if (result.operationId !== operationId)
+                throw new Error('Cwd operation identity mismatch');
+              return result;
+            },
+          },
+        }
+      : {}),
     actions: {
       async listPending(sessionId, request) {
         // The service lists only requested Actions, newest first, so one page
@@ -170,6 +292,7 @@ export function createJavaManagedAgentProvider(
       ? {
           workspaceBinding: {
             agentId,
+            modelPresets: options.modelPresets,
             async list(request) {
               const page = await client.listWorkspaces(
                 { cursor: request.cursor, limit: request.limit },
@@ -185,28 +308,12 @@ export function createJavaManagedAgentProvider(
             async get(workspaceId, request) {
               return client.getWorkspace(workspaceId, request.signal);
             },
-            async createEmpty(request, command) {
-              const result = await client.createSession(
-                {
-                  requestId: managedRequestId(),
-                  idempotencyKey: command.idempotencyKey,
-                  agentId: request.agentId,
-                  input: [],
-                  metadata: { clientId: command.clientId },
-                  workspace: {
-                    workspaceId: request.workspaceId,
-                    cwdRelative: request.cwdRelative,
-                  },
-                },
-                command.signal,
-              );
-              if (!result.sessionId) {
-                throw new Error(
-                  'Managed Agent create response is missing sessionId',
-                );
-              }
-              return { sessionId: result.sessionId };
-            },
+            createEmpty: ({ agentId, workspaceId, cwdRelative }, command) =>
+              createWorkspaceSession(
+                { agentId, workspaceId, cwdRelative },
+                command,
+              ),
+            createSession: createWorkspaceSession,
           },
         }
       : {}),
@@ -339,6 +446,7 @@ function toSessionSummary(
     session.activeTurn?.errorCode ?? session.environment?.errorCode;
   return {
     sessionId: session.sessionId,
+    agentId: session.agentId,
     activeTurnId: session.activeTurn?.turnId,
     title: session.title || session.sessionId,
     workspace: session.workspace,
@@ -351,18 +459,37 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
+      ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
-        sessionActive && !active && (!session.workspace || workspaceTurns),
+        sessionActive &&
+        !active &&
+        (!session.workspace ||
+          (workspaceTurns && session.capabilities?.foregroundShell !== false)),
       // The creator may cancel a running bound Turn after the Workspace stops
       // admitting new work, so cancel is not tied to workspaceTurns; the
       // server refuses anyone else.
       canCancel: sessionActive && active && turnStatus !== 'cancelling',
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
+      ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
   };
+}
+
+function requireCwdOperation(
+  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
+  sessionId: string,
+) {
+  if (
+    operation.type !== 'cwd_change' ||
+    operation.sessionId !== sessionId ||
+    !operation.operationId
+  ) {
+    throw new Error('Cwd operation identity mismatch');
+  }
+  return operation;
 }
 
 function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
@@ -418,6 +545,22 @@ function toPhase(
 function titleFor(text: string): string {
   const title = text.trim().replace(/\s+/g, ' ');
   return title.length <= 80 ? title : `${title.slice(0, 77)}...`;
+}
+
+function requireTaskCancelOperation(
+  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
+  sessionId: string,
+  taskId: string,
+): ManagedTaskCancelOperation {
+  if (
+    operation.type !== 'task_cancel' ||
+    operation.sessionId !== sessionId ||
+    operation.taskId !== taskId ||
+    !operation.operationId ||
+    operation.status === 'cancelled'
+  )
+    throw new Error('Task cancel operation identity mismatch');
+  return operation as ManagedTaskCancelOperation;
 }
 
 function storageKey(options: JavaManagedAgentProviderOptions): string {

@@ -21,6 +21,7 @@ export type CompletedToolOutcome = Pick<
   'callId' | 'executionStatus' | 'error' | 'errorType' | 'resultDisplay'
 > & {
   status?: 'success' | 'error' | 'cancelled';
+  modelFacing?: boolean;
 };
 
 const SUBSTANTIVE_TOOLS = new Set<string>([

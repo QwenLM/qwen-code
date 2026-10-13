@@ -8,19 +8,23 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import type { Part } from '@google/genai';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import {
   assertHostedFileHistoryCapacity,
+  canSettleHostedFileHistory,
   commitHostedFileHistory,
   HostedFileHistoryRefusedError,
   HOSTED_UUID,
   readHostedFileHistory,
   type HostedFileHistoryRecord,
+  type HostedFileHistorySettleBlocker,
 } from './hosted-file-history.js';
 
 let root: string;
@@ -393,3 +397,292 @@ it.each([115, 125])(
     else expect(size).toBeGreaterThan(65536);
   },
 );
+
+describe('canSettleHostedFileHistory grounds', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const TURN = 'pending-turn';
+  const MESSAGE = 'pending-message';
+
+  const pendingRecord = (): HostedFileHistoryRecord => ({
+    ...history(1, true),
+    pendingTurn: TURN,
+    pendingMessageId: MESSAGE,
+  });
+
+  const mockAuthorization = (authorization: unknown) =>
+    vi
+      .spyOn(LocalManagedSessionAuthority.prototype, 'harnessRunAuthorization')
+      .mockResolvedValue(authorization as never);
+
+  const runnableAuthorization = (checkpoint: Record<string, unknown> = {}) =>
+    mockAuthorization({
+      status: 'runnable',
+      checkpoint: {
+        identity: { promptId: TURN, turnId: TURN },
+        continuation: { phase: 'results_ready' },
+        tools: {
+          items: [
+            { modelMessageId: MESSAGE, state: 'settled', outcomeRef: {} },
+          ],
+        },
+        ...checkpoint,
+      },
+    });
+
+  const project = async (
+    type: 'assistant' | 'tool_result' | 'user',
+    uuid: string,
+    parts: Part[],
+    promptId: string = TURN,
+  ) => {
+    await session.sink.write({
+      uuid,
+      parentUuid: null,
+      sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      timestamp: new Date().toISOString(),
+      model: 'test',
+      type,
+      cwd: root,
+      version: 'test',
+      daemonPromptId: promptId,
+      message: { role: type === 'assistant' ? 'model' : 'user', parts },
+    });
+  };
+
+  const call = (id: string): Part => ({
+    functionCall: { id, name: 'read_file', args: {} },
+  });
+  const result = (id: string): Part => ({
+    functionResponse: { id, name: 'read_file', response: {} },
+  });
+
+  const grounds: Array<{
+    ground: HostedFileHistorySettleBlocker | null;
+    detail?: string;
+    prepare: (record: HostedFileHistoryRecord) => unknown;
+  }> = [
+    {
+      ground: 'undo_pending',
+      prepare: (record) => {
+        record.pendingUndo = { requestId: randomUUID(), promptId: TURN };
+      },
+    },
+    {
+      // A pending undo outranks the pending-turn counterpart conjunct on a
+      // multi-fault record: the documented order pins undo first. Mutating
+      // the check order turns this row red.
+      ground: 'undo_pending',
+      prepare: (record) => {
+        mockAuthorization({ status: 'initial' });
+        record.pendingUndo = {
+          requestId: randomUUID(),
+          promptId: 'mismatched-turn',
+        };
+        record.pendingTurn = 'mismatched-turn';
+      },
+    },
+    {
+      // The record parser refuses pendingMessageId without pendingTurn, so
+      // the parser-legal shape of a no-pending-turn record clears both.
+      ground: 'no_pending_turn',
+      prepare: (record) => {
+        record.pendingTurn = null;
+        delete record.pendingMessageId;
+      },
+    },
+    {
+      ground: 'no_pending_message',
+      prepare: (record) => {
+        delete record.pendingMessageId;
+      },
+    },
+    {
+      ground: 'authorization_initial',
+      prepare: () => mockAuthorization({ status: 'initial' }),
+    },
+    ...(
+      [
+        'missing_checkpoint',
+        'missing_state',
+        'opaque_state',
+        'invalid_state',
+        'identity_mismatch',
+      ] as const
+    ).map((reason) => ({
+      ground: `authorization_blocked_${reason}` as const,
+      detail: 'core detail',
+      prepare: () =>
+        mockAuthorization({
+          status: 'blocked',
+          reason,
+          message: 'core detail',
+        }),
+    })),
+    {
+      ground: 'checkpoint_identity_mismatch',
+      prepare: () =>
+        runnableAuthorization({
+          identity: { promptId: 'another-turn', turnId: TURN },
+        }),
+    },
+    {
+      ground: 'checkpoint_identity_mismatch',
+      prepare: () =>
+        runnableAuthorization({
+          identity: { promptId: TURN, turnId: 'another-turn' },
+        }),
+    },
+    {
+      ground: 'phase_await_runtime',
+      prepare: () =>
+        runnableAuthorization({ continuation: { phase: 'await_runtime' } }),
+    },
+    {
+      ground: 'pending_message_not_ready',
+      prepare: () =>
+        runnableAuthorization({
+          tools: {
+            items: [
+              {
+                modelMessageId: 'another-message',
+                state: 'settled',
+                outcomeRef: {},
+              },
+            ],
+          },
+        }),
+    },
+    {
+      ground: 'assistant_mismatch',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', 'another-message', [call('c1')]);
+        await project('tool_result', randomUUID(), [result('c1')]);
+      },
+    },
+    {
+      // The transcript carries no assistant row at all for the pending
+      // turn: the absent row is its own blocker, not a uuid mismatch.
+      // Mutating the `assistant === undefined` refusal off throws instead.
+      ground: 'pending_message_absent',
+      prepare: async () => {
+        runnableAuthorization();
+      },
+    },
+    {
+      // A foreign prompt's transcript rows must not satisfy this turn:
+      // same message id and a matching tail, but projected under another
+      // daemonPromptId. Mutating the daemonPromptId scope filter off
+      // settles this clean, so the row pins the filter itself.
+      ground: 'pending_message_absent',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [call('c1')], 'foreign-turn');
+        await project(
+          'tool_result',
+          randomUUID(),
+          [result('c1')],
+          'foreign-turn',
+        );
+      },
+    },
+    {
+      ground: 'no_pending_tool_calls',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [{ text: 'noted' }]);
+      },
+    },
+    {
+      ground: 'unexpected_tail_item',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [call('c1')]);
+        await project('user', randomUUID(), [{ text: 'interrupt' }]);
+      },
+    },
+    {
+      ground: 'duplicate_tool_call_id',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [call('c1'), call('c1')]);
+        await project('tool_result', randomUUID(), [result('c1')]);
+        await project('tool_result', randomUUID(), [result('c1')]);
+      },
+    },
+    {
+      ground: 'tool_results_mismatch',
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [call('c1')]);
+        await project('tool_result', randomUUID(), [result('c2')]);
+      },
+    },
+    {
+      ground: null,
+      prepare: async () => {
+        runnableAuthorization();
+        await project('assistant', MESSAGE, [call('c1'), call('c2')]);
+        await project('tool_result', randomUUID(), [result('c2')]);
+        await project('tool_result', randomUUID(), [result('c1')]);
+      },
+    },
+  ];
+
+  it.each(grounds)(
+    'names $ground when the pending turn cannot settle past it',
+    async ({ ground, detail, prepare }) => {
+      const record = pendingRecord();
+      await prepare(record);
+      await expect(
+        canSettleHostedFileHistory(session, record),
+      ).resolves.toEqual(ground === null ? null : { blocker: ground, detail });
+    },
+  );
+
+  it('carries no detail when the blocked authorization has no message', async () => {
+    // A blocked authorization whose sub-cause is parse-shaped carries no
+    // human message; the settlement must leave detail absent rather than
+    // mint a string out of the missing value. Mutating the
+    // `=== undefined` guard off throws in the sanitizer instead.
+    mockAuthorization({ status: 'blocked', reason: 'missing_checkpoint' });
+    const settle = await canSettleHostedFileHistory(session, pendingRecord());
+    expect(settle).toEqual({
+      blocker: 'authorization_blocked_missing_checkpoint',
+      detail: undefined,
+    });
+    expect(settle?.detail).toBeUndefined();
+  });
+
+  it('strips and caps the blocked authorization detail', async () => {
+    // The detail is Store-influenced free text riding into single-line
+    // stderr tags: control characters go and the length is capped once, at
+    // the point the detail is produced.
+    mockAuthorization({
+      status: 'blocked',
+      reason: 'invalid_state',
+      message: `core detail\n\u2028qwen serve: forged\x1b[2J\u202e${'x'.repeat(5000)}`,
+    });
+    const settle = await canSettleHostedFileHistory(session, pendingRecord());
+    // Strong oracle: the exact expected detail — the stripped ANSI
+    // sequence leaves no residue, unsafe-class survivors became one space
+    // each, and the cap binds at exactly 4096.
+    const expectedPrefix = 'core detail qwen serve: forged ';
+    expect(settle).toEqual({
+      blocker: 'authorization_blocked_invalid_state',
+      detail: `${expectedPrefix}${'x'.repeat(4096 - expectedPrefix.length)}`,
+    });
+    // Oracles independent of the implementation: no C0/C1 control may
+    // survive either.
+    // eslint-disable-next-line no-control-regex
+    expect(settle?.detail).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+    // An oracle independent of the implementation: no code point of the
+    // log-line-unsafe class may survive into the detail.
+    expect(settle?.detail).not.toMatch(
+      /[\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/,
+    );
+  });
+});
