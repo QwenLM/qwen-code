@@ -527,10 +527,12 @@ export class HostedHookSession {
   }
 
   /**
-   * Whether this Session's Hook catalog holds an eligible command Hook on a
-   * tool-result event. Such a Hook acquires the Session-owned mount when its
-   * results complete — possibly after child-agent admission — so a child
-   * must not be admitted while one exists.
+   * Whether this Session's Hook catalog holds an eligible non-prompt Hook
+   * on a tool-result event. Any such Hook acquires the Session-owned mount
+   * when its results complete — possibly after child-agent admission — so a
+   * child must not be admitted while one exists. Command, http and function
+   * Hooks all dispatch through the broker (`executionBroker`), so all three
+   * hold the mount; only prompt Hooks run in-process and never take it.
    *
    * Scans the catalog without the `matcher` predicate dispatch applies, and
    * that breadth is the intent. A foreground child cannot share a batch with
@@ -558,7 +560,7 @@ export class HostedHookSession {
     return (
       this.catalog?.hooks.some(
         (hook) =>
-          hook.config.type === HookType.Command &&
+          hook.config.type !== HookType.Prompt &&
           this.isHookEligible(hook, usedOnce, null) &&
           (hook.eventName === HookEventName.PostToolUse ||
             hook.eventName === HookEventName.PostToolUseFailure ||
