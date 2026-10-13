@@ -86,6 +86,13 @@ export function buildAuthProviderCatalog(
     providers,
     groups: [
       {
+        id: 'qwencloud',
+        label: '千问AI平台 / QwenCloud',
+        description:
+          'Official recommended setup: Token Plan or Standard API Key',
+        providerIds: providerIdsByGroup('qwencloud'),
+      },
+      {
         id: 'alibaba',
         label: 'Alibaba ModelStudio',
         description:

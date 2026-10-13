@@ -20,6 +20,7 @@ import { getRawModelProviders } from '../../config/loadedSettingsAdapter.js';
 import {
   findProviderById,
   findProviderByCredentials,
+  QWENCLOUD_PROVIDERS,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
 } from '@qwen-code/qwen-code-core/providers/all-providers.js';
@@ -38,11 +39,13 @@ import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 
 type ViewLevel =
   | 'main'
+  | 'qwencloud-select'
   | 'alibaba-select'
   | 'thirdparty-select'
   | 'provider-setup';
 
 type MainOption =
+  | 'QWENCLOUD'
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
   | 'CUSTOM_PROVIDER';
@@ -52,6 +55,15 @@ type MainOption =
 // ---------------------------------------------------------------------------
 
 const MAIN_ITEMS = [
+  {
+    key: 'QWENCLOUD',
+    title: t('千问AI平台 / QwenCloud'),
+    label: t('千问AI平台 / QwenCloud'),
+    description: t(
+      'Official recommended setup: Token Plan or Standard API Key',
+    ),
+    value: 'QWENCLOUD' as MainOption,
+  },
   {
     key: 'ALIBABA_MODELSTUDIO',
     title: t('Alibaba ModelStudio'),
@@ -113,6 +125,7 @@ function getStepLabel(step: string | null, p: ProviderConfig): string {
 
 const VIEW_TITLES: Record<string, string> = {
   main: t('Connect a Provider'),
+  'qwencloud-select': t('千问AI平台 / QwenCloud · Access Method'),
   'alibaba-select': t('Alibaba ModelStudio · Access Method'),
   'thirdparty-select': t('Third-party Providers · Provider'),
 };
@@ -179,6 +192,10 @@ export function AuthDialog(): React.JSX.Element {
 
   // -- Sub-menu definitions (data-driven) -----------------------------------
 
+  const qwencloudItems = useMemo(
+    () => QWENCLOUD_PROVIDERS.map(providerToItem),
+    [],
+  );
   const alibabaItems = useMemo(() => ALIBABA_PROVIDERS.map(providerToItem), []);
   const thirdPartyItems = useMemo(
     () => THIRD_PARTY_PROVIDERS.map(providerToItem),
@@ -229,6 +246,10 @@ export function AuthDialog(): React.JSX.Element {
       onSelect: (v: string) => void;
     }
   > = {
+    'qwencloud-select': {
+      items: qwencloudItems,
+      onSelect: handleProviderSelect,
+    },
     'alibaba-select': {
       items: alibabaItems,
       onSelect: handleProviderSelect,
@@ -254,8 +275,9 @@ export function AuthDialog(): React.JSX.Element {
   // (resolveMetadataKey returns config.id for *any* provider with a static
   // models[], so it can't be used to detect "Alibaba" specifically.)
   const defaultMainIndex = useMemo(() => {
-    if (matchedProvider?.uiGroup === 'third-party') return 1;
-    if (matchedProvider?.uiGroup === 'custom') return 2;
+    if (matchedProvider?.uiGroup === 'third-party') return 2;
+    if (matchedProvider?.uiGroup === 'custom') return 3;
+    if (matchedProvider?.uiGroup === 'alibaba') return 1;
     return 0;
   }, [matchedProvider]);
 
@@ -264,6 +286,9 @@ export function AuthDialog(): React.JSX.Element {
   const handleMainSelect = (value: MainOption) => {
     clearErrors();
     switch (value) {
+      case 'QWENCLOUD':
+        pushView('qwencloud-select');
+        break;
       case 'ALIBABA_MODELSTUDIO':
         pushView('alibaba-select');
         break;

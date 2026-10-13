@@ -175,6 +175,16 @@ export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
   'dashscope-us.aliyuncs.com',
 ];
 
+/**
+ * 千问AI平台 (China) / QwenCloud (International) MaaS hosts. Both the
+ * pay-as-you-go endpoints and the `token-plan.`-prefixed subscription
+ * endpoints are subdomains of these, so one suffix match covers all four.
+ */
+export const QWENCLOUD_MAAS_HOSTS: readonly string[] = [
+  'maas.qianwenaiapi.com',
+  'maas.qwencloudapi.com',
+];
+
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
@@ -229,6 +239,14 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       hostname.startsWith('token-plan.') &&
       hostname.endsWith('.maas.aliyuncs.com');
 
+    // 千问AI平台 / QwenCloud MaaS hosts, including their `token-plan.`
+    // subscription subdomains.
+    const isQwenCloudOrigin =
+      hostname !== null &&
+      QWENCLOUD_MAAS_HOSTS.some(
+        (host) => hostname === host || hostname.endsWith('.' + host),
+      );
+
     // Internal Alibaba domains proxying to DashScope-compatible APIs.
     // Covers *.alibaba-inc.com and *.aliyun-inc.com.
     const isInternalOrigin =
@@ -256,6 +274,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       normalizedProxyUrl &&
       !isDashscopeOrigin &&
       !isTokenPlanOrigin &&
+      !isQwenCloudOrigin &&
       !isInternalOrigin &&
       !isAliCloudApiOrigin &&
       !isProxyMatch
@@ -280,6 +299,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     return (
       isDashscopeOrigin ||
       isTokenPlanOrigin ||
+      isQwenCloudOrigin ||
       isInternalOrigin ||
       isAliCloudApiOrigin ||
       isProxyMatch

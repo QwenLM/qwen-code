@@ -194,11 +194,23 @@ const moveDownAndWaitForSelection = async (
   await waitForSelectedOption(lastFrame, label);
 };
 
+const QWENCLOUD_MAIN_LABEL = '千问AI平台 / QwenCloud';
+
+// \u5343\u95eeAI\u5e73\u53f0 / QwenCloud is the first top-level entry; Alibaba
+// ModelStudio now sits one step below it.
+const selectAlibabaModelStudio = async (
+  stdin: { write: (s: string) => void },
+  lastFrame: () => string | undefined,
+) => {
+  await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+  await moveDownAndWaitForSelection(stdin, lastFrame, 'Alibaba ModelStudio');
+};
+
 const navigateToCustomProtocolSelect = async (
   stdin: { write: (s: string) => void },
   lastFrame: () => string | undefined,
 ) => {
-  await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+  await selectAlibabaModelStudio(stdin, lastFrame);
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Third-party Providers');
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Custom Provider');
   await pressEnterAndWaitFor(
@@ -513,7 +525,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // QWEN OAuth no longer has a UI entry; the dialog falls back to the
-      // default Alibaba ModelStudio option.
+      // default first option, 千问AI平台 / QwenCloud.
+      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
 
@@ -553,7 +566,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is Alibaba ModelStudio (first option).
+      // Default is 千问AI平台 / QwenCloud (first option).
+      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
 
@@ -596,7 +610,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
-      // it will just show the default Alibaba ModelStudio option.
+      // it will just show the default first option, 千问AI平台 / QwenCloud.
+      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
   });
@@ -652,7 +667,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         { closeAuthDialog },
         undefined, // config.getAuthType() returns undefined
       );
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
 
       // Simulate pressing escape key
       stdin.write('\u001b'); // ESC key
@@ -835,6 +850,10 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const cases = [
         {
+          label: QWENCLOUD_MAIN_LABEL,
+          childTitle: `${QWENCLOUD_MAIN_LABEL} · Access Method`,
+        },
+        {
           label: 'Alibaba ModelStudio',
           childTitle: 'Alibaba ModelStudio · Access Method',
         },
@@ -852,7 +871,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         const { stdin, lastFrame, unmount } =
           renderAuthDialog(createSettings());
 
-        await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+        await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
         while (
           !lastFrame()?.match(
             new RegExp(`›\\s*(?:\\d+\\.\\s*)?${escapeRegExp(testCase.label)}`),
@@ -908,7 +927,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
@@ -974,7 +993,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
@@ -1044,7 +1063,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
@@ -1111,7 +1130,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
@@ -1194,7 +1213,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
@@ -1260,7 +1279,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         { handleProviderSubmit },
       );
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       stdin.write('\r');
       await waitForSelectedOption(lastFrame, 'Coding Plan');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
@@ -1341,7 +1360,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       stdin.write('\r');
       await waitForSelectedOption(lastFrame, 'Coding Plan');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
@@ -1411,7 +1430,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       stdin.write('\r');
       await waitForSelectedOption(lastFrame, 'Coding Plan');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');

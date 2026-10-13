@@ -8,7 +8,10 @@ import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
-import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
+import {
+  DASHSCOPE_REGIONAL_HOSTS,
+  QWENCLOUD_MAAS_HOSTS,
+} from '../core/openaiContentGenerator/provider/dashscope.js';
 import { getDefaultApiKeyEnvVar } from '../models/modelConfigErrors.js';
 import {
   ALL_PROVIDERS,
@@ -203,6 +206,7 @@ function classifyDashScopeBaseUrl(
   const hostname = url.hostname.toLowerCase();
   const suffixes = [
     ...DASHSCOPE_REGIONAL_HOSTS,
+    ...QWENCLOUD_MAAS_HOSTS,
     'maas.aliyuncs.com',
     'alibaba-inc.com',
     'aliyun-inc.com',

@@ -36,6 +36,7 @@ import type {
   ModelWireApi,
 } from '@qwen-code/qwen-code-core';
 import {
+  QWENCLOUD_PROVIDERS,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
   AuthEvent,
@@ -101,11 +102,13 @@ import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 
 type ViewLevel =
   | 'main'
+  | 'qwencloud-select'
   | 'alibaba-select'
   | 'thirdparty-select'
   | 'provider-setup';
 
 type MainOption =
+  | 'QWENCLOUD'
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
   | 'CUSTOM_PROVIDER';
@@ -118,6 +121,14 @@ interface RadioItem {
 }
 
 const MAIN_ITEMS: RadioItem[] = [
+  {
+    key: 'QWENCLOUD',
+    label: t('千问AI平台 / QwenCloud'),
+    description: t(
+      'Official recommended setup: Token Plan or Standard API Key',
+    ),
+    value: 'QWENCLOUD',
+  },
   {
     key: 'ALIBABA_MODELSTUDIO',
     label: t('Alibaba ModelStudio'),
@@ -165,6 +176,7 @@ const PROTOCOL_ITEMS: RadioItem[] = [
 
 const VIEW_TITLES: Record<string, string> = {
   main: t('Connect a Provider'),
+  'qwencloud-select': t('千问AI平台 / QwenCloud · Access Method'),
   'alibaba-select': t('Alibaba ModelStudio · Access Method'),
   'thirdparty-select': t('Third-party Providers · Provider'),
 };
@@ -1367,6 +1379,10 @@ function AuthDialogFlow({
 
   // -- Sub-menu items ---------------------------------------------------------
 
+  const qwencloudItems = useMemo(
+    () => QWENCLOUD_PROVIDERS.map(providerToItem),
+    [],
+  );
   const alibabaItems = useMemo(() => ALIBABA_PROVIDERS.map(providerToItem), []);
   const thirdPartyItems = useMemo(
     () => THIRD_PARTY_PROVIDERS.map(providerToItem),
@@ -1415,6 +1431,7 @@ function AuthDialogFlow({
   );
 
   const subMenus: Record<string, RadioItem[]> = {
+    'qwencloud-select': qwencloudItems,
     'alibaba-select': alibabaItems,
     'thirdparty-select': thirdPartyItems,
   };
@@ -1429,8 +1446,9 @@ function AuthDialogFlow({
   );
   // Land on the tab matching the active provider's uiGroup (ink parity).
   const defaultMainIndex = useMemo(() => {
-    if (matchedProvider?.uiGroup === 'third-party') return 1;
-    if (matchedProvider?.uiGroup === 'custom') return 2;
+    if (matchedProvider?.uiGroup === 'third-party') return 2;
+    if (matchedProvider?.uiGroup === 'custom') return 3;
+    if (matchedProvider?.uiGroup === 'alibaba') return 1;
     return 0;
   }, [matchedProvider]);
 
@@ -1440,6 +1458,9 @@ function AuthDialogFlow({
     (value: MainOption) => {
       clearErrors();
       switch (value) {
+        case 'QWENCLOUD':
+          pushView('qwencloud-select');
+          break;
         case 'ALIBABA_MODELSTUDIO':
           pushView('alibaba-select');
           break;
