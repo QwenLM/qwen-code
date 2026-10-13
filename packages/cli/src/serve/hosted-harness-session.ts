@@ -7496,6 +7496,14 @@ export function registerHostedHarnessSessionRoutes(
           );
           return;
         }
+        // The terminal write (and toolTurn.finish() / the continuation
+        // consumption flush) sits outside the model-stage catch above: a
+        // store failure thrown from them lands here with failureReason
+        // still at its 'error' initial value. Classify the original cause
+        // once so the fallback record and the status surface keep the name
+        // (#13800 P2).
+        const storeFailure = namedStoreFailure(cause);
+        if (storeFailure !== undefined) failureReason = storeFailure;
         try {
           await session.managed.sink.write(turnResultRecord('error'));
         } catch (settleCause) {
