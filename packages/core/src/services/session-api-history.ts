@@ -6,45 +6,31 @@
 
 import type { Content, Part } from '@google/genai';
 import { isTurnResultRecordPayload } from './chatRecordingService.js';
-import {
-  isApiUserPrompt,
-  isTodoStopGuardPromptText,
-} from './api-user-prompt.js';
-import { effectiveHistoryEnd } from '../core/turn-interruption.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
 } from './chatRecordingService.js';
-import {
-  isInternalCodeModeToolResult,
-  markApiHistoryPrompt,
-  getApiHistoryPromptId,
-} from '../utils/transcript-records.js';
+import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 
-export {
-  markApiHistoryPrompt,
-  getApiHistoryPromptId,
-  moveApiHistoryPromptId,
-} from '../utils/transcript-records.js';
+const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
 
-export function restoreApiHistoryPromptIds(
-  current: readonly Content[],
-  restored: Content[],
+type IdentifiedContent = Content & {
+  [API_HISTORY_PROMPT_ID]?: string;
+};
+
+export function markApiHistoryPrompt(
+  content: Content,
+  promptId: unknown,
 ): void {
-  for (
-    let index = 0;
-    index < Math.min(current.length, restored.length);
-    index++
-  ) {
-    if (JSON.stringify(current[index]) !== JSON.stringify(restored[index]))
-      break;
-    const promptId = getApiHistoryPromptId(current[index]!);
-    if (promptId && findApiHistoryPromptIndex(current, promptId) === index) {
-      markApiHistoryPrompt(restored[index]!, promptId);
-    }
+  if (typeof promptId === 'string' && promptId.length > 0) {
+    (content as IdentifiedContent)[API_HISTORY_PROMPT_ID] = promptId;
   }
+}
+
+export function getApiHistoryPromptId(content: Content): string | undefined {
+  return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
 }
 
 /** Returns the unique matching entry at or after `startIndex`, or -1. */
@@ -112,24 +98,10 @@ export function getLastApiHistoryPromptId(
   history: readonly Content[],
   trailingSystemNotifications?: number,
 ): string | undefined {
+  const end = history.length - (trailingSystemNotifications ?? 0);
   const prompt = history
-    .slice(0, effectiveHistoryEnd(history, trailingSystemNotifications ?? 0))
-    .findLast(
-      (content) =>
-        isApiUserPrompt(
-          content,
-          getApiHistoryPromptId(content)
-            ? undefined
-            : {
-                excludeTextPart: isTodoStopGuardPromptText,
-                excludeTaskNotifications:
-                  trailingSystemNotifications === undefined,
-              },
-        ) ||
-        (content.role === 'user' &&
-          !content.parts?.some((part) => part.functionResponse) &&
-          content.parts?.some((part) => part.inlineData || part.fileData)),
-    );
+    .slice(0, end)
+    .findLast((content) => getApiHistoryPromptId(content) !== undefined);
   return prompt && getApiHistoryPromptId(prompt);
 }
 
@@ -160,8 +132,7 @@ export function getLastApiPromptCancellation(
     history,
     trailingSystemNotifications,
   );
-  if (!promptId || findApiHistoryPromptIndex(history, promptId) === -1)
-    return unknown;
+  if (!promptId) return unknown;
   const matches = hints.filter(
     (hint) => hint?.kind === 'prompt' && hint.promptId === promptId,
   );
@@ -192,9 +163,7 @@ export function getLastApiPromptCancellation(
     hints.indexOf(result) <= hints.indexOf(owner)
   )
     return unknown;
-  const cancellation = getTurnResultCancellation(result);
-  if (!cancellation) return unknown;
-  return cancellation;
+  return getTurnResultCancellation(result) ?? unknown;
 }
 
 export interface BuildApiHistoryOptions {

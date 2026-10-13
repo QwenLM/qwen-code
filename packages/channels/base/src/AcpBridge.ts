@@ -404,18 +404,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     };
   }
 
-  async cancelSession(
-    sessionId: string,
-    options?: { cancelReason?: 'user' | 'interrupted' },
-  ): Promise<void> {
+  async cancelSession(sessionId: string): Promise<void> {
     const conn = this.ensureConnection();
     try {
-      await conn.cancel({
-        sessionId,
-        ...(options?.cancelReason
-          ? { _meta: { 'qwen.cancelReason': options.cancelReason } }
-          : {}),
-      });
+      await conn.cancel({ sessionId });
     } finally {
       this.resolvePendingPermissions(sessionId);
     }

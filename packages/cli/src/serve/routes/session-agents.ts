@@ -45,7 +45,6 @@ import {
 } from '../session-agents/orchestrator.js';
 import { getSessionAgentEventHub } from '../session-agents/events.js';
 import { AGENT_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
-import { PROMPT_CANCEL_REASON_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { detectFromLoopback } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -246,14 +245,7 @@ export function registerSessionAgentRoutes(
         .listWorkspaceSessions(runtime.workspaceCwd)
         .filter((session) => session.sourceType === AGENT_SESSION_SOURCE_TYPE)
         .map(async (session) => {
-          // Teardown is infrastructure: without the meta the bridge reads
-          // it as a person's stop and durably suppresses recovery.
-          await bridge
-            .cancelSession(session.sessionId, {
-              sessionId: session.sessionId,
-              _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
-            })
-            .catch(() => {});
+          await bridge.cancelSession(session.sessionId).catch(() => {});
           await bridge.closeSession(session.sessionId).catch(() => {});
         }),
     );

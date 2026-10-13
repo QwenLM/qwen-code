@@ -135,13 +135,11 @@ export function readHostAck(ack: unknown): {
   ok: boolean;
   reason?: string;
   cancelled: boolean;
-  cancelReason?: 'user' | 'interrupted';
 } {
   const loose = (typeof ack === 'object' && ack !== null ? ack : {}) as {
     ok?: unknown;
     reason?: unknown;
     cancelled?: unknown;
-    cancelReason?: unknown;
   };
   const cancelled = loose.cancelled === true || loose.reason === 'cancelled';
   return {
@@ -149,10 +147,6 @@ export function readHostAck(ack: unknown): {
     ok: loose.ok === true && !cancelled,
     ...(typeof loose.reason === 'string' ? { reason: loose.reason } : {}),
     cancelled,
-    ...(cancelled &&
-    (loose.cancelReason === 'user' || loose.cancelReason === 'interrupted')
-      ? { cancelReason: loose.cancelReason }
-      : {}),
   };
 }
 
@@ -160,12 +154,7 @@ export function readHostAck(ack: unknown): {
 function refusal(ack: ReturnType<typeof readHostAck>): Record<string, unknown> {
   return {
     error: ack.reason ?? (ack.cancelled ? 'cancelled' : 'lease_mismatch'),
-    ...(ack.cancelled
-      ? {
-          cancelled: true,
-          ...(ack.cancelReason ? { cancelReason: ack.cancelReason } : {}),
-        }
-      : {}),
+    ...(ack.cancelled ? { cancelled: true } : {}),
   };
 }
 
@@ -805,15 +794,8 @@ export function registerAgentHostTransportRoutes(
           return {
             runId: run.runId,
             ok: ack.ok,
-            // Fenced run: the Host aborts it with the declared provenance.
-            ...(ack.cancelled
-              ? {
-                  cancelled: true,
-                  ...(ack.cancelReason
-                    ? { cancelReason: ack.cancelReason }
-                    : {}),
-                }
-              : {}),
+            // The person stopped it: the Host aborts the turn, no result.
+            ...(ack.cancelled ? { cancelled: true } : {}),
           };
         });
         if (host.protocol === HOST_PROTOCOL_VERSION) {
