@@ -2,7 +2,7 @@
 
 [English](2026-10-09-managed-workflow-child-kind.md) | [简体中文](2026-10-09-managed-workflow-child-kind.zh-CN.md)
 
-状态:已在本变更中实现。已落地:`managed-child_run` 的 `workflow` 记录体 kind,在两种语言中均已登记并校验,但不开放提交;以及累计 child launch 预算,超出时以 `budget_exhausted` 拒绝。仍为设计:产出 `workflow` 记录的 workflow 运行时,以及 Workspace 隔离策略,二者各有后续切片(见"后续工作")。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4c** 切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13743](https://github.com/QwenLM/qwen-code/issues/13743) 跟踪。它承接 H4a([记录契约](2026-10-06-managed-child-agent-runtime.md),#13505)与 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.md),#13550)。更早的 [H4 问题框架](2026-10-04-managed-child-agents.md) 仍是背景;凡它与 H4a、H4b 或本文档冲突之处,以后者为准。
+状态:已在本变更中实现。已落地:`managed-child_run` 的 `workflow` 记录体 kind 与累计 child launch 预算(超出时以 `budget_exhausted` 拒绝),提交由 [workflow 运行时设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md) 启用(同一棵树交付:门禁列出两种 kind)。仍为设计的只剩 Workspace 隔离策略(见"后续工作")。这是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 **H4c** 切片,即 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段,由 [#13743](https://github.com/QwenLM/qwen-code/issues/13743) 跟踪。它承接 H4a([记录契约](2026-10-06-managed-child-agent-runtime.md),#13505)与 H4b([child Session 运行时](2026-10-07-managed-child-session-runtime.md),#13550)。更早的 [H4 问题框架](2026-10-04-managed-child-agents.md) 仍是背景;凡它与 H4a、H4b 或本文档冲突之处,以后者为准。
 
 ## 问题与范围
 
@@ -42,7 +42,7 @@ Issue #13743 在 H4c 名下提出三件事:`workflow` child kind(C1)、Workspace
 2. **两种 child Session kind 共用同一形状。** `workflow` 与 `child_agent` 共享封闭键集、固定键、停止原因,以及每一条 run、交付与 acceptance 规则。workflow child 是一个 child Session,它的 launch 输入运行一个 workflow,而不是一段提示词。流水线提交的每个事实对二者都相同:launch 身份、dispatch、attach、结果副本、acceptance、consumption 与级联取消。workflow launch 在提示词之外需要的东西(要运行的 workflow 及其参数)放在 `inputRef` 指向的 launch 输入里。该 envelope 由 workflow 运行时切片定义,正如 H4b 定义了 child agent 的 envelope。
 3. **两种 kind 有三处不同。**
    - 任务 kind:`workflow` run 投影为任务 kind `workflow`。公开的 `TaskKind` 枚举已列出它(`partial`),因此 OpenAPI 契约不变。
-   - 启用:kind 门禁准入 `child_agent`,不准入 `workflow`。
+   - 启用:(已被运行时切片取代)在本切片提交时,kind 门禁准入 `child_agent`,不准入 `workflow`;[workflow 运行时切片](2026-10-10-managed-workflow-child-runtime.zh-CN.md)准入两者(决策 5)。
    - definition pin:`workflow` run 必须在每个修订上都携带 `run.definition`,包括第一个修订。pin 指名它运行的 workflow:`definitionId` 是 workflow 的稳定身份,`definitionRevision` 是其修订,`definitionDigest` 是所运行定义的摘要。workflow 是这次 launch 的主体,所以缺少它的 launch 会以 "Workflow run must pin its workflow definition from launch." 被拒绝。child agent 仍可在没有 pin 的情况下开启,但最迟在 dispatch 时必须带上(H4a)。
 4. **跨记录规则按 child Session 适用,而不是按 kind。** TypeScript authority 与 Java store 对两种 kind 适用同样三条规则:
    - 第一层 run 的 `rootSessionId` 必须是持有该日志的 Session。
@@ -51,9 +51,9 @@ Issue #13743 在 H4c 名下提出三件事:`workflow` child kind(C1)、Workspace
 
    这些规则,以及后继与起始规则、restore 跳过和 launch 配额,都通过同一个点名两种 kind 的分类函数判断,而不是写成"不是 Shell":`managed-child-run-record.ts` 中的 `isChildSessionRun`,以及 Java 的 `ManagedExtensionRecords.isChildSessionRun`。TypeScript 的分类函数与任务 kind 投影对 `AnyChildRun` 的每个 kind 穷举 switch,所以以后新增的 kind 在被分类之前无法通过编译。Java 中未列出的 kind 不算 child Session,`childRunTaskKind` 会拒绝它,而不是把它投影成 child agent。
 
-5. **`workflow` 保持禁用。** `MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS` 仍为 `['child_agent']`。authority 在发布任何内容之前,以 "domain child_run kind workflow is registered but not enabled for submission." 拒绝 `workflow` 提交。Java store 先于任何写入方校验并物化 `workflow` 记录体(H1–H4b 一直保持的 server-first 顺序),并投影其任务 kind。
-6. **Java 运行时路径仍只处理 `child_agent`。** relay 的发现页与关闭级联的 live-scope 查询现在都额外要求 `task_kind = 'child_agent'`。relay 创建的是运行提示词的 child Session,级联则经由 child agent 漏斗取消。如果二者处理 `workflow` 行,relay 会从一次 workflow launch 创建出由提示词驱动的 child,级联会卡在一个漏斗拒绝的取消上,让关闭无法完成。放宽二者属于 workflow 运行时切片。因此启用 `workflow` 不只是加一条门禁条目:它需要 Workflow 工具的 Managed 准入、launch envelope 以及这两处放宽,全部在那个切片中完成。
-7. **读取方容忍新 kind。** workspace restore 枚举跳过所有 child Session kind,因为二者都不拥有输出 manifest。child agent 漏斗仍只读取 `child_agent` 记录,所以它的记录查找永远不会把 `workflow` run 当作 child agent 返回。
+5. **本切片 `workflow` 保持门禁关闭,随其运行时切片开启。** 此处 `MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS` 仍为 `['child_agent']`——同一棵树内交付的[运行时切片](2026-10-10-managed-workflow-child-runtime.md)将其落成 `['child_agent', 'workflow']`(H3 的 `shell` 已由 #13856 启用,发布的常量为 `['child_agent', 'shell', 'workflow']`);authority 只在每一次修订提交上拒绝未列出的 kind:"domain child_run kind `<kind>` is registered but not enabled for submission."。Java store 先于任何写入方校验并物化 `workflow` 记录体(H1–H4b 一直保持的 server-first 顺序),并投影其任务 kind。
+6. **Java 运行时路径本切片仍只处理 `child_agent`,由同一运行时切片放宽。** 本切片提交时,relay 的发现页与关闭级联的 live-scope 查询都要求 `task_kind = 'child_agent'`,relay 经 child agent 漏斗创建运行提示词的 child Session;[运行时切片](2026-10-10-managed-workflow-child-runtime.md)将二者放宽为 `IN ('child_agent', 'workflow')`,使 `workflow` 行对创建、结算与取消它的整套机制可见。没有这些放宽就处理 `workflow` 行,会从一次 workflow launch 创造出由提示词驱动的 child,而关闭会卡在一个漏斗拒绝的取消上——门禁条目的开启需要 Managed 准入、launch envelope 与这两处放宽一起到位。
+7. **读取方容忍新 kind。** workspace restore 枚举跳过所有 child Session kind,因为二者都不拥有输出 manifest。(已被运行时切片取代)在本切片提交时,child agent 漏斗只读取 `child_agent` 记录,所以它的记录查找从不把 `workflow` run 当作 child agent 返回;运行时切片让漏斗按 kind 参数化(其决策 7)。
 8. **深度与并发保持 H4b 交付时的样子。** 深度 1,每个 owner scope 最多 4 个活跃 child,超出时分别在 launch 时以 `depth_limit` 或 `count_limit` 拒绝,且不提交任何东西。
 9. **launch 预算。** 一个 owner scope 在 Session 生命周期内最多 launch `MANAGED_CHILD_LIMITS.maxLaunchesPerScope` = 64 个 child Session run。
    - 计入什么:该 scope 已提交的每个 child Session run,不论 kind、不论状态。失败与取消的 launch 也计入,因为每一次都消耗了一次创建尝试,并留下一条重建时要回放的链(H0c 未决问题 1)。
@@ -79,7 +79,7 @@ Schema version 1。链以 `childRunId` 为键,与 `child_agent` 相同。[`child
 
 ## 非目标
 
-- **workflow 运行时**:Workflow 工具的 Managed 准入、launch envelope、执行 workflow 的 child Session、放宽 relay 与级联,以及启用该 kind。
+- (已由运行时切片交付) **workflow 运行时**:Workflow 工具的 Managed 准入、launch envelope、执行 workflow 的 child Session、放宽 relay 与级联,以及启用该 kind——仅是本切片的非目标;[workflow 运行时设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md)在同一棵树里交付了全部内容。
 - **Workspace 隔离策略**(决策 11)。
 - **深度超过 1**,以及嵌套树的按根预算。
 - **模型、token 与时长预算。** 这里的 `budget_exhausted` 约束的是 launch 次数,不是 token;`duration_limit` 仍未使用。
@@ -99,8 +99,8 @@ Schema version 1。链以 `childRunId` 为键,与 `child_agent` 相同。[`child
 ## 验证
 
 - **Fixture 一致性。** `workflow` 的用例与后继对在两种语言中经 `managed-child-run-record.test.ts` 与 `ManagedChildRunRecordContractTest` 重放。两个校验器都以 fixture 指名的子句拒绝每个非法用例,Java 还钉住了每个合法用例的任务 kind。
-- **Authority。** 真实的 kind 门禁拒绝 `workflow` launch,且没有任何内容被发布。仅在植入时放开门禁的情况下,`workflow` 链经过 acceptance 与 consumption 提交,在没有门禁的情况下重新打开时重建(门禁拒绝的是提交,从不拒绝读取方),投影任务 kind `workflow` 并带上 pin 的 `definitionRevision`,并遵守 root、acceptance 与反向规则。
-- **Java store 与 relay。** `workflow` 链在同样规则下提交并投影为 `workflow`。交付待处理的 `workflow` 行既不出现在 relay 的发现页上,也不出现在级联的 live scope 中。
+- **Authority。** (本切片提交时如此;运行时切片已把这些拒绝见证改写为断言准入。)真实的 kind 门禁拒绝 `workflow` launch,且没有任何内容被发布。仅在植入时放开门禁的情况下,`workflow` 链经过 acceptance 与 consumption 提交,在没有门禁的情况下重新打开时重建(门禁拒绝的是提交,从不拒绝读取方),投影任务 kind `workflow` 并带上 pin 的 `definitionRevision`,并遵守 root、acceptance 与反向规则。
+- **Java store 与 relay。** `workflow` 链在同样规则下提交并投影为 `workflow`。(本切片提交时如此;运行时切片放宽了两个查询。)交付待处理的 `workflow` 行既不出现在 relay 的发现页上,也不出现在级联的 live scope 中。
 - **预算。** 准入矩阵覆盖了边界与顺序。tool turn 测试 launch 了第 64 个 child,随后在没有活跃 child 的情况下两次以 `budget_exhausted` 拒绝第 65 个。两次拒绝都没有提交任何记录,第二次拒绝表明重放推导出了与第一次相同的回答。
 - **读取方。** 在分离的 Shell lineage 旁边放一条 `child_agent` 或 `workflow` 记录时,workspace restore 都能成功。配额计数包含一条植入的 `workflow` run,而漏斗自己的记录查找不会返回它。
 - **变异检查。** 每条新守卫都逐一禁用过,其见证均变红:TypeScript 11 个,Java 8 个。另有一个变异(把 restore 跳过收窄回 `child_agent`)与本变更行为相同,因为枚举的落空分支写入 `undefined`,而 lineage 检查本就把它视为不存在。这个变异改由 `tsc` 拒绝,因为 `workflow` run 没有 `outputRef`。
@@ -108,20 +108,20 @@ Schema version 1。链以 `childRunId` 为键,与 `child_agent` 相同。[`child
 ## 验收标准
 
 - TypeScript 与 Java 从共享 fixture 产出并拒绝完全相同的 `workflow` 链,除两个改指向的未知 kind 见证外,所有 H3、H4a 与 H4b 用例原样重放。
-- `MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS` 为 `['child_agent']`,`workflow` 提交以 "registered but not enabled" 被拒绝。
+- (已由运行时切片翻转)在本切片提交时,`MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS` 为 `['child_agent']`,`workflow` 提交以 "registered but not enabled" 被拒绝;运行时切片有意翻转了两者——发布的常量为 `['child_agent', 'shell', 'workflow']`(H3 的 `shell` 由 #13856 启用),`workflow` 提交成功。
 - 超出预算的 launch 以 `budget_exhausted` 被拒绝且不提交任何 child,重放回答相同。
 - 没有公开 API 或迁移变更,所有既有 child agent 测试保持通过。
 
 ## 未决问题
 
-1. **workflow launch envelope**:它指名的是已保存 workflow、扩展 workflow 还是内联源码,以及参数如何约束。由 workflow 运行时切片决定。
-2. **workflow 自己的 agent 在哪里运行**:作为嵌套的 child Session(需要深度 2 与真实的树深度;`childLaunchAdmission` 目前传入的是深度 1),还是在 workflow child 内部运行。由 workflow 运行时切片决定。
+1. (已由运行时切片了结) **workflow launch envelope**:内联源码,`{ definition, script, args }` 封闭键、32 KiB `maxEnvelopeBytes` 界——[运行时设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md)的决策 1 与 3。
+2. (已由运行时切片了结) **workflow 自己的 agent 在哪里运行**:在 workflow child 内部作为进程内 subagent 运行;嵌套 child Session 与深度 2 运行时是已指名的后续——运行时设计的决策 5。
 3. **预算取值**:64 是否需要调整,以及嵌套落地后的按根预算。
 
 ## 后续工作
 
-| 切片            | 范围                                                                                                                                                                                             |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Workflow 运行时 | Workflow 工具的 Managed 准入、workflow launch envelope、child Session 执行 workflow、relay 与级联放宽到 `workflow`,最后是 kind 门禁条目。                                                        |
-| 隔离            | [#13753](https://github.com/QwenLM/qwen-code/issues/13753):为 child worktree 及其合并回去提供 Workspace 能力;然后是 `worktree`(生命周期、合并策略)与 `snapshot`,并决定串行共享是否需要独立取值。 |
-| H4d–H4f、Detach | 与 H4a/H4b 交付地图相同。                                                                                                                                                                        |
+| 切片            | 范围                                                                                                                                                                                                                                                                                                        |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Workflow 运行时 | 已由 [workflow 运行时设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md) 交付:Workflow 工具的 Managed 准入(内联源码,见该设计决策 1 —— 了结了本文未决问题 1)、launch envelope、child Session 执行 workflow(其 agent 在进程内运行,了结了未决问题 2)、relay 与级联放宽到 `workflow`,以及 kind 门禁条目。 |
+| 隔离            | [#13753](https://github.com/QwenLM/qwen-code/issues/13753):为 child worktree 及其合并回去提供 Workspace 能力;然后是 `worktree`(生命周期、合并策略)与 `snapshot`,并决定串行共享是否需要独立取值。                                                                                                            |
+| H4d–H4f、Detach | 与 H4a/H4b 交付地图相同。                                                                                                                                                                                                                                                                                   |
