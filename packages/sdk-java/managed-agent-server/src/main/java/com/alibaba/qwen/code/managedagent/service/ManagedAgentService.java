@@ -26,6 +26,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
@@ -53,6 +54,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +91,10 @@ public class ManagedAgentService {
     // "text" is the spelling that clients used before the contract.
     private static final Set<String> INPUT_TYPES = Set.of("input_text",
             "text");
+    // The per-block cap (1M chars) times the per-list cap (100) would
+    // otherwise admit ~100M characters in a single command.
+    private static final int MAX_AGGREGATE_INPUT_CHARS = 4 * 1000 * 1000;
+    private static final int MAX_BLOCK_INPUT_CHARS = 1000 * 1000;
     private final AgentStateStore store;
     private final ManagedWorkspaceRegistry workspaces;
     private final RequestDigests digests;
@@ -110,9 +116,8 @@ public class ManagedAgentService {
     }
 
     private boolean supportsClose(SessionRecord session) {
-        return session.workspace() == null || store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
-                && harness.supportsLifecycle();
+        return session.workspace() == null || runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
+                && harness.supportsLifecycle(session.toolProfile());
     }
 
     private boolean hasActions(SessionRecord session) {
@@ -259,6 +264,55 @@ public class ManagedAgentService {
     public CommandAdmission createChildSession(String tenantId,
             String parentSessionId, String childRunId, String description,
             String prompt, boolean isolated) {
+        List<InputBlock> blocks = List.of(new InputBlock("input_text",
+                description.isBlank() ? prompt
+                        : "[" + description + "]\n\n" + prompt));
+        List<Map<String, Object>> input = input(blocks, false);
+        String title = description.isBlank() ? "child agent"
+                : description.length() > 256 ? description.substring(0, 256)
+                        : description;
+        return insertChildSession(tenantId, parentSessionId, childRunId,
+                title, input, isolated);
+    }
+
+    /**
+     * The workflow arm of the same creation (#13803 K1): the child's first
+     * turn carries one `workflow_launch` block — the workflow the parent
+     * launch pinned (id and revision classify, the digest binds the exact
+     * script bytes that ride the block) plus its structured arguments —
+     * instead of a prompt. Everything else is the prompt arm unchanged:
+     * the record-key-derived creation key, the one-transaction lineage,
+     * the dispatch of the admitted creation.
+     */
+    public CommandAdmission createWorkflowChildSession(String tenantId,
+            String parentSessionId, String childRunId, String definitionId,
+            long definitionRevision, String definitionDigest, String script,
+            Object args) {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("type", "workflow_launch");
+        Map<String, Object> definition = new LinkedHashMap<>();
+        definition.put("definitionId", definitionId);
+        definition.put("definitionRevision", definitionRevision);
+        definition.put("definitionDigest", definitionDigest);
+        block.put("definition", definition);
+        block.put("script", script);
+        if (args != null) {
+            block.put("args", args);
+        }
+        List<Map<String, Object>> input = List.of(block);
+        String title =
+                definitionId.length() > 256 ? definitionId.substring(0, 256)
+                        : definitionId;
+        return insertChildSession(tenantId, parentSessionId, childRunId,
+                title, input, false);
+    }
+
+    /** The shared child creation: parent admitted, lineage stamped, first
+     * turn minted from {@code input}, replay by the derived creation key. */
+    private CommandAdmission insertChildSession(String tenantId,
+            String parentSessionId, String childRunId, String title,
+            List<Map<String, Object>> input, boolean isolated) {
+        List<Map<String, Object>> normalizedInput = normalizeInput(input);
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
         if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
             throw new ApiException(HttpStatus.CONFLICT,
@@ -266,11 +320,7 @@ public class ManagedAgentService {
                     "The parent Session cannot admit a child.");
         }
         String creationKey = childCreationKey(parentSessionId, childRunId);
-        List<InputBlock> blocks = List.of(new InputBlock("input_text",
-                description.isBlank() ? prompt
-                        : "[" + description + "]\n\n" + prompt));
-        List<Map<String, Object>> input = input(blocks, false);
-        if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
+        if (!normalizedInput.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
@@ -283,9 +333,6 @@ public class ManagedAgentService {
                         : parentLineage.rootSessionId(),
                 childRunId, parentLineage == null ? 1
                         : parentLineage.depth() + 1);
-        String title = description.isBlank() ? "child agent"
-                : description.length() > 256 ? description.substring(0, 256)
-                        : description;
         String childCwd = null;
         if (isolated) {
             childCwd = store.findChildWorkspaceCwd(tenantId,
@@ -299,7 +346,7 @@ public class ManagedAgentService {
         Map<String, Object> semantic = new LinkedHashMap<>();
         semantic.put("child", childRunId);
         semantic.put("title", title);
-        semantic.put("input", input);
+        semantic.put("input", normalizedInput);
         if (childCwd != null) {
             semantic.put("workspace", childCwd);
         }
@@ -309,11 +356,13 @@ public class ManagedAgentService {
             admission = childCwd == null
                     ? store.insertChildSessionCommand(tenantId,
                             parentSessionId, creationKey, requestDigest, title,
-                            input, SubmitHarnessTurn.computePayloadDigest(input),
+                            normalizedInput,
+                            SubmitHarnessTurn.computePayloadDigest(normalizedInput),
                             lineage)
                     : store.insertChildSessionCommand(tenantId,
                             parentSessionId, creationKey, requestDigest, title,
-                            input, SubmitHarnessTurn.computePayloadDigest(input),
+                            normalizedInput,
+                            SubmitHarnessTurn.computePayloadDigest(normalizedInput),
                             lineage, childCwd);
         } catch (DuplicateKeyException error) {
             admission = store.replayChildSessionCommand(tenantId,
@@ -784,7 +833,10 @@ public class ManagedAgentService {
     private static boolean retention(SessionRecord session,
             Set<String> closed) {
         return session.workspace() == null
-                || closed.contains(session.sessionId());
+                || closed.contains(session.sessionId())
+                        && (!WorkspaceToolProfiles.isShellOrMcp(session.toolProfile())
+                                || WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2
+                                        && List.of("CLOSED", "ARCHIVED").contains(session.status()));
     }
 
     private PublicSession publicSession(SessionRecord session) {
@@ -818,7 +870,8 @@ public class ManagedAgentService {
                         true,
                         session.workspace() == null,
                         true,
-                        hasActions(session), supportsClose(session), retention, retention, supportsDelete(session, retention)),
+                        hasActions(session), supportsClose(session), retention, retention, supportsDelete(session, retention),
+                        foregroundShell(session)),
                 publicWorkspace(session));
     }
 
@@ -914,12 +967,20 @@ public class ManagedAgentService {
                 new WebShellSessionCapabilities(true, hasArtifacts(session),
                         hasActions(session), maySubmit, supportsClose(session),
                         retention, retention, supportsDelete(session, retention),
-                        mayChangeCwd));
+                        mayChangeCwd, foregroundShell(session)));
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
-        return retention || session.workspace() != null && store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
+        return retention || session.workspace() != null && runtimeWarmer != null
+                && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(session.toolProfile());
+    }
+
+    private Boolean foregroundShell(SessionRecord session) {
+        if (session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
+            return null;
+        }
+        return store.workspaceFilesEnabled() && store.workspaceShellEnabled()
+                && WorkspaceToolProfiles.requiresApproval(session.approvalMode());
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -976,7 +1037,7 @@ public class ManagedAgentService {
     private static WebShellTurn webShellTurn(TurnSummary turn) {
         return new WebShellTurn(turn.turnId(), turn.sessionId(),
                 turn.status().toLowerCase(), turn.createdAt(),
-                turn.completedAt(), turn.errorCode(), null);
+                turn.completedAt(), turn.errorCode());
     }
 
     PublicEvent publicEvent(EventRecord event) {
@@ -1305,6 +1366,7 @@ public class ManagedAgentService {
             return List.of();
         }
         List<Map<String, Object>> result = new ArrayList<>();
+        long totalChars = 0;
         for (InputBlock block : blocks) {
             if (block == null || !INPUT_TYPES.contains(block.type())
                     || block.text() == null || block.text().isEmpty()) {
@@ -1312,9 +1374,91 @@ public class ManagedAgentService {
                         "unsupported_input",
                         "Phase 1 accepts non-empty text input only.");
             }
-            result.add(Map.of("type", "text", "text", block.text()));
+            // Code points, matching the published schema's maxLength; a
+            // String.length() count would disagree on astral-plane text.
+            int blockChars = block.text().codePointCount(0,
+                    block.text().length());
+            if (blockChars > MAX_BLOCK_INPUT_CHARS) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "invalid_input",
+                        "Input block exceeds the " + MAX_BLOCK_INPUT_CHARS
+                                + " character per-block limit.");
+            }
+            totalChars += blockChars;
+            if (totalChars > MAX_AGGREGATE_INPUT_CHARS) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "invalid_input",
+                        "Input exceeds the " + MAX_AGGREGATE_INPUT_CHARS
+                                + " character aggregate limit.");
+            }
+            result.add(Map.of("type", "text", "text",
+                    replaceLoneSurrogates(block.text())));
         }
         return List.copyOf(result);
+    }
+
+    /** The input the digest and the column both describe: an unpaired
+     * surrogate, which no store column keeps, trades for U+FFFD at
+     * admission — before the payload digest, the replay digest and the
+     * insert — so all three name one representation. Well-formed
+     * surrogate pairs and every non-string value pass through. */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> normalizeInput(
+            List<Map<String, Object>> input) {
+        List<Map<String, Object>> result = new ArrayList<>(input.size());
+        for (Map<String, Object> block : input) {
+            result.add((Map<String, Object>) normalizeValue(block));
+        }
+        return List.copyOf(result);
+    }
+
+    private static Object normalizeValue(Object value) {
+        if (value instanceof String text) {
+            return replaceLoneSurrogates(text);
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> copy = new LinkedHashMap<>(map.size());
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                copy.put(replaceLoneSurrogates((String) entry.getKey()),
+                        normalizeValue(entry.getValue()));
+            }
+            return copy;
+        }
+        if (value instanceof List<?> list) {
+            List<Object> copy = new ArrayList<>(list.size());
+            for (Object item : list) {
+                copy.add(normalizeValue(item));
+            }
+            return Collections.unmodifiableList(copy);
+        }
+        return value;
+    }
+
+    static String replaceLoneSurrogates(String text) {
+        StringBuilder out = null;
+        int written = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char current = text.charAt(i);
+            if (Character.isHighSurrogate(current)) {
+                if (i + 1 < text.length()
+                        && Character.isLowSurrogate(text.charAt(i + 1))) {
+                    i++; // a well-formed pair passes through unchanged
+                    continue;
+                }
+            } else if (!Character.isLowSurrogate(current)) {
+                continue;
+            }
+            if (out == null) {
+                out = new StringBuilder(text.length());
+            }
+            out.append(text, written, i).append('�');
+            written = i + 1;
+        }
+        if (out == null) {
+            return text;
+        }
+        out.append(text, written, text.length());
+        return out.toString();
     }
 
     private static String metadataTitle(String explicitTitle,
@@ -1344,18 +1488,21 @@ public class ManagedAgentService {
                 : title instanceof String ? (String) title : null);
     }
 
+    private static boolean unicodeBlank(String title) {
+        return title.codePoints().allMatch(character -> Character.isWhitespace(character)
+                || Character.isSpaceChar(character) || character == 0xfeff);
+    }
+
     private static String validTitle(String title) {
         if (title != null && title.length() > 512) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
                     "Title must not exceed 512 characters.");
         }
-        return title == null || title.isBlank() ? null : title;
+        return title == null || unicodeBlank(title) ? null : title;
     }
 
     private static String validRenameTitle(String title) {
-        if (title == null || title.length() > 256
-                || title.codePoints().allMatch(character -> Character.isWhitespace(character)
-                        || Character.isSpaceChar(character) || character == 0xfeff)) {
+        if (title == null || title.length() > 256 || unicodeBlank(title)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
                     "Title must contain 1-256 characters.");
         }

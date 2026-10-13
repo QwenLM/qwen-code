@@ -35,6 +35,10 @@ import {
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import {
+  hostedShellLaneAttachesChildAgents,
+  type HostedWorkspaceToolProfile,
+} from './hosted-workspace-profiles.js';
 
 // H4b: the kind gate admits `child_agent` for real, so this suite runs
 // without an enablement mock. The Broker is mocked as in the sibling
@@ -60,6 +64,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    acquired = false;
     runtime = {
       bindingId: 'binding',
       generation: '1',
@@ -67,14 +72,20 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     };
     fileHistory = broker.fileHistory;
     warm = broker.warm;
-    acquire = broker.acquire;
+    acquire = async (...args: Parameters<typeof broker.acquire>) => {
+      await broker.acquire(...args);
+      this.acquired = true;
+    };
     prepare = broker.prepare;
     prepareV3 = broker.prepareV3;
     execute = broker.execute;
     executeV3 = broker.executeV3;
     acknowledgeV3 = broker.acknowledgeV3;
     cancel = broker.cancel;
-    release = broker.release;
+    release = async (...args: Parameters<typeof broker.release>) => {
+      await broker.release(...args);
+      this.acquired = false;
+    };
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
     hookControl = broker.hookControl;
@@ -111,7 +122,9 @@ function createTurn(
   promptName = 'prompt',
   hooksMountHeld = false,
   childWorkspaces = false,
+  attachChildAgents = true,
   hooksSession?: HostedHookSession,
+  profile: HostedWorkspaceToolProfile = 'hosted-workspace-team-lead/1',
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -145,13 +158,17 @@ function createTurn(
     },
     undefined,
     {
-      profile: 'hosted-workspace-shell/1',
-      childAgents: {
-        funnel: children,
-        depth,
-        childWorkspaces,
-        queueConsumption: (childRunId) => consumption.push(childRunId),
-      },
+      profile,
+      ...(attachChildAgents
+        ? {
+            childAgents: {
+              funnel: children,
+              depth,
+              childWorkspaces,
+              queueConsumption: (childRunId) => consumption.push(childRunId),
+            },
+          }
+        : {}),
       ...(hookEvents
         ? {
             hooks: {
@@ -258,6 +275,26 @@ beforeEach(async () => {
 afterEach(async () => {
   await session?.close();
   await rm(root, { recursive: true, force: true });
+});
+
+it('advertises child agents only on a shell lane that public admission has not suppressed', () => {
+  expect(hostedShellLaneAttachesChildAgents(true, false)).toBe(true);
+  expect(hostedShellLaneAttachesChildAgents(true, true)).toBe(false);
+  expect(hostedShellLaneAttachesChildAgents(false, false)).toBe(false);
+});
+
+it('hides the agent tool when public shell admission attaches no child orchestrator', async () => {
+  const tools = await createTurn(
+    0,
+    undefined,
+    'prompt',
+    false,
+    false,
+    false,
+    undefined,
+    'hosted-workspace-shell/1',
+  ).declarations(new AbortController().signal);
+  expect(tools.some((tool) => tool.name === 'agent')).toBe(false);
 });
 
 it('declares the agent tool at the root and hides it from a child Session', async () => {
@@ -1399,17 +1436,20 @@ const resultEvents = [
 
 it.each(
   resultEvents.flatMap((eventName) =>
-    [false, true].map((background) => ({ eventName, background })),
+    ['command', 'http', 'function'].flatMap((type) =>
+      [false, true].map((background) => ({ eventName, type, background })),
+    ),
   ),
 )(
-  'refuses restored $eventName command Hooks before child admission (background=$background)',
-  async ({ eventName, background }) => {
+  'refuses restored $eventName $type Hooks before child admission (background=$background)',
+  async ({ eventName, type, background }) => {
     const hooks = await restoredHooks({
       eventName,
-      config: { type: 'command' },
+      config: { type: type as 'command' | 'http' | 'function' },
     });
-    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     try {
+      expect(hooks.hasMountableToolResultHooks).toBe(true);
       const result = await executeAgent(
         turn,
         call({
@@ -1442,7 +1482,7 @@ it('refuses a background child on a result Hook whose matcher cannot match agent
     config: { type: 'command' },
     matcher: 'read_file',
   });
-  const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+  const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
   try {
     expect(hooks.hasMountableToolResultHooks).toBe(true);
     const result = await executeAgent(
@@ -1463,22 +1503,14 @@ it('refuses a background child on a result Hook whose matcher cannot match agent
   }
 });
 
-// The type/eligibility filter and the event filter are orthogonal, so the
-// controls exercise the five ineligible shapes on one event and the event
+// The eligibility filter and the event filter are orthogonal, so the
+// controls exercise the three ineligible shapes on one event and the event
 // filter on the single off-event row. The refusal side above already sweeps
-// all three result events.
+// every non-prompt type across all three result events.
 const admissionControls: Array<
   Pick<ManagedHookDescriptor, 'eventName' | 'config'> &
     Partial<ManagedHookDescriptor>
 > = [
-  {
-    eventName: HookEventName.PostToolUse,
-    config: { type: 'http' as const },
-  },
-  {
-    eventName: HookEventName.PostToolUse,
-    config: { type: 'function' as const },
-  },
   {
     eventName: HookEventName.PostToolUse,
     config: { type: HookType.Prompt, prompt: 'check' },
@@ -1509,7 +1541,7 @@ it.each([false, true])(
       session,
       original.getCatalog()!,
     );
-    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     try {
       expect(original.hasMountableToolResultHooks).toBe(true);
       await original.fire(
@@ -1598,7 +1630,7 @@ it('refuses a child while a once Hook is committed but unsettled', async () => {
     session,
     catalog,
   );
-  const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+  const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
   await hooks.ensureReady();
   expect(hooks.mountHeld).toBe(false);
   expect(hooks.hasUnsettledExecutions).toBe(true);
@@ -1627,7 +1659,7 @@ it.each(
   'admits result-Hook controls %# (background=$background)',
   async ({ descriptor, background }) => {
     const hooks = await restoredHooks(descriptor);
-    const turn = createTurn(0, undefined, 'prompt', false, false, hooks);
+    const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     turn.setPromptHookRunner(async (hookConfig, eventName) => ({
       hookConfig,
       eventName,

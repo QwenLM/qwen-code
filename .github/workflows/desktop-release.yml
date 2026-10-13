@@ -542,6 +542,11 @@ jobs:
           WINDOWS_CONFIG: '${{ env.WINDOWS_CONFIG }}'
         run: |
           set -euo pipefail
+          if [ "$RUNNER_OS" = 'Linux' ]; then
+            QWEN_DESKTOP_PATCHELF="$(command -v patchelf)"
+            PATCHELF="$GITHUB_WORKSPACE/packages/desktop/scripts/patchelf-immutable-runtime.sh"
+            export QWEN_DESKTOP_PATCHELF PATCHELF
+          fi
           args=( ${{ matrix.tauri_args }} )
           if [ "$DRY_RUN" = 'true' ]; then
             args+=(--no-sign)
@@ -549,6 +554,11 @@ jobs:
             args+=(--config "$WINDOWS_CONFIG")
           fi
           npm run tauri -- build "${args[@]}"
+
+      - name: 'Verify Linux installer runtimes'
+        if: "runner.os == 'Linux'"
+        working-directory: 'packages/desktop'
+        run: 'npm run smoke:linux-installers -- src-tauri/target/${{ matrix.rust_target }}/release/bundle'
 
       - name: 'Verify macOS signature'
         if: "runner.os == 'macOS' && (github.event_name == 'release' || inputs.dry_run == false)"
@@ -743,7 +753,22 @@ jobs:
           RELEASE_CLOBBER: '${{ inputs.clobber }}'
         run: |
           set -euo pipefail
+          # `gh release create --generate-notes` lets the Release Notes API pick
+          # its own start tag. This repo carries several tag families (v*,
+          # desktop-v*, sdk-typescript-v*, cua-driver-rs-v*), so the API anchors
+          # on an unrelated release (observed: cua-driver-rs-v*) and every
+          # Desktop release re-lists the PRs since then. Anchor the notes at the
+          # previous stable Desktop release instead. The API needs an existing
+          # release tag, so resolve it from the release list, not `git tag`.
+          previous_tag="$(
+            gh release list --limit 100 --exclude-drafts --json tagName,isPrerelease \
+              --jq '.[] | select(.isPrerelease | not) | .tagName' \
+              | grep -x 'desktop-v[0-9].*' \
+              | grep -vF -x "$RELEASE_TAG" \
+              | head -n1 || true
+          )"
           args=("$RELEASE_TAG" release-assets/* --target "$GITHUB_SHA" --title "Qwen Code Desktop v$RELEASE_VERSION" --generate-notes --latest=false)
+          if [ -n "$previous_tag" ]; then args+=(--notes-start-tag "$previous_tag"); fi
           if [ "$RELEASE_DRAFT" = 'true' ]; then args+=(--draft); fi
           if [ "$RELEASE_PRERELEASE" = 'true' ]; then args+=(--prerelease); fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then

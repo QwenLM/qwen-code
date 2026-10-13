@@ -4,10 +4,12 @@
 
 [English](2026-10-04-managed-agent-event-transport.md) | [简体中文](2026-10-04-managed-agent-event-transport.zh-CN.md)
 
-**Status: design reserved — 设计预留·未交付.** Nothing described in this
-document is implemented. There is no `EventTransport` interface, no MQ client,
-no consumer, and no multi-node wake anywhere in the repository. Every
-architecture statement below is a forward-looking design reserve, not a
+**Status: design reserved — 设计预留·未交付.** The transport side remains
+unimplemented: no MQ client, no consumer, and no multi-node wake anywhere in
+the repository. (Written when no `EventTransport` type existed; MQ1 has since
+landed the interface and the composite seam — see
+[2026-10-11-managed-agent-event-transport-seam](2026-10-11-managed-agent-event-transport-seam.md).)
+Every architecture statement below is a forward-looking design reserve, not a
 description of running code; each such section says so again in its heading.
 This document changes no production behavior and ships no production code.
 
@@ -189,12 +191,17 @@ Evidence is in Appendix A; every path below was read on `5ddfacc9d4`.
   commit transaction for journal facts (same-transaction commit, after-commit
   drain) — the MQ2 phase wires the second and never relabels the first as
   covering it.
-- **Dedicated transport abstraction — DOES NOT EXIST IN CODE.** A code search
-  for `EventTransport`/`eventTransport`/`RocketMQ` returns zero matches
-  outside design documents. There is no transport configuration property, no
-  outbox-drain loop aimed at a broker, and no multi-node wake consumer. The
-  name exists only in the 2026-09-20 storage-and-event design (conceptual
-  interface, proposed follow-up work — see the header).
+- **Dedicated transport abstraction — DID NOT EXIST AT THE BASELINE; MQ1 has
+  since named it.** At the baseline read (`5ddfacc9d4`, 2026-10-04), a code
+  search for `EventTransport`/`eventTransport`/`RocketMQ` returned zero
+  matches outside design documents, and the name existed only in the
+  2026-09-20 storage-and-event design (conceptual interface, proposed
+  follow-up work). MQ1
+  ([2026-10-11-managed-agent-event-transport-seam](2026-10-11-managed-agent-event-transport-seam.md))
+  has since introduced the `EventTransport` interface behind the after-commit
+  seam; there is still no implementation, no transport configuration
+  property, no outbox-drain loop aimed at a broker, and no multi-node wake
+  consumer.
 - **TypeScript embedded scheduler — NO seam by design.**
   `EmbeddedHarnessScheduler` pumps activations from
   `FileManagedActivationStore` leases inside one process and schedules
@@ -282,6 +289,80 @@ broker/client documentation or a staging deployment before phase MQ2 starts):
    ordered messaging per message group) are well documented for classic
    topics, but **their carry-over to LiteTopic is UNVERIFIED**.
 
+**Resolution (verified 2026-10-12, Beijing, from public documentation and the
+5.5.0 source tag).** All five items resolve in LiteTopic's favor; the
+MQ2-start staging re-check still stands. Sources: [RIP-83
+wiki](https://github.com/apache/rocketmq/wiki/RIP%E2%80%9083-Lite-Topic:-A-New-Message-Model);
+[LiteTopic domain
+model](https://rocketmq.apache.org/docs/domainModel/03litetopic/); [5.5.0
+release
+notes](https://rocketmq.apache.org/zh/release-notes/2026/04/10/5.5.0/);
+[multi-agent best
+practice](https://rocketmq.apache.org/zh/docs/bestPractice/04multiagent/);
+[Aliyun LiteTopic
+reference](https://help.aliyun.com/zh/apsaramq-for-rocketmq/cloud-message-queue-rocketmq-5-x-series/developer-reference/litetopic)
+and [usage
+limits](https://www.alibabacloud.com/help/en/apsaramq-for-rocketmq/cloud-message-queue-rocketmq-5-x-series/product-overview/usage-limits);
+[5.5.0 LiteTopic deep
+dive](https://www.cnblogs.com/alisystemsoftware/p/20189542); 5.5.0 source tag
+[LiteEventDispatcher](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/lite/LiteEventDispatcher.java#L107-L162),
+[PopLiteMessageProcessor](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/processor/PopLiteMessageProcessor.java#L285-L328),
+[AckMessageProcessor](https://github.com/apache/rocketmq/blob/rocketmq-all-5.5.0/broker/src/main/java/org/apache/rocketmq/broker/processor/AckMessageProcessor.java#L539-L558).
+
+1. **Delivery guarantee: at-least-once.** RocketMQ's core model is
+   at-least-once ("each message can be successfully delivered at least once"),
+   with policy-driven redelivery and a DLQ after the retry cap; Aliyun's
+   LiteTopic reference states client acknowledgements yield at-least-once
+   semantics; on ordered lanes, TDMQ's commercial documentation records
+   fixed-interval retry (snippet-level evidence — the open-source pages do
+   not state the interval). Broker-persisted offsets (below) resume delivery
+   from the committed watermark after a consumer restart. Consumers must be
+   idempotent — exactly the design's invariant 5.
+2. **Ordering: per-LiteTopic FIFO.** The official domain-model page: each
+   LiteTopic has one queue by default, stored and consumed in order;
+   consumption is ordered-only, one consumer thread per LiteTopic.
+3. **Consumer model, offsets, lifecycle, quotas.** Subscription registration
+   is per-client (ClientID), not group-locked: consumers in one group may
+   subscribe to different LiteTopic sets and can add/remove at runtime
+   (thousands per consumer). Dispatch, however, is **shared within a group**:
+   one dispatch attempt selects exactly one client per group — the 5.5.0
+   `LiteEventDispatcher` buckets subscribers by group and stops after the
+   first successful client, and locks, FIFO state and the offset all key on
+   `(group, LiteTopic, 0)`. On a lost ACK or client inactivity the in-doubt
+   message is re-dispatched, possibly to a different member (the 5.5.0
+   inactivity path re-dispatches while avoiding the previous client), so
+   there are no per-node copies; consumer idempotence (invariant 5) and the
+   activation fence absorb that. Cross-node wake fan-out therefore needs one
+   consumer group per node (the dispatcher iterates every group); this feeds
+   the §11 routing decision. Offsets are broker-side — memory snapshot plus incremental
+   persistence on RocksDB. LiteTopics auto-create on first send/subscribe and
+   auto-delete when their TTL lapses without writes, releasing the LiteTopic
+   count — but a subscription relation still occupies the subscription quota
+   until the consumer unsubscribes (Aliyun special rule). RIP-83 names quota
+   controls (max topics per client/total, ready-set overflow control) but
+   Apache's parameter-limits page publishes no LiteTopic numbers; Aliyun
+   publishes concrete caps: 2,000 subscriptions per consumer
+   (ticket-raisable), 200 consumption TPS per LiteTopic, and per-instance
+   creation/subscription quotas by spec — up to 23.2M LiteTopics on the
+   largest Platinum spec (`rmq.u2.1000xlarge`); 1M maps to
+   `rmq.u2.30xlarge`.
+4. **Client availability.** Official requirement: server ≥ 5.5.0, gRPC SDK
+   ≥ 5.1.0; `LitePushConsumer`/`LiteProducer` examples live in
+   apache/rocketmq-clients. `subscribeLite()` performs quota verification and
+   may fail — the adapter must treat subscription as fallible. Aliyun pricing
+   is instance-spec-based with no fixed public per-unit LiteTopic price.
+5. **Classic carry-over: does NOT hold on the consume side.** Subscription is
+   per-client rather than group-shared; consumption is ordered-only and
+   single-threaded per LiteTopic; dispatch is event-driven (Ready Set), not
+   long-polling Pop. Shared with classic: the CommitLog write path and the
+   at-least-once/retry/DLQ machinery. Broker config for the RocksDB-backed
+   path is `enableLmq=true`, `enableMultiDispatch=true`,
+   `storeType=defaultRocksDB`; note 5.5.0 also supports LMQ over
+   CombineConsumeQueueStore without the RocksDB migration (release notes,
+   PR #10174) — the store choice is MQ2-start verification scope. Known
+   operational caveat: rocketmq-dashboard issue #2777 (negative LiteTopic
+   quota counters) is dashboard-side only.
+
 For Redis Streams, standard and documented semantics apply (treated as
 verified for the purpose of this table): per-stream FIFO; consumer groups via
 `XREADGROUP` with `XACK`; re-delivery of un-ACKed entries through the pending
@@ -292,18 +373,18 @@ verified guarantees for any particular Redis deployment.
 
 ### 5.2 Capability table
 
-| Capability                                            | RocketMQ LiteTopic                                                      | Redis Streams                                                     |
-| ----------------------------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Per-Session addressing (one topic/stream per Session) | Designed for it (million-scale, per-session)                            | Possible; one stream per key, memory cost grows with live streams |
-| At-least-once delivery                                | UNVERIFIED for LiteTopic; classic RocketMQ consumption is at-least-once | Yes via consumer groups + PEL re-delivery                         |
-| Per-key ordering                                      | UNVERIFIED (not required by design; see §2)                             | Yes, per-stream FIFO                                              |
-| Re-delivery / crash recovery of consumers             | UNVERIFIED                                                              | Yes via `XAUTOCLAIM`/`XCLAIM` after a timeout                     |
-| Consumer groups (multi-node workers, wake fan-in)     | UNVERIFIED for LiteTopic                                                | First-class                                                       |
-| Suspend/Resume per Session (backpressure, quarantine) | Documented (per-topic consumer-level)                                   | Manual (stop reading the group key)                               |
-| Retention & lifecycle of millions of queues           | Documented as designed for it; API/limits UNVERIFIED                    | Operator-managed (`XTRIM`, key expiry); risk of unbounded growth  |
-| Broker as Session truth risk                          | Same architectural risk both ways; invariants 1–3 forbid it regardless  | Same                                                              |
-| Ops profile                                           | Broker cluster; Java client                                             | Single Redis / cluster; already in many deployments               |
-| Named by #12380                                       | Yes ("RocketMQ or Redis Streams")                                       | Yes                                                               |
+| Capability                                            | RocketMQ LiteTopic                                                                                                                                                                                                                                                         | Redis Streams                                                     |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Per-Session addressing (one topic/stream per Session) | Designed for it (million-scale, per-session)                                                                                                                                                                                                                               | Possible; one stream per key, memory cost grows with live streams |
+| At-least-once delivery                                | Yes — at-least-once with retry + DLQ; the fixed-interval retry on ordered lanes is commercial-doc evidence only, OSS pages silent (verified 2026-10-12, §5.1)                                                                                                              | Yes via consumer groups + PEL re-delivery                         |
+| Per-key ordering                                      | Yes — one ordered queue and one consumer thread per LiteTopic (verified 2026-10-12, §5.1); still not required by design (§2)                                                                                                                                               | Yes, per-stream FIFO                                              |
+| Re-delivery / crash recovery of consumers             | Yes — broker-persisted offsets (memory snapshot + incremental RocksDB) resume from the committed watermark (verified 2026-10-12, §5.1)                                                                                                                                     | Yes via `XAUTOCLAIM`/`XCLAIM` after a timeout                     |
+| Consumer groups (multi-node workers, wake fan-in)     | Shared within a group — one dispatch attempt goes to exactly one client per group, and a redelivery after a lost ACK or client inactivity can land on a different member (5.5.0 source-verified, §5.1); cross-node fan-out needs one consumer group per node (§11)         | First-class                                                       |
+| Suspend/Resume per Session (backpressure, quarantine) | Documented (per-topic consumer-level)                                                                                                                                                                                                                                      | Manual (stop reading the group key)                               |
+| Retention & lifecycle of millions of queues           | Auto-create on first use; TTL auto-delete releases the LiteTopic count (a subscription still counts until unsubscribe); OSS numeric caps unpublished — Aliyun publishes 2,000 subscriptions per consumer and 200 consumption TPS per LiteTopic (verified 2026-10-12, §5.1) | Operator-managed (`XTRIM`, key expiry); risk of unbounded growth  |
+| Broker as Session truth risk                          | Same architectural risk both ways; invariants 1–3 forbid it regardless                                                                                                                                                                                                     | Same                                                              |
+| Ops profile                                           | Broker cluster; Java client                                                                                                                                                                                                                                                | Single Redis / cluster; already in many deployments               |
+| Named by #12380                                       | Yes ("RocketMQ or Redis Streams")                                                                                                                                                                                                                                          | Yes                                                               |
 
 ### 5.3 Selection
 
@@ -375,7 +456,7 @@ selected broker.
 | Duplicate delivery of one envelope                | Consumer dedup `(tenantId, sessionId, stream, sequence)` against the SQL watermark; the duplicate is a no-op. Activation enqueue stays idempotent. The `stream` is the delivered lane (`public_event` from `last_sequence`, `authoritative_journal` from the journal-commit sequence). |
 | Reordered delivery within one Session             | The per-stream sequence watermark + gap detection; consumer re-reads Snapshot-plus-tail from SQL before applying anything newer. A later record never lands ahead of an unseen earlier one from MQ alone.                                                                              |
 | Broker redelivery after processed-but-ACK-lost    | Same as duplicate delivery.                                                                                                                                                                                                                                                            |
-| Consumer crash before processing                  | Broker redelivers (per selected broker's at-least-once path — must be verified in §5.1 before MQ2); the Session is woken late but from SQL truth.                                                                                                                                      |
+| Consumer crash before processing                  | Broker redelivers (per selected broker's at-least-once path — verified at doc level 2026-10-12, §5.1; re-checked against staging at MQ2-start); the Session is woken late but from SQL truth.                                                                                          |
 | Consumer crash after a local effect, before ACK   | Duplicate path on restart; every local effect is idempotent on committed identities.                                                                                                                                                                                                   |
 | Producer crash between SQL commit and publish     | Message never sent; the committed SQL delivery line is still complete. Recovery comes from SQL-side scans (overflow/re-read discipline), as today for `SessionEventHub`. MQ is not recreated as an outbox of truth.                                                                    |
 | Broker short outage                               | Producer retries with bounded buffer; local post-commit SSE unaffected; wake latency degrades only.                                                                                                                                                                                    |
@@ -391,13 +472,14 @@ selected broker.
 - **Do not let the broker become the browser cursor.** SSE replay cursors and
   the persisted replay floor stay SQL-based (V14 `managed_event_replay`
   pattern).
-- **LiteTopic semantics risk.** §5.1 lists UNVERIFIED delivery/ordering
-  items; if verification fails, MQ2 falls back to Redis Streams under the same
-  seam rather than relaxing the invariants.
-- **Wake-intent carrier.** The canonical design names `WakeIntent`; the repo
-  today carries the committed `wake.requested` record kind, and #12827's open
-  question 3 (Session inbox vs new record) stays unsettled until #13300 lands.
-  This design intentionally does not pick the carrier.
+- **LiteTopic semantics risk.** §5.1's doc-level verification resolved the
+  delivery/ordering items on 2026-10-12; the residual exposure is the
+  MQ2-start staging re-check — if that fails, MQ2 falls back to Redis Streams
+  under the same seam rather than relaxing the invariants.
+- **Wake-intent carrier.** Resolved 2026-10-12 (§11): the carrier is the
+  committed `wake.requested` record, which #13300 landed; a distinct
+  WakeIntent record would store the same fact twice, so this supersedes
+  #12827 question 3.
 - **Scope hygiene.** Each phase records its slice and exclusions on the
   tracker, per #12380's claiming rule.
 
@@ -418,14 +500,36 @@ This slice's validation is documentation-only:
 
 ## 11. Open questions for the tracker issue
 
-1. Wake-intent carrier: keep the committed `wake.requested` record as the
-   wake envelope source, or a distinct WakeIntent record (supersedes #12827
-   question 3 once #13300 lands)?
-2. Which node consumes a Session's envelopes — a consumer-group-per-Session
-   routing scheme, or hash-partitioned wake workers? (Decision needed before
-   MQ2 consumer wiring.)
-3. LiteTopic §5.1 UNVERIFIED items: who runs the broker-docs/staging
-   verification, and where are the results pinned?
+1. Wake-intent carrier — **resolved 2026-10-12**: the committed
+   `wake.requested` record stays the wake envelope source. It commits with
+   its Session input in one transaction on the authoritative journal stream,
+   it already sits in the envelope v1 vocabulary and fixtures, and a distinct
+   WakeIntent record would store the same fact twice, against the
+   single-commit-carrier discipline (§2). This supersedes #12827 question 3
+   now that #13300 has landed.
+2. Session-envelope consumption routing — **resolved 2026-10-12**: a shared
+   bootstrap lane plus owner-side dynamic subscription. Dispatch evidence
+   from the 2026-10-12 verification (§5.1): LiteTopic dispatch is shared
+   within a group — one dispatch attempt selects exactly one client per
+   group, and a redelivery after a lost ACK or client inactivity can move to
+   another member. Consumer-group-per-Session is the wrong axis (a group per
+   Session means millions of groups; LiteTopic already provides per-Session
+   addressing), and group-per-node fan-out is unnecessary because the
+   activation fence, not the broker, decides which node may act. So: a
+   pending-activation wake rides one shared bootstrap group (any worker takes
+   it and attempts activation through the fence, with SQL scans as the
+   backstop), and a node that wins activation subscribes to that Session's
+   LiteTopic (per-client, dynamic) and unsubscribes on release — the
+   Session's owner is then the sole subscriber and dispatch lands exactly on
+   it. That sole-subscriber property is the steady state, not the handoff:
+   when a lease expires without a clean unsubscribe, a stale subscription can
+   coexist briefly, the dispatcher may select it, and its fenced no-op ACK
+   still advances the group offset, so the new owner can miss that
+   notification — SQL reconciliation (the backstop above) covers the miss,
+   and the handoff case is on MQ2's verification list.
+3. LiteTopic §5.1 items: the broker-docs verification ran 2026-10-12 and its
+   results are pinned in §5.1's resolution block; what remains is the
+   MQ2-start staging re-check against a real 5.5.0+ cluster.
 4. Envelope naming/fields: folded into the separate TypeScript contract
    slice; this document's §4 is its input, not its output.
 
@@ -450,10 +554,12 @@ Read on `5ddfacc9d4` (2026-10-04). One line per resident responsibility.
 | `packages/core/src/managed-runtime/managed-activation-store.ts`                             | activation descriptors, leases, fences, epochs                                                                                   | NO                               |
 | `packages/core/src/managed-runtime/managed-extension-projection.ts`                         | `ManagedSessionTaskView` projection incl. outbox/delivery state                                                                  | NO                               |
 
-**Verdict: PARTIAL.** A Java after-commit seam exists
-(`CommittedEventPublisher`, currently exactly one in-process implementation);
-a dedicated `EventTransport`/wake abstraction exists nowhere in code (code
-search yields zero matches; the 2026-09-20 design sketch is a document, not
-code) and must be introduced at MQ1 behind that seam.
+**Verdict: PARTIAL (read at the baseline `5ddfacc9d4`, 2026-10-04).** A Java
+after-commit seam exists (`CommittedEventPublisher`, at the baseline exactly
+one in-process implementation); a dedicated `EventTransport`/wake abstraction
+existed nowhere in code at the baseline and was to be introduced at MQ1
+behind that seam — which MQ1 has since done
+([2026-10-11-managed-agent-event-transport-seam](2026-10-11-managed-agent-event-transport-seam.md):
+interface plus composite, no implementation).
 The TypeScript embedded scheduler is process-local by design and gains no
 broker dependency from this slice.

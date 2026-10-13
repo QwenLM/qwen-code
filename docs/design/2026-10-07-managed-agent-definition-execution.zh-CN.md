@@ -142,8 +142,8 @@ D8a 把 `model`、`permission_policy` 和 `tools` 的元素作为开放对象存
   #13166 规定由运维保证发布顺序：任何 `/2` 会话之前，先排空旧 worker 并升级所有
   provisioner。Java 没有可检查的开关，白名单就是门槛：运维完成上述发布后才把
   `hosted-workspace-files/2` 加入白名单。在此之前，选择它的定义会被拒绝。
-- **`shell/1` 与 `shell/2`** 等待公开前台 Shell 准入（#13271），且必须搭配
-  `default` 审批模式，见下文。
+- **`shell/1` 与 `shell/2`** 等待公开前台 Shell 准入（#13271），且不能搭配
+  `yolo` 审批模式，见下文。
 - **`mcp/1`** 等待 Stage H。
 
 **组合规则**，不满足时均返回 `409 agent_definition_unsupported`：

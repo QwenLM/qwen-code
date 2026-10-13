@@ -88,6 +88,19 @@ class AgentDefinitionCompilerTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"yolo", "default", "auto-edit"})
+    void definitionsCannotAcquireInternalTeamLeadEvenWhenAllowlisted(String mode) {
+        assertThatThrownBy(() -> AgentDefinitionCompiler.compile(definition(
+                hostedProfile(WorkspaceToolProfiles.INTERNAL_TEAM_LEAD),
+                "{\"approval_mode\":\"" + mode + "\"}"), true, mode,
+                List.of(WorkspaceToolProfiles.INTERNAL_TEAM_LEAD)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("agent_definition_unsupported");
+                    assertThat(error.getDetails().get("field")).isEqualTo("tools");
+                });
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource(textBlock = """
             '{"model":{"id":"qwen3"},"instructions":"","tools":[],"permission_policy":{}}', model
             '{"model":{},"instructions":7,"tools":[],"permission_policy":{}}', instructions
@@ -143,7 +156,7 @@ class AgentDefinitionCompilerTest {
     void metadataNeverAffectsExecution() {
         String json = "{\"model\":{},\"instructions\":\"\",\"tools\":[],"
                 + "\"permission_policy\":{},"
-                + "\"metadata\":{\"team\":\"review\",\"mode\":\"yolo\"}}";
+                + "\"metadata\":{\"team\":\"review\",\"mode\":\"auto-edit\"}}";
         assertThat(AgentDefinitionCompiler.compile(json, false, "yolo",
                 FILES_ONLY).approvalMode()).isEqualTo("yolo");
     }
