@@ -2746,6 +2746,60 @@ class ToolPublicationStoreTest {
     }
 
     @Test
+    void settledProjectionDoesNotParseObsoleteSourceJson() {
+        var fixture = apiFixture();
+        fixture.jdbc().update("UPDATE managed_agent_tool_result SET work_state = 'PENDING', next_attempt_at = 0");
+        var claim = fixture.results().claim().orElseThrow();
+        fixture.jdbc().update("UPDATE managed_agent_tool_result SET work_state = 'SUPPRESSED',"
+                + " claim_until = NULL, source_json = '{}'");
+        var before = fixture.jdbc().queryForMap("SELECT * FROM managed_agent_tool_result");
+        var artifacts = fixture.jdbc().queryForList("SELECT * FROM managed_agent_artifact");
+        var events = fixture.jdbc().queryForList("SELECT * FROM managed_agent_event");
+        var projection = new ManagedToolResultStore.Projection(JSON.createObjectNode(), "pub-1",
+                JSON.createObjectNode(), JSON.createObjectNode(), List.of(), fixture.policy().version());
+        assertThat(fixture.results().complete(claim, projection, fixture.policy().version())).isFalse();
+        assertThat(fixture.jdbc().queryForMap("SELECT * FROM managed_agent_tool_result"))
+                .usingRecursiveComparison().isEqualTo(before);
+        assertThat(fixture.jdbc().queryForList("SELECT * FROM managed_agent_artifact"))
+                .usingRecursiveComparison().isEqualTo(artifacts);
+        assertThat(fixture.jdbc().queryForList("SELECT * FROM managed_agent_event"))
+                .usingRecursiveComparison().isEqualTo(events);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void projectionUsesPersistedOwnerAndRejectsForeignActiveClaims(boolean privateSession) {
+        var fixture = apiFixture();
+        fixture.jdbc().update("UPDATE managed_agent_tool_result SET work_state = 'PENDING', next_attempt_at = 0");
+        var claim = fixture.results().claim().orElseThrow();
+        var source = claim.source();
+        var foreign = new ManagedToolResultStore.Claim(new ManagedToolResultStore.Source(source.id(), "foreign",
+                source.workspaceId(), source.sessionId(), source.executionCallId(), source.journalRevision(),
+                source.receiptSequence(), source.outcomeRef(), source.resultRef(), source.resources(), source.sourceDigest()),
+                claim.generation());
+        if (privateSession) {
+            fixture.jdbc().update("UPDATE managed_agent_session SET tool_profile = 'csi-files-retirement/1'");
+        }
+        var before = fixture.jdbc().queryForMap("SELECT * FROM managed_agent_tool_result");
+        var artifacts = fixture.jdbc().queryForList("SELECT * FROM managed_agent_artifact");
+        var events = fixture.jdbc().queryForList("SELECT * FROM managed_agent_event");
+        var projection = new ManagedToolResultStore.Projection(JSON.createObjectNode(), "pub-1",
+                JSON.createObjectNode(), JSON.createObjectNode(), List.of(), fixture.policy().version());
+        if (privateSession) {
+            assertThat(fixture.results().complete(foreign, projection, fixture.policy().version())).isFalse();
+        } else {
+            assertThatThrownBy(() -> fixture.results().complete(foreign, projection, fixture.policy().version()))
+                    .hasMessage("Claimed projection source conflicts");
+        }
+        assertThat(fixture.jdbc().queryForMap("SELECT * FROM managed_agent_tool_result"))
+                .usingRecursiveComparison().isEqualTo(before);
+        assertThat(fixture.jdbc().queryForList("SELECT * FROM managed_agent_artifact"))
+                .usingRecursiveComparison().isEqualTo(artifacts);
+        assertThat(fixture.jdbc().queryForList("SELECT * FROM managed_agent_event"))
+                .usingRecursiveComparison().isEqualTo(events);
+    }
+
+    @Test
     void retiredRootRejectsProjectionWhilePublicSessionIsStillReadable() {
         var fixture = apiFixture();
         var artifact = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100)

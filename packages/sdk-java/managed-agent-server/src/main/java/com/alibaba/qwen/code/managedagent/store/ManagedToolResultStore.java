@@ -343,33 +343,36 @@ public class ManagedToolResultStore {
             if (candidate == null) {
                 return false;
             }
-            ToolPublicationRetentionStore.lockTenant(jdbc, (String) candidate.get("tenant_id"));
+            String tenant = (String) candidate.get("tenant_id");
+            String session = (String) candidate.get("session_id");
+            var sessionKey = JSON.createObjectNode().put("tenantId", tenant)
+                    .put("workspaceId", (String) candidate.get("workspace_id")).put("sessionId", session);
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
             if (isPrivateResult(candidate)) {
                 status.setRollbackOnly();
                 return false;
             }
-            Source source = claimSource(claim, candidate);
             jdbc.queryForList("SELECT state FROM qwen_managed_session_journal_head"
-                    + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", source.tenantId(), source.sessionId());
+                    + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenant, session);
             var retired = jdbc.queryForList("SELECT generation FROM qwen_output_session_retirement"
                     + " WHERE tenant_key = ? AND session_key = ?",
-                    ToolPublicationRetentionStore.hash(source.tenantId()), ToolPublicationRetentionStore.hash(source.sessionId()));
+                    ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session));
             jdbc.queryForList("SELECT publication_id FROM qwen_tool_publication WHERE scope_key = ? AND tenant_id = ?"
                     + " AND session_id = ? AND publication_id = ? FOR UPDATE",
-                    ToolPublicationDataStore.scope(source.sessionKey()), source.tenantId(), source.sessionId(), projection.publicationId());
+                    ToolPublicationDataStore.scope(sessionKey), tenant, session, projection.publicationId());
             var publicSessions = jdbc.queryForList("SELECT tenant_id, session_id, workspace_id, status, last_sequence FROM"
                             + " managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
-                    source.tenantId(), source.sessionId());
-            var row = lockResultRow(source.id());
+                    tenant, session);
+            var row = lockResultRow(claim.source().id());
             if (row == null) {
                 return false;
             }
             requireSameSource(candidate, row);
-            source = claimSource(claim, row);
             if (!"LEASED".equals(row.get("work_state"))
                     || ((Number) row.get("claim_generation")).longValue() != claim.generation()) {
                 return false;
             }
+            Source source = claimSource(claim, row);
             if (!retired.isEmpty()) {
                 settleFailure(source, claim.generation(), "SUPPRESSED", "session_retired");
                 return false;

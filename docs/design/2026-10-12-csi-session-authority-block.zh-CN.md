@@ -84,6 +84,10 @@ Worker path、input bytes 与 preparation evidence 来自已提交 record，不�
 
 身份实现由 Broker 与 Server 共享；旧 `com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity` 保留已公开的 `verify`、`boot` 与 `expectedPod` 静态方法，并委托给 Broker 实现。旧入口标记为 deprecated，不复制身份验证逻辑。新增的 Broker API 与本 feature 仍需 maintainer 评审。
 
+普通 projection 完成从已持久化 result 行导出加锁范围，保持 tenant、私有守卫、head、publication、公共 Session、result 的顺序。取得当前 result 行后先检查 LEASED 状态和 claim generation；已结束的工作返回 false，不再解析已失效的 source JSON。活跃 claim 在任何写入前仍需完整 stored-source、scope 与 caller-claim 一致性证明。私有拒绝边界从持久化 owner 导出，不能借用外来 caller 的 tenant。
+
+两个私有 operator repackage 产物采用 `csi-session` 与 `csi-runtime` classifier。普通 Server 镜像选择器显式排除它们，继续要求唯一 unclassified 主 JAR；这不增加镜像中的私有执行入口或 Kubernetes 部署。升级验证将 V69–V72 纳入准确新增清单，继续逐行比较既有 Flyway history。并发测试在准确的当前 schema 和表中观察被请求的行锁：MySQL 使用 `performance_schema.data_lock_waits`/`data_locks`，MariaDB 使用 `information_schema.INNODB_LOCK_WAITS`/`INNODB_LOCKS`。轮询间隔允许 InnoDB information-schema 缓存刷新，避免保留等待前的快照。五秒期限、future 保持阻塞、拒绝与无副作用断言均保持不变。
+
 ### READY 范围与失败行为
 
 Adapter 仅准入 READY 工作。既有 retirement evidence 是拒绝条件，不是 DRAINING

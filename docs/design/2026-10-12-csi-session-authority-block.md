@@ -97,6 +97,10 @@ Ordinary publication refuses private Sessions when allocating a read lease or PU
 
 Broker and Server share the identity implementation. The former `com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity` retains its public static `verify`, `boot` and `expectedPod` methods, delegating to Broker. The former entry point is deprecated without duplicating validation logic. The added Broker API and feature still require maintainer review.
 
+Ordinary projection completion derives its locking scope from the persisted result row and retains tenant, private guard, head, publication, public Session and result ordering. After reading the current result row, it checks LEASED state and claim generation first. Settled work returns false without parsing obsolete source JSON. Active claims still require complete stored-source, scope and caller-claim agreement before any write. Private refusal derives from the persisted owner and cannot borrow a foreign caller's tenant.
+
+The two private operator repackage artifacts use `csi-session` and `csi-runtime` classifiers. The ordinary Server image selector explicitly excludes them and still requires one unclassified main JAR; this adds no private execution entry point to the image or Kubernetes deployment. Upgrade verification includes V69–V72 in the exact added inventory while retaining row-by-row Flyway history comparison. Concurrency tests observe the requested row lock within the exact current schema and table: MySQL uses `performance_schema.data_lock_waits`/`data_locks`, while MariaDB uses `information_schema.INNODB_LOCK_WAITS`/`INNODB_LOCKS`. Polling allows the InnoDB information-schema cache to refresh instead of retaining a pre-wait snapshot. The five-second deadline, blocked-future, refusal and no-effect assertions remain unchanged.
+
 ### READY scope and failure behavior
 
 The adapter admits only READY work. Existing retirement evidence is a refusal,

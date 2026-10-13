@@ -49,6 +49,7 @@ class ManagedAgentCsiMutationMySqlIT {
             var data = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
             Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
             var jdbc = new JdbcTemplate(data);
+            String lockWaitQuery = lockWaitQuery(jdbc);
             var manager = new DataSourceTransactionManager(data);
             var json = new ObjectMapper();
             var properties = new ManagedAgentProperties();
@@ -104,13 +105,11 @@ class ManagedAgentCsiMutationMySqlIT {
                     assertThat(inserting.await(5, TimeUnit.SECONDS)).isTrue();
                     var collection = pool.submit(() -> page ? collector.collect(claim) : collector.claim());
                     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                    while (jdbc.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits w"
-                            + " JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID"
-                            + " WHERE l.OBJECT_SCHEMA = DATABASE() AND l.OBJECT_NAME = 'qwen_tool_publication_tenant'",
-                            Integer.class) == 0) {
+                    while (jdbc.queryForObject(lockWaitQuery, Integer.class, "qwen_tool_publication_tenant") == 0) {
                         assertThat(collection).isNotDone();
                         assertThat(System.nanoTime()).isLessThan(deadline);
-                        Thread.sleep(20);
+                        // InnoDB information-schema lock views need over 100 ms between cache reads.
+                        Thread.sleep(150);
                     }
                     continueInsert.countDown();
                     var created = creation.get(5, TimeUnit.SECONDS);
@@ -149,6 +148,7 @@ class ManagedAgentCsiMutationMySqlIT {
             var data = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
             Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
             var jdbc = new JdbcTemplate(data);
+            String lockWaitQuery = lockWaitQuery(jdbc);
             var manager = new DataSourceTransactionManager(data);
             var json = new ObjectMapper();
             var properties = new ManagedAgentProperties();
@@ -203,13 +203,10 @@ class ManagedAgentCsiMutationMySqlIT {
                     }
                     created.countDown();
                     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                    while (jdbc.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits w"
-                            + " JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID"
-                            + " WHERE l.OBJECT_SCHEMA = DATABASE() AND l.OBJECT_NAME = 'managed_agent_session'",
-                            Integer.class) == 0) {
+                    while (jdbc.queryForObject(lockWaitQuery, Integer.class, "managed_agent_session") == 0) {
                         assertThat(mutation).isNotDone();
                         assertThat(System.nanoTime()).isLessThan(deadline);
-                        Thread.sleep(20);
+                        Thread.sleep(150);
                     }
                     assertThatThrownBy(() -> mutation.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
                     originalLock.rollback();
@@ -231,6 +228,17 @@ class ManagedAgentCsiMutationMySqlIT {
         } finally {
             admin.execute("DROP DATABASE IF EXISTS " + schema);
         }
+    }
+
+    private static String lockWaitQuery(JdbcTemplate jdbc) {
+        if (jdbc.queryForObject("SELECT VERSION()", String.class).contains("MariaDB")) {
+            return "SELECT COUNT(*) FROM information_schema.INNODB_LOCK_WAITS w"
+                    + " JOIN information_schema.INNODB_LOCKS l ON l.LOCK_ID = w.REQUESTED_LOCK_ID"
+                    + " WHERE l.LOCK_TABLE = CONCAT('`', DATABASE(), '`.`', ?, '`')";
+        }
+        return "SELECT COUNT(*) FROM performance_schema.data_lock_waits w"
+                + " JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID"
+                + " WHERE l.OBJECT_SCHEMA = DATABASE() AND l.OBJECT_NAME = ?";
     }
 
     private static Map<String, JsonNode> allTables(JdbcTemplate jdbc, ObjectMapper json) {
