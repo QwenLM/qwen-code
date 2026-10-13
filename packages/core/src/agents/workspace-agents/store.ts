@@ -50,8 +50,8 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
   retries: {
     // A waiter must outlast one slow holder: a critical section here is an
     // fsync-bound atomic JSON write, which on an oversubscribed host takes
-    // longer than the old 10-retry (~1s) budget and failed CI with ELOCKED.
-    // 30 retries (~5s worst case) matches the board-lock.ts budget.
+    // longer than the old 10-retry (~0.7s) budget and failed CI with ELOCKED.
+    // 30 retries (~2.7s worst case) matches the board-lock.ts budget.
     retries: 30,
     minTimeout: 5,
     maxTimeout: 100,

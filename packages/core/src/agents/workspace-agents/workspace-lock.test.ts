@@ -9,9 +9,15 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../config/storage.js';
-import { readWorkspaceAgents } from './store.js';
+import {
+  generateAgentId,
+  getWorkspaceFilePath,
+  readWorkspaceAgents,
+  updateWorkspaceAgents,
+} from './store.js';
 
 const PROJECT_ROOT = '/agent-workspace-lock-test';
 
@@ -79,6 +85,46 @@ describe('agent workspace lock', () => {
         (agent) => agent.name,
       );
       expect(names.sort()).toEqual([...first, ...second].sort());
+    } finally {
+      Storage.setRuntimeBaseDir(null);
+    }
+  });
+
+  it('outlasts one slow foreign lock holder within the retry budget', async () => {
+    Storage.setRuntimeBaseDir(runtimeDir);
+    try {
+      // Create the workspace record so the competing lock has a target.
+      await readWorkspaceAgents(PROJECT_ROOT);
+      const target = getWorkspaceFilePath(PROJECT_ROOT);
+
+      // Hold the cross-process lock the way a slow foreign process would —
+      // through proper-lockfile directly, leaving the in-process mutex free
+      // so the store gets all the way to its own lock attempt. The 1.5s hold
+      // sits above the old 10-retry budget (~0.7s) and inside the 30-retry
+      // budget (~2.7s), far under the 10s stale threshold, so the waiter can
+      // only succeed by outlasting the hold through its own retries.
+      const release = await lockfile.lock(target, {
+        retries: 0,
+        realpath: false,
+      });
+      const mutation = updateWorkspaceAgents(PROJECT_ROOT, (agents) => [
+        ...agents,
+        { id: generateAgentId(), name: 'contended', createdAt: Date.now() },
+      ]);
+      // Observe a rejection immediately so an early ELOCKED (the waiter gave
+      // up before the hold ended) surfaces as a clean assertion failure, not
+      // an unhandled rejection.
+      const outcome = mutation.then(
+        () => 'ok' as const,
+        (error: unknown) => error,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await release();
+
+      expect(await outcome).toBe('ok');
+      await expect(readWorkspaceAgents(PROJECT_ROOT)).resolves.toMatchObject([
+        { name: 'contended' },
+      ]);
     } finally {
       Storage.setRuntimeBaseDir(null);
     }
