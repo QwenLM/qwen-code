@@ -104,6 +104,35 @@ describe('contextLengthError', () => {
     });
   });
 
+  // vLLM rejects an oversized prompt in its own words, so without these the
+  // reactive compaction path never fired for self-hosted vLLM servers.
+  describe('vLLM context overflow wording', () => {
+    it.each([
+      [
+        'The decoder prompt (length 40000) is longer than the maximum model length of 32768. Make sure that `max_model_len` is no smaller than the number of text tokens.',
+        40000,
+      ],
+      [
+        'The decoder prompt (length 32768) plus the number of requested output tokens (at least 1) is longer than the maximum model length of 32768. Make sure that `max_model_len` is no smaller than the number of text tokens (prompt + requested output tokens).',
+        32768,
+      ],
+      [
+        'The engine prompt length 40000 exceeds the max_model_len 32768. Please reduce prompt.',
+        40000,
+      ],
+    ])(
+      'detects overflow and parses both token counts: %s',
+      (message, actual) => {
+        const info = getContextLengthExceededInfo(new Error(`400 ${message}`));
+
+        expect(info.isExceeded).toBe(true);
+        expect(info.actualTokens).toBe(actual);
+        expect(info.limitTokens).toBe(32768);
+        expect(info.limitKind).toBe('total');
+      },
+    );
+  });
+
   it('parses prompt-too-long actual and limit token counts', () => {
     const info = getContextLengthExceededInfo(
       new Error('prompt is too long: 137500 tokens > 135000 maximum'),

@@ -43,6 +43,11 @@ const CONTEXT_LENGTH_PATTERNS = [
   // llama.cpp: "request (279935 tokens) exceeds the available context size
   // (262144 tokens), try increasing it" (#13415).
   /\bexceeds the available context size\b/i,
+  // vLLM: "The decoder prompt (length 40000) is longer than the maximum model
+  // length of 32768." from the engine, and "The engine prompt length 40000
+  // exceeds the max_model_len 32768." from the Responses endpoint.
+  /\bis longer than the maximum model length\b/i,
+  /\bexceeds the max_model_len\b/i,
 ];
 
 function parseInteger(value: string): number {
@@ -122,6 +127,23 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(llamaCppMatch[1]!),
       limitTokens: parseInteger(llamaCppMatch[2]!),
+      limitKind: 'total',
+    };
+  }
+
+  // vLLM names the prompt length and its `max_model_len`, which is the
+  // server's real window and often smaller than the one inferred from the id.
+  const vllmMatch =
+    text.match(
+      /prompt \(length\s*(\d[\d,]*)\)[^\n]*?longer than the maximum model length of\s*(\d[\d,]*)/i,
+    ) ??
+    text.match(
+      /prompt length\s*(\d[\d,]*)\s*exceeds the max_model_len\s*(\d[\d,]*)/i,
+    );
+  if (vllmMatch) {
+    return {
+      actualTokens: parseInteger(vllmMatch[1]!),
+      limitTokens: parseInteger(vllmMatch[2]!),
       limitKind: 'total',
     };
   }
