@@ -10564,8 +10564,12 @@ class QwenAgent implements Agent {
             .filter(({ s }) => session.getRewindCutPoint(s.promptId) >= 0)
             .map(async ({ s, idx }) => {
               const stats = await fhs.getDiffStats(s.promptId);
+              const daemonPromptId = session.getRewindDaemonPromptId(
+                s.promptId,
+              );
               return {
                 promptId: s.promptId,
+                ...(daemonPromptId ? { daemonPromptId } : {}),
                 turnIndex: idx,
                 timestamp: s.timestamp.toISOString(),
                 diffStats: {

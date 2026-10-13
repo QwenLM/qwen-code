@@ -16,6 +16,7 @@ import {
 } from '@qwen-code/web-shell';
 import {
   DaemonClient,
+  findDaemonRewindUserBlock,
   type DaemonSessionSummary,
   type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
@@ -300,7 +301,7 @@ interface InsightProgress {
 }
 
 interface EditingMessage {
-  turnIndex?: number;
+  blockId?: string;
 }
 
 function isAutomaticApprovalMode(modeId: unknown): boolean {
@@ -1576,11 +1577,17 @@ export function EmbeddedApp() {
             const editContent = queuedPromptForEdit
               ? queuedPromptForEdit.prompt
               : content;
+            const target = transcriptBlocksRef.current.filter(
+              (block) =>
+                block.kind === 'user' &&
+                block.meta?.['source'] !== 'background_notification',
+            )[turnIndex];
+            if (!editsQueuedPrompt && !target) return false;
             composerRef.current?.clear({ text: true, tags: true });
             composerRef.current?.setText(editContent);
             composerRef.current?.focus?.();
             setEditingMessage({
-              turnIndex: editsQueuedPrompt ? undefined : turnIndex,
+              blockId: editsQueuedPrompt ? undefined : target?.id,
             });
             return true;
           }}
@@ -1617,6 +1624,18 @@ export function EmbeddedApp() {
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
+              const blocks = transcriptBlocksRef.current;
+              const userBlocks = blocks.filter(
+                (block) =>
+                  block.kind === 'user' &&
+                  block.meta?.['source'] !== 'background_notification',
+              );
+              const target =
+                editingMessage.blockId === undefined
+                  ? userBlocks.at(-1)
+                  : userBlocks.find(
+                      (block) => block.id === editingMessage.blockId,
+                    );
               let snapshots: Awaited<
                 ReturnType<typeof daemonClient.getRewindSnapshots>
               >['snapshots'];
@@ -1626,19 +1645,16 @@ export function EmbeddedApp() {
               } catch (err) {
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
-              const snapshot =
-                editingMessage.turnIndex === undefined
-                  ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
-                      (latest, entry) =>
-                        !latest || entry.turnIndex > latest.turnIndex
-                          ? entry
-                          : latest,
-                      undefined,
+              const matches =
+                target?.promptId &&
+                findDaemonRewindUserBlock(blocks, target.promptId)?.id ===
+                  target.id
+                  ? snapshots.filter(
+                      (entry) => entry.daemonPromptId === target.promptId,
                     )
-                  : snapshots.find(
-                      (entry) => entry.turnIndex === editingMessage.turnIndex,
-                    );
-              if (!snapshot) {
+                  : [];
+              const snapshot = matches.length === 1 ? matches[0] : undefined;
+              if (!snapshot || !target) {
                 throw new Error(t('composer.editExpired'));
               }
               try {
@@ -1668,7 +1684,7 @@ export function EmbeddedApp() {
               if (
                 !(await waitForRewindApplied(
                   () => transcriptBlocksRef.current,
-                  snapshot.turnIndex,
+                  userBlocks.indexOf(target),
                 )) &&
                 runtimeRef.current?.sessionId === sessionId
               ) {

@@ -2201,6 +2201,7 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  private readonly rewindDaemonPromptIds = new Map<string, string>();
   private codeModeNestedSequence = 0;
   private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
@@ -4862,6 +4863,7 @@ export class Session implements SessionContext {
   ): {
     targetTurnIndex: number;
     apiTruncateIndex: number;
+    daemonPromptId?: string;
   } {
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw RequestError.invalidParams(
@@ -4893,12 +4895,14 @@ export class Session implements SessionContext {
     // `getRewindCutPoint` already returns -1 when the recorder cannot resolve
     // this promptId, so a negative `recordingTurnIndex` never reaches here on
     // its own.
-    if (apiTruncateIndex < 0) {
+    if (!promptId || apiTruncateIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind to the requested turn. It may have been compressed or does not exist, or its model-history identity is missing or ambiguous.',
       );
     }
+
+    const daemonPromptId = this.getRewindDaemonPromptId(promptId);
 
     llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
@@ -4955,7 +4959,18 @@ export class Session implements SessionContext {
       void this.#drainNotificationQueue();
     }
 
-    return { targetTurnIndex, apiTruncateIndex };
+    return {
+      targetTurnIndex,
+      apiTruncateIndex,
+      ...(daemonPromptId ? { daemonPromptId } : {}),
+    };
+  }
+
+  getRewindDaemonPromptId(promptId: string): string | undefined {
+    const recorder = this.config.getChatRecordingService();
+    return recorder
+      ? recorder.getRewindDaemonPromptId(promptId)
+      : this.rewindDaemonPromptIds.get(promptId);
   }
 
   captureHistorySnapshot(): Content[] {
@@ -6696,6 +6711,23 @@ export class Session implements SessionContext {
                 }
               } catch (e) {
                 debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+              }
+            }
+
+            if (
+              isFreshUserTurn &&
+              daemonPromptId &&
+              !this.config.getChatRecordingService()
+            ) {
+              this.rewindDaemonPromptIds.set(promptId, daemonPromptId);
+              const retainedIds = new Set(
+                this.config
+                  .getFileHistoryService()
+                  .getSnapshots()
+                  .map((snapshot) => snapshot.promptId),
+              );
+              for (const id of this.rewindDaemonPromptIds.keys()) {
+                if (!retainedIds.has(id)) this.rewindDaemonPromptIds.delete(id);
               }
             }
 

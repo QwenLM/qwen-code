@@ -110,6 +110,19 @@ ACP history rollback carries each entry's `rewindId` through JSON and removes
 that transport metadata before restoring model content. Existing clients
 already echo the history array, so no new option or client-side counter is needed.
 
+Daemon-backed interfaces use the existing admitted `daemonPromptId` to associate
+each eligible snapshot with its visible user message. The catalog and rewind
+notification carry that association; `turnIndex` remains the raw snapshot
+position, including retry gaps and compressed prefixes. Recorder projections
+recover the association from existing records. With recording disabled, ACP
+retains it only for live file-history snapshots. Optimistic messages bind to
+their exact block when admission returns. WebShell and VS Code require a unique
+association before requesting rewind; missing or ambiguous associations are
+unavailable, not positional guesses. The SDK truncates the matching user block
+and its suffix, excluding injected owner-sharing rows. Legacy notifications
+without this association retain the old numeric interpretation for older
+producers; they are not used to authorize editing in the updated interfaces.
+
 Acceptance requires the same legacy fixture to cut at its source record,
 identified turns to keep resolving, unlinked/ambiguous targets to refuse, and
 resume/compression plus both live Ink and ACP entrances to obey these rules.
@@ -129,11 +142,7 @@ OpenTUI seeds its prompt counter past identities claimed by a resumed
 transcript before minting a new id. Although OpenTUI has no rewind surface of
 its own, those ids are persisted and may later be consumed by Ink rewind.
 
-The change deliberately leaves out widening the seed past retained file-history
-snapshot keys. The refusal
-above fires only when two snapshots share a key. If a turn minted after
-resume re-wears the key of a snapshot that a conversation-only rewind left
-behind, and writes no files itself, a code restore of that turn resolves to
-the older snapshot. The seed that preceded this change counted user records
-only, so live turns already had this exposure; it is accepted as a residual
-risk and tracked in #11408.
+Seeding past retained file-history snapshot keys is handled separately by
+#13729 for #11408. That merged companion prevents a resumed turn from reusing
+a snapshot key left behind by conversation-only rewind; it is not duplicated
+in this change.

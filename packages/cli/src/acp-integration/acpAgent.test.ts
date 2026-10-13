@@ -2463,6 +2463,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rewindToTurn: ReturnType<typeof vi.fn>;
         beginHistoryMutation: ReturnType<typeof vi.fn>;
         getRewindCutPoint: ReturnType<typeof vi.fn>;
+        getRewindDaemonPromptId: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         getDefaultReasoningConfig: ReturnType<typeof vi.fn>;
@@ -6006,6 +6007,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
           beginHistoryMutation: vi.fn().mockImplementation(() => vi.fn()),
           getRewindCutPoint: vi.fn().mockReturnValue(0),
+          getRewindDaemonPromptId: vi.fn(),
           clearActiveTodoPlanRevision: vi.fn(),
           clearTodoStopGuardTrust: vi.fn(),
           getDefaultReasoningConfig: vi.fn(() =>
@@ -25055,6 +25057,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     lastSessionMock!.getRewindCutPoint.mockImplementation((promptId: string) =>
       promptId === promptIds[1] ? 2 : -1,
     );
+    lastSessionMock!.getRewindDaemonPromptId.mockImplementation(
+      (promptId: string) =>
+        promptId === promptIds[1] ? 'daemon-B' : undefined,
+    );
 
     expect(
       await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots, {
@@ -25064,6 +25070,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       snapshots: [
         {
           promptId: promptIds[1],
+          daemonPromptId: 'daemon-B',
           turnIndex: 1,
           timestamp: '2026-10-09T00:00:00.000Z',
           diffStats: { filesChanged: 1, insertions: 2, deletions: 1 },

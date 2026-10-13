@@ -569,6 +569,7 @@ describe('Session', () => {
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     getRewindTurnIndex: ReturnType<typeof vi.fn>;
+    getRewindDaemonPromptId: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
     getBranchCheckpointCursor: ReturnType<typeof vi.fn>;
@@ -966,6 +967,7 @@ describe('Session', () => {
       getRewindTurnIndex: vi.fn((promptId: string) =>
         ['p1', 'p2', 'p3'].indexOf(promptId),
       ),
+      getRewindDaemonPromptId: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
       getBranchCheckpointCursor: vi.fn().mockReturnValue({
@@ -7005,6 +7007,61 @@ describe('Session', () => {
       expect(session.getRewindCutPoint(promptId!)).toBe(0);
     });
 
+    it('associates a recording-disabled fresh prompt with its admitted daemon identity', async () => {
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      const snapshots: core.FileHistorySnapshot[] = [];
+      vi.mocked(mockFileHistoryService.getSnapshots).mockImplementation(
+        () => snapshots,
+      );
+      vi.mocked(mockFileHistoryService.makeSnapshot).mockImplementation(
+        async (promptId: string) => {
+          snapshots.push({
+            promptId,
+            timestamp: new Date('2026-10-13T00:00:00Z'),
+            trackedFileBackups: {},
+          });
+        },
+      );
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mockLlmClient.tryCompressChat.mockImplementation(async () => {
+        await gate;
+        return {
+          originalTokenCount: 1,
+          newTokenCount: 1,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+      });
+      const pending = session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'fresh prompt' }],
+        },
+        { version: 1, sessionId: 'test-session-id', promptId: 'daemon-fresh' },
+      );
+      await vi.waitFor(() =>
+        expect(mockLlmClient.tryCompressChat).toHaveBeenCalled(),
+      );
+      await session.cancelPendingPrompt();
+      release();
+      await expect(pending).resolves.toMatchObject({ stopReason: 'cancelled' });
+      const snapshot = snapshots.at(-1)!;
+      expect(snapshot.promptId).toMatch(/^test-session-id########\d+$/);
+      expect(session.getRewindDaemonPromptId(snapshot.promptId)).toBe(
+        'daemon-fresh',
+      );
+      expect(session.getRewindDaemonPromptId('unknown')).toBeUndefined();
+      const [entry] = vi.mocked(mockChat.addHistory).mock.calls.at(-1)!;
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([entry]);
+      expect(session.rewindToTurn(0, { rewindFiles: false })).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+        daemonPromptId: 'daemon-fresh',
+      });
+    });
+
     it('rejects (accepted:false) when a prompt is already in flight', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue([
         { role: 'user', parts: [{ text: 'unanswered' }] },
@@ -9362,6 +9419,9 @@ describe('Session', () => {
         { role: 'user', parts: [{ text: 'third' }] },
       ];
       markApiHistoryPrompt(history[3]!, 'p3');
+      mockChatRecordingService.getRewindDaemonPromptId.mockImplementation(
+        (id: string) => (id === 'p3' ? 'daemon-C' : undefined),
+      );
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
         ['p1', 'p2', 'p3'].map((promptId) => ({
@@ -9374,6 +9434,7 @@ describe('Session', () => {
       expect(session.rewindToTurn(2, { rewindFiles: false })).toEqual({
         targetTurnIndex: 2,
         apiTruncateIndex: 3,
+        daemonPromptId: 'daemon-C',
       });
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         2,

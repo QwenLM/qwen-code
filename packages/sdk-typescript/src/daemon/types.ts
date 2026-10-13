@@ -5289,6 +5289,7 @@ export interface PermissionResponse {
 
 export interface DaemonRewindSnapshotInfo {
   promptId: string;
+  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
