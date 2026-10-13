@@ -42,6 +42,14 @@ export interface WebTerminalSnapshot {
   exitCode?: number;
   workspaceCwd: string;
   handlesPrimaryDa?: boolean;
+  /**
+   * Set when the PTY backend terminated the session itself — a resource
+   * budget was exhausted (bounded pause hold / write queue). The failure is
+   * the terminal state; `exitCode` is deliberately absent because no native
+   * exit status belongs to it.
+   */
+  failed?: boolean;
+  failureMessage?: string;
 }
 
 export interface CreateWebTerminalOptions {
@@ -73,11 +81,15 @@ interface PtySession {
   unacknowledgedInputBytes: number;
   exited: boolean;
   exitCode?: number;
+  /** Set once the PTY backend terminated this session on a resource limit. */
+  failure?: { message: string };
   outputListeners: Set<(data: string) => void>;
   exitListeners: Set<(e: { exitCode: number; signal?: number }) => void>;
+  failureListeners: Set<(message: string) => void>;
   reclaimTimer?: ReturnType<typeof setTimeout>;
   dataDisposable?: { dispose(): void };
   exitDisposable?: { dispose(): void };
+  errorDisposable?: { dispose(): void };
   queryTerminal?: Terminal;
   queryReplyDisposable?: { dispose(): void };
   /**
@@ -94,7 +106,20 @@ interface SpawnedWebTerminalPty extends WebTerminalPty {
   onExit(
     callback: (e: { exitCode: number; signal?: number }) => void,
   ): { dispose(): void } | undefined;
+  /** EventEmitter surface; used for structured PTY resource failures. */
+  on?(
+    event: 'error',
+    listener: (err: Error) => void,
+  ): { dispose(): void } | undefined;
 }
+
+const getPtyLimitMessage = (err: unknown): string | undefined => {
+  const code = (err as { code?: unknown }).code;
+  if (code !== 'QWEN_PTY_OUTPUT_LIMIT' && code !== 'QWEN_PTY_WRITE_LIMIT') {
+    return undefined;
+  }
+  return err instanceof Error ? err.message : String(err);
+};
 
 function killPtyTree(pty: WebTerminalPty): void {
   if (process.platform === 'win32') {
@@ -288,6 +313,20 @@ export class WebTerminalRegistry {
     const sessionRef: { current?: PtySession } = {};
     const earlyOutput: string[] = [];
     let earlyExit: { exitCode: number; signal?: number } | undefined;
+    let earlyFailure: string | undefined;
+    const handleFailure = (message: string) => {
+      const session = sessionRef.current;
+      if (!session) {
+        earlyFailure = message;
+        return;
+      }
+      if (session.failure) return;
+      session.failure = { message };
+      // The backend already killed the child and closed the master fd; free
+      // the session's pty-side listeners the same way the exit path does.
+      setImmediate(() => this.releasePtyResources(session));
+      for (const listener of [...session.failureListeners]) listener(message);
+    };
     const handleData = (data: string) => {
       const session = sessionRef.current;
       if (!session) {
@@ -360,6 +399,7 @@ export class WebTerminalRegistry {
     };
     let dataDisposable: { dispose(): void } | undefined;
     let exitDisposable: { dispose(): void } | undefined;
+    let errorDisposable: { dispose(): void } | undefined;
     const spawnPty = (useBundled: boolean) =>
       ptyImpl.module.spawn(file, args, {
         name: 'xterm-256color',
@@ -395,6 +435,15 @@ export class WebTerminalRegistry {
       }
       dataDisposable = spawned.onData(handleData);
       exitDisposable = spawned.onExit(handleExit);
+      errorDisposable = spawned.on?.('error', (err: Error) => {
+        const message = getPtyLimitMessage(err);
+        if (message === undefined) {
+          // Preserve the pre-subscription behavior for unexpected pty errors:
+          // without a listener they escaped the EventEmitter as unhandled.
+          throw err;
+        }
+        handleFailure(message);
+      });
       proc = {
         pid: spawned.pid,
         write: (data) => spawned.write(data),
@@ -464,8 +513,10 @@ export class WebTerminalRegistry {
       exited: false,
       outputListeners: new Set(),
       exitListeners: new Set(),
+      failureListeners: new Set(),
       dataDisposable,
       exitDisposable,
+      errorDisposable,
       queryTerminal,
       queryReplyDisposable,
       ptyResourcesReleased: false,
@@ -475,6 +526,7 @@ export class WebTerminalRegistry {
     this.finishCreating(terminalId);
     for (const data of earlyOutput) handleData(data);
     if (earlyExit) handleExit(earlyExit);
+    if (earlyFailure !== undefined) handleFailure(earlyFailure);
     this.scheduleReclaim(terminalId, session);
 
     return { terminalId };
@@ -506,6 +558,20 @@ export class WebTerminalRegistry {
     return () => session.exitListeners.delete(listener);
   }
 
+  /** Observe a backend-side resource failure (bounded hold / write queue). */
+  addFailureListener(
+    terminalId: string,
+    listener: (message: string) => void,
+  ): (() => void) | undefined {
+    const session = this.sessions.get(terminalId);
+    if (!session) return undefined;
+    session.failureListeners.add(listener);
+    return () => {
+      if (this.sessions.get(terminalId) === session)
+        session.failureListeners.delete(listener);
+    };
+  }
+
   /** Read buffered output and exit state when a browser tab reconnects. */
   readSnapshot(terminalId: string): WebTerminalSnapshot | undefined {
     const session = this.sessions.get(terminalId);
@@ -516,12 +582,15 @@ export class WebTerminalRegistry {
       workspaceCwd: session.workspaceCwd,
       ...(session.queryTerminal ? { handlesPrimaryDa: true } : {}),
       ...(session.exitCode !== undefined ? { exitCode: session.exitCode } : {}),
+      ...(session.failure
+        ? { failed: true, failureMessage: session.failure.message }
+        : {}),
     };
   }
 
   write(terminalId: string, data: string): WebTerminalWriteResult {
     const session = this.sessions.get(terminalId);
-    if (!session || session.exited) return 'unavailable';
+    if (!session || session.exited || session.failure) return 'unavailable';
     const bytes = Buffer.byteLength(data);
     const isRecoveryControl =
       data.length === 1 && '\x03\x04\x1a\x1c'.includes(data);
@@ -543,7 +612,7 @@ export class WebTerminalRegistry {
 
   resize(terminalId: string, cols: number, rows: number): boolean {
     const session = this.sessions.get(terminalId);
-    if (!session || session.exited) return false;
+    if (!session || session.exited || session.failure) return false;
     try {
       session.pty.resize(cols, rows);
       return true;
@@ -583,7 +652,8 @@ export class WebTerminalRegistry {
     }
     session.outputListeners.clear();
     session.exitListeners.clear();
-    if (!session.exited) {
+    session.failureListeners.clear();
+    if (!session.exited && !session.failure) {
       // killPtyTree has to run before releasePtyResources: its pty.kill()
       // defers the whole teardown while `_isReady` is false, so a terminal
       // released before its shell's first output byte (tab closed during slow
@@ -592,6 +662,11 @@ export class WebTerminalRegistry {
       // it really ran; releaseHost then disposes the worker a deferred kill
       // would strand, and skips the native close so the queued kill() stays the
       // single closer — never a second close.
+      //
+      // A failed session skips this on purpose: the backend already
+      // terminated the whole tree before reporting the failure, so
+      // re-signaling the pid would reach a possibly recycled one — the same
+      // reason the exited path never signals.
       killPtyTree(session.pty);
     }
     this.releasePtyResources(session);
@@ -643,6 +718,7 @@ export class WebTerminalRegistry {
     session.ptyResourcesReleased = true;
     session.dataDisposable?.dispose();
     session.exitDisposable?.dispose();
+    session.errorDisposable?.dispose();
     session.queryReplyDisposable?.dispose();
     session.queryTerminal?.dispose();
     session.pty.releaseHost?.();

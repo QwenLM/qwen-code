@@ -10,14 +10,19 @@
  * The suite runs under vitest/Node: the backend drives the pinned native
  * addon directly from a main-thread async `fs.read` pump, so its observable
  * contract — output streaming, writes, resize reaching the child's terminal,
- * kill/exit, pause hold, flow control, encoding — is exercised directly
- * here. The Bun-leg round-trip through the real `getPty()` seam lives in
+ * kill/exit, pause hold, flow control, encoding, and the bounded-hold /
+ * write-queue / admission resource limits — is exercised directly here. The Bun-leg round-trip through the real `getPty()` seam lives in
  * bun-pty.node-bun.test.ts.
  */
 
 import * as fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { spawn } from './bun-pty.js';
+import {
+  getPtyBudgetStats,
+  processPtyBudget,
+  PtyLimitError,
+  spawn,
+} from './bun-pty.js';
 
 const POSIX = process.platform !== 'win32';
 
@@ -142,7 +147,12 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
   }, 20_000);
 
   it('keeps exit detection while paused output floods past 3 MB', async () => {
-    const pty = spawn('/bin/sh', ['-c', 'yes X | head -c 3000000; exit 0']);
+    // The raw flood is 3 MB and reaches the master as ~4.5 MB (ONLCR), so the
+    // hold cap is sized explicitly to keep this a pause-hold exercise rather
+    // than a limit-termination exercise.
+    const pty = spawn('/bin/sh', ['-c', 'yes X | head -c 3000000; exit 0'], {
+      limits: { pausedHoldBytes: 16 * 1024 * 1024 },
+    });
     pty.pause();
     let exits = 0;
     pty.onExit(() => {
@@ -282,4 +292,262 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
     expect(() => pty.clear()).not.toThrow();
     pty.kill();
   }, 20_000);
+});
+
+describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
+  type Spawned = ReturnType<typeof spawn>;
+
+  const nextError = (pty: Spawned): { errors: PtyLimitError[] } => {
+    const errors: PtyLimitError[] = [];
+    pty.on('error', (error: Error) => {
+      errors.push(error as PtyLimitError);
+    });
+    return { errors };
+  };
+
+  const waitForFdClosed = (pty: Spawned): Promise<boolean> =>
+    waitFor(() => {
+      try {
+        fs.fstatSync(fdOf(pty));
+        return false;
+      } catch {
+        return true;
+      }
+    });
+
+  const waitForChildGone = (pty: Spawned): Promise<boolean> =>
+    waitFor(() => {
+      try {
+        process.kill(pty.pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    }, 5_000);
+
+  it('terminates with an explicit error when a paused flood passes the per-pty hold cap', async () => {
+    const LIMIT = 128 * 1024;
+    const pty = spawn('/bin/sh', ['-c', 'yes X | head -c 2097152; sleep 30'], {
+      limits: { pausedHoldBytes: LIMIT },
+    });
+    const { errors } = nextError(pty);
+    let exits = 0;
+    pty.onExit(() => {
+      exits += 1;
+    });
+    let output = '';
+    pty.onData((data) => {
+      output += data;
+    });
+
+    pty.pause();
+    expect(await waitFor(() => errors.length > 0)).toBe(true);
+
+    expect(errors.length).toBe(1);
+    const error = errors[0]!;
+    expect(error).toBeInstanceOf(PtyLimitError);
+    expect(error.code).toBe('QWEN_PTY_OUTPUT_LIMIT');
+    expect(error.limitKind).toBe('paused-hold-per-pty');
+    expect(error.limit).toBe(LIMIT);
+    expect(error.acceptedBytes).toBeGreaterThan(0);
+    expect(error.acceptedBytes).toBeLessThanOrEqual(LIMIT);
+    expect(error.hasUndeliveredData).toBe(true);
+
+    const stats = pty.stats;
+    expect(stats.resourceFailed).toBe(true);
+    expect(stats.pausedBytes).toBe(0);
+
+    // onExit stays reserved for real native exits: the product failure is
+    // the error terminal state, never a fabricated exit code.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(exits).toBe(0);
+
+    // Full teardown: master fd closed, child tree gone by real ownership.
+    expectFdClosed(pty);
+    expect(await waitForChildGone(pty)).toBe(true);
+
+    // No auto-resume and no replay of the discarded hold.
+    const before = output;
+    pty.resume();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(output).toBe(before);
+
+    // The process-wide hold ledger is released.
+    expect(getPtyBudgetStats().pausedHoldBytes).toBe(0);
+  }, 30_000);
+
+  it('holds a flood under the cap byte-exact and stays alive until resume', async () => {
+    const LINES = 8000;
+    const LIMIT = 512 * 1024;
+    const pty = spawn(
+      '/bin/sh',
+      ['-c', `awk 'BEGIN{for(i=0;i<${LINES};i++)print "K" i}'; sleep 30`],
+      { limits: { pausedHoldBytes: LIMIT } },
+    );
+    const { errors } = nextError(pty);
+    let output = '';
+    pty.onData((data) => {
+      output += data;
+    });
+
+    pty.pause();
+    expect(await waitFor(() => pty.stats.pausedBytes >= 50_000)).toBe(true);
+    expect(pty.stats.pausedBytes).toBeLessThanOrEqual(LIMIT);
+    expect(errors.length).toBe(0);
+    fs.fstatSync(fdOf(pty)); // still open: nothing was terminated
+
+    pty.resume();
+    const expected =
+      Array.from({ length: LINES }, (_, i) => `K${i}`).join('\r\n') + '\r\n';
+    expect(await waitFor(() => output.includes(`K${LINES - 1}`))).toBe(true);
+    expect(output).toBe(expected);
+
+    pty.kill();
+    expect(await waitForFdClosed(pty)).toBe(true);
+    expect(getPtyBudgetStats().pausedHoldBytes).toBe(0);
+  }, 30_000);
+
+  it('enforces the process-wide hold budget across ptys without touching the first', async () => {
+    const original = processPtyBudget.totalPausedHoldBytes;
+    processPtyBudget.totalPausedHoldBytes = 160 * 1024;
+    try {
+      expect(getPtyBudgetStats().pausedHoldBytes).toBe(0);
+
+      // A floods ~100 KB of master bytes (ONLCR included) and parks there,
+      // well under the 160 KB global cap.
+      const a = spawn('/bin/sh', [
+        '-c',
+        'awk \'BEGIN{for(i=0;i<15000;i++)print "A" i}\'; sleep 30',
+      ]);
+      const aErrors = nextError(a);
+      let aOutput = '';
+      a.onData((data) => {
+        aOutput += data;
+      });
+      a.pause();
+      expect(
+        await waitFor(() => getPtyBudgetStats().pausedHoldBytes >= 95_000),
+      ).toBe(true);
+
+      // B floods megabytes: the shared cap, not B's own per-pty cap, ends it.
+      const b = spawn('/bin/sh', ['-c', 'yes X | head -c 2097152; sleep 30']);
+      const bErrors = nextError(b);
+      b.onData(() => {});
+      b.pause();
+      expect(await waitFor(() => bErrors.errors.length > 0, 15_000)).toBe(true);
+      expect(bErrors.errors.length).toBe(1);
+      expect(bErrors.errors[0]!.code).toBe('QWEN_PTY_OUTPUT_LIMIT');
+      expect(bErrors.errors[0]!.limitKind).toBe('paused-hold-process');
+      expect(bErrors.errors[0]!.limit).toBe(160 * 1024);
+
+      // Only B was terminated; A keeps its hold, its child, and zero errors.
+      expect(a.stats.resourceFailed).toBe(false);
+      expect(aErrors.errors.length).toBe(0);
+      a.resume();
+      expect(await waitFor(() => aOutput.includes('A9999'))).toBe(true);
+      a.kill();
+      expect(await waitForFdClosed(a)).toBe(true);
+      expectFdClosed(b);
+    } finally {
+      processPtyBudget.totalPausedHoldBytes = original;
+    }
+  }, 40_000);
+
+  it('terminates with an explicit error when queued writes pass the cap', async () => {
+    const LIMIT = 64 * 1024;
+    const pty = spawn('/bin/sh', ['-c', 'sleep 30'], {
+      limits: { writeQueueBytes: LIMIT },
+    });
+    const { errors } = nextError(pty);
+    let exits = 0;
+    pty.onExit(() => {
+      exits += 1;
+    });
+
+    // A synchronous burst cannot interleave with the async write drain, so
+    // the queue grows monotonically until the cap rejects it.
+    const chunk = Buffer.alloc(4096, 0x57);
+    for (let i = 0; i < 40; i += 1) pty.write(chunk);
+
+    expect(errors.length).toBe(1);
+    const error = errors[0]!;
+    expect(error).toBeInstanceOf(PtyLimitError);
+    expect(error.code).toBe('QWEN_PTY_WRITE_LIMIT');
+    expect(error.limitKind).toBe('write-queue-per-pty');
+    expect(error.limit).toBe(LIMIT);
+    expect(error.acceptedBytes).toBeGreaterThan(0);
+    expect(error.acceptedBytes).toBeLessThanOrEqual(LIMIT);
+    expect(error.hasUndeliveredData).toBe(false);
+
+    expect(pty.stats.resourceFailed).toBe(true);
+    expect(pty.stats.writeQueuedBytes).toBe(0);
+    expectFdClosed(pty);
+    expect(await waitForChildGone(pty)).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(exits).toBe(0);
+  }, 20_000);
+
+  it('admits ptys up to the process-wide cap and frees the slot on close', async () => {
+    const original = processPtyBudget.maxActivePtys;
+    processPtyBudget.maxActivePtys = 1;
+    try {
+      expect(getPtyBudgetStats().activePtys).toBe(0);
+
+      const first = spawn('/bin/sh', ['-c', 'sleep 30']);
+      let caught: unknown;
+      try {
+        spawn('/bin/sh', ['-c', 'sleep 30']);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(PtyLimitError);
+      const limitError = caught as PtyLimitError;
+      expect(limitError.code).toBe('QWEN_PTY_ACTIVE_LIMIT');
+      expect(limitError.limitKind).toBe('active-pty-count');
+      expect(limitError.limit).toBe(1);
+
+      first.kill();
+      expect(await waitFor(() => getPtyBudgetStats().activePtys === 0)).toBe(
+        true,
+      );
+
+      const second = spawn('/bin/sh', ['-c', 'sleep 30']);
+      expect(second.pid).toBeGreaterThan(0);
+      second.kill();
+      expect(await waitFor(() => getPtyBudgetStats().activePtys === 0)).toBe(
+        true,
+      );
+    } finally {
+      processPtyBudget.maxActivePtys = original;
+    }
+  }, 30_000);
+
+  it('tracks hold, queue and admit counts in the process budget stats', async () => {
+    const baseline = getPtyBudgetStats();
+    expect(baseline.pausedHoldBytes).toBe(0);
+    expect(baseline.writeQueueBytes).toBe(0);
+
+    const pty = spawn('/bin/sh', [
+      '-c',
+      'awk \'BEGIN{for(i=0;i<15000;i++)print "O" i}\'; sleep 30',
+    ]);
+    pty.pause();
+    expect(
+      await waitFor(() => getPtyBudgetStats().pausedHoldBytes >= 50_000),
+    ).toBe(true);
+    expect(getPtyBudgetStats().pausedHoldBytes).toBe(pty.stats.pausedBytes);
+    expect(getPtyBudgetStats().activePtys).toBeGreaterThanOrEqual(1);
+
+    pty.resume();
+    expect(await waitFor(() => getPtyBudgetStats().pausedHoldBytes === 0)).toBe(
+      true,
+    );
+    pty.kill();
+    expect(
+      await waitFor(
+        () => getPtyBudgetStats().activePtys === baseline.activePtys,
+      ),
+    ).toBe(true);
+  }, 30_000);
 });

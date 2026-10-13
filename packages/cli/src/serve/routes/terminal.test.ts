@@ -46,6 +46,8 @@ function registryWithSnapshot(
         exitCode?: number;
         workspaceCwd: string;
         handlesPrimaryDa?: boolean;
+        failed?: boolean;
+        failureMessage?: string;
       }
     | undefined,
 ) {
@@ -54,6 +56,7 @@ function registryWithSnapshot(
     readSnapshot: vi.fn(() => snapshot),
     addOutputListener: vi.fn(() => vi.fn()),
     addExitListener: vi.fn(() => vi.fn()),
+    addFailureListener: vi.fn(() => vi.fn()),
     resize: vi.fn(() => true),
     write: vi.fn(() => 'written'),
     release: vi.fn(),
@@ -256,6 +259,53 @@ describe('terminal WebSocket route', () => {
       '/workspace',
     );
     expect(registry.write).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a backend resource failure as an error frame and a non-retryable close', async () => {
+    const registry = registryWithSnapshot(undefined);
+    let failure: ((message: string) => void) | undefined;
+    vi.mocked(registry.addFailureListener).mockImplementationOnce(
+      (_terminalId, listener) => {
+        failure = listener;
+        return vi.fn();
+      },
+    );
+    const ws = new FakeWebSocket();
+    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+      ws as unknown as WebSocket,
+      request,
+    );
+
+    failure!('qwen-bun-pty resource limit reached');
+
+    expect(ws.sent).toContain(
+      '\x00{"type":"error","message":"qwen-bun-pty resource limit reached"}',
+    );
+    expect(ws.close).toHaveBeenCalledWith(4001, 'Terminal failed');
+    // The backend already killed the child: the session is not released by
+    // signalling it again — detach only, like the exit path.
+    expect(registry.release).not.toHaveBeenCalled();
+  });
+
+  it('closes with the failure state when a reconnect hits a failed session', async () => {
+    const registry = registryWithSnapshot({
+      output: 'held\r\n',
+      exited: false,
+      workspaceCwd: '/workspace',
+      failed: true,
+      failureMessage: 'resource limit reached',
+    });
+    const ws = new FakeWebSocket();
+
+    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+      ws as unknown as WebSocket,
+      request,
+    );
+
+    expect(ws.sent).toContain(
+      '\x00{"type":"error","message":"resource limit reached"}',
+    );
+    expect(ws.close).toHaveBeenCalledWith(4001, 'Terminal failed');
   });
 
   it('closes cleanly when the session disappears before replay', async () => {

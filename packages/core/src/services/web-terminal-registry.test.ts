@@ -508,6 +508,87 @@ describe('WebTerminalRegistry', () => {
     ).resolves.toEqual({ terminalId: 'terminal:bundled-double-fail' });
   });
 
+  it('marks the session failed and frees the pty when the backend reports a resource limit', async () => {
+    const errorListeners: Array<(err: Error) => void> = [];
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
+    });
+    const registry = await start('terminal:limit');
+    const failures: string[] = [];
+    registry.addFailureListener('terminal:limit', (message) => {
+      failures.push(message);
+    });
+    expect(registry.readSnapshot('terminal:limit')?.failed).toBeUndefined();
+
+    errorListeners[0]!(
+      Object.assign(new Error('qwen-bun-pty resource limit reached'), {
+        code: 'QWEN_PTY_OUTPUT_LIMIT',
+      }),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(failures).toHaveLength(1);
+    const snapshot = registry.readSnapshot('terminal:limit');
+    expect(snapshot?.failed).toBe(true);
+    expect(snapshot?.failureMessage).toContain('resource limit');
+    // A failed session accepts no more input, and the backend already killed
+    // the tree — the registry must not signal the pid again.
+    registry.write('terminal:limit', 'nope');
+    registry.resize('terminal:limit', 100, 40);
+    expect(write).not.toHaveBeenCalled();
+    expect(resize).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it('re-throws unexpected backend errors from the error event', async () => {
+    const errorListeners: Array<(err: Error) => void> = [];
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') errorListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
+    });
+    const registry = await start('terminal:unexpected');
+
+    expect(() =>
+      errorListeners[0]!(Object.assign(new Error('boom'), { code: 'EPIPE' })),
+    ).toThrow('boom');
+    expect(
+      registry.readSnapshot('terminal:unexpected')?.failed,
+    ).toBeUndefined();
+  });
+
   it('frees a bundled-shape session once across kill and exit-time release', async () => {
     // Bundled ConPTY shape: the host reference was released at spawn, so the
     // native close is only reachable through kill(); the noted release must

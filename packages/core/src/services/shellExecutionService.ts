@@ -2033,7 +2033,6 @@ export class ShellExecutionService {
         let outputComparison: AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
         const sniffChunks: Buffer[] = [];
-        const error: Error | null = null;
         let exited = false;
         // Set the moment performCancelKill actually proceeds (a cancel reached
         // us before the shell exited). The finalizer reads THIS, not a late
@@ -2281,6 +2280,21 @@ export class ShellExecutionService {
             return;
           }
 
+          // The qwen-bun-pty backend terminates a command itself when a
+          // resource budget is exhausted (bounded pause hold / write queue)
+          // and reports a stable structured reason. Converge the execution on
+          // that error — a visible failure carrying no fabricated exit code —
+          // instead of the crash path below; the backend has already killed
+          // the child and closed the master fd, so no onExit will follow.
+          const limitCode = getErrnoCode(err);
+          if (
+            limitCode === 'QWEN_PTY_OUTPUT_LIMIT' ||
+            limitCode === 'QWEN_PTY_WRITE_LIMIT'
+          ) {
+            settleResult(null, null, err);
+            return;
+          }
+
           // Surface unexpected PTY errors to preserve existing crash behavior.
           throw err;
         };
@@ -2372,90 +2386,110 @@ export class ShellExecutionService {
           this.activePtys.delete(ptyProcess.pid);
         };
 
+        // Resolves the execution exactly once — with the real native exit
+        // status on the natural path, or with a structured resource-failure
+        // error and NO exit code when the PTY backend terminated the command
+        // itself (the exit code is never fabricated).
+        let settled = false;
+        const finalizeResult = async (
+          exitCode: number | null,
+          signal: number | null,
+          failureError: Error | null,
+        ) => {
+          if (settled) return;
+          settled = true;
+          const finalBuffer = Buffer.concat(outputChunks);
+          let fullOutput = '';
+
+          try {
+            try {
+              render(true);
+            } catch (e) {
+              debugLogger.warn(
+                `Final PTY render threw during cleanup: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+
+            try {
+              if (isStreamingRawContent) {
+                // Re-decode the captured buffer with proper encoding detection.
+                // The streaming decoder used the first-chunk heuristic which
+                // can misdetect when early output is ASCII-only but later
+                // output is in a different encoding (e.g. GBK).
+                const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
+                const decodedOutput = new TextDecoder(finalEncoding).decode(
+                  finalBuffer,
+                );
+                fullOutput = await replayTerminalOutput(
+                  decodedOutput,
+                  cols,
+                  rows,
+                  Terminal,
+                );
+              } else {
+                fullOutput = serializeTerminalToText(headlessTerminal);
+              }
+            } catch {
+              try {
+                fullOutput = decodeBufferedOutput(finalBuffer);
+              } catch {
+                // Ignore fallback rendering errors and resolve with empty text.
+              }
+            }
+            fullOutput = appendOutputCaptureLimitNotice(
+              fullOutput,
+              outputCaptureLimitExceeded,
+              totalBytesReceived,
+              maxBufferedOutputBytes,
+            );
+
+            resolve({
+              rawOutput: finalBuffer,
+              output: fullOutput,
+              exitCode,
+              signal,
+              error: failureError,
+              aborted: abortSignal.aborted,
+              pid: ptyProcess.pid,
+              executionMethod:
+                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+            });
+          } finally {
+            disposeForegroundPtyResources();
+          }
+        };
+
+        // Give any last onData callbacks a chance to run before finalizing.
+        // onExit can arrive slightly before late PTY data is processed.
+        const settleResult = (
+          exitCode: number | null,
+          signal: number | null,
+          failureError: Error | null,
+        ) => {
+          exited = true;
+          abortSignal.removeEventListener('abort', abortHandler);
+          const flushChain = () => processingChain.then(() => {});
+          const deadline = new Promise<void>((res) =>
+            setTimeout(res, SIGKILL_TIMEOUT_MS),
+          );
+          const drain = () =>
+            new Promise<void>((res) => setImmediate(res)).then(flushChain);
+
+          void Promise.race([
+            flushChain().then(drain).then(drain),
+            deadline,
+          ]).then(() => {
+            void finalizeResult(exitCode, signal, failureError);
+          });
+        };
+
         const exitDisposable = ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
-            exited = true;
-            abortSignal.removeEventListener('abort', abortHandler);
-
-            const finalize = async () => {
-              const finalBuffer = Buffer.concat(outputChunks);
-              let fullOutput = '';
-
-              try {
-                try {
-                  render(true);
-                } catch (e) {
-                  debugLogger.warn(
-                    `Final PTY render threw during cleanup: ${e instanceof Error ? e.message : String(e)}`,
-                  );
-                }
-
-                try {
-                  if (isStreamingRawContent) {
-                    // Re-decode the captured buffer with proper encoding detection.
-                    // The streaming decoder used the first-chunk heuristic which
-                    // can misdetect when early output is ASCII-only but later
-                    // output is in a different encoding (e.g. GBK).
-                    const finalEncoding =
-                      getCachedEncodingForBuffer(finalBuffer);
-                    const decodedOutput = new TextDecoder(finalEncoding).decode(
-                      finalBuffer,
-                    );
-                    fullOutput = await replayTerminalOutput(
-                      decodedOutput,
-                      cols,
-                      rows,
-                      Terminal,
-                    );
-                  } else {
-                    fullOutput = serializeTerminalToText(headlessTerminal);
-                  }
-                } catch {
-                  try {
-                    fullOutput = decodeBufferedOutput(finalBuffer);
-                  } catch {
-                    // Ignore fallback rendering errors and resolve with empty text.
-                  }
-                }
-                fullOutput = appendOutputCaptureLimitNotice(
-                  fullOutput,
-                  outputCaptureLimitExceeded,
-                  totalBytesReceived,
-                  maxBufferedOutputBytes,
-                );
-
-                resolve({
-                  rawOutput: finalBuffer,
-                  output: fullOutput,
-                  exitCode,
-                  signal: signal === 0 ? null : (signal ?? null),
-                  error,
-                  aborted: abortSignal.aborted,
-                  pid: ptyProcess.pid,
-                  executionMethod:
-                    (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ??
-                    'node-pty',
-                });
-              } finally {
-                disposeForegroundPtyResources();
-              }
-            };
-
-            // Give any last onData callbacks a chance to run before finalizing.
-            // onExit can arrive slightly before late PTY data is processed.
-            const flushChain = () => processingChain.then(() => {});
-            const deadline = new Promise<void>((res) =>
-              setTimeout(res, SIGKILL_TIMEOUT_MS),
+            settleResult(
+              exitCode,
+              signal === 0 ? null : (signal ?? null),
+              null,
             );
-            const drain = () =>
-              new Promise<void>((res) => setImmediate(res)).then(flushChain);
-
-            void Promise.race([
-              flushChain().then(drain).then(drain),
-              deadline,
-            ]).then(() => {
-              void finalize();
-            });
           },
         );
 
@@ -2831,7 +2865,7 @@ export class ShellExecutionService {
               output: snapshot,
               exitCode: null,
               signal: null,
-              error,
+              error: null,
               // See childProcessFallback for the full rationale — promoted
               // results are NOT user-cancellations, so callers' `if
               // (result.aborted)` branches must NOT trigger.
