@@ -256,6 +256,28 @@ describe('check-failsafe-reports', () => {
     expect(check('hosted', noFamily).status).toBe(0);
   });
 
+  it('hosts admission gates as their own family and rejects drift in both directions', () => {
+    const gates = module('gates', ['com.example.HostedAdmissionGate'], {
+      'com.example.HostedAdmissionGate': [1, 0],
+    });
+    expect(check('hosted-gates', gates).status).toBe(0);
+    expect(check('hosted-gates', gates).output).toContain(
+      'gates: com.example.HostedAdmissionGate ran 1 test(s)',
+    );
+    const outside = module('outsiders', ['com.example.HostedFlowIT'], {
+      'com.example.HostedFlowIT': [1, 0],
+    });
+    expect(check('hosted-gates', outside).output).toContain(
+      'com.example.HostedFlowIT ran outside the hosted-gates family',
+    );
+    expect(check('hosted-gates', outside).status).toBe(1);
+    const unrun = module('unrun-gate', ['com.example.HostedWedgeGate']);
+    expect(check('hosted-gates', unrun).output).toContain(
+      'com.example.HostedWedgeGate ran no test in this job',
+    );
+    expect(check('hosted-gates', unrun).status).toBe(1);
+  });
+
   it('refuses an unknown family or a missing module', () => {
     expect(check('mariadb', root).status).toBe(2);
     expect(check('constructor', root).status).toBe(2);

@@ -161,6 +161,26 @@ public final class ManagedEventEnvelopes {
                         digestValue(payloadRef.get("digest"))));
     }
 
+    /**
+     * The canonical wire form of an envelope — the same canonical JSON the
+     * TypeScript producer emits — so a receiver recomputes the same bytes.
+     */
+    public static String toJson(ManagedEventEnvelope envelope) {
+        var node = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance
+                .objectNode();
+        node.put("v", envelope.v());
+        node.put("sessionId", envelope.sessionId());
+        node.put("tenantId", envelope.tenantId());
+        node.put("workspaceId", envelope.workspaceId());
+        node.put("stream", envelope.stream());
+        node.put("sequence", envelope.sequence());
+        node.put("eventId", envelope.eventId());
+        node.put("kind", envelope.kind());
+        node.put("occurredAt", envelope.occurredAt());
+        node.putObject("payloadRef").put("digest", envelope.payloadRef().digest());
+        return canonicalJson(node);
+    }
+
     // --- canonical JSON (mirrors canonicalManagedSessionJson) ---
 
     static String canonicalJson(JsonNode node) {

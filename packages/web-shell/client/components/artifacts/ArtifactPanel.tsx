@@ -344,6 +344,7 @@ export type ArtifactPanelTab =
        * its loading state until then.
        */
       loadPage?: TrajectoryPageLoader;
+      historyGapRevision?: number;
     }
   | {
       id: string;
@@ -1565,7 +1566,11 @@ export function ArtifactPanel({
             sessionId={activeTab.sessionId}
           />
         ) : activeTab.kind === 'trajectory' ? (
-          <TrajectoryPanel key={activeTab.id} loadPage={activeTab.loadPage} />
+          <TrajectoryPanel
+            key={activeTab.id}
+            loadPage={activeTab.loadPage}
+            historyGapRevision={activeTab.historyGapRevision}
+          />
         ) : activeTab.kind === 'token_usage' ? (
           <TokenUsagePanel
             key={activeTab.id}
