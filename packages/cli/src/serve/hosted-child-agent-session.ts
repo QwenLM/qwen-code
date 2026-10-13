@@ -47,8 +47,11 @@ import {
   childStopRequestedBody,
   decodeChildLaunchEnvelope,
   encodeChildLaunchEnvelope,
+  encodeWorkflowLaunchEnvelope,
+  workflowLaunchBody,
   type ChildAdmission,
   type ChildLaunchEnvelope,
+  type WorkflowLaunchEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import {
   MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS,
@@ -63,10 +66,14 @@ import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import { hostedTeamMembership } from './hosted-team-session.js';
 import {
+  HOSTED_MEMBER_MESSAGE_IN_FLIGHT,
+  HOSTED_MEMBER_MESSAGE_PER_RUN,
   HostedChildChains,
+  hostedMemberView,
   hostedOpenTeamChainMember,
   hostedRouteDetails,
   isSentInstruction,
+  MEMBER_MESSAGE_ID_PREFIX,
   memberPlanModeRequired,
   teamMemberPreamble,
   type HostedRouteDetails,
@@ -122,6 +129,23 @@ export interface ChildAgentLaunchParams {
   readonly prompt: string;
   readonly definition: DefinitionPin;
   readonly workspaceMode: ChildWorkspaceMode;
+  readonly workingDirectory: string;
+  readonly executionCallId: string;
+}
+
+/**
+ * The workflow launch (#13803 decision 3): the script the child executes
+ * and its arguments ride the envelope; the pin the admission computed from
+ * those exact bytes opens the chain (K3).
+ */
+export interface WorkflowLaunchParams {
+  readonly childRunId: string;
+  readonly ownerScopeId: string;
+  readonly rootSessionId: string;
+  readonly completion: ChildCompletion;
+  readonly script: string;
+  readonly args: unknown;
+  readonly definition: DefinitionPin;
   readonly workingDirectory: string;
   readonly executionCallId: string;
 }
@@ -309,19 +333,28 @@ export async function childWorkspaceAnswerSuffix(
  * may be kept at the result ref. Empty for a `shared` run and for one
  * that never started.
  */
-export function childWorkspaceEndedSuffix(record: ChildAgentRun): string {
+export function childWorkspaceEndedSuffix(record: ChildSessionRun): string {
   if (record.workspaceMode !== 'worktree' || record.run.execution !== 'settled')
     return '';
   return "\n\n[child workspace] the child's changes did not land, unless the child had finished its work before this end and its merge landed them here. Inspect this Workspace before relying on the child's changes; work that did not land may be kept under refs/qwen/child-workspaces/.";
 }
 
+/** The model-facing name of a child Session kind, defined once so every
+ * answer about a run names the kind its record carries. */
+export function childKindLabel(
+  kind: ChildSessionRun['kind'],
+): 'Child agent' | 'Workflow child' {
+  return kind === 'workflow' ? 'Workflow child' : 'Child agent';
+}
+
 /**
  * #13753 I2: the one-line end of an ended child run's answer, with its
  * workspace suffix. The live answer and the recovery gap fill must agree
- * (decision 7), so the sentence is defined once, here.
+ * (decision 7), so the sentence is defined once, here, and names the kind
+ * the record itself carries.
  */
-export function childRunEndedText(record: ChildAgentRun): string {
-  return `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).${childWorkspaceEndedSuffix(record)}`;
+export function childRunEndedText(record: ChildSessionRun): string {
+  return `${childKindLabel(record.kind)} run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).${childWorkspaceEndedSuffix(record)}`;
 }
 
 /**
@@ -347,6 +380,8 @@ export function childResultNotificationText(params: {
    * can follow the child's terminal list surface — never the internal
    * `promptId:callId` marker. */
   readonly taskId: string;
+  /** The record kind of the child that finished ('child_agent' | 'workflow'). */
+  readonly kind: 'child_agent' | 'workflow';
   readonly description: string;
   readonly text: string;
   /** H4e-b1: the member name of a child run on a team roster. */
@@ -354,10 +389,11 @@ export function childResultNotificationText(params: {
   /** #13753 I2: a worktree child's merge outcome, already rendered. */
   readonly workspace?: string;
 }): string {
+  const label = childKindLabel(params.kind);
   const head = [
     '<task-notification>',
     `<task-id>${escapeXml(params.taskId)}</task-id>`,
-    '<kind>child_agent</kind>',
+    `<kind>${params.kind}</kind>`,
     ...(params.teammate === undefined
       ? []
       : [`<teammate>${escapeXml(params.teammate)}</teammate>`]),
@@ -365,7 +401,7 @@ export function childResultNotificationText(params: {
     ...(params.workspace === undefined
       ? []
       : [`<workspace>${escapeXml(params.workspace)}</workspace>`]),
-    `<summary>Child agent "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`,
+    `<summary>${label} "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`,
     '<result>',
   ].join('\n');
   return boundedNotificationText(
@@ -446,15 +482,16 @@ export class HostedChildAgentSession {
     private readonly key: ManagedSessionKey,
   ) {}
 
-  /** The last committed body of one child run, parsed. */
-  record(childRunId: string): ChildAgentRun | undefined {
+  /** The last committed body of one child run, parsed. Both child Session
+   * kinds answer: the relay and cascade verbs are kind-blind (#13803 K2). */
+  record(childRunId: string): ChildSessionRun | undefined {
     const existing = this.store.authority.extensionRecord(
       'child_run',
       childRunId,
     );
     if (existing === undefined) return undefined;
     const record = parseChildRun(existing.record);
-    return record.kind === 'child_agent' ? record : undefined;
+    return isChildSessionRun(record) ? record : undefined;
   }
 
   /** The last committed acceptance of one child run, parsed. */
@@ -526,6 +563,10 @@ export class HostedChildAgentSession {
     const record = head && this.record(head.childRunId);
     if (record === undefined)
       throw new Error(`Child run ${run.childRunId} has no chain head.`);
+    if (record.kind !== 'child_agent')
+      throw new Error(
+        `Child run ${run.childRunId} chains back to a workflow run.`,
+      );
     return record;
   }
 
@@ -622,9 +663,21 @@ export class HostedChildAgentSession {
       }
       const run = this.runForTask(params.taskId);
       if (run === undefined) {
+        // A workflow child's task id is a real task — the refusal says why
+        // it takes no message instead of denying it exists.
+        const workflow = this.store.authority
+          .extensionRecordsInDomain('child_run')
+          .map((entry) => parseChildRun(entry.record))
+          .some(
+            (record) =>
+              record.kind === 'workflow' &&
+              this.taskIdOf(record.childRunId) === params.taskId,
+          );
         return {
           kind: 'refused',
-          reason: `No child agent task ${params.taskId} was launched by this Session.`,
+          reason: workflow
+            ? `Task ${params.taskId} is a workflow child, which takes no messages in this profile; read its task surface instead.`
+            : `No child agent task ${params.taskId} was launched by this Session.`,
         };
       }
       // A continuation that never started is no head and left its
@@ -640,7 +693,8 @@ export class HostedChildAgentSession {
         from.predecessorChildRunId !== null
       ) {
         const predecessor = this.record(from.predecessorChildRunId);
-        if (predecessor === undefined) break;
+        if (predecessor === undefined || predecessor.kind !== 'child_agent')
+          break;
         from = predecessor;
       }
       // H4e-b2 decision 2: a run of an open team member's chain is that
@@ -850,6 +904,130 @@ export class HostedChildAgentSession {
   }
 
   /**
+   * H4e-b3 decision 8 (b3c): the running-only send of one member message,
+   * executed on the lead's funnels for one roster position of its open
+   * team. The head check and the commit ride this one writes chain, so
+   * the recipient's state cannot change between them. The send never
+   * routes to a continuation and never spends H4b's active cap or H4c's
+   * launch budget: a finished, ended or stopping head is not reached.
+   * Member messages share H4d-b's 8 in flight and 64 per run on the head
+   * with the lead's own, capped to 4 in flight and 16 in all. A re-driven
+   * send names the same `msgc_` id with the same content and is answered
+   * sent, so nothing is sent twice.
+   */
+  sendToRunningMember(params: {
+    /** The roster entry's run: the launch the recipient's chain started from. */
+    readonly rootChildRunId: string;
+    readonly content: Buffer;
+    readonly messageId: string;
+    /** The `member_message` command that sends it. */
+    readonly executionCallId: string;
+  }): Promise<
+    | { readonly kind: 'sent' }
+    | {
+        readonly kind: 'notReached';
+        readonly reason:
+          | 'finished'
+          | 'ended'
+          | 'stopping'
+          | 'budget_exhausted'
+          | 'count_limit'
+          | 'member_budget'
+          | 'member_count_limit'
+          | 'completed_after_stop';
+      }
+  > {
+    return this.inWrites(async () => {
+      const sent = this.store.authority.extensionRecord(
+        'session_message',
+        params.messageId,
+      );
+      if (sent !== undefined) {
+        const message = parseSessionMessage(sent.record);
+        if (
+          message.direction === 'outbound' &&
+          message.route === 'to_child' &&
+          message.contentDigest === sha256(params.content)
+        ) {
+          return { kind: 'sent' };
+        }
+        throw new ManagedSessionConflictError(
+          `Session message ${params.messageId} was sent with different evidence.`,
+        );
+      }
+      const chains = new HostedChildChains(
+        this.store.authority.extensionRecordsInDomain('child_run'),
+      );
+      const view = hostedMemberView(chains, params.rootChildRunId);
+      const head = view.head;
+      if (
+        head === undefined ||
+        view.state === 'failed' ||
+        view.state === 'cancelled'
+      ) {
+        return { kind: 'notReached', reason: 'ended' };
+      }
+      // R1-3: a completed head that was stopped before completing is not
+      // the `finished` case — the leader cannot continue it either.
+      if (view.stopRequestedCompletion) {
+        return { kind: 'notReached', reason: 'completed_after_stop' };
+      }
+      if (view.state === 'completed') {
+        return { kind: 'notReached', reason: 'finished' };
+      }
+      if (view.stopping) {
+        return { kind: 'notReached', reason: 'stopping' };
+      }
+      const sentBefore = this.messagesTo(head.childRunId);
+      const limits = MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS;
+      if (sentBefore.length >= limits.maxPerRun) {
+        return { kind: 'notReached', reason: 'budget_exhausted' };
+      }
+      if (
+        sentBefore.filter(isUndeliveredMessage).length >=
+        limits.maxInFlightPerRun
+      ) {
+        return { kind: 'notReached', reason: 'count_limit' };
+      }
+      const memberSent = sentBefore.filter((message) =>
+        message.messageId.startsWith(MEMBER_MESSAGE_ID_PREFIX),
+      );
+      if (memberSent.length >= HOSTED_MEMBER_MESSAGE_PER_RUN) {
+        return { kind: 'notReached', reason: 'member_budget' };
+      }
+      if (
+        memberSent.filter(isUndeliveredMessage).length >=
+        HOSTED_MEMBER_MESSAGE_IN_FLIGHT
+      ) {
+        return { kind: 'notReached', reason: 'member_count_limit' };
+      }
+      const contentRef = await this.store.resources.publish(
+        'managed-message-content',
+        params.content,
+      );
+      const body = outboundMessageBody({
+        messageId: params.messageId,
+        route: 'to_child',
+        childRunId: head.childRunId,
+        senderSessionId: this.key.sessionId,
+        contentRef,
+        executionCallId: params.executionCallId,
+      });
+      await this.store.authority.commitExtensionRecord(
+        {
+          operation: 'sendSessionMessage',
+          commandId: `${params.messageId}:1`,
+          sessionKey: this.key,
+          contentDigest: digest(body),
+        },
+        { domain: 'session_message', record: body },
+        TRUSTED,
+      );
+      return { kind: 'sent' };
+    });
+  }
+
+  /**
    * Revision 1 (`startChildRun`): the launch intent, before any physical
    * side effect. The retried launch returns its opening command, so the
    * creation idempotency the control plane derives from this record can
@@ -875,13 +1053,106 @@ export class HostedChildAgentSession {
       prompt: params.prompt,
       definition: params.definition,
     };
-    // A restated launch names the same record: identical evidence is the
-    // replay — anything else conflicts, never a second child chain.
+    const replay = await this.admitLaunch(params, {
+      bytes: () => encodeChildLaunchEnvelope(envelope),
+      matches: (committedBytes) => {
+        const committed = decodeChildLaunchEnvelope(committedBytes);
+        const sentPrompt = params.sentPrompt ?? params.prompt;
+        return (
+          committed.description === params.description &&
+          isDeepStrictEqual(committed.definition, params.definition) &&
+          (committed.prompt === params.prompt ||
+            isSentInstruction(committed.prompt, sentPrompt))
+        );
+      },
+      build: (inputRef) =>
+        childLaunchBody({
+          childRunId: params.childRunId,
+          ownerScopeId: params.ownerScopeId,
+          rootSessionId: params.rootSessionId,
+          completion: params.completion,
+          inputRef,
+          workspaceMode: params.workspaceMode,
+          workingDirectory: params.workingDirectory,
+          executionCallId: params.executionCallId,
+          definition: params.definition,
+        }),
+    });
+    return replay.committedBytes === undefined
+      ? { inputRef: replay.inputRef, envelope }
+      : {
+          inputRef: replay.inputRef,
+          envelope: decodeChildLaunchEnvelope(replay.committedBytes),
+        };
+  }
+
+  /**
+   * Revision 1 of a `workflow` launch (#13803 K1): same discipline as
+   * {@link admit}, with the workflow envelope and the pin opening the chain.
+   */
+  async admitWorkflow(params: WorkflowLaunchParams): Promise<{
+    readonly inputRef: ManagedSessionDurableRef;
+    readonly envelope: WorkflowLaunchEnvelope;
+  }> {
+    const envelope: WorkflowLaunchEnvelope = {
+      definition: params.definition,
+      script: params.script,
+      args: params.args ?? null,
+    };
+    const { inputRef } = await this.admitLaunch(
+      { ...params, workspaceMode: 'shared' as const },
+      {
+        bytes: () => encodeWorkflowLaunchEnvelope(envelope),
+        build: (inputRef) =>
+          workflowLaunchBody({
+            childRunId: params.childRunId,
+            ownerScopeId: params.ownerScopeId,
+            rootSessionId: params.rootSessionId,
+            completion: params.completion,
+            inputRef,
+            workingDirectory: params.workingDirectory,
+            executionCallId: params.executionCallId,
+            definition: params.definition,
+          }),
+      },
+    );
+    return { inputRef, envelope };
+  }
+
+  /** A restated launch names the same record. The shared launch path of
+   * both kinds — publish, commit, replay by matching evidence (byte
+   * identity, or the sent-instruction reading a restated child launch
+   * tolerates): anything else conflicts, never a second chain. */
+  private async admitLaunch(
+    params: {
+      readonly childRunId: string;
+      readonly ownerScopeId: string;
+      readonly rootSessionId: string;
+      readonly completion: ChildCompletion;
+      readonly definition: DefinitionPin;
+      readonly workspaceMode: ChildWorkspaceMode;
+      readonly workingDirectory: string;
+      readonly executionCallId: string;
+    },
+    prepared: {
+      /** Encoded only where a fresh launch publishes them (or the default
+       * matcher compares them): a replay restating a launch whose encoding
+       * would now pass the envelope bound still names its committed record
+       * (#13858 R3-4). */
+      readonly bytes: () => Buffer;
+      readonly build: (inputRef: ManagedSessionDurableRef) => ChildSessionRun;
+      readonly matches?: (committedBytes: Buffer) => boolean;
+    },
+  ): Promise<{
+    readonly inputRef: ManagedSessionDurableRef;
+    readonly committedBytes?: Buffer;
+  }> {
     const existing = this.record(params.childRunId);
     if (existing !== undefined) {
       const committedBytes = await this.store.resources.read(existing.inputRef);
-      const committed = decodeChildLaunchEnvelope(committedBytes);
-      const sentPrompt = params.sentPrompt ?? params.prompt;
+      const matches =
+        prepared.matches ??
+        ((candidate: Buffer) => isDeepStrictEqual(candidate, prepared.bytes()));
       const sameEvidence =
         existing.ownerScopeId === params.ownerScopeId &&
         existing.rootSessionId === params.rootSessionId &&
@@ -890,36 +1161,25 @@ export class HostedChildAgentSession {
         existing.workingDirectory === params.workingDirectory &&
         existing.run.executionCallId === params.executionCallId &&
         isDeepStrictEqual(existing.run.definition, params.definition) &&
-        committed.description === params.description &&
-        isDeepStrictEqual(committed.definition, params.definition) &&
-        (committed.prompt === params.prompt ||
-          isSentInstruction(committed.prompt, sentPrompt));
+        matches(committedBytes);
       if (!sameEvidence) {
         throw new ManagedSessionConflictError(
           `Child run ${params.childRunId} was launched with different evidence.`,
         );
       }
-      return { inputRef: existing.inputRef, envelope: committed };
+      return { inputRef: existing.inputRef, committedBytes };
     }
-    const bytes = encodeChildLaunchEnvelope(envelope);
-    const inputRef = await this.store.resources.publish('managed-input', bytes);
+    const inputRef = await this.store.resources.publish(
+      'managed-input',
+      prepared.bytes(),
+    );
     await this.commit(
       params.childRunId,
-      childLaunchBody({
-        childRunId: params.childRunId,
-        ownerScopeId: params.ownerScopeId,
-        rootSessionId: params.rootSessionId,
-        completion: params.completion,
-        inputRef,
-        workspaceMode: params.workspaceMode,
-        workingDirectory: params.workingDirectory,
-        executionCallId: params.executionCallId,
-        definition: params.definition,
-      }),
+      prepared.build(inputRef),
       params.childRunId,
       'startChildRun',
     );
-    return { inputRef, envelope };
+    return { inputRef };
   }
 
   /**
@@ -1000,7 +1260,7 @@ export class HostedChildAgentSession {
       if (existing === undefined) {
         throw new Error(`Child run ${childRunId} has no record to revise.`);
       }
-      const previous = this.parseAgent(existing.record, childRunId);
+      const previous = this.parseSessionRun(existing.record, childRunId);
       if (previous.resultRef != null && previous.terminalReceiptRef != null) {
         const committedResult = await this.store.resources.read(
           previous.resultRef,
@@ -1061,7 +1321,7 @@ export class HostedChildAgentSession {
         ChildAgentStopReason,
         'creation_failed' | 'child_failed' | 'quota_exceeded'
       >;
-      readonly reason: ChildAgentRun['run']['reason'];
+      readonly reason: ChildSessionRun['run']['reason'];
       readonly started: boolean;
       readonly childSessionId?: string;
       /** Present when the caller chose the failure from the child's newest
@@ -1226,7 +1486,7 @@ export class HostedChildAgentSession {
 
   private async buildResultNotification(
     childRunId: string,
-    child: ChildAgentRun,
+    child: ChildSessionRun,
     params: { readonly description: string },
   ): Promise<ManagedSessionInputRequest> {
     const resultRef = child.resultRef;
@@ -1247,13 +1507,16 @@ export class HostedChildAgentSession {
     return {
       inputId,
       turnId: inputId,
-      source: 'child_agent',
+      // The source names the record kind that produced the result; the
+      // wake and consumption predicates admit both (#13803 K2).
+      source: child.kind,
       contentRef: await this.store.resources.publish(
         'managed-input',
         Buffer.from(
           JSON.stringify({
             text: childResultNotificationText({
               taskId: this.taskIdOf(childRunId),
+              kind: child.kind,
               description: params.description,
               text: (await this.store.resources.read(resultRef)).toString(
                 'utf8',
@@ -1308,7 +1571,7 @@ export class HostedChildAgentSession {
     }
   }
 
-  private mustRecord(childRunId: string): ChildAgentRun {
+  private mustRecord(childRunId: string): ChildSessionRun {
     const record = this.record(childRunId);
     if (record === undefined) {
       throw new Error(`Child run ${childRunId} has no record to revise.`);
@@ -1329,7 +1592,7 @@ export class HostedChildAgentSession {
 
   private revise(
     childRunId: string,
-    step: (previous: ChildAgentRun) => ChildAgentRun,
+    step: (previous: ChildSessionRun) => ChildSessionRun,
     evidence?: {
       readonly operation?: string;
       readonly commandId?: string;
@@ -1343,7 +1606,7 @@ export class HostedChildAgentSession {
       const previousParsed =
         existing === undefined
           ? undefined
-          : this.parseAgent(existing.record, childRunId);
+          : this.parseSessionRun(existing.record, childRunId);
       if (previousParsed === undefined) {
         throw new Error(`Child run ${childRunId} has no record to revise.`);
       }
@@ -1365,17 +1628,20 @@ export class HostedChildAgentSession {
     return write;
   }
 
-  private parseAgent(record: unknown, childRunId: string): ChildAgentRun {
+  private parseSessionRun(
+    record: unknown,
+    childRunId: string,
+  ): ChildSessionRun {
     const parsed = parseChildRun(record);
-    if (parsed.kind !== 'child_agent') {
-      throw new Error(`Child run ${childRunId} is not a child agent.`);
+    if (!isChildSessionRun(parsed)) {
+      throw new Error(`Child run ${childRunId} is not a child Session run.`);
     }
     return parsed;
   }
 
   private commit(
     childRunId: string,
-    record: ChildAgentRun,
+    record: ChildSessionRun,
     commandId: string,
     operation: string,
   ): Promise<void> {

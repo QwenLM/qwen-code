@@ -3,11 +3,13 @@ package com.alibaba.qwen.code.managedagent.store;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.sun.source.tree.AssignmentTree;
 import com.sun.source.tree.BinaryTree;
 import com.sun.source.tree.BlockTree;
 import com.sun.source.tree.CaseTree;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
+import com.sun.source.tree.CompoundAssignmentTree;
 import com.sun.source.tree.ConditionalExpressionTree;
 import com.sun.source.tree.IdentifierTree;
 import com.sun.source.tree.LambdaExpressionTree;
@@ -90,9 +92,9 @@ import org.junit.jupiter.api.Test;
 //   boundary below pins which files lock the session row or touch the
 //   turn row at all. A lambda handed straight into a call folds there —
 //   its body runs within the call — while a lambda in any other position,
-//   or an anonymous-class method body, runs where it is invoked, which
-//   the parse cannot see: such a body is held aside and fails closed when
-//   it reaches a side instead of folding at its declaration. A nested
+//   or an anonymous- or local-class method body, runs where it is invoked,
+//   which the parse cannot see: such a body is held aside and fails closed
+//   when it reaches a side instead of folding at its declaration. A nested
 //   held body propagates to the enclosing member's held set, and a
 //   literal an embedded expression cannot resolve still joins the
 //   statement's spelling.
@@ -148,6 +150,8 @@ class SessionRowLockOrderTest {
                             Set.of("ManagedArtifactReader.open/1",
                                     "ManagedArtifactReader.readRange/3",
                                     "ManagedArtifactReader.readRange/5")),
+                    Map.entry("ManagedEventEnvelopes.java",
+                            Set.of("ManagedEventEnvelopes.digest/1")),
                     Map.entry("ManagedExtensionRecordStore.java",
                             Set.of("ManagedExtensionRecordStore.sha256/1",
                                     "ManagedExtensionRecordStore.storedRow/2")),
@@ -178,6 +182,7 @@ class SessionRowLockOrderTest {
                     Map.entry("ToolPublicationDataStore.java",
                             Set.of("ToolPublicationDataStore.hash/1",
                                     "ToolPublicationDataStore.lockOriginalSettledResult/3",
+                                    "ToolPublicationDataStore.lockStagedPlacement/2",
                                     "ToolPublicationDataStore.requireStagedCall/2",
                                     "ToolPublicationDataStore.usesDataSource/1",
                                     "VerificationBudget.timeout/2",
@@ -969,6 +974,39 @@ class SessionRowLockOrderTest {
                 "conditionalTurnWriter");
     }
 
+    // The both-branches crediting merges opposite sides into one event:
+    // no single run executes both branches, so the merged spelling proves
+    // neither order and certifies nothing — the turn write that follows
+    // it on every run still violates ahead of the lock.
+    @Test
+    void theAuditCertifiesNoOrderFromAMergedBranchSpelling() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void conditionalWriter(String tenantId,
+                            String sessionId, boolean locking) {
+                        jdbc.update(locking
+                                ? "UPDATE managed_agent_session SET touched"
+                                        + " = 1"
+                                : "UPDATE managed_agent_turn SET status"
+                                        + " = 'FAILED'");
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThat(audit(synthetic).violations()).containsExactly(
+                "conditionalWriter");
+    }
+
     // A call embedded in a SQL concatenation is still a call: the spelling
     // is scored from the flattened text and the invocation is followed, so
     // a helper hop inside the string cannot hide the helper's own turn-row
@@ -1192,6 +1230,41 @@ class SessionRowLockOrderTest {
                 .hasMessageContaining("anonLocker");
     }
 
+    // A local class's method bodies run where the class is invoked, which
+    // the parse cannot see — exactly like an anonymous class's: folding
+    // them at the declaration would order a lock the body takes before a
+    // turn-row write that runs first, so they are held aside and fail
+    // closed when they reach a side.
+    @Test
+    void theAuditFailsClosedOnALocalClassBodyReachingASide() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void localClassWriter(String tenantId,
+                            String sessionId) {
+                        class LocalLocker {
+                            void run() {
+                                lockSession(tenantId, sessionId);
+                            }
+                        }
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        new LocalLocker().run();
+                    }
+
+                    private void lockSession(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThatThrownBy(() -> audit(synthetic))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("localClassWriter");
+    }
+
     // A lambda handed straight into a call runs within it, so its body
     // folds at that position: the writer that locks first stays clean.
     @Test
@@ -1254,6 +1327,73 @@ class SessionRowLockOrderTest {
                 .containsExactlyInAnyOrder("localSqlWriter");
     }
 
+    // A reassigned String local carries its new spelling: tracking only
+    // the declaration replays the stale text, and the assignment scores
+    // [stale, new] in that order — a lock the local no longer holds
+    // certifying the turn write it now carries as lock-before-turn.
+    @Test
+    void theAuditScoresAReassignedLocalStringAtItsUseSite() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void reassignedLocalWriter(String tenantId,
+                            String sessionId) {
+                        String sql = "UPDATE managed_agent_session SET"
+                                + " touched = 1";
+                        sql = "UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'";
+                        jdbc.update(sql);
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        Audit audit = audit(synthetic);
+        assertThat(audit.violations()).containsExactly(
+                "reassignedLocalWriter");
+        assertThat(audit.lockers()).containsExactly("reassignedLocalWriter");
+        assertThat(audit.turnRowAccessors())
+                .containsExactlyInAnyOrder("reassignedLocalWriter");
+    }
+
+    // A compound append extends the local's spelling, and the append runs
+    // no statement either: the assembled text still scores at the use, so
+    // a turn write used only after the lock stays clean — scoring the
+    // appended literal at the assignment would invert it.
+    @Test
+    void theAuditScoresACompoundAppendedLocalStringAtItsUseSite() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void compoundAppendWriter(String tenantId,
+                            String sessionId) {
+                        String sql = "UPDATE";
+                        sql += " managed_agent_turn SET status = 'FAILED'";
+                        requireSessionForUpdate(tenantId, sessionId);
+                        jdbc.update(sql);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        Audit audit = audit(synthetic);
+        assertThat(audit.violations()).isEmpty();
+        assertThat(audit.lockers()).containsExactly("compoundAppendWriter");
+        assertThat(audit.turnRowAccessors())
+                .containsExactlyInAnyOrder("compoundAppendWriter");
+    }
+
     // A pure delegator's lock and turn sides resolve to the same call
     // site, so a strict comparison of its own body can never fire: the
     // helper it delegates to reads the session row, writes the turn row
@@ -1289,6 +1429,42 @@ class SessionRowLockOrderTest {
                 """;
         assertThat(audit(synthetic).violations()).containsExactly(
                 "lateLockWriter");
+    }
+
+    // A delegator chain that loops has no evaluation order the audit can
+    // decide: the descent re-enters a member already on the chain, and
+    // answering for one leg would certify the inversion the cycle hides —
+    // the audit fails closed instead.
+    @Test
+    void theAuditFailsClosedOnADelegatorCycle() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void cyclicWriterA(String tenantId,
+                            String sessionId) {
+                        cyclicWriterB(tenantId, sessionId);
+                    }
+
+                    @Transactional
+                    public void cyclicWriterB(String tenantId,
+                            String sessionId) {
+                        cyclicWriterA(tenantId, sessionId);
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThatThrownBy(() -> audit(synthetic))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("cyclicWriterA");
     }
 
     // A protected writer is an entry point a visibility-anchored matcher
@@ -1468,10 +1644,10 @@ class SessionRowLockOrderTest {
         }
         Set<Key> lockReaching = reaching(events, true);
         Set<Key> turnReaching = reaching(events, false);
-        // A held lambda or anonymous-class body is benign only while
-        // every event it carries provably reaches neither side — like an
-        // ambiguous reference; the moment one does, the audit fails closed
-        // instead of folding the body at its declaration, a position its
+        // A held lambda or class body is benign only while every event
+        // it carries provably reaches neither side — like an ambiguous
+        // reference; the moment one does, the audit fails closed instead
+        // of folding the body at its declaration, a position its
         // invocation may never share.
         for (Map.Entry<Key, List<List<Event>>> member
                 : heldLambdas.entrySet()) {
@@ -1483,11 +1659,11 @@ class SessionRowLockOrderTest {
                                         || turnReaching.contains(
                                                 event.callee()));
                 if (sideReaching) {
-                    throw new IllegalStateException("a lambda or"
-                            + " anonymous-class body in "
-                            + member.getKey().handle() + " reaches the"
-                            + " session lock or the turn row, and its"
-                            + " invocation site is invisible to the audit");
+                    throw new IllegalStateException("a lambda or class"
+                            + " body in " + member.getKey().handle()
+                            + " reaches the session lock or the turn row,"
+                            + " and its invocation site is invisible to"
+                            + " the audit");
                 }
                 events.get(member.getKey()).addAll(held);
             }
@@ -1590,13 +1766,18 @@ class SessionRowLockOrderTest {
     // order: the session-row lock must precede the first turn-row access.
     // A call reaching both sides is the delegator shape — the two events
     // sit on the same call site — so the comparison descends into the
-    // callee, whose own order is what the site answers. The visited set
-    // ends the cycle when a delegate is its own caller's sibling.
+    // callee, whose own order is what the site answers. The descent is a
+    // single chain — each level answers its first delegator event — so a
+    // re-entry is always a call cycle, whose order the audit cannot
+    // decide: it fails closed instead of answering for one leg.
     private static boolean lockAfterTurn(Key method,
             Map<Key, List<Event>> events, Set<Key> lockReaching,
             Set<Key> turnReaching, Set<Key> visiting) {
         if (!visiting.add(method)) {
-            return false;
+            throw new IllegalStateException("the delegator descent loops"
+                    + " back to " + method.handle() + " — a call cycle's"
+                    + " order is undecidable to the audit: break the cycle"
+                    + " or inline one leg");
         }
         for (Event event : events.getOrDefault(method, List.of())) {
             if (event.callee() != null) {
@@ -1614,9 +1795,13 @@ class SessionRowLockOrderTest {
                 }
                 continue;
             }
-            // A statement whose SQL locks the session row while reading the
-            // turn row takes the write lock it declares; the read half is
-            // the database's own ordering.
+            // A merged conditional or switch spelling flags both sides
+            // on one event, but no single run executes both branches: the
+            // event proves neither order, so it certifies nothing and the
+            // next event decides.
+            if (event.lock() && event.turn()) {
+                continue;
+            }
             if (event.lock()) {
                 return false;
             }
@@ -1678,11 +1863,11 @@ class SessionRowLockOrderTest {
     // The statement walk over one body. The constants map is the member's
     // own overlay of the file's class constants: the String locals the
     // walk records land in it, so a local's spelling scores at its uses.
-    // Lambdas not passed straight into a call — and anonymous-class
-    // method bodies — are held aside for the reachability check in
-    // audit(): their invocation site is invisible to the parse, so a body
-    // that reaches a side fails closed there instead of folding at its
-    // declaration.
+    // Lambdas not passed straight into a call — and anonymous- or
+    // local-class method bodies — are held aside for the reachability
+    // check in audit(): their invocation site is invisible to the parse,
+    // so a body that reaches a side fails closed there instead of folding
+    // at its declaration.
     private static final class EventScanner extends TreeScanner<Void, Void> {
         private final List<Event> events;
         private final List<List<Event>> heldLambdas = new ArrayList<>();
@@ -1788,6 +1973,42 @@ class SessionRowLockOrderTest {
             return super.visitVariable(node, unused);
         }
 
+        // A reassignment replaces the local's spelling: the overlay tracks
+        // it, or a use after the assignment still scores the stale text
+        // the declaration carried — and the assignment itself scores
+        // [stale, new] in that order, an inversion's lock-before-turn.
+        @Override
+        public Void visitAssignment(AssignmentTree node, Void unused) {
+            if (node.getVariable() instanceof IdentifierTree identifier
+                    && constants.containsKey(identifier.getName()
+                            .toString())) {
+                String text = flatten(node.getExpression(), constants);
+                if (!text.isEmpty()) {
+                    constants.put(identifier.getName().toString(), text);
+                    scanCalls(node.getExpression());
+                    return null;
+                }
+            }
+            return super.visitAssignment(node, unused);
+        }
+
+        @Override
+        public Void visitCompoundAssignment(CompoundAssignmentTree node,
+                Void unused) {
+            if (node.getVariable() instanceof IdentifierTree identifier
+                    && constants.containsKey(identifier.getName()
+                            .toString())) {
+                String text = flatten(node.getExpression(), constants);
+                if (!text.isEmpty()) {
+                    constants.merge(identifier.getName().toString(), text,
+                            String::concat);
+                    scanCalls(node.getExpression());
+                    return null;
+                }
+            }
+            return super.visitCompoundAssignment(node, unused);
+        }
+
         @Override
         public Void visitLambdaExpression(LambdaExpressionTree node,
                 Void unused) {
@@ -1823,6 +2044,28 @@ class SessionRowLockOrderTest {
             EventScanner held = new EventScanner(new ArrayList<>(), caller,
                     methods, constants, ambiguous);
             for (Tree member : node.getClassBody().getMembers()) {
+                if (member instanceof MethodTree method) {
+                    if (method.getBody() != null) {
+                        held.scan(method.getBody(), null);
+                    }
+                } else {
+                    scan(member, null);
+                }
+            }
+            heldLambdas.add(held.events);
+            heldLambdas.addAll(held.heldLambdas);
+            return null;
+        }
+
+        @Override
+        public Void visitClass(ClassTree node, Void unused) {
+            // A local class's method bodies run where the class is
+            // invoked, which the parse cannot see — hold them aside
+            // exactly like an anonymous class's. Any other member folds
+            // at the declaration, as the anonymous twin's do.
+            EventScanner held = new EventScanner(new ArrayList<>(), caller,
+                    methods, constants, ambiguous);
+            for (Tree member : node.getMembers()) {
                 if (member instanceof MethodTree method) {
                     if (method.getBody() != null) {
                         held.scan(method.getBody(), null);
