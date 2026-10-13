@@ -48,6 +48,12 @@ The [published report](https://github.com/QwenLM/qwen-code/pull/13767#issuecomme
 
 The command illustrates existing capture options; it does not set up A/B isolation or validate results automatically, and it does not reproduce the historical nine-task suite by itself. Use the existing [integration-test helper](../../../integration-tests/test-helper.ts) for a repeatable regression once a concrete defect is identified, and the existing [telemetry](../../developers/development/telemetry.md) for recorded usage and tool events. This docs-only revision did not rerun the provider.
 
+## Bounded follow-up on 2026-10-13
+
+Two source-CLI sessions at `c2f5ce45b156` used the historical B configuration and the same model/prompts. Native requests confirmed 11 initial declarations, including `tool_search`/`tool_call` while Agent and Goal tools remained hidden. Agent returned exactly `TOTAL=63`; that format failure did not recur in this one sample. Goal repeated the premature `tool_call(get_goal)`, was refused, then searched the schemas, ran the verifier and completed. Both the startup reminder and Goal continuation already instructed schema review before invocation. The ordering error is reproducible model behavior; these observations do not identify a missing instruction or a production-code fix. The refusal remains a call-quality failure, even though the task recovered.
+
+Four preliminary sessions through isolated global `qwen` used its base 0.24.0 installation rather than the normal profile's auto-updated 0.25.0. They completed but exposed Agent/Goal directly, so they do not verify the deferred bridge. They are excluded from that conclusion. No new A/B cost comparison was performed, and no production change was made from these observations.
+
 ## Remaining acceptance
 
 The evidence supports lower token totals for this fixed sample. It does not establish general recall parity, priced savings or standard-suite acceptance. #12333 remains open: compare representative tasks and any separately chosen settings overlay through existing evaluation paths. A newly reproducible product defect should get a small focused regression and fix; expanding a custom evaluation framework is not a prerequisite for local verification.
