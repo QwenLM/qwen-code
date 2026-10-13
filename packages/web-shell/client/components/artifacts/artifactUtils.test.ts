@@ -14,6 +14,7 @@ import {
   getReviewDownloadMimeType,
   isDownloadOnlyWorkspaceArtifact,
   isOfficeDocumentPath,
+  isExcelFile,
   normalizePath,
   readWorkspaceFileAsBlob,
 } from './artifactUtils';
@@ -76,7 +77,7 @@ describe('artifactUtils', () => {
         kind: 'file',
         workspacePath: 'a.xlsx',
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isDownloadOnlyWorkspaceArtifact({
         kind: 'pdf',
@@ -95,6 +96,21 @@ describe('artifactUtils', () => {
         workspacePath: 'notes.md',
       }),
     ).toBe(false);
+  });
+
+  it('recognizes xlsx paths and extensionless Excel attachments', () => {
+    const mime =
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    expect(isExcelFile('reports/Q3.XLSX', 'application/octet-stream')).toBe(
+      true,
+    );
+    expect(isExcelFile('attachment-id', mime)).toBe(true);
+    expect(isExcelFile(undefined, `${mime}; charset=utf-8`)).toBe(true);
+    expect(isExcelFile('legacy.xls', mime)).toBe(false);
+    expect(isExcelFile('notes.txt', mime)).toBe(false);
+    expect(isExcelFile('attachment-id', 'application/octet-stream')).toBe(
+      false,
+    );
   });
 
   it('prefers recognized file types before the artifact kind', () => {
@@ -144,7 +160,7 @@ describe('artifactUtils', () => {
 
   it.each([
     ['report.docx', 'text/html'],
-    ['report.xlsx', 'image/png'],
+    ['report.xls', 'image/png'],
     ['report.pdf', 'text/markdown'],
     ['clip.mp4', 'image/png'],
   ])(
