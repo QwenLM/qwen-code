@@ -37,6 +37,8 @@ import {
   type HostedBrokerExecutionState,
 } from './hosted-workspace-broker.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
+import { hostedPromptKey } from './hosted-member-chain.js';
+import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import { HOSTED_TOOL_APPROVAL_POLICY } from './hosted-tool-approval.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
@@ -461,6 +463,104 @@ describe('recoverHostedRuntimeTurn', () => {
       expect(turn.report.executions[0]?.runtimeSessionId).toBe(
         hostedRuntimeSessionId(PROMPT_ID),
       );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  /**
+   * Drives a fresh session to a parked await_command checkpoint (H4e-b3):
+   * a member's board call parked mid-wait when its owner died.
+   */
+  async function parkAtAwaitCommand(): Promise<ManagedSession> {
+    const session = await open('boot-1', true, 'hosted-workspace-files/1');
+    const harness = createManagedHarnessHandle(session);
+    const authority = session.authority;
+    const contentRef = await session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: 'write the board' }])),
+    );
+    const admissionRef = await session.resources.publish(
+      'managed-admission',
+      Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+    );
+    await authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: PROMPT_ID,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: DIGEST,
+      },
+      {
+        inputId: PROMPT_ID,
+        turnId: PROMPT_ID,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await harness.ensureRunnable();
+    const argsRef = await session.resources.publish(
+      'managed-command-args',
+      Buffer.from('{}', 'utf8'),
+    );
+    await harness.commitAwaitCommand(
+      [
+        {
+          commandId: sessionCommandId({
+            senderSessionId: SESSION_ID,
+            promptKey: hostedPromptKey(PROMPT_ID),
+            callId: 'call-1',
+          }),
+          functionCallId: 'call-1',
+          toolName: 'task_create',
+          modelMessageId: 'message-1',
+          folded: false,
+        },
+      ],
+      { turnId: PROMPT_ID, promptId: PROMPT_ID },
+      {
+        holdsWorkspaceMount: false,
+        attempt: { attemptId: 'message-1', routeRef: argsRef },
+      },
+    );
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    return session;
+  }
+
+  it('classifies the parked command wait as drivable, like the agent wait', async () => {
+    const parked = await parkAtAwaitCommand();
+    const replacement = await open('boot-2', false);
+    try {
+      const turn = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      expect(turn.acquiredRuntime).toBe(false);
+      // Every run reads known by construction and the fold belongs to the
+      // continue/cancel route's resume arm, exactly like the agent wait.
+      expect(turn.drivable).toBe(true);
+      expect(turn.report).toMatchObject({
+        phase: 'await_command',
+        checkpointId: parked.authority.latestCheckpoint?.checkpointId,
+        executions: [
+          {
+            functionCallId: 'call-1',
+            toolName: 'task_create',
+            outcome: 'known',
+            status: { state: 'executing' },
+          },
+        ],
+      });
     } finally {
       await replacement.close();
     }
