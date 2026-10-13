@@ -169,14 +169,10 @@ async function switchMainModel(
   const parsed = parseAcpModelOption(modelArg);
 
   if (parsed.authType) {
-    await config.switchModel(
-      parsed.authType,
-      parsed.modelId,
-      parsed.authType !== currentAuthType &&
-        parsed.authType === AuthType.QWEN_OAUTH
-        ? { requireCachedCredentials: true }
-        : undefined,
-    );
+    // The `/model` action rejects any `QWEN_OAUTH` selection before this point
+    // (the free tier is discontinued), so `switchModel` is never asked to
+    // require cached Qwen OAuth credentials here.
+    await config.switchModel(parsed.authType, parsed.modelId, undefined);
     if (persistSelection) {
       persistSetting(
         settings,
@@ -1129,13 +1125,11 @@ export const modelCommand: SlashCommand = {
       const parsed = parseAcpModelOption(modelName);
       // `coder-model(qwen-oauth)` from the shipped registry would otherwise
       // reach the switch and surface a misleading "credentials expired" error
-      // for a tier that no longer exists. Runtime snapshots are exempt: an
-      // already-authenticated session keeps working until the server rejects
-      // it, which is how the model picker treats the same selection.
-      const isRuntimeOAuthSelection = parsed.modelId.startsWith(
-        `$runtime|${AuthType.QWEN_OAUTH}|`,
-      );
-      if (parsed.authType === AuthType.QWEN_OAUTH && !isRuntimeOAuthSelection) {
+      // for a tier that no longer exists. `parseAcpModelOption` only yields
+      // `authType: QWEN_OAUTH` for a typed `(qwen-oauth)` suffix on a bare
+      // registry id — it returns `{ modelId }` (no authType) for a
+      // `$runtime|…` snapshot, so there is nothing here to exempt.
+      if (parsed.authType === AuthType.QWEN_OAUTH) {
         return {
           type: 'message',
           messageType: 'error',
