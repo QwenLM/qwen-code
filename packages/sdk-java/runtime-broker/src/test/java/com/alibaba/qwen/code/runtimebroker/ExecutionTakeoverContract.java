@@ -113,6 +113,14 @@ final class ExecutionTakeoverContract {
                         .getExecutionCallId(),
                 "owner", Duration.ofMinutes(10)));
         repository.findOrCreate(hold(foreign, prefix + "-foreign", ManagedHoldFamily.SHELL));
+        // A Harness id that differs only in case is a different owner; on a
+        // case-insensitive store the SQL's `=` would alias it in, so both
+        // implementations fence the exact identity in Java (#13986 review).
+        RuntimeSessionRecord caseVariant = new RuntimeSessionRecord(
+                new RuntimeSession(harness.toUpperCase(java.util.Locale.ROOT),
+                        prefix + "-session-case", "bootstrap", scope),
+                prefix + "-binding-case", 1, RuntimeSessionRecord.State.READY, 0, Instant.now());
+        repository.findOrCreate(hold(caseVariant, prefix + "-case", ManagedHoldFamily.SHELL));
 
         assertThrows(IllegalArgumentException.class,
                 () -> repository.findHoldRowsByHarnessSession(harness, null, 0));

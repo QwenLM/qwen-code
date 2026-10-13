@@ -59,6 +59,26 @@ class BindingExecutionInventoryTest {
     }
 
     @Test
+    void jdbcHoldRowsByHarnessSessionKeepsExactHarnessIdentityOnCaseInsensitiveColumns()
+            throws Exception {
+        // #13986 review: a case-insensitive collation lets the SQL's `=`
+        // alias another Harness's hold rows in; the exact identity fence is
+        // Java-side, so the alias must not reach the restart inventory.
+        DataSource source = dataSource();
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE qwen_tool_execution "
+                    + "ALTER COLUMN harness_session_id VARCHAR_IGNORECASE(512) NOT NULL");
+        }
+        var harnessWriter = new JdbcToolExecutionRepository(source);
+        harnessWriter.findOrCreate(holdRow("hold-foreign", "Harness-Case"));
+        harnessWriter.findOrCreate(holdRow("hold-exact", "harness-case"));
+        var harnessReader = new JdbcToolExecutionRepository(source);
+        assertEquals(List.of("hold-exact"),
+                harnessReader.findHoldRowsByHarnessSession("harness-case", null, 100)
+                        .stream().map(ToolExecutionRecord::getExecutionCallId).toList());
+    }
+
+    @Test
     void jdbcFullyDecodesTerminalRecordsAndRejectsCorruptResults() throws Exception {
         DataSource source = dataSource();
         var writer = new JdbcToolExecutionRepository(source);
@@ -221,6 +241,14 @@ class BindingExecutionInventoryTest {
                 sessionId + "-harness", sessionId, "turn", id, "digest",
                 Map.of("sessionId", sessionId, "promptId", "turn", "callId", id,
                         "argsDigest", "digest", "runtimeProtocol", 3));
+    }
+
+    private static ToolExecutionRecord holdRow(String id, String harnessSessionId) {
+        return ToolExecutionRecord.prepared(id, id + "-key", "binding", 1,
+                harnessSessionId, "runtime-" + id, "turn", id, "digest",
+                Map.of("dispatchMode", "background_v3_process", "sessionId",
+                        "runtime-" + id, "promptId", "turn", "callId", id,
+                        "argsDigest", "digest"));
     }
 
     private static RuntimeBindingRecord lostBinding() {

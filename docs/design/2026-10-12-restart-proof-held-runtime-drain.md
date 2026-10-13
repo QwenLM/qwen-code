@@ -60,7 +60,9 @@ This dodges three specific faults:
 - One repository query `findHoldRowsByHarnessSession` on
   `ToolExecutionRepository` (InMemory + Jdbc + a `JdbcRepositoryContract`
   parity pin), since the rows carry `harnessSessionId` directly; the
-  release-state filter lives in the service, over `RuntimeSessionRecord`.
+  release-state filter lives in the service, over `RuntimeSessionRecord`,
+  and the exact Harness identity is re-checked in Java because the
+  column's collation may compare case-insensitively (#13986 review).
 - One read-only route. It answers from durable rows, so it works after a
   Broker restart too.
 

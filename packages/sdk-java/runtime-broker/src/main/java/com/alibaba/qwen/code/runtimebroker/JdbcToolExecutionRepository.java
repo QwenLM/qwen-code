@@ -552,6 +552,12 @@ public final class JdbcToolExecutionRepository
                     return List.copyOf(matches);
                 }
                 for (ToolExecutionRecord record : batch) {
+                    // A case-insensitive collation lets the SQL's `=` alias
+                    // another Harness's rows in; the exact Harness identity
+                    // fence is decided here, in Java (#13986 review).
+                    if (!harnessSessionId.equals(record.getHarnessSessionId())) {
+                        continue;
+                    }
                     if (ManagedHoldFamily.of(record) != null) {
                         matches.add(record);
                         if (matches.size() == limit) {
