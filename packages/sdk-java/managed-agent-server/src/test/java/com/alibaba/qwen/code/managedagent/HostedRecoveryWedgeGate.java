@@ -375,16 +375,16 @@ class HostedRecoveryWedgeGate {
                             + " recovery_detail_code, writer_id, writer_generation,"
                             + " journal_revision, committed_sequence, activation_epoch,"
                             + " writer_lease_until, updated_at FROM"
-                            + " qwen_managed_session_journal_head WHERE tenant_id = ? AND"
+                            + " ma_session_head WHERE tenant_id = ? AND"
                             + " session_id = ?", tenant, id);
             query(out, jdbc, "journal_tx " + id,
                     "SELECT session_id, operation, command_id, journal_revision, first_sequence,"
-                            + " last_sequence, created_at FROM qwen_managed_session_journal_tx"
+                            + " last_sequence, created_at FROM ma_session_journal_tx"
                             + " WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision"
                             + " DESC LIMIT 25", tenant, id);
             query(out, jdbc, "publications " + id,
                     "SELECT publication_id, tenant_id, session_id, retention_state, state,"
-                            + " capture_used_bytes FROM qwen_tool_publication WHERE tenant_id = ?"
+                            + " capture_used_bytes FROM ma_output_capture WHERE tenant_id = ?"
                             + " AND session_id = ?", tenant, id);
         }
         dumpSessionRows(jdbc, out, sessions);

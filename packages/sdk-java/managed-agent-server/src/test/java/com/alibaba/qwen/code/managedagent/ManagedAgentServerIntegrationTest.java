@@ -125,7 +125,7 @@ class ManagedAgentServerIntegrationTest {
         // would otherwise be claimed once its dispatch lease expires and
         // poison the counter-sensitive tests that run later in this shared
         // context.
-        jdbc.update("UPDATE managed_agent_turn SET status = 'FAILED',"
+        jdbc.update("UPDATE ma_turn SET status = 'FAILED',"
                 + " error_code = 'test_cleanup', completed_at = ?,"
                 + " dispatch_owner = NULL, dispatch_lease_until = NULL,"
                 + " retry_after = NULL WHERE status IN ('ACCEPTED',"
@@ -308,7 +308,7 @@ class ManagedAgentServerIntegrationTest {
         assertThat(UUID.fromString(sessionId).toString()).isEqualTo(sessionId);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " INFORMATION_SCHEMA.COLUMNS WHERE"
-                        + " LOWER(TABLE_NAME) = 'managed_agent_session' AND"
+                        + " LOWER(TABLE_NAME) = 'ma_session' AND"
                         + " LOWER(COLUMN_NAME) = 'harness_session_id'",
                 Integer.class)).isZero();
 
@@ -720,26 +720,16 @@ class ManagedAgentServerIntegrationTest {
                         .content("{\"title\":\"blocked\"}"))
                 .andExpect(status().isOk());
 
-        // The retained failed receipt replays the same content and retries
-        // the Harness mutation without duplicating the requested event.
-        // The mutation is retried on the delivery lane, whose completion
-        // order with the "blocked" sibling is nondeterministic, so the
-        // live title at replay time may legitimately read either value;
-        // only the replay flag and the event inventory below are stable.
+        // An already submitted, superseded identity cannot become a new title revision.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"retry title\"}"))
-                .andExpect(status().isOk())
-                .andExpect(header().string("X-Qwen-Idempotent-Replay",
-                        "true"));
-
-        JsonNode events = objectMapper.readTree(events(tenant, sessionId)
-                .getResponse().getContentAsString()).get("data");
-        assertThat(events).filteredOn(event -> "session.updated".equals(
-                        event.get("type").asText()))
-                .hasSize(2);
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("session_mutation_superseded"));
+        JsonNode events = objectMapper.readTree(events(tenant, sessionId).getResponse().getContentAsString()).get("data");
+        assertThat(events).filteredOn(event -> "session.updated".equals(event.get("type").asText())).hasSize(1);
     }
 
     @Test
@@ -2120,8 +2110,8 @@ class ManagedAgentServerIntegrationTest {
     static class FixtureConfiguration {
         @Bean
         @Primary
-        FixtureHarness fixtureHarness() {
-            return new FixtureHarness();
+        FixtureHarness fixtureHarness(JdbcTemplate jdbc) {
+            return new FixtureHarness(jdbc);
         }
     }
 
@@ -2156,7 +2146,16 @@ class ManagedAgentServerIntegrationTest {
         private final Map<String, HarnessRuntimeRecovery>
                 tenantRecoveries = new ConcurrentHashMap<>();
         /** H6b: the automation funnel this fixture answers for. */
-        final AutomationHarnessFake automations = new AutomationHarnessFake();
+        final AutomationHarnessFake automations;
+
+        FixtureHarness(JdbcTemplate jdbc) {
+            automations = new AutomationHarnessFake((sessionId, schedule) -> {
+                String tenantId = jdbc.queryForObject("SELECT tenant_id FROM ma_session"
+                        + " WHERE session_id = ?", String.class, sessionId);
+                AutomationHarnessFake.projectSchedule(jdbc, tenantId, sessionId, schedule,
+                        System.currentTimeMillis());
+            });
+        }
 
         @Override
         public boolean isAvailable() {
@@ -2465,7 +2464,7 @@ class ManagedAgentServerIntegrationTest {
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenant, harnessSession, operation);
                 return null;
             });
-            jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_generation = 7, claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
+            jdbc.update("UPDATE ma_session_head SET claim_generation = 7, claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
                     System.currentTimeMillis() + 60_000, tenant, harnessSession);
             var authority = new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority(operation, 7);
             for (var invalid : java.util.Arrays.asList(null,
@@ -2475,11 +2474,11 @@ class ManagedAgentServerIntegrationTest {
                         binding.getGeneration(), invalid).toCompletableFuture().join()).satisfies(admissionClosed);
                 assertThat(sessions.findById(scope, "runtime-a")).isNull();
             }
-            jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = 0 WHERE tenant_id = ? AND harness_session_id = ?", tenant, harnessSession);
+            jdbc.update("UPDATE ma_session_head SET claim_lease_until = 0 WHERE tenant_id = ? AND harness_session_id = ?", tenant, harnessSession);
             assertThatThrownBy(() -> broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(),
                     binding.getGeneration(), authority).toCompletableFuture().join()).satisfies(admissionClosed);
             assertThat(sessions.findById(scope, "runtime-a")).isNull();
-            jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
+            jdbc.update("UPDATE ma_session_head SET claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",
                     System.currentTimeMillis() + 60_000, tenant, harnessSession);
             assertThat(broker.releaseOriginal(harnessSession, "runtime-a", binding.getBindingId(), binding.getGeneration(), authority)
                     .toCompletableFuture().join()).isTrue();

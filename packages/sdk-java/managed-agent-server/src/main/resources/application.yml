@@ -12,6 +12,7 @@ spring:
       max-wait: 30000
   flyway:
     enabled: true
+    locations: classpath:db/managed-schema
   lifecycle:
     timeout-per-shutdown-phase: '30s'
 
