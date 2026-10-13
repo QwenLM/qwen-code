@@ -1518,6 +1518,95 @@ async function modelOutputCommittedTurn(
   return { handle, turn };
 }
 
+describe('journal wait', () => {
+  it('binds a yolo turn before its first journal write and resolves replay-safely', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const routeRef = await session.resources.publish(
+      'managed-tool-input',
+      Buffer.from('{}'),
+    );
+    const calls = [
+      {
+        functionCallId: 'call-1',
+        toolName: 'agent',
+      },
+    ];
+    const turn = { turnId: 'turn-1', promptId: 'turn-1' };
+    const boundary = await handle.commitAwaitJournal(calls, turn, {
+      attemptId: 'message-1',
+      routeRef,
+    });
+    expect(boundary.kind).toBe('durable_wait');
+    expect(session.authority.latestCheckpoint?.boundary).toBe(
+      HARNESS_DURABLE_WAIT_BOUNDARY,
+    );
+    const parked = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(parked).toMatchObject({
+      continuation: { phase: 'await_journal' },
+      identity: turn,
+      attempt: { attemptId: 'message-1', outputState: 'output_committed' },
+      journalWait: { calls },
+    });
+    expect(
+      (
+        await handle.commitAwaitJournal(calls, turn, {
+          attemptId: 'message-replayed',
+          routeRef,
+        })
+      ).checkpointId,
+    ).toBe(boundary.checkpointId);
+    const advanced = await handle.resolveAwaitJournal();
+    expect(advanced).toMatchObject({
+      continuation: { phase: 'model_output_committed' },
+      journalWait: { calls },
+    });
+    await session.close();
+  });
+
+  it('rejects an empty or conflicting journal wait', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    const routeRef = await session.resources.publish(
+      'managed-tool-input',
+      Buffer.from('{}'),
+    );
+    const turn = { turnId: 'turn-1', promptId: 'turn-1' };
+    await expect(
+      handle.commitAwaitJournal([], turn, {
+        attemptId: 'message-1',
+        routeRef,
+      }),
+    ).rejects.toThrow(/at least one call/);
+    await handle.commitAwaitJournal(
+      [
+        {
+          functionCallId: 'call-1',
+          toolName: 'agent',
+        },
+      ],
+      turn,
+      { attemptId: 'message-1', routeRef },
+    );
+    await expect(
+      handle.commitAwaitJournal(
+        [
+          {
+            functionCallId: 'call-2',
+            toolName: 'team_create',
+          },
+        ],
+        turn,
+        { attemptId: 'message-1', routeRef },
+      ),
+    ).rejects.toThrow(/different journal batch/);
+    await session.close();
+  });
+});
+
 describe('agent wait', () => {
   it('commits the wait at admission and replays the identical restated set', async () => {
     const session = await open(await createWorkspace());

@@ -26,6 +26,7 @@ export const HARNESS_CHECKPOINT_PHASES = [
   'model_output_committed',
   'await_action',
   'await_runtime',
+  'await_journal',
   'await_agent',
   'await_command',
   'results_ready',
@@ -234,6 +235,17 @@ export interface HarnessAgentWaitGroup {
   readonly runs: readonly HarnessAgentWaitRun[];
 }
 
+/** One control-plane call protected by a journal-only durable wait. */
+export interface HarnessJournalWaitCall {
+  readonly functionCallId: string;
+  readonly toolName: string;
+}
+
+/** The zero-Runtime calls of one protected tool batch. */
+export interface HarnessJournalWaitGroup {
+  readonly calls: readonly HarnessJournalWaitCall[];
+}
+
 /**
  * One member command call this Turn waits on (H4e-b3). The wait rides its
  * own group rather than `tools.items`, same lifetime rule as the agent
@@ -307,6 +319,7 @@ export interface HarnessCheckpointV1 {
   readonly tools: HarnessToolsGroup | null;
   readonly runtime: HarnessRuntimeGroup | null;
   readonly approval: HarnessApprovalGroup | null;
+  readonly journalWait: HarnessJournalWaitGroup | null;
   readonly agentWait: HarnessAgentWaitGroup | null;
   readonly commandWait: HarnessCommandWaitGroup | null;
   readonly commandLock: HarnessCommandLockGroup | null;
@@ -346,6 +359,7 @@ const ROOT_KEYS = [
   'tools',
   'runtime',
   'approval',
+  'journalWait',
   'agentWait',
   'commandWait',
   'commandLock',
@@ -983,6 +997,43 @@ function parseAgentWaitRun(
   };
 }
 
+function parseJournalWaitCall(
+  value: ManagedSessionJsonValue,
+  label: string,
+): HarnessJournalWaitCall {
+  const record = object(value, label);
+  assertNoUnknownKeys(record, ['functionCallId', 'toolName'], label);
+  return {
+    functionCallId: assertManagedSessionStableId(
+      record['functionCallId'],
+      `${label}.functionCallId`,
+    ),
+    toolName: assertManagedSessionStableId(
+      record['toolName'],
+      `${label}.toolName`,
+    ),
+  };
+}
+
+function parseJournalWait(
+  value: ManagedSessionJsonValue | undefined,
+): HarnessJournalWaitGroup | null {
+  if (value === null || value === undefined) return null;
+  const record = object(value, 'journalWait');
+  assertNoUnknownKeys(record, ['calls'], 'journalWait');
+  const calls = jsonArray(record['calls'], 'journalWait.calls').map(
+    (item, index) => parseJournalWaitCall(item, `journalWait.calls[${index}]`),
+  );
+  if (calls.length === 0) {
+    fail('journal wait requires at least one call.');
+  }
+  uniqueIds(
+    calls.map((call) => call.functionCallId),
+    'journalWait.calls.functionCallId',
+  );
+  return { calls };
+}
+
 function parseAgentWait(
   value: ManagedSessionJsonValue | undefined,
 ): HarnessAgentWaitGroup | null {
@@ -1277,6 +1328,9 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     if (checkpoint.approval !== null) {
       fail('before_model cannot carry an approval.');
     }
+    if (checkpoint.journalWait !== null) {
+      fail('before_model cannot carry a journal wait.');
+    }
     if (checkpoint.agentWait !== null) {
       fail('before_model cannot carry an agent wait.');
     }
@@ -1319,6 +1373,12 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     ) {
       fail('model_output_committed cannot carry an unfolded command wait.');
     }
+    if (
+      checkpoint.journalWait !== null &&
+      (checkpoint.agentWait !== null || checkpoint.commandWait !== null)
+    ) {
+      fail('model_output_committed cannot carry competing waits.');
+    }
     return;
   }
 
@@ -1338,6 +1398,9 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     if (checkpoint.agentWait !== null) {
       fail('await_action cannot carry an agent wait.');
     }
+    if (checkpoint.journalWait !== null) {
+      fail('await_action cannot carry a journal wait.');
+    }
     if (checkpoint.commandWait !== null) {
       fail('await_action cannot carry a command wait.');
     }
@@ -1354,8 +1417,33 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     if (checkpoint.agentWait !== null) {
       fail('await_runtime cannot carry an agent wait.');
     }
+    if (checkpoint.journalWait !== null) {
+      fail('await_runtime cannot carry a journal wait.');
+    }
     if (checkpoint.commandWait !== null) {
       fail('await_runtime cannot carry a command wait.');
+    }
+    return;
+  }
+
+  if (phase === 'await_journal') {
+    if (
+      checkpoint.journalWait === null ||
+      checkpoint.journalWait.calls.length === 0
+    ) {
+      fail('await_journal requires the journal wait calls.');
+    }
+    if (checkpoint.attempt.outputState !== 'output_committed') {
+      fail('await_journal requires committed model output.');
+    }
+    if (checkpoint.approval?.state === 'requested') {
+      fail('await_journal cannot keep a requested approval.');
+    }
+    if (inFlightTools || dispatchRuntime) {
+      fail('await_journal cannot carry in-flight Runtime work.');
+    }
+    if (checkpoint.agentWait !== null || checkpoint.commandWait !== null) {
+      fail('await_journal cannot carry a specialized wait.');
     }
     return;
   }
@@ -1384,6 +1472,9 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     if (checkpoint.commandWait !== null) {
       fail('await_agent cannot carry a command wait.');
     }
+    if (checkpoint.journalWait !== null) {
+      fail('await_agent cannot carry a journal wait.');
+    }
     return;
   }
 
@@ -1410,6 +1501,9 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     if (checkpoint.agentWait !== null) {
       fail('await_command cannot carry an agent wait.');
     }
+    if (checkpoint.journalWait !== null) {
+      fail('await_command cannot carry a journal wait.');
+    }
     return;
   }
 
@@ -1426,6 +1520,9 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     if (checkpoint.agentWait !== null) {
       fail('results_ready cannot carry an agent wait.');
     }
+    if (checkpoint.journalWait !== null) {
+      fail('results_ready cannot carry a journal wait.');
+    }
     if (checkpoint.commandWait !== null) {
       fail('results_ready cannot carry a command wait.');
     }
@@ -1436,11 +1533,12 @@ function assertPhaseShape(checkpoint: HarnessCheckpointV1): void {
     inFlightTools ||
     dispatchRuntime ||
     checkpoint.approval?.state === 'requested' ||
+    checkpoint.journalWait !== null ||
     checkpoint.agentWait !== null ||
     checkpoint.commandWait !== null
   ) {
     fail(
-      'turn_settled cannot carry in-flight tools, a requested approval, an agent wait, or a command wait.',
+      'turn_settled cannot carry in-flight tools, a requested approval, or a wait.',
     );
   }
 }
@@ -1459,6 +1557,7 @@ function parseHarnessCheckpointObject(
     tools: parseTools(record['tools']),
     runtime: parseRuntime(record['runtime']),
     approval: parseApproval(record['approval']),
+    journalWait: parseJournalWait(record['journalWait']),
     agentWait: parseAgentWait(record['agentWait']),
     commandWait: parseCommandWait(record['commandWait']),
     commandLock: parseCommandLock(record['commandLock']),
@@ -1476,6 +1575,17 @@ export function parseHarnessCheckpointV1(bytes: Buffer): HarnessCheckpointV1 {
       bytes.toString('utf8'),
       MANAGED_SESSION_LIMITS.maxEventBytes,
     ),
+  );
+}
+
+/** A live or just-resolved zero-Runtime journal batch. */
+export function harnessCheckpointIsJournalWait(
+  checkpoint: HarnessCheckpointV1,
+): boolean {
+  return (
+    checkpoint.continuation.phase === 'await_journal' ||
+    (checkpoint.continuation.phase === 'model_output_committed' &&
+      checkpoint.journalWait !== null)
   );
 }
 
@@ -1573,7 +1683,12 @@ export function encodeHarnessCheckpointV1(
   const record: Partial<Record<keyof HarnessCheckpointV1, unknown>> = {
     ...checkpoint,
   };
-  for (const key of ['agentWait', 'commandWait', 'commandLock'] as const) {
+  for (const key of [
+    'journalWait',
+    'agentWait',
+    'commandWait',
+    'commandLock',
+  ] as const) {
     if (record[key] === null) delete record[key];
   }
   return Buffer.from(JSON.stringify(record), 'utf8');
@@ -1680,6 +1795,7 @@ export function createInitialHarnessCheckpoint(input: {
     tools: null,
     runtime: null,
     approval: null,
+    journalWait: null,
     agentWait: null,
     commandWait: null,
     commandLock: null,
@@ -1739,6 +1855,7 @@ export function createNextTurnReadyHarnessCheckpoint(input: {
     tools: null,
     runtime: null,
     approval: null,
+    journalWait: null,
     agentWait: null,
     commandWait: null,
     // The Turn that stamped decision 4's lock has finished, whichever Turn
@@ -1786,6 +1903,61 @@ export function createAwaitActionHarnessCheckpoint(input: {
     tools: input.previous.tools,
     runtime: input.previous.runtime,
     approval: input.approval,
+    journalWait: null,
+    agentWait: null,
+    commandWait: null,
+    commandLock: carriedCommandLock(input.previous),
+    output: input.previous.output,
+    followUp: input.previous.followUp,
+  };
+}
+
+/** Durable boundary for a zero-Runtime control-plane tool batch. */
+export function createAwaitJournalHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+  readonly attempt: HarnessAttemptGroup | null;
+  readonly journalWait: HarnessJournalWaitGroup;
+}): HarnessCheckpointV1 {
+  if (input.attempt?.outputState !== 'output_committed') {
+    throw new ManagedSessionRecordError(
+      'await_journal requires committed model output.',
+    );
+  }
+  if (input.journalWait.calls.length === 0) {
+    throw new ManagedSessionRecordError(
+      'await_journal requires at least one call.',
+    );
+  }
+  if (
+    input.previous.approval?.state === 'requested' ||
+    input.previous.agentWait?.runs.some((run) => !run.consumed) ||
+    input.previous.commandWait?.runs.some((run) => !run.folded) ||
+    input.previous.tools?.items.some((item) => item.state === 'in_progress')
+  ) {
+    throw new ManagedSessionRecordError(
+      'await_journal cannot replace unfinished Harness work.',
+    );
+  }
+  return {
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: { phase: 'await_journal', pendingEventIds: [] },
+    attempt: input.attempt,
+    tools: input.previous.tools,
+    runtime: input.previous.runtime,
+    approval: null,
+    journalWait: input.journalWait,
     agentWait: null,
     commandWait: null,
     commandLock: carriedCommandLock(input.previous),
@@ -1866,6 +2038,7 @@ export function createAwaitAgentHarnessCheckpoint(input: {
     tools: input.previous.tools,
     runtime: input.previous.runtime,
     approval: null,
+    journalWait: null,
     agentWait: input.agentWait,
     commandWait: null,
     commandLock: carriedCommandLock(input.previous),
@@ -1947,6 +2120,7 @@ export function createAwaitCommandHarnessCheckpoint(input: {
     tools: input.previous.tools,
     runtime: input.previous.runtime,
     approval: null,
+    journalWait: null,
     agentWait: null,
     commandWait: input.commandWait,
     commandLock: carriedCommandLock(input.previous),
@@ -2016,6 +2190,7 @@ export function createConsumedCommandWaitHarnessCheckpoint(input: {
     tools: input.previous.tools,
     runtime: input.previous.runtime,
     approval: null,
+    journalWait: null,
     agentWait: null,
     commandWait: {
       runs,
@@ -2092,6 +2267,7 @@ export function createConsumedAgentWaitHarnessCheckpoint(input: {
     tools: input.previous.tools,
     runtime: input.previous.runtime,
     approval: null,
+    journalWait: null,
     agentWait: { runs },
     commandWait: null,
     commandLock: carriedCommandLock(input.previous),
@@ -2137,6 +2313,7 @@ export function createAwaitRuntimeHarnessCheckpoint(input: {
     tools: input.tools,
     runtime: input.runtime,
     approval: null,
+    journalWait: null,
     agentWait: null,
     commandWait: null,
     commandLock: carriedCommandLock(input.previous),
@@ -2215,6 +2392,7 @@ export function createResultsReadyHarnessCheckpoint(input: {
       ),
     },
     approval: null,
+    journalWait: null,
     agentWait: null,
     commandWait: null,
     commandLock: carriedCommandLock(input.previous),
@@ -2267,6 +2445,7 @@ export function createTurnSettledHarnessCheckpoint(input: {
     tools: input.previous.tools,
     runtime: input.previous.runtime,
     approval: null,
+    journalWait: null,
     agentWait: null,
     commandWait: null,
     commandLock: carriedCommandLock(input.previous),
@@ -2356,6 +2535,7 @@ export function createConsumedRuntimeResultsHarnessCheckpoint(input: {
     },
     runtime: input.previous.runtime,
     approval: null,
+    journalWait: null,
     agentWait: null,
     commandWait: null,
     commandLock: carriedCommandLock(input.previous),
@@ -2417,6 +2597,7 @@ export function createModelOutputCommittedHarnessCheckpoint(input: {
     tools: input.previous.tools,
     runtime: input.previous.runtime,
     approval: null,
+    journalWait: input.previous.journalWait,
     agentWait: input.previous.agentWait,
     commandWait: input.previous.commandWait,
     commandLock: carriedCommandLock(input.previous),

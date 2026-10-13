@@ -225,6 +225,25 @@ async function execute(
   return JSON.stringify(responses);
 }
 
+async function settleTurn(promptId: string): Promise<void> {
+  await session.sink.write({
+    uuid: randomUUID(),
+    parentUuid: null,
+    sessionId: sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    type: 'system',
+    cwd: root,
+    version: 'test',
+    subtype: 'turn_result',
+    systemPayload: {
+      promptId,
+      state: 'completed',
+      stopReason: 'end_turn',
+      endedAt: Date.now(),
+    },
+  });
+}
+
 const member = (name: string, callId: string, extra = {}) =>
   call(
     'agent',
@@ -281,6 +300,7 @@ beforeEach(async () => {
       createdBy: 'test',
     },
   });
+  await createManagedHarnessHandle(session).ensureCheckpoint();
   const store = { authority: session.authority, resources: session.resources };
   children = new HostedChildAgentSession(store, sessionKey);
   teams = new HostedTeamSession(store, sessionKey, children);
@@ -358,6 +378,28 @@ it('declares the team tools only beside the root Agent tool, behind both gates',
     expect(closed).toContain(HOSTED_AGENT_TOOL);
     expect(closed.some((tool) => team.includes(tool.name!))).toBe(false);
   }
+});
+
+it('checkpoints a zero-Runtime team batch before carrying its journal result', async () => {
+  const answer = await execute(createTurn(), [
+    call('team_create', { team_name: 'review' }, 'call-team'),
+  ]);
+  expect(answer).toContain('review');
+  const authorization = await session.authority.harnessRunAuthorization();
+  expect(authorization.status).toBe('runnable');
+  if (authorization.status !== 'runnable') return;
+  expect(authorization.checkpoint).toMatchObject({
+    continuation: { phase: 'model_output_committed' },
+    journalWait: {
+      calls: [
+        {
+          functionCallId: 'call-team',
+          toolName: 'team_create',
+        },
+      ],
+    },
+  });
+  expect(broker.acquire).not.toHaveBeenCalled();
 });
 
 // #13753 I2: a host that serves child Workspaces adds isolation to the
@@ -1519,6 +1561,7 @@ it('records the owner a send of this Turn gave work, even once it completed', as
       'call-park-2',
     ),
   ]);
+  await settleTurn('prompt');
   const later = await execute(
     createTurn({ messages: true, promptId: 'prompt-2' }),
     [
@@ -1974,6 +2017,7 @@ it('records the owner a send of a wake turn gave work', async () => {
     call('task_create', { subject: 'fix', description: 'fix it' }, 'call-task'),
   ]);
   await finish('prompt:call-alice');
+  await settleTurn('prompt');
   // The lead reads a result in a wake turn, whose call keys collapse its
   // prompt id to a digest; the owner rule reads the same keys.
   const wakePrompt = 'msg_result:message:accept:notify';
@@ -1998,6 +2042,7 @@ it('records the owner a send of a wake turn gave work', async () => {
       call('task_update', { taskId: '1', status: 'pending' }, 'call-park'),
     ]),
   ).toContain('Task #1 updated (status: pending, owner: alice).');
+  await settleTurn(wakePrompt);
   expect(
     await execute(createTurn({ messages: true, promptId: 'prompt-2' }), [
       call('task_update', { taskId: '1', status: 'in_progress' }, 'call-back'),

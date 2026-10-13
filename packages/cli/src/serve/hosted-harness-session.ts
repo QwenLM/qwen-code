@@ -56,6 +56,7 @@ import {
   type HarnessRunAuthorization,
   harnessCheckpointIsAgentWait,
   harnessCheckpointIsCommandWait,
+  harnessCheckpointIsJournalWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
@@ -1565,6 +1566,7 @@ export async function parkNeedsNoRuntimeSettlement(
   // plain settle would leave the checkpoint parked and refuse the next
   // Turn's model start.
   if (harnessCheckpointIsCommandWait(checkpoint)) return false;
+  if (harnessCheckpointIsJournalWait(checkpoint)) return false;
   if (
     !(checkpoint.tools?.items ?? []).every(
       (item) => item.state === 'settled' && item.consumed,
@@ -4707,14 +4709,20 @@ export function registerHostedHarnessSessionRoutes(
       // Cold loads stay inert: only an explicit takeover request may touch
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
-      const takeover = !lifecycle && !session.hooks && takeoverFlags;
-      // A Hooks Session recovers only through this load (it never takes
-      // over), and the file-history gate below needs every call of the
-      // pending round answered. The team and agent calls the dead Harness
-      // never answered are answered first — a committed one by what
-      // committed, any other as never run — or the gate would refuse this
-      // Session on every load. A failed answer leaves the gate's retriable
-      // refusal.
+      const hookAuthorization =
+        session.hooks && takeoverFlags
+          ? await managed.authority
+              .harnessRunAuthorization()
+              .catch(() => undefined)
+          : undefined;
+      const hookJournalRecovery =
+        hookAuthorization?.status === 'runnable' &&
+        harnessCheckpointIsJournalWait(hookAuthorization.checkpoint);
+      const takeover =
+        !lifecycle && takeoverFlags && (!session.hooks || hookJournalRecovery);
+      // A Hooks Session may take over only the first-class journal wait. Its
+      // pending round still needs every call answered before the recovery
+      // route replays PostTool hooks and advances the checkpoint.
       if (session.hooks && !lifecycle && unsettled !== undefined) {
         try {
           await answerResumedTurnCalls({
@@ -7432,7 +7440,8 @@ export function registerHostedHarnessSessionRoutes(
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
-    if (session.hooks) return error(res, 409, 'hosted_hook_recovery_required');
+    if (session.hooksBusy)
+      return error(res, 409, 'hosted_hook_operation_active');
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
     const { promptId, checkpointId, activationId } = request;
@@ -7495,6 +7504,8 @@ export function registerHostedHarnessSessionRoutes(
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
+    if (session.hooksBusy)
+      return error(res, 409, 'hosted_hook_operation_active');
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (!continueAuthorization.ok) {
       releaseRecoveredRuntime(session);
@@ -7516,24 +7527,28 @@ export function registerHostedHarnessSessionRoutes(
       );
       return error(res, 409, 'hosted_turn_recovery_required', 'not_runnable');
     }
+    const continueRunnable = continueAuthorization.authorization;
     if (
-      continueAuthorization.authorization.checkpoint.continuation.phase !==
-        'results_ready' &&
+      session.hooks &&
+      !harnessCheckpointIsJournalWait(continueRunnable.checkpoint)
+    ) {
+      releaseRecoveredRuntime(session);
+      return error(res, 409, 'hosted_hook_recovery_required');
+    }
+    if (
+      continueRunnable.checkpoint.continuation.phase !== 'results_ready' &&
       // The agent wait (#13708): still outstanding, or folded past it —
       // the consumed advance lands as model_output_committed carrying the
       // wait's group. Both re-enter through the same resume arm below, and
       // so does the command wait (H4e-b3), which the takeover reports as
       // await_command.
-      !harnessCheckpointIsAgentWait(
-        continueAuthorization.authorization.checkpoint,
-      ) &&
-      !harnessCheckpointIsCommandWait(
-        continueAuthorization.authorization.checkpoint,
-      )
+      !harnessCheckpointIsAgentWait(continueRunnable.checkpoint) &&
+      !harnessCheckpointIsCommandWait(continueRunnable.checkpoint) &&
+      !harnessCheckpointIsJournalWait(continueRunnable.checkpoint)
     ) {
       releaseRecoveredRuntime(session);
       writeStderrLineSafe(
-        `qwen serve: Hosted Session ${req.params['id']} continue: continuation not ready: phase=${continueAuthorization.authorization.checkpoint.continuation.phase}`,
+        `qwen serve: Hosted Session ${req.params['id']} continue: continuation not ready: phase=${continueRunnable.checkpoint.continuation.phase}`,
       );
       return error(
         res,
@@ -7686,6 +7701,7 @@ export function registerHostedHarnessSessionRoutes(
           },
           {
             mcp: session.mcp,
+            hooks: session.hooks,
             profile: session.toolProfile,
             context: workspaceContext,
             childRuns: session.childRuns,
@@ -7704,12 +7720,9 @@ export function registerHostedHarnessSessionRoutes(
           // owes, polling the relay ledger exactly as the live arm did, then
           // re-derive the round — the fold's own tool_result is what the
           // resume request carries.
-          if (
-            continueAuthorization.authorization.status === 'runnable' &&
-            continueAuthorization.authorization.checkpoint.agentWait !== null
-          ) {
+          if (continueRunnable.checkpoint.agentWait !== null) {
             const outstanding =
-              continueAuthorization.authorization.checkpoint.agentWait.runs.filter(
+              continueRunnable.checkpoint.agentWait.runs.filter(
                 (run) => !run.consumed,
               );
             if (outstanding.length > 0) {
@@ -7727,10 +7740,7 @@ export function registerHostedHarnessSessionRoutes(
               // adoption is durable: the resolve's own read faults surface
               // as a retriable block, and an inapplicable answer is a
               // defect, never a round start (R2-9).
-              const lastRun =
-                continueAuthorization.authorization.checkpoint.agentWait.runs.at(
-                  -1,
-                );
+              const lastRun = continueRunnable.checkpoint.agentWait.runs.at(-1);
               if (lastRun !== undefined) {
                 let adopted;
                 try {
@@ -7769,12 +7779,8 @@ export function registerHostedHarnessSessionRoutes(
           // H4e-b3: the command wait resumes exactly like the agent wait —
           // re-enter each outstanding run's poll with what is left of its
           // bound, then the round's never-reached calls pair off.
-          if (
-            continueAuthorization.authorization.status === 'runnable' &&
-            continueAuthorization.authorization.checkpoint.commandWait !== null
-          ) {
-            const commandWait =
-              continueAuthorization.authorization.checkpoint.commandWait;
+          if (continueRunnable.checkpoint.commandWait !== null) {
+            const commandWait = continueRunnable.checkpoint.commandWait;
             if (session.commands === undefined)
               throw new Error('Command wait checkpoint has no command funnel.');
             const outstanding = commandWait.runs.filter((run) => !run.folded);
@@ -7844,14 +7850,30 @@ export function registerHostedHarnessSessionRoutes(
               'Recovered Runtime turn has no journaled tool results.',
             );
           }
+          if (harnessCheckpointIsJournalWait(continueRunnable.checkpoint)) {
+            if (session.hooks) {
+              resumeParts = await toolTurn.resumeHookResults(
+                resumeParts,
+                'recovered',
+                abort.signal,
+              );
+            }
+            let resolved;
+            try {
+              resolved = await harness.resolveAwaitJournal();
+            } catch (cause) {
+              throw new HostedToolRecoveryRequiredError(cause);
+            }
+            if (resolved === null)
+              throw new Error(
+                'Recovered journal wait did not advance the checkpoint.',
+              );
+          }
           if (
-            continueAuthorization.authorization.status === 'runnable' &&
-            (continueAuthorization.authorization.checkpoint.agentWait !==
-              null ||
-              (continueAuthorization.authorization.checkpoint.commandWait !==
-                null &&
-                !continueAuthorization.authorization.checkpoint.commandWait
-                  .holdsWorkspaceMount))
+            continueRunnable.checkpoint.agentWait !== null ||
+            continueRunnable.checkpoint.journalWait !== null ||
+            (continueRunnable.checkpoint.commandWait !== null &&
+              !continueRunnable.checkpoint.commandWait.holdsWorkspaceMount)
           ) {
             // An agent-wait resume has no Runtime results to consume and
             // must NOT claim the Workspace mount in advance of any tool
@@ -7979,7 +8001,8 @@ export function registerHostedHarnessSessionRoutes(
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
-    if (session.hooks) return error(res, 409, 'hosted_hook_recovery_required');
+    if (session.hooksBusy)
+      return error(res, 409, 'hosted_hook_operation_active');
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
     const { promptId, checkpointId, activationId } = request;
@@ -8057,6 +8080,8 @@ export function registerHostedHarnessSessionRoutes(
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
+    if (session.hooksBusy)
+      return error(res, 409, 'hosted_hook_operation_active');
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (!cancelAuthorization.ok) {
       writeStderrLineSafe(
@@ -8080,6 +8105,14 @@ export function registerHostedHarnessSessionRoutes(
       // blocked refusal above).
       return error(res, 409, 'hosted_turn_recovery_required', 'not_runnable');
     }
+    if (
+      session.hooks &&
+      !harnessCheckpointIsJournalWait(
+        cancelAuthorization.authorization.checkpoint,
+      )
+    ) {
+      return error(res, 409, 'hosted_hook_recovery_required');
+    }
     // The async arm is a closure: property narrowing on
     // cancelAuthorization.authorization does not reach it, so pin the
     // runnable authorization the guards above established.
@@ -8100,6 +8133,7 @@ export function registerHostedHarnessSessionRoutes(
         // the round pairs off — while no group means the Runtime park.
         const agentWait = cancelRunnable.checkpoint.agentWait;
         const commandWait = cancelRunnable.checkpoint.commandWait;
+        const journalWait = cancelRunnable.checkpoint.journalWait;
         let broker: HostedWorkspaceBroker | undefined;
         if (commandWait !== null) {
           // H4e-b3's own mirror of the agent-wait cancellation: the
@@ -8173,7 +8207,7 @@ export function registerHostedHarnessSessionRoutes(
             signal: cancelFillAbort.signal,
             consume: (childRunId) => session.childConsumption.add(childRunId),
           });
-        } else {
+        } else if (journalWait === null) {
           broker = await stopParkedRuntimeExecutions({
             session: session.managed,
             promptId,
@@ -8192,7 +8226,11 @@ export function registerHostedHarnessSessionRoutes(
         // A Runtime park's non-Runtime siblings (a team call, a background
         // launch) that committed before the Harness died are answered by
         // what committed; the settlements above answer only what they own.
-        await answerCommittedTurnCalls({
+        const answerInterruptedCalls =
+          journalWait === null
+            ? answerCommittedTurnCalls
+            : answerResumedTurnCalls;
+        await answerInterruptedCalls({
           session: session.managed,
           sessionId,
           cwd: session.cwd,
@@ -8202,6 +8240,15 @@ export function registerHostedHarnessSessionRoutes(
           messages: session.messages,
           commands: session.commands,
         });
+        if (journalWait !== null) {
+          const resolved = await createManagedHarnessHandle(
+            session.managed,
+          ).resolveAwaitJournal();
+          if (resolved === null)
+            throw new Error(
+              'Cancelled journal wait did not advance the checkpoint.',
+            );
+        }
         // Whatever shape the wait was in, its round is fully answered now:
         // the folds above landed (or the journaled proof they were never
         // owed), so only the terminal record below settles the Turn.

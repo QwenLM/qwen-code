@@ -422,6 +422,33 @@ it('records the launch isolation and replays it after the capability is gone', a
   );
 });
 
+it('carries the completed background launch as a recoverable journal wait', async () => {
+  const responses = await executeAgent(
+    createTurn(),
+    call({
+      description: 'audit',
+      prompt: 'review',
+      run_in_background: true,
+    }),
+  );
+  expect(JSON.stringify(responses)).toContain('started in the background');
+  const authorization = await session.authority.harnessRunAuthorization();
+  expect(authorization.status).toBe('runnable');
+  if (authorization.status !== 'runnable') return;
+  expect(authorization.checkpoint).toMatchObject({
+    continuation: { phase: 'model_output_committed' },
+    journalWait: {
+      calls: [
+        {
+          functionCallId: 'call-1',
+          toolName: 'agent',
+        },
+      ],
+    },
+  });
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
 async function foregroundWorktreeAnswer(
   result: string,
   receipt: Buffer,
@@ -1301,6 +1328,22 @@ it('bounds chained background launches from wake turns', async () => {
   );
   const hopOne = session.authority.extensionRecordsInDomain('child_run')[0];
   expect(hopOne?.recordId).toMatch(/^[0-9a-f]{16}:call-1$/);
+  await session.sink.write({
+    uuid: randomUUID(),
+    parentUuid: null,
+    sessionId: sessionKey.sessionId,
+    timestamp: new Date().toISOString(),
+    type: 'system',
+    cwd: root,
+    version: 'test',
+    subtype: 'turn_result',
+    systemPayload: {
+      promptId: 'root-run:accept:notify',
+      state: 'completed',
+      stopReason: 'end_turn',
+      endedAt: Date.now(),
+    },
+  });
   const wakeTwo = createTurn(0, undefined, `${hopOne?.recordId}:accept:notify`);
   await executeAgent(
     wakeTwo,

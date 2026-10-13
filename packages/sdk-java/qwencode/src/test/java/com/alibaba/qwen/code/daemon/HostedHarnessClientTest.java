@@ -785,6 +785,24 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void parsesAJournalWaitRuntimeRecoveryAsReadyWithoutRuntimeSettlement() {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> sendSessionJson(exchange, 200,
+                        sessionJsonWithAgentWaitRuntimeRecovery().replace(
+                                "\"phase\":\"await_agent\"",
+                                "\"phase\":\"await_journal\"")));
+        try (HostedHarnessClient client = newClient()) {
+            HarnessRuntimeRecovery recovery = client.loadSession(
+                    new LoadHarnessSession(SESSION_ID)).getRuntimeRecovery();
+            assertNotNull(recovery);
+            assertEquals("await_journal", recovery.getPhase());
+            assertFalse(recovery.hasUnknownOutcome());
+            assertTrue(recovery.isContinuationReady());
+            assertTrue(recovery.isCancellationReady());
+        }
+    }
+
+    @Test
     void agentWaitWithoutExecutionsIsNotReady() {
         // The wire parser already enforces 1-1024 executions; the predicate
         // keeps the same floor so an empty wait never readies a continuation

@@ -19,6 +19,7 @@ import {
   HARNESS_MODEL_START_PHASES,
   harnessCheckpointIsAgentWait,
   harnessCheckpointIsCommandWait,
+  harnessCheckpointIsJournalWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import {
@@ -98,7 +99,12 @@ export interface HostedRuntimeRecoveryExecution {
 }
 
 export interface HostedRuntimeRecoveryReport {
-  phase: 'await_runtime' | 'await_agent' | 'await_command' | 'results_ready';
+  phase:
+    | 'await_runtime'
+    | 'await_journal'
+    | 'await_agent'
+    | 'await_command'
+    | 'results_ready';
   checkpointId: string;
   activationId: string;
   executions: HostedRuntimeRecoveryExecution[];
@@ -1635,6 +1641,27 @@ export async function recoverHostedRuntimeTurn(input: {
             runtimeSessionId: hostedRuntimeSessionId(promptId),
             outcome: 'known',
             status: { state: run.consumed ? 'settled' : 'executing' },
+          })),
+        },
+      });
+    }
+    if (harnessCheckpointIsJournalWait(checkpoint)) {
+      const settled =
+        checkpoint.continuation.phase === 'model_output_committed';
+      return recovered({
+        promptId,
+        acquiredRuntime: false,
+        report: {
+          phase: 'await_journal',
+          checkpointId: checkpoint.identity.checkpointId,
+          activationId: session.activation.activationId,
+          executions: (checkpoint.journalWait?.calls ?? []).map((call) => ({
+            functionCallId: call.functionCallId,
+            toolName: call.toolName,
+            executionCallId: call.functionCallId,
+            runtimeSessionId: hostedRuntimeSessionId(promptId),
+            outcome: 'known',
+            status: { state: settled ? 'settled' : 'executing' },
           })),
         },
       });

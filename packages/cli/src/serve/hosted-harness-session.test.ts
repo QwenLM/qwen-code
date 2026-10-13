@@ -96,6 +96,7 @@ import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 import {
   HostedToolRecoveryRequiredError,
+  hostedChildRunIdFor,
   hostedRuntimeSessionId,
   HostedWorkspaceToolTurn,
 } from './hosted-workspace-tool-turn.js';
@@ -19523,6 +19524,175 @@ describe('Hosted Harness Runtime turn takeover', () => {
     }
   }
 
+  async function parkJournalWaitTurn(options?: {
+    hooksYoloTask?: boolean;
+  }): Promise<void> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const journalStore = new LocalJsonlManagedSessionJournalStore({
+      runtimeBaseDir: state.root,
+      sessionId: SESSION_ID,
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+    });
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore,
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              ...(options?.hooksYoloTask ? { hookCatalog: hookPin } : {}),
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    try {
+      const contentRef = await managed.resources.publish(
+        'managed-input',
+        Buffer.from(JSON.stringify([{ type: 'text', text: 'create task' }])),
+      );
+      const admissionRef = await managed.resources.publish(
+        'managed-admission',
+        Buffer.from(
+          JSON.stringify({ promptId: PROMPT_ID, digest: 'a'.repeat(64) }),
+        ),
+      );
+      await managed.authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: PROMPT_ID,
+          sessionKey: key,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          inputId: PROMPT_ID,
+          turnId: PROMPT_ID,
+          source: 'hosted-harness',
+          contentRef,
+          admissionRef,
+          deadline: null,
+          wakeReason: 'input',
+        },
+      );
+      const harness = createManagedHarnessHandle(managed);
+      await harness.ensureRunnable();
+      await managed.sink.write({
+        uuid: 'assistant-journal',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: state.root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-task',
+                name: 'task_create',
+                args: { subject: 'Audit auth', description: 'review' },
+              },
+            },
+          ],
+        },
+      });
+      const routeRef = await managed.resources.publish(
+        'managed-tool-input',
+        Buffer.from('{}'),
+      );
+      await harness.commitAwaitJournal(
+        [
+          {
+            functionCallId: 'call-task',
+            toolName: 'task_create',
+          },
+        ],
+        { turnId: PROMPT_ID, promptId: PROMPT_ID },
+        { attemptId: 'assistant-journal', routeRef },
+      );
+      if (options?.hooksYoloTask) {
+        const teams = new HostedTeamSession(
+          { authority: managed.authority, resources: managed.resources },
+          key,
+        );
+        await teams.run('team_create', { team_name: 'review' }, 'setup-team');
+        await teams.run(
+          'task_create',
+          { subject: 'Audit auth', description: 'review' },
+          hostedChildRunIdFor(PROMPT_ID, 'call-task'),
+        );
+      }
+    } finally {
+      await managed.close();
+    }
+  }
+
+  it('settles a journal wait through the managed-runtime cancel route', async () => {
+    await parkJournalWaitTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const { server, loaded } = await loadReplacement(
+      true,
+      'hosted-workspace-shell/1',
+    );
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      phase: string;
+      checkpointId: string;
+      activationId: string;
+    };
+    expect(recovery.phase).toBe('await_journal');
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.accepted).toBe(true);
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    expect(JSON.stringify(transcript.body)).toContain(
+      'The tool call never ran',
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
   it('settles the cancelled takeover of an admitted foreground orphan without waiting on it (R2-2)', async () => {
     await parkAgentWaitResumeShape('orphan');
     const { server, loaded } = await loadReplacement(
@@ -25301,11 +25471,106 @@ describe('Hosted Harness Runtime turn takeover', () => {
     30_000,
   );
 
-  // H4e-b1: a Hooks Session never takes over; its bare load is the only
-  // recovery route, and with a Write in the round the file-history gate
-  // needs every call of the round answered. A committed team call the dead
-  // Harness never answered is answered from its record before the gate and
-  // before the resume, so the Session loads and the model never retries it.
+  it('continues a yolo Hooks Session from a journal-only crash without repeating the team write', async () => {
+    await parkJournalWaitTurn({ hooksYoloTask: true });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => ({
+        operationId: operation.operationId,
+        state: 'settled',
+        catalog: { ...hookPin, hooks: [] },
+      }),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    let resumed: Part[] | undefined;
+    state.model.mockImplementationOnce(async (input) => {
+      resumed = [
+        ...((input as { resumeFromToolResults?: Part[] })
+          .resumeFromToolResults ?? []),
+      ];
+      return { text: 'continued', model: 'test-model' };
+    });
+    const second = await replacementApp();
+    const loaded = await replacementHeaders(
+      supertest(second).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: 'hosted-workspace-shell/1',
+      hookCatalog: hookPin,
+      driveRuntimeRecovery: true,
+    });
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      phase: string;
+      checkpointId: string;
+      activationId: string;
+    };
+    expect(recovery.phase).toBe('await_journal');
+    const continued = await replacementHeaders(
+      supertest(second).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(() => expect(resumed).toBeDefined(), {
+      timeout: 10_000,
+    });
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(second).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    expect(
+      JSON.stringify(
+        resumed!.find((part) => part.functionResponse?.id === 'call-task')
+          ?.functionResponse?.response,
+      ),
+    ).toContain('committed its team change');
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    );
+    expect(
+      journal.events.filter(
+        (event) =>
+          event.kind === 'domain.committed' &&
+          (event.payload as Record<string, unknown>)['domain'] === 'team_task',
+      ),
+    ).toHaveLength(1);
+    await replacementHeaders(
+      supertest(second).delete(`/session/${SESSION_ID}`),
+    );
+  }, 30_000);
+
+  // A Hooks Session with Runtime work still recovers on its bare load. With
+  // a Write in the round the file-history gate needs every call answered.
+  // A committed team call the dead Harness never answered is answered from
+  // its record before the gate and before the resume, so the model never
+  // retries it.
   it.each(['read_file', 'write_file'] as const)(
     'answers a committed task_create before a Hooks Session resumes on its bare load (Runtime sibling %s)',
     async (sibling) => {

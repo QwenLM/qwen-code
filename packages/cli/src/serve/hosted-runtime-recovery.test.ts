@@ -355,7 +355,97 @@ describe('recoverHostedRuntimeTurn', () => {
     return session;
   }
 
+  async function parkAtAwaitJournal(resolve = false): Promise<ManagedSession> {
+    const session = await open('boot-1', true, 'hosted-workspace-shell/1');
+    const harness = createManagedHarnessHandle(session);
+    const authority = session.authority;
+    const contentRef = await session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: 'launch a child' }])),
+    );
+    const admissionRef = await session.resources.publish(
+      'managed-admission',
+      Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+    );
+    await authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: PROMPT_ID,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: DIGEST,
+      },
+      {
+        inputId: PROMPT_ID,
+        turnId: PROMPT_ID,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await harness.ensureRunnable();
+    const routeRef = await session.resources.publish(
+      'managed-tool-input',
+      Buffer.from('{}'),
+    );
+    await harness.commitAwaitJournal(
+      [
+        {
+          functionCallId: 'call-1',
+          toolName: 'agent',
+        },
+      ],
+      { turnId: PROMPT_ID, promptId: PROMPT_ID },
+      { attemptId: 'message-1', routeRef },
+    );
+    if (resolve) await harness.resolveAwaitJournal();
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    return session;
+  }
+
   const brokerOptions = { baseUrl: 'http://127.0.0.1:1', token: 'test' };
+
+  it.each([
+    [false, 'executing'],
+    [true, 'settled'],
+  ] as const)(
+    'classifies a journal wait without a Runtime lease (resolved=%s)',
+    async (resolve, state) => {
+      const parked = await parkAtAwaitJournal(resolve);
+      const replacement = await open('boot-2', false);
+      try {
+        const turn = mustRecover(
+          await recoverHostedRuntimeTurn({
+            session: replacement,
+            sessionId: SESSION_ID,
+            cwd: root,
+            promptId: PROMPT_ID,
+            brokerOptions,
+            passive: false,
+          }),
+        );
+        expect(turn.acquiredRuntime).toBe(false);
+        expect(turn.report).toMatchObject({
+          phase: 'await_journal',
+          checkpointId: parked.authority.latestCheckpoint?.checkpointId,
+          executions: [
+            {
+              functionCallId: 'call-1',
+              toolName: 'agent',
+              executionCallId: 'call-1',
+              runtimeSessionId: hostedRuntimeSessionId(PROMPT_ID),
+              outcome: 'known',
+              status: { state },
+            },
+          ],
+        });
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it('classifies the parked agent wait without folding or acquiring', async () => {
     const parked = await parkAtAwaitAgent();

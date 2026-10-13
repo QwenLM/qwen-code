@@ -46,7 +46,9 @@ public final class HarnessRuntimeRecovery {
         // await_command waits are the same shape: the member's own
         // session_command journal is the ledger, and every run's reply is
         // durable evidence once it lands.
-        if ("await_agent".equals(phase) || "await_command".equals(phase)) {
+        if ("await_journal".equals(phase)
+                || "await_agent".equals(phase)
+                || "await_command".equals(phase)) {
             return !executions.isEmpty() && executions.stream().allMatch(
                     execution -> "known".equals(execution.getOutcome()));
         }
@@ -59,6 +61,7 @@ public final class HarnessRuntimeRecovery {
 
     public boolean isCancellationReady() {
         return ("await_runtime".equals(phase)
+                || "await_journal".equals(phase)
                 || "await_agent".equals(phase)
                 || "await_command".equals(phase)
                 || "results_ready".equals(phase)) && !executions.isEmpty()

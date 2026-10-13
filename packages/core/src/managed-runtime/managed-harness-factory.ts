@@ -9,6 +9,7 @@ import {
   createAwaitActionHarnessCheckpoint,
   createAwaitAgentHarnessCheckpoint,
   createAwaitCommandHarnessCheckpoint,
+  createAwaitJournalHarnessCheckpoint,
   createAwaitRuntimeHarnessCheckpoint,
   createConsumedAgentWaitHarnessCheckpoint,
   createConsumedCommandWaitHarnessCheckpoint,
@@ -28,6 +29,7 @@ import {
   type HarnessAgentWaitRun,
   type HarnessCheckpointV1,
   type HarnessCommandWaitRun,
+  type HarnessJournalWaitCall,
   type HarnessRunAuthorization,
 } from './managed-harness-checkpoint.js';
 import { managedRuntimeDispatchGate } from './managed-runtime-dispatch-gate.js';
@@ -209,6 +211,17 @@ export interface ManagedHarnessHandle {
     promptId: string,
     settledResults?: boolean,
   ): Promise<void>;
+  /** Commits the zero-Runtime control-plane batch before its first write. */
+  commitAwaitJournal(
+    calls: readonly HarnessJournalWaitCall[],
+    turn: { readonly turnId: string; readonly promptId: string },
+    attempt?: {
+      readonly attemptId: string;
+      readonly routeRef: ManagedSessionDurableRef;
+    },
+  ): Promise<HarnessDurableWaitBoundary>;
+  /** Resolves or re-adopts a completed journal-only batch. */
+  resolveAwaitJournal(): Promise<HarnessCheckpointV1 | null>;
   /**
    * Commits the agent-wait safety point: admitted foreground child runs as
    * `await_agent` with `durable_wait`. Agent calls bypass the Broker
@@ -436,11 +449,12 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         latest.boundary === HARNESS_DURABLE_WAIT_BOUNDARY &&
         phase !== 'await_action' &&
         phase !== 'await_runtime' &&
+        phase !== 'await_journal' &&
         phase !== 'await_agent' &&
         phase !== 'await_command'
       ) {
         throw new ManagedSessionConflictError(
-          'durable-wait checkpoint is not an await_action, await_runtime, await_agent, or await_command phase.',
+          'durable-wait checkpoint is not a supported wait phase.',
         );
       }
       return {
@@ -634,6 +648,152 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       });
       await this.commitHarnessCheckpoint(
         `harness:model_output_committed:${this.activation.activationId}:${identity.coveredSequence}`,
+        checkpoint,
+        null,
+      );
+      return checkpoint;
+    });
+  }
+
+  async commitAwaitJournal(
+    calls: readonly HarnessJournalWaitCall[],
+    turn: { readonly turnId: string; readonly promptId: string },
+    attempt?: {
+      readonly attemptId: string;
+      readonly routeRef: ManagedSessionDurableRef;
+    },
+  ): Promise<HarnessDurableWaitBoundary> {
+    if (calls.length === 0) {
+      throw new ManagedSessionConflictError(
+        'Journal wait batch must contain at least one call.',
+      );
+    }
+    const ids = new Set<string>();
+    for (const call of calls) {
+      if (ids.has(call.functionCallId)) {
+        throw new ManagedSessionConflictError(
+          'Journal wait calls must have unique functionCallId values.',
+        );
+      }
+      ids.add(call.functionCallId);
+    }
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const latest = this.authority.latestCheckpoint;
+      if (latest?.boundary === HARNESS_DURABLE_WAIT_BOUNDARY) {
+        const previous = (await this.requireRunnableAuthorization()).checkpoint;
+        if (previous.continuation.phase === 'await_journal') {
+          const waited = previous.journalWait?.calls ?? [];
+          const same =
+            waited.length === calls.length &&
+            calls.every((call) =>
+              waited.some(
+                (existing) =>
+                  existing.functionCallId === call.functionCallId &&
+                  existing.toolName === call.toolName,
+              ),
+            );
+          if (same) return this.runtimeBoundary();
+          throw new ManagedSessionConflictError(
+            'harness is already waiting on a different journal batch.',
+          );
+        }
+        throw new ManagedSessionConflictError(
+          'the durable wait in progress must resolve before the journal wait.',
+        );
+      }
+      const runnable = await this.ensureRunnableUnlocked();
+      const startsTurn =
+        runnable.continuation.phase === 'before_model' ||
+        runnable.continuation.phase === 'turn_settled';
+      if (
+        (turn.turnId !== runnable.identity.turnId ||
+          turn.promptId !== runnable.identity.promptId) &&
+        !startsTurn
+      ) {
+        throw new ManagedSessionConflictError(
+          'a journal wait cannot change the current unfinished turn.',
+        );
+      }
+      if (
+        runnable.identity.activationId !== this.activation.activationId &&
+        !startsTurn
+      ) {
+        throw new ManagedSessionConflictError(
+          'a journal wait cannot continue a prior activation.',
+        );
+      }
+      const previous = {
+        ...runnable,
+        identity: {
+          ...runnable.identity,
+          ...turn,
+          activationId: this.activation.activationId,
+        },
+      };
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = createAwaitJournalHarnessCheckpoint({
+        previous,
+        ...identity,
+        attempt:
+          previous.attempt ??
+          (attempt
+            ? {
+                attemptId: attempt.attemptId,
+                routeRef: attempt.routeRef,
+                capabilityRef: null,
+                samplingRef: null,
+                outputState: 'output_committed',
+                usageRef: null,
+                budgetConsumed: 0,
+              }
+            : null),
+        journalWait: { calls },
+      });
+      await this.commitHarnessCheckpoint(
+        `harness:await_journal:${this.activation.activationId}:${calls.map((call) => call.functionCallId).join(',')}:${identity.coveredSequence}`,
+        checkpoint,
+        HARNESS_DURABLE_WAIT_BOUNDARY,
+      );
+      return this.runtimeBoundary();
+    });
+  }
+
+  async resolveAwaitJournal(): Promise<HarnessCheckpointV1 | null> {
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const latest = this.authority.latestCheckpoint;
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY) {
+        if (
+          previous.continuation.phase !== 'model_output_committed' ||
+          previous.journalWait === null
+        ) {
+          return null;
+        }
+        if (previous.identity.activationId === this.activation.activationId) {
+          return previous;
+        }
+      } else if (previous.continuation.phase !== 'await_journal') {
+        throw new ManagedSessionConflictError(
+          'durable-wait checkpoint is not an await_journal phase.',
+        );
+      }
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = createModelOutputCommittedHarnessCheckpoint({
+        previous: {
+          ...previous,
+          identity: {
+            ...previous.identity,
+            activationId: this.activation.activationId,
+          },
+        },
+        ...identity,
+      });
+      await this.commitHarnessCheckpoint(
+        `harness:model_output_committed:${this.activation.activationId}:journal:${identity.coveredSequence}`,
         checkpoint,
         null,
       );

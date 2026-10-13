@@ -1445,6 +1445,7 @@ export class HostedWorkspaceToolTurn {
   // launches this turn recorded directly — it is how PostToolUse learns
   // an agent call actually ran (R1-62).
   private readonly agentDispatched = new Set<string>();
+  private journalWaitOpen = false;
   private publisher?: HostedShellPublisher;
   private bindingGeneration?: string;
   private advertised?: FunctionDeclaration[];
@@ -2094,9 +2095,15 @@ export class HostedWorkspaceToolTurn {
     model: string,
     signal: AbortSignal,
   ): Promise<Part[]> {
-    if (!this.hooks) return this.executeNative(calls, parts, model, signal);
     const responses = await this.executeNative(calls, parts, model, signal);
-    return this.completeHookResults(calls, responses, model, signal);
+    const completed = this.hooks
+      ? await this.completeHookResults(calls, responses, model, signal)
+      : responses;
+    if (this.journalWaitOpen) {
+      await this.harness.resolveAwaitJournal();
+      this.journalWaitOpen = false;
+    }
+    return completed;
   }
 
   private async completeHookResults(
@@ -3894,6 +3901,39 @@ export class HostedWorkspaceToolTurn {
           turnId: this.promptId,
           promptId: this.promptId,
         });
+      else {
+        const journalRequests = requests.flatMap((request, index) =>
+          refusals[index] === undefined ? [{ request, index }] : [],
+        );
+        if (
+          journalRequests.length > 0 &&
+          journalRequests.every(
+            ({ request }) =>
+              request.message ||
+              request.team ||
+              ((request.agent || request.workflow) && request.agentBackground),
+          )
+        ) {
+          const first = journalRequests[0];
+          let routeRef = inputRefs.get(first.index);
+          if (!routeRef) {
+            routeRef = await this.session.resources.publish(
+              'managed-tool-input',
+              first.request.inputBytes,
+            );
+            inputRefs.set(first.index, routeRef);
+          }
+          await this.harness.commitAwaitJournal(
+            journalRequests.map(({ request }) => ({
+              functionCallId: request.call.callId,
+              toolName: request.call.name,
+            })),
+            { turnId: this.promptId, promptId: this.promptId },
+            { attemptId: messageId, routeRef },
+          );
+          this.journalWaitOpen = true;
+        }
+      }
       // H3: dispatch is durable the moment the checkpoint commits.
       for (const [index, request] of requests.entries()) {
         if (!request.background && !request.monitoring) continue;

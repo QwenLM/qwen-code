@@ -9,6 +9,7 @@ import {
   authorizeParsedHarnessCheckpoint,
   createAwaitActionHarnessCheckpoint,
   createAwaitAgentHarnessCheckpoint,
+  createAwaitJournalHarnessCheckpoint,
   createAwaitRuntimeHarnessCheckpoint,
   createConsumedAgentWaitHarnessCheckpoint,
   createConsumedRuntimeResultsHarnessCheckpoint,
@@ -23,6 +24,7 @@ import {
   tryParseHarnessCheckpointV1,
   type HarnessAgentWaitGroup,
   type HarnessCheckpointV1,
+  harnessCheckpointIsJournalWait,
 } from './managed-harness-checkpoint.js';
 import {
   createAwaitCommandHarnessCheckpoint,
@@ -694,6 +696,46 @@ describe('harness checkpoint v1', () => {
       delete value['agentWait'];
     });
     expect(parseHarnessCheckpointV1(bytes).agentWait).toBeNull();
+  });
+
+  it('round-trips a journal wait and carries it through its resolved boundary', () => {
+    const calls = [
+      {
+        functionCallId: 'call-1',
+        toolName: 'agent',
+      },
+    ];
+    const wait = createAwaitJournalHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      journalWait: { calls },
+    });
+    expect(wait.continuation.phase).toBe('await_journal');
+    expect(harnessCheckpointIsJournalWait(wait)).toBe(true);
+    expect(parseHarnessCheckpointV1(bytesOf(wait))).toEqual(wait);
+
+    const advanced = createModelOutputCommittedHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+    });
+    expect(advanced.continuation.phase).toBe('model_output_committed');
+    expect(advanced.journalWait).toEqual({ calls });
+    expect(harnessCheckpointIsJournalWait(advanced)).toBe(true);
+    expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
+  });
+
+  it('omits an empty journal wait for older checkpoint readers', () => {
+    const encoded = JSON.parse(bytesOf(seed()).toString()) as Record<
+      string,
+      unknown
+    >;
+    expect(encoded).not.toHaveProperty('journalWait');
+    expect(parseHarnessCheckpointV1(bytesOf(seed())).journalWait).toBeNull();
   });
 
   it('rejects an await_agent checkpoint against the other wait families', () => {
