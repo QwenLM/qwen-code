@@ -111,6 +111,7 @@ connection = new AgentSideConnection(() => ({
     }
     if (scenario === 'qwen-tool-name') {
       await send({sessionUpdate:'tool_call',toolCallId:'qwen-1',title:'Shell',kind:'execute',status:'in_progress',rawInput:{command:'ls'},_meta:{toolName:'run_shell_command'}});
+      await send({sessionUpdate:'tool_call_update',toolCallId:'qwen-1',status:'in_progress',content:[{type:'content',content:{type:'text',text:'progress'}}],_meta:{subagentProgress:true}});
       await send({sessionUpdate:'tool_call_update',toolCallId:'qwen-1',status:'completed'});
       await send({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'done'}});
       return {stopReason:'end_turn'};

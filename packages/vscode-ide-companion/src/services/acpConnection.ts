@@ -65,26 +65,41 @@ export function buildAcpClientCapabilities(): {
 }
 
 /**
+ * Returns `preferredOptionId` only when the peer actually offered it. Voting an
+ * id the peer did not offer makes the agent throw "unoffered option" and abort
+ * the turn with the user's typed answers discarded, so both resolvers below
+ * start from this check. Their fallback ladders differ on purpose.
+ */
+function offeredPreferredOptionId(
+  options: ReadonlyArray<{ optionId: string }>,
+  preferredOptionId: string | undefined,
+): string | undefined {
+  return preferredOptionId &&
+    options.some((option) => option.optionId === preferredOptionId)
+    ? preferredOptionId
+    : undefined;
+}
+
+/**
  * Picks the option id to vote for a question approval: the webview's choice
  * when the peer offered it, else `proceed_once`. Returns undefined when neither
- * is on offer — voting an id the peer did not offer makes the agent throw
- * "unoffered option" and abort the turn with the user's typed answers
- * discarded. Mirrors the daemon twin's strict resolution.
+ * is on offer, which the handler turns into `cancelled`.
+ *
+ * Stricter than `resolvePermissionOptionId` below, whose ladder ends at any
+ * `allow_once` option and then at `options[0]` — on a flattened question that
+ * would silently record the first choice as the user's answer. The daemon twin
+ * (`daemonIdeConnection.resolvePermissionOptionId`) is stricter still: it has no
+ * fallback and cancels instead.
  */
 export function resolveAskUserQuestionOptionId(
   options: ReadonlyArray<{ optionId: string }> | undefined,
   preferredOptionId: string | undefined,
 ): string | undefined {
   const offered = Array.isArray(options) ? options : [];
-  if (
-    preferredOptionId &&
-    offered.some((option) => option.optionId === preferredOptionId)
-  ) {
-    return preferredOptionId;
-  }
-  return offered.some((option) => option.optionId === 'proceed_once')
-    ? 'proceed_once'
-    : undefined;
+  return (
+    offeredPreferredOptionId(offered, preferredOptionId) ??
+    offeredPreferredOptionId(offered, 'proceed_once')
+  );
 }
 
 /**
@@ -318,8 +333,19 @@ export class AcpConnection {
                 optionId,
               );
               if (selectedOptionId === undefined) {
-                logger.log(
+                // The user's typed answers are discarded here, so this is the
+                // daemon twin's WARN, not an INFO line, and it names both the
+                // voted id and the offered set: a flattened question (a
+                // capability regression), no options at all, and a stale webview
+                // id all land in this branch and have different owners.
+                logger.warn(
                   '[ACP] AskUserQuestion option not advertised; cancelling',
+                  {
+                    optionId,
+                    offered: permissionData.options?.map(
+                      (option) => option.optionId,
+                    ),
+                  },
                 );
                 return { outcome: { outcome: 'cancelled' } };
               }
@@ -506,11 +532,12 @@ export class AcpConnection {
       return undefined;
     }
 
-    if (
-      preferredOptionId &&
-      options.some((option) => option.optionId === preferredOptionId)
-    ) {
-      return preferredOptionId;
+    const offeredPreferred = offeredPreferredOptionId(
+      options,
+      preferredOptionId,
+    );
+    if (offeredPreferred) {
+      return offeredPreferred;
     }
 
     return (

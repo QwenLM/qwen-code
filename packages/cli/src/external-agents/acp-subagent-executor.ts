@@ -979,6 +979,10 @@ class AcpSubagentExecutor implements SubagentExecutor {
           ([, value]) => value !== null && value !== undefined,
         ),
       ),
+      // The spread above is shallow, so a progress frame carrying its own
+      // `_meta` but no tool name would replace the stored one wholesale and the
+      // call would finish under a different name than it was announced with.
+      _meta: { ...previous?._meta, ...update._meta },
     };
     this.tools.set(callId, tool);
     const reportedName = resolvePeerToolName(tool);

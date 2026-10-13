@@ -179,8 +179,9 @@ agent 读取客户端 `initialize` 能力上的厂商 `_meta` 键
   `_meta.toolName` 识别 Qwen 封装问题的 ACP 客户端；第 3 节约束其 routed-question
   guard。
 - `packages/core/src/utils/invocation-context.ts` —
-  `ASK_USER_QUESTION_CAPABILITY_META_KEY` 所在处；该能力键与 channel-base、Qwen Live
-  的副本由跨包测试保持一致。
+  `ASK_USER_QUESTION_CAPABILITY_META_KEY` 所在处。一个跨包测试把 channel-base 的副本
+  钉到该常量；Qwen Live 无法导入它（其 adaptor 不得依赖 bridge 或 channels 包），
+  因此 Live 只在自己的 adaptor 测试中钉住该线格式值。
 - `packages/core/src/tools/askUserQuestion.ts` — `getConfirmationDetails`、
   `onConfirm`、答案格式化。
 - 先例：`docs/design/2026-08-25-acp-workspace-event-capability.md`、

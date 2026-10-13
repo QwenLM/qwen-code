@@ -30,6 +30,7 @@ import {
   buildAcpClientCapabilities,
   resolveAskUserQuestionOptionId,
 } from './acpConnection.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 
 type MockChild = {
@@ -158,6 +159,13 @@ describe('AcpConnection initialize capabilities', () => {
 });
 
 describe('resolveAskUserQuestionOptionId', () => {
+  it('pins the fallback literal to the core wire value', () => {
+    // Test-only import: production compares against a peer-offered string and
+    // has no need for the enum. Without this pin a core-side rename of
+    // ProceedOnce leaves the helper voting an id no peer offers.
+    expect(ToolConfirmationOutcome.ProceedOnce).toBe('proceed_once');
+  });
+
   it('votes the webview choice when the peer offered it', () => {
     expect(
       resolveAskUserQuestionOptionId(
@@ -169,8 +177,11 @@ describe('resolveAskUserQuestionOptionId', () => {
 
   it('falls back to proceed_once when the webview chose an unoffered id', () => {
     expect(
-      resolveAskUserQuestionOptionId([{ optionId: 'proceed_once' }], 'stale'),
-    ).toBe('proceed_once');
+      resolveAskUserQuestionOptionId(
+        [{ optionId: ToolConfirmationOutcome.ProceedOnce }],
+        'stale',
+      ),
+    ).toBe(ToolConfirmationOutcome.ProceedOnce);
   });
 
   it('refuses to vote when the peer offers neither, so the turn is not aborted', () => {
@@ -192,6 +203,14 @@ describe('resolveAskUserQuestionOptionId', () => {
 });
 
 describe('AcpConnection handshake wiring', () => {
+  afterEach(() => {
+    // The stub below is a one-shot child that cannot serve a second spawn, so
+    // it must not outlive this describe: the file's other `spawnMock.mockReset`
+    // lives in a sibling `beforeEach` and does not cover tests added here.
+    spawnMock.mockReset();
+    vi.restoreAllMocks();
+  });
+
   it('writes the structured-question capability on the initialize request it sends', async () => {
     const written: string[] = [];
     const exitListeners: Array<
@@ -225,13 +244,123 @@ describe('AcpConnection handshake wiring', () => {
     // Deliberately not stubbing setupChildProcessHandlers: the point is to drive
     // the real handshake, so a reverted capability call site turns this red.
     const pending = conn.connect(process.execPath).catch(() => undefined);
-    // The handler settles for 1s before wiring the SDK and sending initialize.
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    // Poll for the frame rather than sleeping past the handler's settle delay:
+    // a fixed sleep leaves whatever margin that unnamed literal allows, and a
+    // miss reads as an empty capture, i.e. as a capability regression. The
+    // timeout must stay above it, since vi.waitFor defaults to the same 1s.
+    await vi.waitFor(
+      () => expect(written.join('')).toContain('"qwen.askUserQuestion":true'),
+      { timeout: 5_000, interval: 25 },
+    );
+    // connect() settles only once the child exits, and that same window is how
+    // a spawn failure is reported.
     for (const listener of exitListeners) listener(0, null);
     await pending;
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(written.join('')).toContain('"qwen.askUserQuestion":true');
+  }, 20_000);
+
+  it('cancels a flattened question rather than voting an id the peer did not offer', async () => {
+    const written: string[] = [];
+    const exitListeners: Array<
+      (code: number | null, signal: string | null) => void
+    > = [];
+    const stdin = new Writable({
+      write(chunk, _encoding, callback) {
+        written.push(String(chunk));
+        callback();
+      },
+    });
+    const stdout = new Readable({ read() {} });
+    const child = createMockChild({
+      stdin,
+      stdout,
+      stderr: new Readable({ read() {} }),
+      on: (event: string, listener: (...args: unknown[]) => void) => {
+        if (event === 'exit') {
+          exitListeners.push(
+            listener as (code: number | null, signal: string | null) => void,
+          );
+        }
+        return child;
+      },
+    });
+    spawnMock.mockReturnValue(child);
+    const conn = new AcpConnection() as unknown as {
+      connect: (cliEntryPath: string) => Promise<void>;
+      onAskUserQuestion: (data: unknown) => Promise<{
+        optionId: string;
+        answers?: Record<string, string>;
+      }>;
+    };
+    // The webview votes the structured-question id. A peer that flattened the
+    // question never offered it, so the handler must cancel instead of echoing
+    // it back: the agent throws "unoffered option" and discards the answers.
+    conn.onAskUserQuestion = vi.fn().mockResolvedValue({
+      optionId: ToolConfirmationOutcome.ProceedOnce,
+      answers: { '0': 'Alpha' },
+    });
+
+    const pending = conn.connect(process.execPath).catch(() => undefined);
+    await vi.waitFor(
+      () => expect(written.join('')).toContain('"qwen.askUserQuestion":true'),
+      { timeout: 5_000, interval: 25 },
+    );
+
+    // A flattened frame arriving from a peer that ignored (or predates) the
+    // capability this companion just advertised. Its option set matches
+    // `buildAskUserQuestionOptions`: one encoded id per choice, the synthetic
+    // `Other…`, then cancel — and no `proceed_once` for the webview's vote to
+    // land on.
+    const toolCall = {
+      toolCallId: 'tool-1',
+      title: 'Ask',
+      kind: 'think',
+      status: 'pending',
+      rawInput: {
+        questions: [
+          {
+            question: 'Pick one',
+            header: 'Choice',
+            options: [
+              { label: 'Alpha', description: 'A' },
+              { label: 'Beta', description: 'B' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+      _meta: {
+        toolName: 'ask_user_question',
+        qwenInteractionKind: 'user_question',
+      },
+    };
+    stdout.push(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'session-1',
+          toolCall,
+          options: [
+            { optionId: 'ask:q0:o0', name: 'Alpha', kind: 'allow_once' },
+            { optionId: 'ask:q0:o1', name: 'Beta', kind: 'allow_once' },
+            { optionId: 'ask:q0:other', name: 'Other…', kind: 'allow_once' },
+            { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+          ],
+        },
+      })}\n`,
+    );
+
+    await vi.waitFor(() => expect(written.join('')).toContain('"cancelled"'), {
+      timeout: 5_000,
+      interval: 25,
+    });
+    expect(written.join('')).not.toContain(ToolConfirmationOutcome.ProceedOnce);
+
+    for (const listener of exitListeners) listener(0, null);
+    await pending;
   }, 20_000);
 });
 

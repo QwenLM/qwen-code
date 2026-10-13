@@ -216,8 +216,10 @@ reconstructed from the selected option id.
   ACP client that must recognise a Qwen-framed question by
   `_meta.toolName`; section 3 constrains its routed-question guard.
 - `packages/core/src/utils/invocation-context.ts` — where
-  `ASK_USER_QUESTION_CAPABILITY_META_KEY` lives; the capability key is shared
-  with the channel-base and Qwen Live copies by a cross-package test.
+  `ASK_USER_QUESTION_CAPABILITY_META_KEY` lives. A cross-package test pins the
+  channel-base duplicate to this constant; Qwen Live cannot import it (its
+  adaptor must not depend on the bridge or channel packages), so Live pins the
+  wire value only inside its own adaptor test.
 - `packages/core/src/tools/askUserQuestion.ts` — `getConfirmationDetails`,
   `onConfirm`, answer formatting.
 - Precedents: `docs/design/2026-08-25-acp-workspace-event-capability.md`,

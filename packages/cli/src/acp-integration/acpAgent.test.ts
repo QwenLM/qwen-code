@@ -4435,14 +4435,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   );
 
   it.each([
-    [true, true, false],
-    [false, false, false],
+    [true, true, false, true],
+    [false, false, false, true],
     // An agent-host session is read-only, but this capability is a wire-format
     // concern, so the gate must still honor it (R2-1).
-    [true, true, true],
+    [true, true, true, true],
+    // Absence is the normative case, not an edge: a standard host such as Zed
+    // sends no `qwen.askUserQuestion` key at all and must get the flattened
+    // options. A `_meta: {}` row would evaluate identically, so it is not
+    // listed separately.
+    [undefined, false, false, false],
   ])(
-    'gates structured ask_user_question support on client capability %s (agent host: %s)',
-    async (supported, expected, agentHost) => {
+    'gates structured ask_user_question support on client capability %s, expecting %s (agent host: %s, advertised: %s)',
+    async (supported, expected, agentHost, advertise) => {
       const innerConfig = await setupSessionMocks('ask-user-question-session');
       // An agent-host session is only admitted from a trusted parent, so that
       // arm boots the same way as the other trusted-capability tests.
@@ -4460,7 +4465,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }) as AgentLike;
       try {
         await agent.initialize({
-          clientCapabilities: { _meta: { 'qwen.askUserQuestion': supported } },
+          // The unadvertised row must omit `_meta` entirely rather than send
+          // the key as `undefined`: that is the frame a standard host sends.
+          clientCapabilities: advertise
+            ? { _meta: { 'qwen.askUserQuestion': supported } }
+            : {},
           ...(agentHost
             ? {
                 _meta: {
@@ -4482,6 +4491,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               }
             : {}),
         });
+        // Pin the row's own premise: without this the agent-host arm is
+        // indistinguishable from the standalone one, and a reshape of the
+        // session-source key would leave it green while covering nothing new.
+        if (agentHost) {
+          expect(innerConfig.setSessionSource).toHaveBeenCalledWith(
+            AGENT_HOST_SESSION_SOURCE_TYPE,
+            undefined,
+          );
+        } else {
+          expect(innerConfig.setSessionSource).not.toHaveBeenCalled();
+        }
         if (expected) {
           expect(
             innerConfig.setAskUserQuestionHostSupported,
