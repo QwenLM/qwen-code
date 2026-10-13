@@ -31,8 +31,11 @@ const bunAvailable =
   spawnSync(bunBin, ['--version'], { timeout: 15_000 }).status === 0;
 
 const getPtyModulePath = fileURLToPath(new URL('./getPty.ts', import.meta.url));
+const getPtyDistPath = fileURLToPath(
+  new URL('../../dist/src/utils/getPty.js', import.meta.url),
+);
 
-const fixtureSource = `
+const roundtripFixtureSource = `
 import { loadPty } from ${JSON.stringify(getPtyModulePath)};
 
 const result = await loadPty();
@@ -91,6 +94,58 @@ console.log(
 );
 `;
 
+// The paused-exit fixture is the automated P1/P2 regression: a child that
+// exits (or is cancelled) while the backend is paused must still deliver
+// onExit exactly once, close the master fd, and — because the fixture never
+// calls process.exit on its success path — leave the host event loop free to
+// drain. The same fixture runs under both interpreters: under Bun through
+// the qwen-bun-pty backend, under Node through the wrapper it must match.
+const pausedExitFixtureSource = `
+import * as fs from 'node:fs';
+import { loadPty } from ${JSON.stringify(getPtyDistPath)};
+
+const result = await loadPty();
+if (!result.impl) {
+  console.error('loadPty returned no backend: ' + result.loadError);
+  process.exit(1);
+}
+const pty = result.impl.module.spawn(
+  '/bin/sh',
+  ['-c', 'echo READY; sleep 0.3; echo TAIL_AFTER; exit 7'],
+  { cols: 80, rows: 24, cwd: process.cwd(), env: process.env },
+);
+let output = '';
+let exits = 0;
+let lastExit = null;
+pty.onData((data) => { output += data; });
+pty.onExit((e) => { exits += 1; lastExit = e; });
+const deadline = Date.now() + 15_000;
+while (!output.includes('READY') && Date.now() < deadline) {
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+pty.pause();
+while (exits === 0 && Date.now() < deadline) {
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+if (exits !== 1) {
+  console.error('expected exactly one exit event, got ' + exits);
+  process.exit(1);
+}
+let fdState = 'OPEN';
+try {
+  fs.fstatSync(pty.fd);
+} catch (e) {
+  fdState = 'closed(' + (e.code || '') + ')';
+}
+if (fdState !== 'closed(EBADF)') {
+  console.error('master fd not released: ' + fdState);
+  process.exit(1);
+}
+console.log(
+  JSON.stringify({ backend: result.impl.name, exits, exit: lastExit, fd: fdState }),
+);
+`;
+
 describe.skipIf(!bunAvailable || process.platform === 'win32')(
   'PTY under the real Bun runtime',
   () => {
@@ -100,7 +155,7 @@ describe.skipIf(!bunAvailable || process.platform === 'win32')(
     beforeEach(() => {
       tempRoot = mkdtempSync(path.join(tmpdir(), 'bun-pty-test-'));
       fixturePath = path.join(tempRoot, 'pty-fixture.mjs');
-      writeFileSync(fixturePath, fixtureSource);
+      writeFileSync(fixturePath, roundtripFixtureSource);
     });
 
     afterEach(() => {
@@ -132,6 +187,56 @@ describe.skipIf(!bunAvailable || process.platform === 'win32')(
         expect(parsed.cols).toBe(100);
         expect(parsed.rows).toBe(40);
         expect(parsed.exit.signal).toBe(1);
+      },
+    );
+  },
+);
+
+describe.skipIf(process.platform === 'win32')(
+  'paused-exit lifecycle on every runtime',
+  () => {
+    let tempRoot: string;
+    let fixturePath: string;
+
+    beforeEach(() => {
+      tempRoot = mkdtempSync(path.join(tmpdir(), 'bun-pty-pause-test-'));
+      fixturePath = path.join(tempRoot, 'pty-pause-fixture.mjs');
+      writeFileSync(fixturePath, pausedExitFixtureSource);
+    });
+
+    afterEach(() => {
+      rmSync(tempRoot, { recursive: true, force: true });
+    });
+
+    const runtimes: Array<{ name: string; bin: string }> = [
+      { name: 'node', bin: process.execPath },
+    ];
+    if (bunAvailable) runtimes.push({ name: 'bun', bin: bunBin });
+
+    it.each(runtimes)(
+      '$name: delivers exit once and releases the fd when paused at exit',
+      { timeout: 60_000 },
+      ({ bin }) => {
+        const result = spawnSync(bin, [fixturePath], {
+          encoding: 'utf8',
+          timeout: 55_000,
+        });
+        if (result.status !== 0) {
+          throw new Error(
+            `paused-exit fixture failed under ${bin} (code ${result.status}):\n${result.stdout}${result.stderr}`,
+          );
+        }
+        const parsed = JSON.parse(result.stdout.trim()) as {
+          backend: string;
+          exits: number;
+          exit: { exitCode: number; signal?: number };
+          fd: string;
+        };
+        expect(parsed.exits).toBe(1);
+        expect(parsed.exit.exitCode).toBe(7);
+        expect(parsed.fd).toBe('closed(EBADF)');
+        // Reaching a spawnSync result at all proves the host drained: the
+        // fixture never calls process.exit on its success path.
       },
     );
   },

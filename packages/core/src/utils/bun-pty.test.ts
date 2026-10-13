@@ -7,17 +7,30 @@
 /**
  * Behavioural regression for the Bun PTY backend (bun-pty.ts).
  *
- * The suite runs under vitest/Node: the backend is runtime-agnostic
- * worker-thread code, so its observable contract — output streaming, writes,
- * resize reaching the child's terminal, kill/exit, flow control, encoding —
- * is exercised directly here. The Bun-leg round-trip through the real
- * `getPty()` seam lives in bun-pty.node-bun.test.ts.
+ * The suite runs under vitest/Node: the backend drives the pinned native
+ * addon directly from a main-thread async `fs.read` pump, so its observable
+ * contract — output streaming, writes, resize reaching the child's terminal,
+ * kill/exit, pause hold, flow control, encoding — is exercised directly
+ * here. The Bun-leg round-trip through the real `getPty()` seam lives in
+ * bun-pty.node-bun.test.ts.
  */
 
+import * as fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { spawn } from './bun-pty.js';
 
 const POSIX = process.platform !== 'win32';
+
+const fdOf = (pty: unknown): number => (pty as { fd: number }).fd;
+
+const expectFdClosed = (pty: unknown): void => {
+  try {
+    fs.fstatSync(fdOf(pty));
+    throw new Error('expected the master fd to be closed, but fstat succeeded');
+  } catch (error) {
+    expect((error as NodeJS.ErrnoException).code).toBe('EBADF');
+  }
+};
 
 async function waitFor(
   predicate: () => boolean,
@@ -100,6 +113,68 @@ describe.skipIf(!POSIX)('BunPtyProcess', () => {
     pty.resume();
     expect(await waitFor(() => output.includes('PAUSED_MARKER_7'))).toBe(true);
     pty.kill();
+  }, 20_000);
+
+  it('delivers exit exactly once and closes the fd when the child exits while paused', async () => {
+    const pty = spawn('/bin/sh', [
+      '-c',
+      'echo READY; sleep 0.2; echo TAIL_AFTER_PAUSE; exit 7',
+    ]);
+    let output = '';
+    pty.onData((data) => (output += data));
+    let exits = 0;
+    let exit: { exitCode: number; signal?: number } | undefined;
+    pty.onExit((e) => {
+      exits += 1;
+      exit = e;
+    });
+
+    expect(await waitFor(() => output.includes('READY'))).toBe(true);
+    pty.pause();
+
+    expect(await waitFor(() => exits > 0, 5_000)).toBe(true);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(exits).toBe(1);
+    expect(exit!.exitCode).toBe(7);
+    // Wrapper parity: a paused consumer receives no data, not even the tail.
+    expect(output).not.toContain('TAIL_AFTER_PAUSE');
+    expectFdClosed(pty);
+  }, 20_000);
+
+  it('keeps exit detection while paused output overflows the hold', async () => {
+    const pty = spawn('/bin/sh', ['-c', 'yes X | head -c 3000000; exit 0']);
+    pty.pause();
+    let exits = 0;
+    pty.onExit(() => {
+      exits += 1;
+    });
+
+    expect(await waitFor(() => exits > 0, 10_000)).toBe(true);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(exits).toBe(1);
+    expectFdClosed(pty);
+  }, 30_000);
+
+  it('releases the fd when flow-control pause is followed by cancel', async () => {
+    const pty = spawn('/bin/sh', ['-c', 'sleep 30'], {
+      handleFlowControl: true,
+    });
+    let exits = 0;
+    let exit: { exitCode: number; signal?: number } | undefined;
+    pty.onExit((e) => {
+      exits += 1;
+      exit = e;
+    });
+
+    pty.write('\x13'); // XOFF
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    pty.kill('SIGHUP'); // cancel while paused
+
+    expect(await waitFor(() => exits > 0, 5_000)).toBe(true);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(exits).toBe(1);
+    expect(exit!.signal).toBe(1);
+    expectFdClosed(pty);
   }, 20_000);
 
   it('intercepts flow-control messages when handleFlowControl is on', async () => {

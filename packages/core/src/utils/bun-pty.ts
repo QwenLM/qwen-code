@@ -20,8 +20,13 @@
  * `tty.ReadStream` constructed, the runtime never attaches a watcher that
  * misreads `EAGAIN` into a close. `EAGAIN` (child alive, no data) is retried
  * on a short timer; `EIO` (child exited, slave closed) or `EBADF` ends the
- * pump. The observable contract mirrors the POSIX `IPty` surface the
- * consumers use: `pid`, `cols`, `rows`, `process`, `handleFlowControl`,
+ * pump. The native exit callback of this addon only fires around master-fd
+ * read activity (isolated-probe evidence: with zero reads it never fires, on
+ * Node and Bun alike), so the pump must keep reading even while paused —
+ * `pause()` therefore buffers into a bounded hold instead of stopping reads,
+ * and a paused child's exit still reaches `onExit`, closes the fd, and lets
+ * the host drain. The observable contract mirrors the POSIX `IPty` surface
+ * the consumers use: `pid`, `cols`, `rows`, `process`, `handleFlowControl`,
  * `onData`, `onExit`, `resize`, `clear`, `write`, `kill`, `pause`, `resume`,
  * plus the `error` event that ShellExecutionService subscribes to.
  * POSIX only — Windows keeps the Bun gate in `getPty.ts` until ConPTY is
@@ -106,6 +111,13 @@ const READ_BUFFER_BYTES = 64 * 1024;
 // pump sees EIO within milliseconds of the last slave closing; this only
 // covers a pump that stays silent (e.g. a grandchild holding the pty open).
 const EXIT_DRAIN_TIMEOUT_MS = 500;
+
+// While paused the pump keeps reading (see the header: the native exit
+// callback rides on read activity), so output is held here for the resume
+// flush instead. The hold is bounded; past it, paused output is dropped —
+// the wrapper would have applied kernel backpressure by not reading, which
+// this backend cannot afford without losing exit detection.
+const PAUSED_BUFFER_LIMIT = 1024 * 1024;
 
 interface LoadedNative {
   addon: NativeAddon;
@@ -210,6 +222,8 @@ export class BunPtyProcess extends EventEmitter {
   private readonly encoding: string | null;
   private readonly readBuffer = Buffer.alloc(READ_BUFFER_BYTES);
   private paused = false;
+  private readonly pausedChunks: Buffer[] = [];
+  private pausedBytes = 0;
   private pumpActive = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly writeQueue: Array<{ buffer: Buffer; offset: number }> = [];
@@ -374,6 +388,11 @@ export class BunPtyProcess extends EventEmitter {
   resume(): void {
     if (!this.paused) return;
     this.paused = false;
+    const chunks = this.pausedChunks.splice(0);
+    this.pausedBytes = 0;
+    for (const chunk of chunks) {
+      this.emitData(chunk);
+    }
     this.pump();
   }
 
@@ -394,7 +413,11 @@ export class BunPtyProcess extends EventEmitter {
   }
 
   private pump(): void {
-    if (!this.pumpActive || this.paused || this.fdClosed) return;
+    // Reads never stop for pause(): the native exit callback only fires
+    // around master-fd read activity, so a paused pump would never learn
+    // about a child exit — no onExit, an open master fd, and a host that
+    // cannot drain. Paused data is held in the bounded pause hold instead.
+    if (!this.pumpActive || this.fdClosed) return;
     fs.read(
       this.fd,
       this.readBuffer,
@@ -417,10 +440,23 @@ export class BunPtyProcess extends EventEmitter {
           this.endPump();
           return;
         }
-        this.emitData(Buffer.from(this.readBuffer.subarray(0, bytesRead)));
+        const chunk = Buffer.from(this.readBuffer.subarray(0, bytesRead));
+        if (this.paused) {
+          this.holdPaused(chunk);
+        } else {
+          this.emitData(chunk);
+        }
         this.pump();
       },
     );
+  }
+
+  private holdPaused(chunk: Buffer): void {
+    if (this.pausedBytes + chunk.byteLength > PAUSED_BUFFER_LIMIT) {
+      return;
+    }
+    this.pausedChunks.push(chunk);
+    this.pausedBytes += chunk.byteLength;
   }
 
   private schedulePumpRetry(): void {
@@ -437,6 +473,11 @@ export class BunPtyProcess extends EventEmitter {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
     }
+    // The wrapper's paused ReadStream loses its buffered data when the
+    // socket is destroyed on exit; the pause hold is discarded for parity —
+    // resume() after exit replays nothing.
+    this.pausedChunks.length = 0;
+    this.pausedBytes = 0;
     this.closeFd();
     this.finishOutput();
   }
@@ -500,7 +541,7 @@ export class BunPtyProcess extends EventEmitter {
   }
 
   private finishOutput(): void {
-    const tail = this.decoder?.end();
+    const tail = this.paused ? null : this.decoder?.end();
     if (tail) {
       this.emitData(Buffer.from(tail));
     }
