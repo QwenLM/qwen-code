@@ -1,4 +1,10 @@
 import {
+  createComposerTagForItem,
+  fileReferenceInsertText,
+  FILE_PROVIDER_ID,
+  sanitizeAtMentionItem,
+} from './hooks/useAtMentionSources';
+import {
   isModelSetupCommand,
   resolveModelManagement,
   type WebShellModelManagementOptions,
@@ -14,7 +20,10 @@ import { useWebShellNavigation } from './navigation';
 import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
-import { isSessionWriterBlockedCode } from './daemon/session/session-context';
+import {
+  isSessionWriterBlockedCode,
+  sessionContextKey,
+} from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import {
@@ -572,9 +581,9 @@ function isWebTerminalTarget(event: Event): boolean {
 // so a docked panel mounting under an open DialogShell would pause the
 // modal's trap. The surface covers the viewport, so the keyboard is the only
 // escape route; wrap it at the tabbable edges like FocusScope's loop does.
-function getFullscreenSurfaceTabEdges(
-  container: HTMLElement,
-): [HTMLElement | null, HTMLElement | null] {
+function getArtifactPanelTabStops(
+  container: HTMLElement | ShadowRoot,
+): HTMLElement[] {
   const candidates: HTMLElement[] = [];
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT, {
     acceptNode(node) {
@@ -592,20 +601,23 @@ function getFullscreenSurfaceTabEdges(
       ) {
         return NodeFilter.FILTER_SKIP;
       }
-      return element.tabIndex >= 0
+      return element.tabIndex >= 0 || element.shadowRoot
         ? NodeFilter.FILTER_ACCEPT
         : NodeFilter.FILTER_SKIP;
     },
   });
   while (walker.nextNode()) {
-    candidates.push(walker.currentNode as HTMLElement);
+    const element = walker.currentNode as HTMLElement;
+    if (element.tabIndex >= 0) candidates.push(element);
+    if (element.shadowRoot) {
+      candidates.push(...getArtifactPanelTabStops(element.shadowRoot));
+    }
   }
-  const visible = candidates.filter((element) =>
+  return candidates.filter((element) =>
     typeof element.checkVisibility === 'function'
       ? element.checkVisibility({ checkVisibilityCSS: true })
       : true,
   );
-  return [visible[0] ?? null, visible[visible.length - 1] ?? null];
 }
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
@@ -1948,6 +1960,7 @@ interface ArtifactPanelPersistedState {
 }
 
 type PersistedArtifactPanelTab =
+  | Extract<ArtifactPanelTab, { kind: 'files' }>
   | Extract<ArtifactPanelTab, { kind: 'web_preview' }>
   | Omit<Extract<ArtifactPanelTab, { kind: 'turn_calls' }>, 'promptLabel'>
   | Pick<
@@ -2078,6 +2091,15 @@ function parsePersistedArtifactPanelTab(
   }
   const common = { id: tab['id'], title: tab['title'] };
   switch (tab['kind']) {
+    case 'files':
+      if (typeof tab['workspaceCwd'] !== 'string' || !tab['workspaceCwd'])
+        return;
+      return {
+        ...common,
+        kind: 'files',
+        workspaceCwd: tab['workspaceCwd'],
+        workspaceId: tab['workspaceId'] as string | undefined,
+      };
     case 'turn_calls':
       if (
         tab['id'] !== 'turn_calls' ||
@@ -2255,6 +2277,8 @@ function serializeArtifactPanelTabs(
   return tabs.flatMap((tab): PersistedArtifactPanelTab[] => {
     const { id, title } = tab;
     switch (tab.kind) {
+      case 'files':
+        return [tab];
       case 'web_preview':
         return [
           { id, title, kind: tab.kind, url: tab.url, viewport: tab.viewport },
@@ -5199,6 +5223,15 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const filesAvailable =
+    workspaceContextActive &&
+    rightPanelItems.includes('files') &&
+    Boolean(
+      resolveArtifactWorkspaceOwner(
+        workspace.capabilities,
+        connection.workspaceCwd,
+      ),
+    );
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
   const trajectoryAvailable = rightPanelItems.includes('trajectory');
@@ -5954,7 +5987,11 @@ export function App({
         kind: 'trajectory',
         title: t('trajectory.title'),
         sessionId: sourceSessionId,
-        loadPage: createTrajectoryPageLoader(workspace.client, sourceSessionId),
+        loadPage: createTrajectoryPageLoader(
+          workspace.client,
+          sourceSessionId,
+          sessionContextKey(connection.sessionContext),
+        ),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -5967,7 +6004,12 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t, workspace.client],
+    [
+      getDefaultReviewPanelWidth,
+      t,
+      workspace.client,
+      connection.sessionContext,
+    ],
   );
   const openContextUsagePanel = useCallback(
     (
@@ -6574,6 +6616,7 @@ export function App({
     ).some(
       (tab) =>
         (tab.kind === 'terminal' && webTerminalAvailable) ||
+        (tab.kind === 'files' && filesAvailable) ||
         (tab.kind === 'web_preview' && webPreviewAvailable) ||
         (tab.kind === 'workflow' &&
           tab.sessionId === connection.sessionId &&
@@ -6593,6 +6636,34 @@ export function App({
       artifactPanelStateBySessionRef.current.delete(nextSessionId);
       artifactPanelStateBySessionRef.current.set(nextSessionId, currentState);
     };
+    const retainCurrentTrajectory = () => {
+      const retainedTabs = artifactPanelTabsRef.current.filter(
+        (tab) =>
+          previousSessionId === nextSessionId &&
+          trajectoryAvailable &&
+          tab.kind === 'trajectory' &&
+          tab.loadPage ===
+            createTrajectoryPageLoader(
+              workspace.client,
+              tab.sessionId,
+              sessionContextKey(connection.sessionContext),
+            ),
+      );
+      setArtifactPanelTabs(
+        retainedTabs.map((tab) =>
+          tab.kind === 'trajectory'
+            ? { ...tab, historyGapRevision: (tab.historyGapRevision ?? 0) + 1 }
+            : tab,
+        ),
+      );
+      setActiveArtifactPanelTabId(
+        retainedTabs.some(
+          (tab) => tab.id === activeArtifactPanelTabIdRef.current,
+        )
+          ? activeArtifactPanelTabIdRef.current
+          : null,
+      );
+    };
     if (connection.loadingTranscript) {
       saveCurrentState();
       artifactPanelRestoredSessionKeyRef.current = undefined;
@@ -6603,8 +6674,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (connection.status !== 'connected') {
@@ -6617,8 +6687,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (artifactsLoading) {
@@ -6631,8 +6700,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
 
@@ -6669,6 +6737,7 @@ export function App({
     const deferredPersistedTabs = (persisted?.tabs ?? []).filter(
       (tab) =>
         (tab.kind === 'terminal' && !webTerminalAvailable) ||
+        (tab.kind === 'files' && !filesAvailable) ||
         (tab.kind === 'web_preview' && !webPreviewAvailable) ||
         (tab.kind === 'workflow' &&
           tab.sessionId === connection.sessionId &&
@@ -6753,6 +6822,8 @@ export function App({
                         }
                       : undefined;
                 }
+                case 'files':
+                  return filesAvailable ? tab : undefined;
                 case 'web_preview':
                   return webPreviewAvailable ? tab : undefined;
                 case 'file': {
@@ -6880,6 +6951,7 @@ export function App({
                     loadPage: createTrajectoryPageLoader(
                       workspace.client,
                       tab.sessionId,
+                      sessionContextKey(connection.sessionContext),
                     ),
                   };
                 }
@@ -6931,12 +7003,13 @@ export function App({
       const desiredActiveTabId =
         savedState?.activeTabId ?? persisted?.activeTabId ?? null;
       const tabsOpenedDuringRestore = artifactPanelTabsRef.current;
-      const newlyOpenedIds = new Set(
-        tabsOpenedDuringRestore.map((tab) => tab.id),
+      const openedById = new Map(
+        tabsOpenedDuringRestore.map((tab) => [tab.id, tab]),
       );
+      const restoredIds = new Set(mergedRestoredTabs.map((tab) => tab.id));
       const candidateTabs = [
-        ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
-        ...tabsOpenedDuringRestore,
+        ...mergedRestoredTabs.map((tab) => openedById.get(tab.id) ?? tab),
+        ...tabsOpenedDuringRestore.filter((tab) => !restoredIds.has(tab.id)),
       ];
       const mergedTabs = candidateTabs.filter(
         (tab) =>
@@ -7004,6 +7077,7 @@ export function App({
     };
   }, [
     artifactsLoading,
+    connection.sessionContext,
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
@@ -7016,6 +7090,7 @@ export function App({
     sessionActions,
     trajectoryAvailable,
     webTerminalAvailable,
+    filesAvailable,
     webPreviewAvailable,
     workspace.baseUrl,
     workspace.client,
@@ -7059,6 +7134,36 @@ export function App({
     },
     [getDefaultReviewPanelWidth],
   );
+  const openFilesPanel = useCallback(() => {
+    const owner = resolveArtifactWorkspaceOwner(
+      workspace.capabilities,
+      connection.workspaceCwd,
+    );
+    if (!filesAvailable || !owner) return;
+    rememberArtifactPanelTrigger();
+    const tab: ArtifactPanelTab = {
+      id: `files:${owner.id ?? owner.cwd}`,
+      kind: 'files',
+      title: t('files.title'),
+      workspaceCwd: owner.cwd,
+      workspaceId: owner.id,
+    };
+    setArtifactPanelTabs((tabs) =>
+      tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+    );
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelWidth((width) =>
+      Math.min(getMaxArtifactPanelWidth(), Math.max(width, 740)),
+    );
+    setArtifactPanelOpen(true);
+  }, [
+    connection.workspaceCwd,
+    filesAvailable,
+    getMaxArtifactPanelWidth,
+    rememberArtifactPanelTrigger,
+    t,
+    workspace.capabilities,
+  ]);
   const openSubagentPanelForSession = useCallback(
     (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
       if (getSubagentDetailsUnavailableReason(tool)) return;
@@ -7415,16 +7520,20 @@ export function App({
   );
   const openFilePreview = useCallback(
     (
-      change: TurnOutputFileChange,
+      change: TurnOutputFileChange | string,
       previewWorkspaceCwd?: string,
       previewWorkspaceId?: string,
     ) => {
-      const previewContent = getFileChangePreviewContent(change);
+      const path = typeof change === 'string' ? change : change.path;
+      const previewContent =
+        typeof change === 'string'
+          ? undefined
+          : getFileChangePreviewContent(change);
       const tab: ArtifactPanelTab = {
-        id: `file:${previewWorkspaceCwd ?? ''}:${change.path}`,
+        id: `file:${previewWorkspaceCwd ?? ''}:${path}`,
         kind: 'file',
-        title: displayPath(change.path, previewWorkspaceCwd),
-        workspacePath: change.path,
+        title: displayPath(path, previewWorkspaceCwd),
+        workspacePath: path,
         ...(previewWorkspaceCwd ? { workspaceCwd: previewWorkspaceCwd } : {}),
         ...(previewWorkspaceId ? { workspaceId: previewWorkspaceId } : {}),
         ...(previewContent !== undefined ? { previewContent } : {}),
@@ -9151,7 +9260,11 @@ export function App({
       const target =
         (event.composedPath()[0] as Element | undefined) ??
         (event.target as Element | null);
-      if (!target || surface.contains(target) || target.contains(surface)) {
+      if (
+        !target ||
+        event.composedPath().includes(surface) ||
+        target.contains(surface)
+      ) {
         return;
       }
       // The elevated toast host and any Radix layer opened from the panel
@@ -9189,8 +9302,9 @@ export function App({
   }, [dockedFullscreenActive, portalRoot]);
   const handleArtifactPanelSurfaceKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      if (!artifactPanelFullscreen) return;
+      if (!artifactPanelFullscreen && !useFloatingArtifactPanel) return;
       if (
+        event.defaultPrevented ||
         event.key !== 'Tab' ||
         event.altKey ||
         event.ctrlKey ||
@@ -9198,10 +9312,35 @@ export function App({
       ) {
         return;
       }
-      const [first, last] = getFullscreenSurfaceTabEdges(event.currentTarget);
-      const focused = getShadowAwareActiveElement(event.currentTarget);
+      if (!event.nativeEvent.composedPath().includes(event.currentTarget))
+        return;
+      const candidates = getArtifactPanelTabStops(event.currentTarget);
+      const first = candidates[0];
+      const last = candidates[candidates.length - 1];
+      let focused = getShadowAwareActiveElement(event.currentTarget);
+      while (focused?.shadowRoot?.activeElement) {
+        focused = focused.shadowRoot.activeElement;
+      }
       if (!first || !last) {
         if (focused === event.currentTarget) event.preventDefault();
+        return;
+      }
+      // Radix's drawer loop only sees light DOM, so own Tab before it can
+      // wrap from the filter past the file tree's shadow-root rows.
+      if (useFloatingArtifactPanel) {
+        const index = candidates.indexOf(focused as HTMLElement);
+        const next =
+          index < 0
+            ? event.shiftKey
+              ? last
+              : first
+            : candidates[
+                (index + (event.shiftKey ? -1 : 1) + candidates.length) %
+                  candidates.length
+              ];
+        event.preventDefault();
+        event.stopPropagation();
+        next?.focus();
         return;
       }
       if (!event.shiftKey && focused === last) {
@@ -9215,7 +9354,7 @@ export function App({
         last.focus();
       }
     },
-    [artifactPanelFullscreen],
+    [artifactPanelFullscreen, useFloatingArtifactPanel],
   );
   // The drawer's Radix dismiss layer only checks `event.key === 'Escape'`
   // (no isComposing guard), so while composing in a panel input an Escape
@@ -18653,7 +18792,18 @@ export function App({
         if (escArmedActionRef.current !== null) {
           resetEscapeState();
         }
-        if (e.key === 'Tab' && e.shiftKey && !live.interactionBlocked) {
+        if (
+          e.key === 'Tab' &&
+          e.shiftKey &&
+          !live.interactionBlocked &&
+          !e
+            .composedPath()
+            .some(
+              (node) =>
+                node instanceof Element &&
+                node.matches('[role="dialog"], [role="alertdialog"]'),
+            )
+        ) {
           e.preventDefault();
           live.handleCycleMode();
         }
@@ -20125,6 +20275,34 @@ export function App({
     onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
+    onOpenFiles: filesAvailable ? openFilesPanel : undefined,
+    onReferenceFile:
+      workspaceContextActive && !dialogOpen && mainView === 'chat'
+        ? (path: string) => {
+            const tag = createComposerTagForItem(
+              FILE_PROVIDER_ID,
+              sanitizeAtMentionItem({
+                id: `file:${path}`,
+                label: path.split('/').at(-1) ?? path,
+                description: path,
+                kind: 'insert',
+                fileKind: 'file',
+              }),
+              fileReferenceInsertText(path),
+            );
+            if (!tag) return;
+            if (useFloatingArtifactPanel) {
+              closeArtifactPanel();
+            } else {
+              setArtifactPanelFullscreen(false);
+            }
+            editorRef.current?.addTags([tag], {
+              placement: 'inline',
+              position: 'end',
+            });
+            requestAnimationFrame(() => editorRef.current?.focus());
+          }
+        : undefined,
     onOpenWebPreview: workspaceContextActive ? openWebPreviewTab : undefined,
     onWebPreviewChange: updateWebPreviewTab,
     latestReviewAvailable: latestReviewChanges.length > 0,
@@ -23212,6 +23390,15 @@ export function App({
                       event.preventDefault();
                       return;
                     }
+                    const target = event.composedPath()[0];
+                    if (
+                      target instanceof HTMLInputElement &&
+                      target.hasAttribute('data-workspace-file-filter') &&
+                      target.value
+                    ) {
+                      event.preventDefault();
+                      return;
+                    }
                     // Fullscreen is the topmost surface: Escape shrinks the
                     // panel back to its drawer width. Without this the
                     // drawer's dismiss layer would close the panel instead.
@@ -23221,15 +23408,20 @@ export function App({
                   }}
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
-                  <WebShellCustomizationProvider value={customization}>
-                    <ArtifactPanel
-                      {...artifactPanelSharedProps}
-                      onOpenTerminal={
-                        webTerminalAvailable ? openTerminalTab : undefined
-                      }
-                      variant="drawer"
-                    />
-                  </WebShellCustomizationProvider>
+                  <div
+                    className="flex min-h-0 flex-1"
+                    onKeyDown={handleArtifactPanelSurfaceKeyDown}
+                  >
+                    <WebShellCustomizationProvider value={customization}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        onOpenTerminal={
+                          webTerminalAvailable ? openTerminalTab : undefined
+                        }
+                        variant="drawer"
+                      />
+                    </WebShellCustomizationProvider>
+                  </div>
                 </DrawerContent>
               </Drawer>
             )}

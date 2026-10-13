@@ -36,6 +36,12 @@ try {
 // membership check have to be reduced to that form first.
 const packPath = (target) => relative(root, target).split(sep).join('/');
 
+if (packed && !packed.has('NOTICES.txt')) {
+  problems.push(
+    'bundled dependency NOTICES.txt is missing from the npm package',
+  );
+}
+
 // A `.`/`..` path segment (also percent-encoded, which Node rejects the same
 // way) anywhere in a declared `exports` target. Deliberately not `_`: Node
 // resolves `./dist/_/*.js` normally.

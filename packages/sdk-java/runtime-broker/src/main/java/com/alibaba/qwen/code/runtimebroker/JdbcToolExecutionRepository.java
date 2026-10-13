@@ -79,6 +79,29 @@ public final class JdbcToolExecutionRepository
         return false;
     }
 
+    public static List<ToolExecutionRecord> findHarnessExecutions(Connection connection,
+            String tenantId, String harnessSessionId) throws SQLException {
+        List<ToolExecutionRecord> result = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("SELECT e.*, b.isolation_class, b.isolation_key FROM qwen_tool_execution e"
+                + " JOIN qwen_runtime_binding b ON b.binding_id = e.binding_id"
+                + " WHERE b.tenant_id = ? AND e.harness_session_id = ? ORDER BY e.execution_call_id_hash FOR UPDATE")) {
+            statement.setString(1, tenantId);
+            statement.setString(2, harnessSessionId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    ToolExecutionRecord record = mapExecution(rows);
+                    if (!harnessSessionId.equals(record.getHarnessSessionId())
+                            || !"session".equals(rows.getString("isolation_class"))
+                            || !harnessSessionId.equals(rows.getString("isolation_key"))) {
+                        throw new RuntimeBrokerException(409, "workspace_close_identity_unverified", "Execution scope differs", false);
+                    }
+                    result.add(record);
+                }
+            }
+        }
+        return List.copyOf(result);
+    }
+
     @Override
     public ToolExecutionRecord findOrCreate(ToolExecutionRecord candidate) {
         requireCandidate(candidate);

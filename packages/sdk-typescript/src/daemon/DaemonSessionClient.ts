@@ -89,6 +89,8 @@ import type {
 export interface DaemonReplaySnapshot {
   compactedReplay: DaemonEvent[];
   liveJournal: DaemonEvent[];
+  lifecycleReplay?: DaemonEvent[];
+  lifecycleReplayIncomplete?: boolean;
 }
 
 export interface DaemonSessionClientOptions {
@@ -198,6 +200,8 @@ function createStandaloneRestoredClient(
     hasActivePrompt,
     compactedReplay,
     liveJournal,
+    lifecycleReplay,
+    lifecycleReplayIncomplete,
     historyHasMore,
     historyAnchorRecordId,
     replayDegraded,
@@ -219,6 +223,10 @@ function createStandaloneRestoredClient(
           replaySnapshot: {
             compactedReplay: compactedReplay ?? [],
             liveJournal: liveJournal ?? [],
+            ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+            ...(lifecycleReplayIncomplete !== undefined
+              ? { lifecycleReplayIncomplete }
+              : {}),
           },
           replaySnapshotComplete:
             Array.isArray(compactedReplay) && Array.isArray(liveJournal),
@@ -407,6 +415,8 @@ export class DaemonSessionClient {
       hasActivePrompt,
       compactedReplay,
       liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete,
       historyHasMore,
       historyAnchorRecordId,
       replayDegraded,
@@ -426,6 +436,10 @@ export class DaemonSessionClient {
       replaySnapshot: {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
+        ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+        ...(lifecycleReplayIncomplete !== undefined
+          ? { lifecycleReplayIncomplete }
+          : {}),
       },
       replaySnapshotComplete,
       replayPartial: partial === true,
