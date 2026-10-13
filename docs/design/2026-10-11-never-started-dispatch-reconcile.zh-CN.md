@@ -2,11 +2,10 @@
 
 [English](2026-10-11-never-started-dispatch-reconcile.md) | [简体中文](2026-10-11-never-started-dispatch-reconcile.zh-CN.md)
 
-状态：提案（2026-10-11，作者 wenshao）
+原设计：2026-10-11，作者 wenshao。reload 对账已随 #13917 合入；回合内后续为 #13937。
 跟踪：#12380 阶段 H → #12827，#13532 验收运行的发现 **A3**。
-不在范围内：A1 本体（#13789，已合入）、跨 Session 楔死（#13800）、
-启用 `monitor_run` 或 `child_run` 的 `shell` kind，以及 #13801 的
-Gap A（回合内「从未启动」取证门 —— 见「有意不做的事」）。
+
+范围：#13801 的 reload 对账与独立的 #13937 回合内后台 Shell 取证。A1 执行启用、跨 Session 楔死与 Monitor 行缺失取证继续不在这两条路径内。
 
 ## 问题陈述
 
@@ -131,6 +130,25 @@ started: false })` → 经 `commitExtensionRecord` 提交
    `ambiguous_state` —— 永久性空洞（凭据错误）不再与瞬时不可达
    输出逐字节相同的行。
 
+### 回合内后台失败取证（#13937）
+
+tool-turn 的 catch 处理 publication 行尚未创建时失败的后台 Shell 预留。
+保留 grant owner 的 `NOT_STARTED` 证明；该证明不可得时，通过
+`backgroundProcessStatus(executionCallId)` 查询同一原 Broker。只有带类型的
+`runtime_execution_not_found` 应答解析为行缺失，才允许在存活回合内执行
+`settleFailed(..., { stopReason: 'start_failed', started: false })`。
+行存在、unknown、身份不匹配或查询被拒绝时，记录继续未结算；publication
+报错本身永远不是未启动证明。
+
+此后备取证仅适用于后台 Shell 请求。Monitor 派发不创建 `:process` 行，
+继续使用原有 grant-owner 证明。不增加 acquire、release、派发或协议字段。
+记录已证明的 child 终态后，原 Turn 仍报告需要恢复；不宣称批次中的其它
+不确定调用已完成。
+
+回归用例先拒绝 reserve，再因 publication 缺失拒绝 `close_not_started`。
+只有原进程明确不存在时才要求立即结算 child；进程行存在或 Broker 不可达时，
+保留拒绝结算行为。
+
 ### 挂点：hosted 会话 open
 
 在 `registerHostedHarnessSessionRoutes` 的 open/load 处理里
@@ -166,13 +184,8 @@ if (session.childRuns && brokerOptions)
   携带 `is_monitor`、绝不携带 `is_background`，因此根本没有可缺失的
   行，「缺失即证明」对 `monitor_run` 不成立 —— 向那里扩展必须先找到
   另一种证明。
-- 不修 #13801 R1 的 Gap A —— 回合内取证门：当一次后台 reserve 从未
-  落下 publication 行（容量或 owner 拒绝、`await_runtime` 检查点缺
-  失），回合内的 `close_not_started` arm 无法证明「从未启动」，这样
-  的记录只能搁浅到某次重开运行本 arm —— 而常驻 Session 可能永远不会
-  重开。补上另一半位于 `hosted-workspace-tool-turn.ts` 的派发路径，
-  是它自己的后续工作（跟踪为 #13937），且落地时必须保持
-  「仅行缺失」（R3）。
+- reload 扫描器不处理 #13801 R1 Gap A 的存活回合失败路径。该路径由
+  上述 #13937 后备取证单独覆盖，保留同一原进程账本的行缺失证明。
 - 不做周期扫描器：按 R1 只做 reload。open 时 Broker 不可达留下的洞，
   留到下一次 reload 自愈；严格好于今天（永远没有）。
 - 探测后不 `release()`：release 会持久 `RELEASED` 并楔死该 runtime
@@ -222,14 +235,16 @@ execution: 'not_started_proven'} }`，`valid: true` —— 由现有 TS 与
 
 ## 受影响文件
 
-| 文件                                                                                    | 改动                    |
-| --------------------------------------------------------------------------------------- | ----------------------- |
-| `packages/cli/src/serve/hosted-never-started-reconcile.ts`                              | **新增**，arm 本体      |
-| `packages/cli/src/serve/hosted-never-started-reconcile.test.ts`                         | **新增**，见证          |
-| `packages/cli/src/serve/hosted-harness-session.ts`                                      | open 时调用 arm（很小） |
-| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | 接线见证                |
-| `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 组后继对             |
-| `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | 本文档                  |
+| 文件                                                                                    | 改动                     |
+| --------------------------------------------------------------------------------------- | ------------------------ |
+| `packages/cli/src/serve/hosted-never-started-reconcile.ts`                              | **新增**，arm 本体       |
+| `packages/cli/src/serve/hosted-never-started-reconcile.test.ts`                         | **新增**，见证           |
+| `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                  | 回合内后备取证           |
+| `packages/cli/src/serve/hosted-workspace-tool-turn.test.ts`                             | 进程缺失与不确定结果见证 |
+| `packages/cli/src/serve/hosted-harness-session.ts`                                      | open 时调用 arm（很小）  |
+| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | 接线见证                 |
+| `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 组后继对              |
+| `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | 本文档                   |
 
 ## 未决问题
 

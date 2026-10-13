@@ -4196,6 +4196,9 @@ export class HostedWorkspaceToolTurn {
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
+        const request = requests.find(
+          (_, index) => reserved.get(index) === executionCallId,
+        );
         let proven = false;
         try {
           const owner = this.publication!.owner;
@@ -4223,15 +4226,21 @@ export class HostedWorkspaceToolTurn {
               String(closeCause),
           );
         }
+        if (!proven && request?.background) {
+          try {
+            proven =
+              (await this.broker.backgroundProcessStatus(executionCallId)) ===
+              undefined;
+          } catch {
+            writeStderrLineSafe(
+              'qwen serve: Background process absence could not be confirmed.',
+            );
+          }
+        }
         if (!proven) continue;
-        // The grant owner proved this start never happened, yet the run
-        // record admitted for the same execution was already committed
-        // dispatch_started — and nothing beyond this catch can ever settle
-        // it again. Settle it under the same proof so the projection stops
-        // reporting a run that never started.
-        const request = requests.find(
-          (_, index) => reserved.get(index) === executionCallId,
-        );
+        // The grant owner or original background-process ledger proved
+        // this start never happened. Publication absence alone proves
+        // nothing, and Monitor dispatches do not use that process ledger.
         if (request?.background)
           await this.childRuns
             ?.settleFailed(executionCallId, {

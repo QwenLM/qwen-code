@@ -80,6 +80,7 @@ const broker = vi.hoisted(() => ({
   release: vi.fn(),
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
+  backgroundProcessStatus: vi.fn(),
 }));
 // child_run's shell kind and monitor_run are enabled by the H3 enablement
 // slice (#13856); a case that needs a gate shut closes it here, per test,
@@ -106,6 +107,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     release = broker.release;
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
+    backgroundProcessStatus = broker.backgroundProcessStatus;
   },
 }));
 vi.mock(
@@ -195,6 +197,7 @@ const parts: Part[] = calls.map((call) => ({
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  broker.backgroundProcessStatus.mockResolvedValue({ state: 'unknown' });
   expectWritesStopped = false;
   for (const method of [
     broker.authorizeLifecycle,
@@ -4930,6 +4933,7 @@ function backgroundTurnRig(
     lane?: HostedShellTurnOptions;
     notStartedProven?: boolean;
     reserveRefused?: boolean;
+    publicationMissing?: boolean;
   } = {},
 ) {
   enablement.childRun = true;
@@ -4984,6 +4988,12 @@ function backgroundTurnRig(
       }
       if (route === '/grants' && operation === 'close_not_started') {
         order.push('close_not_started');
+        if (options.publicationMissing)
+          throw new ManagedSessionStoreHttpError(
+            404,
+            'publication_not_found',
+            'Publication does not exist',
+          );
         return {
           state: options.notStartedProven === false ? 'RUNNING' : 'NOT_STARTED',
         };
@@ -6076,6 +6086,58 @@ it('settles the admitted child run when grant reservation exhausts its retries',
     'close_not_started',
   ]);
 });
+
+it('settles an in-turn dispatch with no publication and no durable process row', async () => {
+  const { call, parts } = backgroundCall();
+  const rig = backgroundTurnRig(
+    { executionStatus: 'success', responseParts: [], capture: null },
+    { reserveRefused: true, publicationMissing: true },
+  );
+  turn = rig.turn;
+  broker.backgroundProcessStatus.mockResolvedValue(undefined);
+  await expect(
+    turn.execute([call], parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+  expect(broker.executeV3).not.toHaveBeenCalled();
+  expect(rig.order).toContain('close_not_started');
+  expect(rig.orchestrator.calls.at(-1)).toEqual([
+    'settleFailed',
+    {
+      id: 'shell-execution',
+      params: { stopReason: 'start_failed', started: false },
+    },
+  ]);
+  expect(broker.backgroundProcessStatus).toHaveBeenCalledWith(
+    'shell-execution',
+  );
+});
+
+it.each(['present', 'unavailable'] as const)(
+  'keeps an in-turn dispatch blocked when its process proof is %s',
+  async (proof) => {
+    const { call, parts } = backgroundCall();
+    const rig = backgroundTurnRig(
+      { executionStatus: 'success', responseParts: [], capture: null },
+      { reserveRefused: true, publicationMissing: true },
+    );
+    turn = rig.turn;
+    if (proof === 'present')
+      broker.backgroundProcessStatus.mockResolvedValue({ state: 'executing' });
+    else
+      broker.backgroundProcessStatus.mockRejectedValue(
+        new HostedWorkspaceBrokerRejection(503, 'store_unavailable'),
+      );
+    await expect(
+      turn.execute([call], parts, 'model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+
+    expect(rig.orchestrator.calls.map(([name]) => name)).toEqual([
+      'admit',
+      'dispatchStarted',
+    ]);
+  },
+);
 
 it('settles the admitted child run when executeV3 fails without the proven 409', async () => {
   // R3-24: dispatch_started is durable and the v3 start then fails with

@@ -2,12 +2,10 @@
 
 [English](2026-10-11-never-started-dispatch-reconcile.md) | [简体中文](2026-10-11-never-started-dispatch-reconcile.zh-CN.md)
 
-Status: proposed (2026-10-11, author wenshao)
+Original design: 2026-10-11, author wenshao. Reload reconciliation merged in #13917; the in-turn follow-up is #13937.
 Tracks: #12380 Stage H → #12827, finding **A3** of the #13532 acceptance run.
-Out of scope: A1 itself (#13789, merged), the cross-Session wedge (#13800),
-enabling `monitor_run` or the `child_run` `shell` kind, and #13801's Gap A
-(the in-turn never-started proof gate — see "What is deliberately NOT
-built").
+
+Scope: the #13801 reload reconciliation and the separate #13937 in-turn background Shell proof. A1 execution enablement, cross-Session wedges and Monitor absence proof remain outside these paths.
 
 ## Problem statement
 
@@ -144,6 +142,28 @@ started: false })` → commits `state: failed`,
    request URL), or `ambiguous_state` — so a permanent hole (a bad
    token) can no longer read byte-identically to a transient outage.
 
+### In-turn background failure proof (#13937)
+
+The tool-turn catch handles a failed background Shell reservation before a
+publication row exists. It retains the grant owner's `NOT_STARTED` proof; if
+that proof is unavailable, it probes the same original Broker through
+`backgroundProcessStatus(executionCallId)`. Only the typed
+`runtime_execution_not_found` response resolves to absence and permits
+`settleFailed(..., { stopReason: 'start_failed', started: false })` in the live
+Turn. A present row, unknown result, wrong identity or rejected probe leaves
+the record unresolved. The publication error itself is never proof.
+
+This fallback applies only to background Shell requests. Monitor dispatches
+do not create the `:process` row and keep their existing grant-owner proof.
+It adds no acquire, release, dispatch or protocol field. The original Turn
+still reports recovery required after recording the proven child terminal;
+the fix does not claim the rest of an uncertain batch completed.
+
+The regression refuses reservation, then refuses `close_not_started` for the
+absent publication. It requires immediate child settlement only for a
+definitively absent original process and retains refusal when a process row
+exists or the Broker is unavailable.
+
 ### Hook point: hosted session open
 
 In `registerHostedHarnessSessionRoutes`'s open/load path
@@ -182,14 +202,9 @@ if (session.childRuns && brokerOptions)
   absent and the absence read is NOT a never-started proof for
   `monitor_run` — extending this arm there requires a different proof
   first.
-- No fix for #13801 R1 Gap A — the in-turn proof gate: when a background
-  reserve never lands a publication row (capacity or owner refusal, a
-  missing `await_runtime` checkpoint), the in-turn `close_not_started`
-  arm cannot prove never-started, and such a record strands until a
-  reopen runs this arm — which a resident Session may never see. Closing
-  that half lives in `hosted-workspace-tool-turn.ts`'s dispatch path, is
-  its own follow-up (tracked as #13937), and must stay row-absence-only
-  when it lands (R3).
+- The reload scanner does not handle #13801 R1 Gap A, the live in-turn
+  failure path. That path is covered separately by the #13937 fallback
+  above, retaining the same original-process row-absence proof.
 - No periodic scanner: reload-only per R1. A broker-outage-at-open hole
   stays stranded until a later reload; strictly better than today (never).
 - No `release()` after probing: releasing persists `RELEASED` and wedges
@@ -246,14 +261,16 @@ Hook wiring (`hosted-harness-session.test.ts`):
 
 ## Files affected
 
-| File                                                                                    | Change                        |
-| --------------------------------------------------------------------------------------- | ----------------------------- |
-| `packages/cli/src/serve/hosted-never-started-reconcile.ts`                              | **new**, the arm              |
-| `packages/cli/src/serve/hosted-never-started-reconcile.test.ts`                         | **new**, witnesses            |
-| `packages/cli/src/serve/hosted-harness-session.ts`                                      | call the arm on open (~small) |
-| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | wiring witness                |
-| `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 successor pair             |
-| `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | this doc                      |
+| File                                                                                    | Change                                 |
+| --------------------------------------------------------------------------------------- | -------------------------------------- |
+| `packages/cli/src/serve/hosted-never-started-reconcile.ts`                              | **new**, the arm                       |
+| `packages/cli/src/serve/hosted-never-started-reconcile.test.ts`                         | **new**, witnesses                     |
+| `packages/cli/src/serve/hosted-workspace-tool-turn.ts`                                  | in-turn proof fallback                 |
+| `packages/cli/src/serve/hosted-workspace-tool-turn.test.ts`                             | absent and ambiguous process witnesses |
+| `packages/cli/src/serve/hosted-harness-session.ts`                                      | call the arm on open (~small)          |
+| `packages/cli/src/serve/hosted-harness-session.test.ts`                                 | wiring witness                         |
+| `packages/core/src/managed-runtime/contracts/managed-child-run-record-v1.fixtures.json` | +1 successor pair                      |
+| `docs/design/2026-10-11-never-started-dispatch-reconcile(.zh-CN).md`                    | this doc                               |
 
 ## Open questions
 
