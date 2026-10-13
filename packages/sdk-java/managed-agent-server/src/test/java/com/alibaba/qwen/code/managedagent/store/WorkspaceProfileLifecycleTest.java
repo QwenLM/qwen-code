@@ -179,6 +179,46 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"read_file", "write_file", "edit", "glob", "wrong_digest", "wrong_runtime", "wrong_harness",
+            "shell", "v3", "publication", "unreferenced", "corrupt", "unsettled"})
+    void shellProfileNativeFileInputsRequireOriginalIdentityAndKnownSettlement(String mode) throws Exception {
+        var f = fixture();
+        var binding = f.bindings.findOrCreate(new RuntimeProvisionRequest(f.scope(), f.session));
+        String tool = java.util.List.of("read_file", "write_file", "edit", "glob").contains(mode) ? mode
+                : "shell".equals(mode) ? "run_shell_command" : "read_file";
+        String payload = f.json.writeValueAsString(Map.of("toolName", tool, "input", Map.of("file_path", "proof.txt")));
+        String requestDigest = "sha256:" + ("wrong_digest".equals(mode) ? "a".repeat(64)
+                : ToolPublicationContract.sha256(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        var reference = new java.util.HashMap<String, Object>(Map.of("sessionId", "original-owner", "promptId", "turn-1",
+                "callId", "tool-1", "argsDigest", requestDigest, "dispatchMode", "deferred"));
+        if ("v3".equals(mode)) reference.put("runtimeProtocol", 3);
+        if ("publication".equals(mode)) reference.put("publicationId", "pub-1");
+        var ledger = new JdbcToolExecutionRepository(f.jdbc.getDataSource());
+        var execution = ledger.findOrCreate(ToolExecutionRecord.prepared("call-1", "call-1", binding.getBindingId(), binding.getGeneration(),
+                f.session, "original-owner", "turn-1", "tool-1", requestDigest, reference));
+        if (!"unsettled".equals(mode)) {
+            ledger.settlePrepared(execution, Map.of("executionStatus", "success"), java.time.Instant.now());
+        }
+        f.resource("native-input", "managed-tool-input", f.json.createObjectNode()
+                .put("harnessSessionId", "wrong_harness".equals(mode) ? "other-session" : f.session)
+                .put("runtimeSessionId", "wrong_runtime".equals(mode) ? "other-owner" : "original-owner")
+                .put("payloadJson", payload));
+        if ("unreferenced".equals(mode)) f.jdbc.update("UPDATE qwen_managed_session_resource SET state = 'PUBLISHED'");
+        if ("corrupt".equals(mode)) f.jdbc.update("UPDATE qwen_managed_session_resource SET sha256 = ?", "f".repeat(64));
+        var operation = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);
+        var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
+        var verifier = new WorkspaceProfileLifecycleVerifier(f.jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),
+                beans.getBeanProvider(ManagedToolResultStore.class));
+        Runnable verify = () -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation,
+                java.util.List.of(binding), WorkspaceToolProfiles.SHELL));
+        if (java.util.List.of("read_file", "write_file", "edit", "glob").contains(mode)) {
+            verify.run();
+        } else {
+            assertThatThrownBy(verify::run).isInstanceOf(ApiException.class);
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"complete", "capture_failed", "wrong_identity", "missing_seal", "open", "receipt", "publication",
             "deferred_v3", "deferred_v3_input", "wrong_digest", "missing_input_digest", "invalid_input_digest"})
     void verifiesPublishedForegroundCaptureAndRejectsMissingOrChangedEvidence(String mode) throws Exception {
