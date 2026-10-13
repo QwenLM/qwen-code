@@ -3,6 +3,14 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## Managed 工作区与模型
+
+`ManagedAgentWebShell` 可通过 `enableWorkspaceBinding` 启用 Java 授权工作区列表，并通过 `modelPresets={[{ agentId: 'agent-model-a', label: 'Model A' }]}` 提供新建会话的模型预设。每个 `agentId` 必须由宿主预先发布为模型专属 AgentDefinition；服务端模型允许列表和定义中的工具、审批设置决定实际准入。浏览器不发布定义或传入模型凭证。模型预设名称是宿主展示数据，已有会话显示其 Agent 身份；实际模型及修订由 Java 固定。
+
+Java 新建页直接复用标准 Web Shell 的欢迎标题、输入框、原生模型菜单和工作区底栏。选择工作区、相对目录和模型后输入任务并发送，一次请求创建会话与首个 Turn；响应丢失保留冻结请求，已创建后的读回重试不会再次发送输入。旧 provider 的空创建能力保持兼容。已有会话更换模型或工作区应新建，绑定工作区内切换目录仍使用已有修订校验流程。对话复用标准消息列表及输入框布局，保留 Managed 审批、取消、结果与未确认请求重试；不提供 daemon 附件、文件引用或斜杠命令。
+
+本地 Vite Java 演示可添加 `managedWorkspace=1`，或设置 `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true`。`VITE_MANAGED_AGENT_MODEL_PRESETS` 为上述预设数组的 JSON；`VITE_MANAGED_AGENT_ACTOR_ID` 可通过 `X-Qwen-Actor-Id` 提供本地用户身份，同时进入存储隔离 scope。Java 必须已有对应工作区授权，并显式配置 `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`；该本地开发配置仅用于可信 loopback 环境。文件工具执行还需要 Java 文档中的 Workspace files、Session Store、Broker mounts 和 Harness Broker 连接配置。
+
 ## Managed 工具结果
 
 `ManagedAgentWebShell` 与 `createJavaManagedAgentProvider` 支持 Java O3 工具结果。
