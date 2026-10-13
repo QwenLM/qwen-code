@@ -7,49 +7,6 @@ import {
 } from '../src/daemon/ui/transcript.js';
 import type { DaemonUiEvent } from '../src/daemon/ui/types.js';
 import { matchTurnEvent } from '../src/daemon/DaemonClient.js';
-import { normalizeDaemonEvent } from '../src/daemon/ui/normalizer.js';
-
-describe('daemon transcript regeneration metadata', () => {
-  it('retains both turns and their explicit relationship after normalization', () => {
-    const originalPromptId = '11111111-1111-4111-8111-111111111111';
-    const regeneratedPromptId = '22222222-2222-4222-8222-222222222222';
-    const events = [originalPromptId, regeneratedPromptId].flatMap((promptId) =>
-      normalizeDaemonEvent({
-        type: 'session_update',
-        promptId,
-        data: {
-          sessionId: 'session-1',
-          update: {
-            sessionUpdate: 'user_message_chunk',
-            content: { type: 'text', text: 'same question' },
-            _meta: {
-              promptId,
-              ...(promptId === regeneratedPromptId
-                ? { 'qwen.regenerateOf': originalPromptId }
-                : {}),
-            },
-          },
-        },
-      }),
-    );
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      events,
-      { now: 1 },
-    );
-
-    const users = state.blocks.filter((block) => block.kind === 'user');
-    expect(users).toHaveLength(2);
-    expect(users[0].meta).not.toHaveProperty('qwen.regenerateOf');
-    expect(users[1].meta).toMatchObject({
-      'qwen.regenerateOf': originalPromptId,
-    });
-    expect(users.map((block) => block.promptId)).toEqual([
-      originalPromptId,
-      regeneratedPromptId,
-    ]);
-  });
-});
 
 describe('daemon transcript rewind', () => {
   it('drops the target user turn and later transcript blocks', () => {

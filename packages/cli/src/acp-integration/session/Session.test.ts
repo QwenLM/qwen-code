@@ -12715,54 +12715,6 @@ describe('Session', () => {
       ]);
     });
 
-    it('records regeneration lineage without adding it to model input', async () => {
-      const regenerateOf = '11111111-1111-4111-8111-111111111111';
-      const daemonPromptId = '22222222-2222-4222-8222-222222222222';
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-
-      await session.prompt(
-        {
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'hello' }],
-          _meta: { 'qwen.regenerateOf': regenerateOf },
-        },
-        { version: 1, sessionId: 'test-session-id', promptId: daemonPromptId },
-      );
-
-      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-        'hello',
-        undefined,
-        { displayText: 'hello', hookContext: '', regenerateOf },
-        expect.stringContaining('test-session-id########'),
-        daemonPromptId,
-      );
-      expect(textParts(firstSentMessage())).toEqual(['hello']);
-    });
-
-    it.each([null, '', 'prompt-id', {}, ['prompt-id']])(
-      'ignores malformed regeneration lineage (%j)',
-      async (regenerateOf) => {
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'hello' }],
-          _meta: { 'qwen.regenerateOf': regenerateOf },
-        });
-        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-          'hello',
-          undefined,
-          undefined,
-          expect.stringContaining('test-session-id########'),
-          undefined,
-        );
-        expect(textParts(firstSentMessage())).toEqual(['hello']);
-      },
-    );
-
     it.each([
       ['file', '@README.md'],
       ['mcp', '@mcp:o2'],

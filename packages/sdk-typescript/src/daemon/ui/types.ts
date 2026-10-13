@@ -135,7 +135,6 @@ export type DaemonInputAnnotation = DaemonInputReferenceAnnotation;
 export interface DaemonTextDeltaMeta extends Record<string, unknown> {
   qwenDiscreteMessage?: boolean;
   inputAnnotations?: DaemonInputAnnotation[];
-  'qwen.regenerateOf'?: string;
 }
 
 export interface DaemonUiUserImageEvent extends DaemonUiEventBase {

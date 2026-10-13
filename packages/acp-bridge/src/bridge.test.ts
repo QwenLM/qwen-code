@@ -17021,11 +17021,7 @@ describe('createAcpSessionBridge', () => {
         {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'hello from A' }],
-          _meta: {
-            inputAnnotations,
-            'qwen.regenerateOf': '11111111-1111-4111-8111-111111111111',
-            privateRequestId: 'hidden',
-          },
+          _meta: { inputAnnotations, privateRequestId: 'hidden' },
         },
         undefined,
         {
@@ -17061,9 +17057,6 @@ describe('createAcpSessionBridge', () => {
         expect(
           (update._meta as { inputAnnotations?: unknown })?.inputAnnotations,
         ).toEqual(inputAnnotations);
-        expect(update._meta).toMatchObject({
-          'qwen.regenerateOf': '11111111-1111-4111-8111-111111111111',
-        });
         expect(
           (update._meta as { privateRequestId?: unknown })?.privateRequestId,
         ).toBeUndefined();
@@ -17073,47 +17066,6 @@ describe('createAcpSessionBridge', () => {
       abortB.abort();
       await bridge.shutdown();
     });
-
-    it.each([null, '', 'prompt-id', {}, ['prompt-id']])(
-      'omits invalid regeneration metadata from live user echoes (%j)',
-      async (regenerateOf) => {
-        const handle = makeChannel({
-          promptImpl: () => ({ stopReason: 'end_turn' }),
-        });
-        const bridge = makeBridge({
-          channelFactory: async () => handle.channel,
-        });
-        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-        const abort = new AbortController();
-        const events = bridge.subscribeEvents(session.sessionId, {
-          signal: abort.signal,
-        });
-        const userEcho = (async () => {
-          for await (const event of events) {
-            if (event.type !== 'session_update') continue;
-            const update = (
-              event.data as {
-                update?: {
-                  sessionUpdate?: string;
-                  _meta?: Record<string, unknown>;
-                };
-              }
-            ).update;
-            if (update?.sessionUpdate === 'user_message_chunk') return update;
-          }
-          throw new Error('No user echo was published');
-        })();
-
-        await bridge.sendPrompt(session.sessionId, {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'hello' }],
-          _meta: { 'qwen.regenerateOf': regenerateOf },
-        });
-        expect((await userEcho)._meta).not.toHaveProperty('qwen.regenerateOf');
-        abort.abort();
-        await bridge.shutdown();
-      },
-    );
 
     it('echoes only channel display text while forwarding full model context', async () => {
       const handle = makeChannel({

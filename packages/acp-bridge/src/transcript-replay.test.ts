@@ -1090,69 +1090,6 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
-  it('replays regeneration lineage while retaining both original turns', () => {
-    const originalPromptId = '11111111-1111-4111-8111-111111111111';
-    const regeneratedPromptId = '22222222-2222-4222-8222-222222222222';
-    const machine = createTranscriptReplayMachine();
-    const original = updates(
-      machine,
-      record('original-user', 'user', {
-        daemonPromptId: originalPromptId,
-        message: { role: 'user', parts: [{ text: 'same question' }] },
-      }),
-    );
-    const regenerated = updates(
-      machine,
-      record('regenerated-user', 'user', {
-        daemonPromptId: regeneratedPromptId,
-        message: { role: 'user', parts: [{ text: 'same question' }] },
-        systemPayload: {
-          displayText: 'same question',
-          hookContext: '',
-          regenerateOf: originalPromptId,
-          resourceLinks: [
-            { type: 'resource_link', uri: 'session://source', name: 'Source' },
-          ],
-        },
-      }),
-    );
-
-    expect(original[0]._meta).toMatchObject({ promptId: originalPromptId });
-    expect(original[0]._meta).not.toHaveProperty('qwen.regenerateOf');
-    expect(regenerated).toHaveLength(2);
-    expect([original[0], regenerated[0]]).toMatchObject([
-      { content: { type: 'text', text: 'same question' } },
-      { content: { type: 'text', text: 'same question' } },
-    ]);
-    for (const update of regenerated) {
-      expect(update._meta).toMatchObject({
-        promptId: regeneratedPromptId,
-        'qwen.regenerateOf': originalPromptId,
-      });
-    }
-  });
-
-  it.each([null, '', 'prompt-id', {}, ['prompt-id']])(
-    'drops malformed regeneration lineage in saved records (%j)',
-    (regenerateOf) => {
-      const projected = updates(
-        createTranscriptReplayMachine(),
-        record('user-invalid-regeneration', 'user', {
-          message: { role: 'user', parts: [{ text: 'hello' }] },
-          systemPayload: {
-            displayText: 'hello',
-            hookContext: '',
-            regenerateOf,
-          },
-        }),
-      );
-      expect(projected[0]._meta).not.toHaveProperty('qwen.regenerateOf');
-      expect(projected[0]).toMatchObject({
-        content: { type: 'text', text: 'hello' },
-      });
-    },
-  );
-
   it.each([
     ['file', '@README.md'],
     ['mcp', '@mcp:o2'],

@@ -297,7 +297,6 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
-  REGENERATE_OF_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_ATTACHMENT_CONTEXT_META_KEY,
@@ -306,7 +305,6 @@ import {
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
-  parseRegenerateOfPromptId,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
@@ -6233,9 +6231,6 @@ export class Session implements SessionContext {
             const inputAnnotations = readDaemonInputAnnotations(
               promptMetadata?.[DAEMON_INPUT_ANNOTATIONS_META_KEY],
             );
-            const regenerateOf = parseRegenerateOfPromptId(
-              promptMetadata?.[REGENERATE_OF_META_KEY],
-            );
             const declaredSubmission =
               promptMetadata?.[DAEMON_SUBMITTED_PROMPT_META_KEY];
             const submittedPrompt =
@@ -6400,14 +6395,12 @@ export class Session implements SessionContext {
                 goalTurn?.permit,
                 promptDisplayText !== undefined ||
                   inputAnnotations ||
-                  regenerateOf ||
                   attachmentReferences ||
                   resourceLinks.length > 0
                   ? {
                       displayText: promptDisplayText ?? promptText,
                       hookContext: '',
                       ...(inputAnnotations ? { inputAnnotations } : {}),
-                      ...(regenerateOf ? { regenerateOf } : {}),
                       ...(attachmentReferences ? { attachmentReferences } : {}),
                       ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
@@ -6497,14 +6490,11 @@ export class Session implements SessionContext {
                 recorder?.recordUserMessage(
                   promptText,
                   goalTurn?.permit,
-                  promptDisplayText !== undefined ||
-                    inputAnnotations ||
-                    regenerateOf
+                  promptDisplayText !== undefined || inputAnnotations
                     ? {
                         displayText: promptDisplayText ?? promptText,
                         hookContext: '',
                         ...(inputAnnotations ? { inputAnnotations } : {}),
-                        ...(regenerateOf ? { regenerateOf } : {}),
                       }
                     : undefined,
                   promptId,
