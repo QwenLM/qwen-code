@@ -11103,6 +11103,39 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('leaves upgrades to the Express fall-through on a settled handle-less app', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-handleless-upgrade-')),
+    );
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      delete app.locals['acpHandle'];
+      return app;
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        token: 'secret-token',
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      // Probe only after the runtime settles: a handle-less app
+      // (hosted-harness profile, QWEN_SERVE_ACP_HTTP=0) never attaches a
+      // transport, so the upgrade keeps the pre-gate fall-through — a plain
+      // GET /acp answered with the SSE handler's 406, not the gate's 503.
+      await handle.runtimeReady;
+      expect(await probeAcpUpgradeWireStatus(handle)).toBe(406);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('keeps the remote same-origin exception alive during the bootstrap window', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-selforigin-')),

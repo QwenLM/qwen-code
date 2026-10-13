@@ -10778,8 +10778,8 @@ async function runQwenServeImpl(
     // sees a misleading 406 instead of a socket. Hold early upgrades here
     // and replay them once the transport attaches (the same hold the
     // delegating app gives REST requests), or answer a retryable 503 once
-    // no transport can still arrive (runtime settled without one, startup
-    // failed, or the daemon is shutting down).
+    // startup has failed. A runtime that settles without a transport
+    // (handle-less app) restores the fall-through instead.
     const preTransportUpgrades: Array<{
       req: IncomingMessage;
       socket: Duplex;
@@ -10813,27 +10813,11 @@ async function runQwenServeImpl(
       acpWsTransportAttached = true;
       releasePreTransportUpgrades();
     };
-    if (runtimeStartupSettled) {
-      // Prebuilt runtime: the transport attaches synchronously from
-      // onListening. Only a handle-less app (QWEN_SERVE_ACP_HTTP=0) never
-      // attaches — close the gate so late upgrades get the 503 immediately.
-      const acpHandle = (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
-        'acpHandle'
-      ] as AcpHttpHandle | undefined;
-      if (!acpHandle) preTransportUpgradeGateClosed = true;
-    } else {
-      void runtimeReady.then(
-        () => {
-          if (!acpWsTransportAttached) preTransportUpgradeGateClosed = true;
-          releasePreTransportUpgrades();
-        },
-        () => {
-          preTransportUpgradeGateClosed = true;
-          releasePreTransportUpgrades();
-        },
-      );
-    }
-    server.on('upgrade', (req, socket, head) => {
+    const preTransportUpgradeGuard = (
+      req: IncomingMessage,
+      socket: Duplex,
+      head: Buffer,
+    ): void => {
       if (acpWsTransportAttached) return;
       if (preTransportUpgradeGateClosed) {
         socket.write(
@@ -10846,7 +10830,29 @@ async function runQwenServeImpl(
       // A socket opened before any REST request must still force the
       // deferred runtime up, same as the delegating app's start-on-request.
       if (!runtimeStartupSettled) startRuntimeForRequest?.();
-    });
+    };
+    server.on('upgrade', preTransportUpgradeGuard);
+    void runtimeReady.then(
+      () => {
+        // A runtime that settles without a transport (handle-less app:
+        // hosted-harness profile, QWEN_SERVE_ACP_HTTP=0) must keep the
+        // Express fall-through its routes already expose (hidden 404, SSE
+        // 406), so the guard steps aside for later upgrades. Upgrades that
+        // raced the startup window still get the gate's retryable 503.
+        const acpHandle = (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+          'acpHandle'
+        ] as AcpHttpHandle | undefined;
+        if (!acpHandle) {
+          server.removeListener('upgrade', preTransportUpgradeGuard);
+        }
+        preTransportUpgradeGateClosed = true;
+        releasePreTransportUpgrades();
+      },
+      () => {
+        preTransportUpgradeGateClosed = true;
+        releasePreTransportUpgrades();
+      },
+    );
 
     const tryListen = (attemptPort: number, attempt: number): void => {
       const handleListening = (): void => {
