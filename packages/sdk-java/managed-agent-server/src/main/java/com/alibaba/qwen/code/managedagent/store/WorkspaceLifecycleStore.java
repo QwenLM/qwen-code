@@ -121,7 +121,6 @@ public class WorkspaceLifecycleStore {
                 + " ORDER BY journal_revision", row -> {
                 maxScanned[0] = Math.max(maxScanned[0], row.getLong("journal_revision"));
                 for (String line : new String(row.getBytes("record_bytes"), StandardCharsets.UTF_8).split("\n")) {
-
                     try {
                         JsonNode event = json.readTree(line).path("managedSession");
                         String turn = event.path("payload").path("turnId").asText();

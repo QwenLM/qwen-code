@@ -57,7 +57,8 @@ public final class HostedHarnessClient implements AutoCloseable {
     private static final Set<String> RUNTIME_RECOVERY_OUTCOMES =
             Set.of("known", "unknown");
     private static final Set<String> RUNTIME_RECOVERY_PHASES =
-            Set.of("await_runtime", "await_agent", "results_ready");
+            Set.of("await_runtime", "await_agent", "await_command",
+                    "results_ready");
     private static final Set<String> RUNTIME_EXECUTION_STATES =
             Set.of("prepared", "executing", "cancel_requested", "settled");
     private static final AtomicLong CLIENT_SEQUENCE = new AtomicLong();
@@ -397,11 +398,13 @@ public final class HostedHarnessClient implements AutoCloseable {
     /**
      * H4d-b: one session message operation onto the Session's journal (the
      * message relay's verbs). The Hosted side commits through its funnel
-     * and answers 202 once settled; a non-2xx answer surfaces as a
+     * and answers 202 once settled, carrying the settled body — H4e-b3's
+     * command verbs answer it with the lead's reply document, which the
+     * relay copies back to the member. A non-2xx answer surfaces as a
      * {@link DaemonHttpException}, and anything ambiguous is an unknown
      * outcome for the caller to retry, never to guess at.
      */
-    public void runMessageOperation(HarnessSessionRef session,
+    public Map<String, Object> runMessageOperation(HarnessSessionRef session,
             Map<String, Object> body) {
         HarnessSessionRef ref = requireSessionRef(session);
         String operation = "POST /session/:id/messages/operations";
@@ -425,6 +428,7 @@ public final class HostedHarnessClient implements AutoCloseable {
                 throw new DaemonProtocolException(
                         "Hosted Harness settled a different message operation");
             }
+            return json;
         } catch (DaemonProtocolException e) {
             throw new MutationOutcomeUnknownException(operation, e);
         }
