@@ -622,3 +622,117 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(() => across(deep)).not.toThrow();
   });
 });
+
+describe('redirect grammar', () => {
+  it.each<Row>([
+    ['fd-numbered writes', 'printf X 3>p.txt', [write(`${CWD}/p.txt`)]],
+    ['clobber-override writes', 'printf X >| p.txt', [write(`${CWD}/p.txt`)]],
+    [
+      'read-write opens',
+      'printf X <> data.txt',
+      [read(`${CWD}/data.txt`), write(`${CWD}/data.txt`)],
+    ],
+    ['fd-numbered reads', 'cat 0<.env', [read(`${CWD}/.env`)]],
+    ['redirects glued to a word', 'printf X>p.txt', [write(`${CWD}/p.txt`)]],
+    ['`>&` with a file name', 'printf X >&out.txt', [write(`${CWD}/out.txt`)]],
+    ['`&>` with a file name', 'printf X &>out.txt', [write(`${CWD}/out.txt`)]],
+    ['`exec` redirects', 'exec 3>p.txt', [write(`${CWD}/p.txt`)]],
+    ['no write for fd duplication', 'ls -la 2>&1', [dir(CWD)]],
+    ['no write for `>&2`', 'printf X >&2', []],
+    ['no write for `>&-`', 'printf X >&-', []],
+    ['no write for /dev/null', 'echo hi > /dev/null', []],
+    ['no write for /dev/stderr', 'echo hi > /dev/stderr', []],
+    ['no write for a here-string', 'cat <<< hello', []],
+    ['no write for a quoted `>`', 'echo ">" foo', []],
+    ['no write for a single-quoted `>`', "echo '>' foo", []],
+    ['no write for an escaped `>`', 'echo \\> foo', []],
+    [
+      'a quoted `>` is a grep pattern',
+      'grep ">" a.txt',
+      [read(`${CWD}/a.txt`)],
+    ],
+    [
+      'a quoted `>` does not hide the redirect after it',
+      "echo x '>'>f",
+      [write(`${CWD}/f`)],
+    ],
+    [
+      'an escaped `>` does not hide the redirect after it',
+      'echo x \\>>f',
+      [write(`${CWD}/f`)],
+    ],
+    ['`<&` with a spaced fd is no file', 'cat <& 3', []],
+    ['`>&` with a spaced fd is no file', 'echo x >& 10', []],
+    ['backgrounding after fd duplication', 'echo x >&2&', []],
+    [
+      '`>&` with a spaced file name writes it',
+      'echo x >& out.txt',
+      [write(`${CWD}/out.txt`)],
+    ],
+    ['no write inside a comment', 'echo hi # > foo', []],
+    [
+      'a `#` inside a word is not a comment',
+      'echo ""#x >f',
+      [write(`${CWD}/f`)],
+    ],
+    [
+      '`[[` as an argument hides no redirect',
+      'echo [[ > f',
+      [write(`${CWD}/f`)],
+    ],
+    ['`[[` without `]]` hides no redirect', '[[ x >f', [write(`${CWD}/f`)]],
+    ['no write for `[[ a > b ]]`', '[[ a > b ]]', []],
+    ['no write for `(( a > b ))`', '(( a > b ))', []],
+    [
+      'arithmetic keeps its `>`',
+      'echo $(( 1 > 0 )) > out.txt',
+      [write(`${CWD}/out.txt`)],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(ops(command)).toEqual(expected);
+  });
+});
+
+describe('prefix commands and substitutions', () => {
+  it.each<Row>([
+    [
+      'a write inside a substitution is still a write',
+      'echo $(printf X > p.txt)',
+      [write(`${CWD}/p.txt`)],
+    ],
+    ['a process substitution is not a file', 'cat <(true)', []],
+    [
+      'prefix commands keep quoted words intact',
+      'sudo cat "my notes.txt"',
+      [read(`${CWD}/my notes.txt`)],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(ops(command)).toEqual(expected);
+  });
+
+  it.each<Row>([
+    [
+      'an escaped `>` before `|` leaves a pipe',
+      'echo \\>| cat .env',
+      [read('/repo/.env')],
+    ],
+    [
+      '`[[ … ]]` after `if` compares',
+      'if [[ a > b ]]; then echo hi > f; fi',
+      [write('/repo/f')],
+    ],
+    [
+      'nested subshells are not arithmetic',
+      '((cat .env); printf X >p.txt)',
+      [read('/repo/.env'), write('/repo/p.txt')],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+
+  it('unwraps a shell behind a prefix command', () => {
+    expect(across(`sudo bash -c 'printf X > p.txt'`)).toEqual([
+      write('/repo/p.txt'),
+    ]);
+  });
+});
