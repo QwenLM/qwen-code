@@ -85,6 +85,8 @@ MySQL/MariaDB 的两个初始化入口都要求选定应用数据库，在读取
 
 保留的 MariaDB CI 车道使用同一 canonical DDL。其 CHECK 目录没有逐约束的 ENFORCED 字段；即使 Connector/J 将产品名报告为 MySQL，校验仍识别 MariaDB，要求全局和当前会话的 check_constraint_checks 均开启，并核对每项 CHECK 的名称与表达式。两种数据库均要求 InnoDB；MySQL 继续要求 ENFORCED=YES。无法读取强制执行配置或约束关闭时，在元数据枚举或 DDL 前安全拒绝。MySQL 8.4 的验收基线不变。
 
+结构化 CASE 比较仅将裸 TRUE/FALSE token 视为数值别名 1/0，与 [MariaDB 布尔字面量](https://mariadb.com/docs/server/reference/sql-structure/sql-language-structure/sql-language-structure-boolean-literals) 一致。带引号字符串、分支顺序/值、操作符和 ELSE 仍属于校验结构，不跳过任何 CHECK。
+
 真实栈 E2E 运行器仅使用 canonical 表播种和验收，审批查询明确限定 ACTION 类型。Linux CI 对首个及替换 Server 都显式开启 verified recovery，在启动任何 Harness 或接纳工作前注册任务专用新存储的原生身份，不使用仅 SQL 的身份证明，不启用 trusted reboot recovery。macOS LOCAL 工具支持仍属待决定的平台边界；文档描述当前要求 Linux 注册的行为，并保留物理排他规则。
 
 ## 实施顺序与验收

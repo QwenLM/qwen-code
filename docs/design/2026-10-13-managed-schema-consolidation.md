@@ -85,6 +85,8 @@ Both MySQL/MariaDB initialization paths require a selected application catalog. 
 
 The retained MariaDB CI lane uses the same canonical DDL. Its CHECK catalog has no per-constraint ENFORCED field; validation detects MariaDB even when Connector/J reports MySQL, requires global and session check_constraint_checks, and compares every declared CHECK name/expression. Both database families require InnoDB; MySQL still requires ENFORCED=YES. Missing enforcement settings or disabled checks fail closed before metadata enumeration or DDL. This does not change the MySQL 8.4 acceptance baseline.
 
+Structural CASE comparison treats only bare TRUE/FALSE tokens as the numeric aliases 1/0, matching [MariaDB Boolean literals](https://mariadb.com/docs/server/reference/sql-structure/sql-language-structure/sql-language-structure-boolean-literals). Quoted strings, branch order/values, operators and ELSE remain part of the checked shape; no CHECK clause is skipped.
+
 The real-stack E2E runner seeds and audits only canonical tables, including the ACTION discriminator for approvals. Linux CI explicitly enables verified recovery for both initial and replacement Server processes and registers the fresh task-owned native storage before launching any Harness or admitting work. It never substitutes SQL-only identity proof or enables trusted reboot recovery. Current macOS LOCAL tool support remains an unresolved platform decision; the documented current behavior requires Linux registration and preserves physical exclusion.
 
 ## Delivery sequence and acceptance

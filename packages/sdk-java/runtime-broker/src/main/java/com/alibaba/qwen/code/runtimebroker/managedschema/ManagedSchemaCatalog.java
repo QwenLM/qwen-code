@@ -485,7 +485,11 @@ final class ManagedSchemaCatalog {
     private static List<String> checkShape(String expression) {
         List<String> flat = expressionTokens(expression);
         if (flat.contains("case")) {
-            return flat;
+            return flat.stream().map(token -> switch (token) {
+                case "false" -> "0";
+                case "true" -> "1";
+                default -> token;
+            }).toList();
         }
         String portable = portableExpression(expression);
         var matcher =

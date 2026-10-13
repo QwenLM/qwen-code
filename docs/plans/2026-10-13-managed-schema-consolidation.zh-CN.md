@@ -107,3 +107,11 @@ Linux 原生注册/工具模式及修改后的原生 MariaDB 车道仍需 CI 验
 随后全新打包的 Java 21 Server 逐字节嵌入已验证 Broker（Server SHA256 `20c62363d3f7b78f2efbe0c153fc74b46f0791c83a65e667abce2d27600382fe`；DDL 不变）。两个完整纯文本故障转移模式在最终制品上再次通过，耗时 16.197 和 13.793 秒，各自 writer 1→2、journal 12→22、committed 13→25。Session 事件验收明确排除 TASK 流。Broker 在 Java 25（release 21）下全量验证通过 842 项测试，2 项按环境跳过，静态门禁通过；23 项 schema 用例在 Java 21 下重复通过。Server clean 验证通过 9 项重点初始化/Flyway/连接池用例及静态门禁；修改后的两项真实 MySQL 目录用例全部通过且无跳过。这是本轮最终本地制品证据，Linux 与 MariaDB CI 验收仍待完成。
 
 只读复审发现，驱动报告 MariaDB 产品名时会绕过原先仅限 MySQL 的 InnoDB 检查。独立失败探针确认该路径跳过引擎查询；共享数据库族检查现对两种名称都在列校验前拒绝非事务表。最终 Java 21 Broker 验证通过 24 项重点 schema 用例及静态门禁；Server clean 验证再次通过相同 9 项用例及静态门禁。独立探针通过 2 项引擎、9 项 CHECK 和 13 项原生 MySQL 检查，包含真实 MyISAM 拒绝及恢复。最终 Server SHA256 为 `167d5d0d7bea90e3e14d4e19d993d35863469a7bb43e7d5b02eee0c8ddc64eab`；DDL 不变。该制品的两个完整纯文本故障转移循环耗时 16.149 和 14.306 秒，原不变量和清理全部通过。这些最终结果替代前述本地制品证据；原生 Linux/MariaDB CI 及平台决策仍待完成。
+
+## 2026-10-14 布尔 CHECK 别名
+
+`ad2e615530` 的原生 MariaDB 车道仍有 70 项 Broker 用例中的 68 项失败：其目录将资源 GC CASE 的 WHEN 表达式显示为数值 0/1，而 canonical V1 声明为 FALSE/TRUE。独立探针及重点回归均复现同一已编译校验器错误。结构化 CASE 比较现仅归一这些裸 SQL 别名；名称、有序分支、ELSE、操作符及带引号字符串继续校验，32 表 DDL 不变。
+
+Java 21 Broker 验证通过 25 项重点 schema 用例及静态门禁；Server clean 验证通过 9 项初始化/Flyway/连接池用例及静态门禁。独立元数据验证通过 47 项断言，包含全部 32 个表正文/40 项 CHECK，另有 9 项强制执行和 2 项引擎检查通过。真实 MySQL 8.4.11 通过 20 项断言：等价数值 CASE 仍只接纳布尔值，数值 2 和篡改 ELSE 被拒绝，既有物理/schema/审批保护保持有效。UUID 测试库已删除并确认不存在，现有应用数据库未改动。
+
+最终本地 Server SHA256 为 `e249d3685c0bb9e7597fc3c595d404591ef5ed783abded113cc2c20a5ea15d68`，逐字节嵌入已验证 Broker；canonical DDL 仍为 `9800309ca17f5b0c65cb11c29d349385f2c0a23a77d43f098f2d0d4c46368e2b`。前述纯文本恢复循环对应各自记录的制品；本轮验证目录兼容性及约束保护。原生 MariaDB/Linux 验收仍需当前 head 的 CI，受控 fixture、真实 MySQL 或历史 Linux 结果不能替代。

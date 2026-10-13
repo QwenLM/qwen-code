@@ -28,6 +28,34 @@ class ManagedSchemaCatalogTest {
     }
 
     @Test
+    void acceptsNumericBooleanCaseWithoutAcceptingConstraintDrift() throws Exception {
+        String body = "\n    CONSTRAINT ck_probe CHECK (CASE resource_gc_completed"
+                + " WHEN FALSE THEN 1 WHEN TRUE THEN 1 ELSE 0 END = 1)\n";
+        String numeric = "CASE resource_gc_completed WHEN 0 THEN 1 WHEN 1 THEN 1 ELSE 0 END = 1";
+        try (var data = fixture(false); var update = data.prepareStatement(
+                "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
+            Connection connection = mariaDb(data, "MySQL", 1, 1);
+            update.setString(1, numeric);
+            update.executeUpdate();
+            ManagedSchemaCatalog.validateChecks(connection, "ma_operation", body);
+            for (String changed : new String[] {
+                    numeric.replace("WHEN 1", "WHEN 2"),
+                    numeric.replace("WHEN 0", "WHEN 2"),
+                    numeric.replace("ELSE 0", "ELSE 1"),
+                    numeric.replace("THEN 1", "THEN 0"),
+                    numeric.replace("= 1", "<> 1"),
+                    numeric.replace("WHEN 0", "WHEN 'FALSE'"),
+                    numeric.replace("WHEN 1", "WHEN 'TRUE'")}) {
+                update.setString(1, changed);
+                update.executeUpdate();
+                assertThrows(SQLException.class,
+                        () -> ManagedSchemaCatalog.validateChecks(connection, "ma_operation", body),
+                        changed);
+            }
+        }
+    }
+
+    @Test
     void rejectsNonTransactionalTablesWithEitherMariaDbDriverProductName() throws Exception {
         for (String product : new String[] {"MySQL", "MariaDB"}) {
             try (var data = fixture(false); var statement = data.createStatement()) {
