@@ -799,7 +799,7 @@ describe('SendMessageTool — peer mode', () => {
     expect(result.error).toBeDefined();
     expectLlm(
       result,
-      ['Teammate "zed" not found.', 'agents.crossSessionMessaging'],
+      ['Teammate "zed" not found.', 'no peer inbox is bound'],
       ['No reachable session has that name'],
     );
   });
@@ -807,7 +807,7 @@ describe('SendMessageTool — peer mode', () => {
   it('says messaging is off, rather than that a lookup found nothing', async () => {
     expectLlm(
       await peerSend({ kind: 'disabled' }, 'docs-cd'),
-      ['No active team', 'agents.crossSessionMessaging'],
+      ['No active team', 'no peer inbox is bound'],
       ['no reachable session'],
     );
   });

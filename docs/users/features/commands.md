@@ -786,8 +786,11 @@ front-end, a relay), and `headless` or `serve` for a session another
 program drives. Several `serve` or `headless` rows can share one PID: a
 `qwen --acp` child hosts all its sessions in one process — `serve` when
 the daemon spawned it, `headless` when a client is driving it directly —
-and each of them registers separately when peer messaging is active. Hosted
-sessions started with `--bare` or `--safe-mode` do not register here. It is a
+and each of them registers separately when peer messaging is active. A hosted
+session does not register here when its own environment puts it in bare or
+safe mode. A daemon's `--bare` does not reach the sessions it hosts
+(`QWEN_CODE_SIMPLE` is scrubbed from the child environment); an inherited
+`QWEN_CODE_SAFE_MODE` does, keeping those hosted sessions out of this listing. It is a
 self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
 session is allowed to do depends on it. An Agent View record marked

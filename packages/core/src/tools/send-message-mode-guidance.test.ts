@@ -14,8 +14,7 @@ vi.mock('../ipc/peer-send.js', () => ({
   sendToPeer: vi.fn(async () => ({ kind: 'disabled' })),
 }));
 
-const settingExplanation =
-  'agents.crossSessionMessaging is off, or its inbox did not start';
+const settingExplanation = 'no peer inbox is bound in this session';
 
 function makeConfig(mode: string, hasTeam: boolean): Config {
   return {
@@ -32,15 +31,14 @@ function makeConfig(mode: string, hasTeam: boolean): Config {
     getApprovalMode: () => 'default',
     getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
     getToolRegistry: () => ({ getAllToolNames: () => [] }),
-    isSafeMode: () => mode === 'safe-mode' || mode === 'both',
-    getBareMode: () => mode === 'bare' || mode === 'both',
+    isSafeMode: () => mode === 'safe-mode',
   } as unknown as Config;
 }
 
 describe.each([false, true])(
   'disabled peer messaging with team=%s',
   (hasTeam) => {
-    it.each(['safe-mode', 'bare'])(
+    it.each(['safe-mode'])(
       'explains %s suppression when the target cannot be reached',
       async (mode) => {
         const result = await new SendMessageTool(makeConfig(mode, hasTeam))
@@ -48,6 +46,10 @@ describe.each([false, true])(
           .execute(new AbortController().signal);
         expect(result.error).toBeDefined();
         expect(result.llmContent).toContain(`--${mode}`);
+        expect(result.llmContent).toContain('QWEN_CODE_SAFE_MODE');
+        expect(result.llmContent).toContain(
+          'agents.crossSessionMessaging may also be off',
+        );
         expect(result.llmContent).not.toContain(settingExplanation);
         expect(result.llmContent).toContain(
           hasTeam ? 'Teammate "docs-cd" not found.' : 'No active team',
@@ -55,24 +57,16 @@ describe.each([false, true])(
       },
     );
 
-    it('prefers safe-mode guidance when both startup flags are enabled', async () => {
-      const result = await new SendMessageTool(makeConfig('both', hasTeam))
-        .build({ to: 'docs-cd', message: 'hello' })
-        .execute(new AbortController().signal);
-      expect(result.error).toBeDefined();
-      expect(result.llmContent).toContain('--safe-mode');
-      expect(result.llmContent).not.toContain('--bare');
-      expect(result.llmContent).not.toContain(settingExplanation);
-      expect(result.llmContent).toContain(
-        hasTeam ? 'Teammate "docs-cd" not found.' : 'No active team',
-      );
-    });
-    it('preserves the setting or failed-inbox guidance when no startup mode suppresses messaging', async () => {
+    it('reports the absent inbox without inventing a disabled setting', async () => {
       const result = await new SendMessageTool(makeConfig('normal', hasTeam))
         .build({ to: 'docs-cd', message: 'hello' })
         .execute(new AbortController().signal);
       expect(result.error).toBeDefined();
       expect(result.llmContent).toContain(settingExplanation);
+      expect(result.llmContent).not.toContain(
+        'agents.crossSessionMessaging is off',
+      );
+      expect(result.llmContent).not.toContain('inbox did not start');
       expect(result.llmContent).not.toContain('--safe-mode');
       expect(result.llmContent).not.toContain('--bare');
     });

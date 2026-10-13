@@ -79,12 +79,29 @@ describe('ListAgentsTool', () => {
     tool = toolWith(registry);
   });
 
+  it('explains safe-mode suppression even when no peer inbox exists', async () => {
+    const safeTool = new ListAgentsTool({
+      getBackgroundTaskRegistry: () => registry,
+      getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
+      getTeamManager: () => null,
+      isSafeMode: () => true,
+    } as unknown as Config);
+    const result = await run(safeTool);
+    expect(result.llmContent).toContain('--safe-mode');
+    expect(result.llmContent).toContain('QWEN_CODE_SAFE_MODE');
+    expect(result.llmContent).toContain(
+      'agents.crossSessionMessaging may also be off',
+    );
+    expect(result.llmContent).toContain('other Qwen Code session');
+  });
+
   it('reports an empty roster', async () => {
     const result = await run(tool);
 
     expect(tool.name).toBe('list_agents');
     expect(result.llmContent).toBe(
-      'No ordinary background subagents are available in this session. ' +
+      'No ordinary background subagents are available in this session, and no other Qwen Code session on this machine is reachable. ' +
+        'Cross-session messaging is not active (no peer inbox is bound in this session). ' +
         'Named Agent Team teammates are not listed here; their results are ' +
         'delivered automatically through team messaging, so do not use ' +
         'list_agents to wait for a teammate.',
@@ -214,7 +231,8 @@ describe('ListAgentsTool — peer sessions', () => {
     getOwnPeerIdentity.mockResolvedValue(null);
     const result = await run();
     expect(listMessageablePeers).not.toHaveBeenCalled();
-    expect(result.llmContent).not.toContain('reachable');
+    expect(result.llmContent).toContain('no peer inbox is bound');
+    expect(result.llmContent).toContain('no other Qwen Code session');
   });
 
   it('says so when messaging is on but no other session is reachable', async () => {

@@ -125,9 +125,14 @@ class ListAgentsInvocation extends BaseToolInvocation<
     if (agents.length === 0 && sessions.length === 0) {
       const message =
         'No ordinary background subagents are available in this session' +
+        ', and no other Qwen Code session on this machine is reachable. ' +
         (self
-          ? ', and no other Qwen Code session on this machine is reachable. '
-          : '. ') +
+          ? ''
+          : `Cross-session messaging is not active (${
+              this.config.isSafeMode?.()
+                ? '--safe-mode (or QWEN_CODE_SAFE_MODE) disables peer messaging, and agents.crossSessionMessaging may also be off'
+                : 'no peer inbox is bound in this session'
+            }). `) +
         'Named Agent Team teammates are not listed here; their results are ' +
         'delivered automatically through team messaging, so do not use ' +
         'list_agents to wait for a teammate.' +

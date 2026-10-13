@@ -109,10 +109,8 @@ class SendMessageInvocation extends BaseToolInvocation<
 
   private peerMessagingOffReason(): string {
     if (this.config.isSafeMode?.())
-      return '--safe-mode disables peer messaging';
-    if (this.config.getBareMode?.())
-      return '--bare mode disables peer messaging';
-    return 'agents.crossSessionMessaging is off, or its inbox did not start';
+      return '--safe-mode (or QWEN_CODE_SAFE_MODE) disables peer messaging, and agents.crossSessionMessaging may also be off';
+    return 'no peer inbox is bound in this session';
   }
 
   /**
