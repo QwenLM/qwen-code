@@ -401,8 +401,11 @@ public class ManagedSessionStore {
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         Timestamp now = databaseNow();
+        boolean cleanup = authority != null && WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
+        // A resident cleanup writer may outlive its lease while the coordinator
+        // is down; its token and generation must still own the locked head.
         requireWriter(head, request.writerId(), request.writerGeneration(),
-                writerToken, now, true);
+                writerToken, now, !cleanup);
         Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                 plusMillis(now, request.leaseMillis()));
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"

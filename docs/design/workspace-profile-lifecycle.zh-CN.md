@@ -26,7 +26,7 @@ close 保留字节。archive/unarchive 复用 L1，unarchive 恢复 closed，不
 
 ## 清理授权与恢复
 
-v2 `DRAINING` 允许当前 operation claim 获取仅供清理的 writer，沿用 writer fencing 和租约规则。冷 attachment 读取已保存 definition 与原身份，不运行 SessionStart、模型、普通工具、configure/discover/invoke 或 Monitor rebuild。Broker recovery acquire、status、release 自身校验当前 claim 和保存的 binding/generation；禁止新普通 acquire。
+v2 `DRAINING` 允许当前 operation claim 获取仅供清理的 writer。协调器停机期间租约过期的驻留 writer，只有 token、writer ID 和 generation 仍拥有已锁定的 journal head，且当前资源 claim 有效时，才可续租。冷 acquire 与该续租通过同一 head 串行决策，先成功的一方围栏另一方。普通续租、files v1、effects 阶段、旧 claim 和已被替换的 writer 保留租约检查。冷 attachment 读取已保存 definition 与原身份，不运行 SessionStart、模型、普通工具、configure/discover/invoke 或 Monitor rebuild。Broker recovery acquire、status、release 自身校验当前 claim 和保存的 binding/generation；禁止新普通 acquire。
 
 journal/publication 写入按已有资源身份严格限定为输出引用推进、终态、释放证据和已有通知取消。拒绝新执行、换 Runtime 身份和新普通输入。新生命周期 Hook dispatch 仍校验当前 ACL 与挂载授权。claim 接管更新驻留和冷 attachment，旧 claim 不能修改清理记录。
 
@@ -49,6 +49,8 @@ worker 已停止不能证明缺失输出已发布。未知输出继续阻塞；�
 原 worker 存活时：通过 recovery acquire 恢复原 owner；使用 configuration 的稳定 H1 release ID；持久化 `drained`；释放原 Broker RuntimeSession；持久化 `released`。先释放 owner 会使后续 H1 status/release 失去执行条件。覆盖全部 configuration revision，以及与 Hooks 共享的 owner，包括没有 MCP configuration 的 Hook-only owner。
 
 原 worker 可证明已停止时，已知业务/Hook 效果与可信匹配 stop proof 可证明本地连接结束，释放精确 owner。保留证据来源，不伪造 H1 release ACK，也不宣称远端 Session 删除。只要本地 transport 已关闭，HTTP DELETE 超时不妨碍本地清理。endpoint、secret、连接 recipe 不进入公开 receipt。普通 MCP worker replacement 的现有限制保持不变。
+
+匹配的 NOT_FOUND 观察允许停止清理路径在 LOST binding 仍有持久 owner 时等待原 worker 的 stop receipt，但它本身不能释放 owner。先持久化该 receipt，才将 binding 转入 DRAINING 或释放 owner；状态转换和每个停止后 owner 的释放都在 Broker 事务内独立校验当前生命周期 claim。已 dispatch 且结果未知的执行仍在 stop/release 前阻塞。MCP 资源阶段的 `workspace_close_identity_unverified` 可以进入这条核验证据的恢复路径；执行、授权和 claim 错误保留原错误码，Shell 身份错误也保持拒绝。重试可以复用原 receipt，但不能创建 worker、重放效果或补造 H1 ACK。
 
 ## 涉及组件
 

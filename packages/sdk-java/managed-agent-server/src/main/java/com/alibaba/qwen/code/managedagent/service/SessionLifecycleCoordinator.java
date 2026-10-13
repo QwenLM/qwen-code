@@ -384,6 +384,8 @@ public class SessionLifecycleCoordinator {
                             && (http.getErrorCode() != null && (http.getErrorCode().startsWith("workspace_lifecycle_claim")
                                     || http.getErrorCode().startsWith("workspace_lifecycle_authorization")
                                     || http.getErrorCode().startsWith("workspace_close")
+                                            && !(com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.MCP.equals(profile)
+                                                    && "workspace_close_identity_unverified".equals(http.getErrorCode()))
                                     || "runtime_admission_closed".equals(http.getErrorCode())))) {
                         throw unsettled;
                     }

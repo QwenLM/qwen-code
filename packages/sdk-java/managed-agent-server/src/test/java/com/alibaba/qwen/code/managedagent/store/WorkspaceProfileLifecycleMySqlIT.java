@@ -59,6 +59,46 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
         }
     }
 
+    @org.junit.jupiter.api.Test
+    void expiredWriterRenewalAndColdAcquireCannotBothOwnTheHead() throws Exception {
+        var f = fixture();
+        var journal = new ManagedSessionStore(f.jdbc);
+        var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));
+        var operation = admit(f, WorkspaceToolProfiles.SHELL, StoreModels.OperationKind.DELETE);
+        f.transactions.executeWithoutResult(ignored -> f.lifecycle.recoverEffects(operation));
+        f.jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = ?",
+                java.sql.Timestamp.from(java.time.Instant.parse("2000-01-01T00:00:00Z")));
+        var start = new java.util.concurrent.CountDownLatch(1);
+        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+            var futures = java.util.stream.IntStream.range(0, 2).mapToObj(index -> executor.submit(() -> {
+                start.await();
+                try {
+                    return f.transactions.execute(ignored -> index == 0
+                            ? journal.renewWriter("tenant", f.session, "w".repeat(32),
+                                    new ManagedSessionStoreModels.RenewWriterRequest("workspace", "resident", writer.writerGeneration(), 60_000L),
+                                    WorkspaceLifecycleStore.authority(operation))
+                            : journal.acquireWriter("tenant", f.session, "r".repeat(32),
+                                    new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "recovery", 60_000L),
+                                    WorkspaceLifecycleStore.authority(operation)));
+                } catch (com.alibaba.qwen.code.managedagent.api.ApiException conflict) {
+                    org.assertj.core.api.Assertions.assertThat(conflict.getCode()).isEqualTo("managed_session_writer_conflict");
+                    return null;
+                }
+            })).toList();
+            start.countDown();
+            var winners = new java.util.ArrayList<ManagedSessionStoreModels.WriterGrant>();
+            for (var future : futures) {
+                var grant = future.get(10, java.util.concurrent.TimeUnit.SECONDS);
+                if (grant != null) winners.add(grant);
+            }
+            org.assertj.core.api.Assertions.assertThat(winners).hasSize(1);
+            org.assertj.core.api.Assertions.assertThat(f.jdbc.queryForObject("SELECT writer_generation FROM qwen_managed_session_journal_head", Long.class))
+                    .isEqualTo(winners.getFirst().writerGeneration());
+            org.assertj.core.api.Assertions.assertThat(journal.hasLiveWriter("tenant", f.session)).isTrue();
+        }
+    }
+
     @Override
     WorkspaceLifecycleStoreTest.Fixture fixture() {
         return new WorkspaceLifecycleStoreTest.Fixture(source);

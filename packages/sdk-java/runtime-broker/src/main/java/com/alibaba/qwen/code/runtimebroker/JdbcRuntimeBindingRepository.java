@@ -82,6 +82,11 @@ public final class JdbcRuntimeBindingRepository
         }
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, claim.getRequest().getScope().getTenantId());
+            var authority = claim.getRequest().getScope().getLifecycleAuthority();
+            if (authority != null) {
+                requireHarnessAdmission(connection, claim.getRequest().getScope(), claim.getRequest().getIsolationKey(),
+                        authority, false, false, true);
+            }
             RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true);
             RuntimeAdmission.requireStoppedRelease(binding, claim, expected, JdbcRepositorySupport.databaseNowPrecise(connection));
             if (JdbcToolExecutionRepository.hasActiveByBinding(connection, binding.getBindingId(), binding.getGeneration())) {
@@ -1017,6 +1022,15 @@ public final class JdbcRuntimeBindingRepository
                         "Runtime binding slot is inconsistent");
             }
             current.requireSafeReplacement(replacement);
+            var authority = replacement.getRequest().getScope().getLifecycleAuthority();
+            if (authority != null && replacement.getDrainReceipt() != null) {
+                requireHarnessAdmission(connection, current.getRequest().getScope(), current.getRequest().getIsolationKey(),
+                        authority, false, false, true);
+            }
+            if (current.getState() == RuntimeBindingRecord.State.LOST && replacement.getState() == RuntimeBindingRecord.State.DRAINING
+                    && JdbcToolExecutionRepository.hasActiveByBinding(connection, current.getBindingId(), current.getGeneration())) {
+                throw new RuntimeBrokerException(409, "workspace_close_execution_unsettled", "Original resources remain active", false);
+            }
             RuntimeBindingRecord updated = replacement.withVersion(
                     expected.getVersion() + 1);
             updateBinding(connection, updated);

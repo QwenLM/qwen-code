@@ -76,6 +76,64 @@ class WorkspaceProfileLifecycleTest {
 
     @ParameterizedTest
     @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
+    void expiredResidentWriterRenewsOnlyUnderTheCurrentResourceClaim(String profile) {
+        var f = fixture();
+        var journal = new ManagedSessionStore(f.jdbc);
+        String token = "w".repeat(32);
+        var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, token,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));
+        var first = admit(f, profile, OperationKind.DELETE);
+        var renew = new ManagedSessionStoreModels.RenewWriterRequest("workspace", "resident", writer.writerGeneration(), 60_000L);
+        f.jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = ?",
+                java.sql.Timestamp.from(java.time.Instant.parse("2000-01-01T00:00:00Z")));
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, token,
+                renew, WorkspaceLifecycleStore.authority(first))))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_writer_conflict"));
+        f.transactions.executeWithoutResult(ignored -> f.lifecycle.recoverEffects(first));
+        f.jdbc.update("UPDATE managed_agent_operation SET lease_until = 0");
+        var current = f.transactions.execute(ignored -> f.store.claimOperation("tenant", f.session, first.operationId(),
+                "server-2", Duration.ofSeconds(30)).orElseThrow());
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, token, renew)))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced"));
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, token,
+                renew, WorkspaceLifecycleStore.authority(first))))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced"));
+        var renewed = f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, token,
+                renew, WorkspaceLifecycleStore.authority(current)));
+        assertThat(renewed.writerGeneration()).isEqualTo(writer.writerGeneration());
+        assertThat(journal.hasLiveWriter("tenant", f.session)).isTrue();
+        f.jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = ?",
+                java.sql.Timestamp.from(java.time.Instant.parse("2000-01-01T00:00:00Z")));
+        var replacement = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "r".repeat(32),
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "recovery", 60_000L),
+                WorkspaceLifecycleStore.authority(current)));
+        assertThat(replacement.writerGeneration()).isGreaterThan(writer.writerGeneration());
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, token,
+                renew, WorkspaceLifecycleStore.authority(current))))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_writer_conflict"));
+    }
+
+    @Test
+    void filesV1DrainingStillRejectsAnExpiredWriter() {
+        var f = fixture();
+        var journal = new ManagedSessionStore(f.jdbc);
+        var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));
+        String id = f.transactions.execute(ignored -> f.store.beginWorkspaceLifecycle("tenant", f.session, OperationKind.CLOSE,
+                "owner", "a".repeat(64), "close", "digest", true, 1).operation().operationId());
+        var operation = f.transactions.execute(ignored -> f.store.claimOperation("tenant", f.session, id,
+                "server-1", Duration.ofSeconds(30)).orElseThrow());
+        f.transactions.executeWithoutResult(ignored -> f.lifecycle.recoverEffects(operation));
+        f.jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = ?",
+                java.sql.Timestamp.from(java.time.Instant.parse("2000-01-01T00:00:00Z")));
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, "w".repeat(32),
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "resident", writer.writerGeneration(), 60_000L),
+                WorkspaceLifecycleStore.authority(operation))))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_writer_conflict"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
     void cleanupAdmissionDoesNotRequireTheNewExecutionSwitch(String profile) {
         var f = fixture();
         f.jdbc.update("UPDATE managed_agent_session SET tool_profile = ?", profile);
