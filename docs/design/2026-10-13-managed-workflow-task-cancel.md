@@ -2,7 +2,7 @@
 
 [English](2026-10-13-managed-workflow-task-cancel.md) | [简体中文](2026-10-13-managed-workflow-task-cancel.zh-CN.md)
 
-Status: implemented in this change. The `workflow` task kind joins the public task cancel path: `CANCELLABLE_TASK_KINDS` widens to admit it, and the contract names it in `1.45.0`. Every stop mechanic it rides already exists and is kind-blind; this change opens the gate and pins the path with workflow-chain tests and the kind's Stage F fault round.
+Status: implemented in this change; Stage F verification pending. The `workflow` task kind joins the public task cancel path: `CANCELLABLE_TASK_KINDS` widens to admit it, and the contract names it in `1.45.0`. Every stop mechanic it rides already exists and is kind-blind; this change opens the gate and pins the path with workflow-chain tests. The kind's Stage F fault round (decision 6) is owed and has not run — the evidence cited below is the unit, contract and record tier only.
 
 This is the remaining `child_run` kind of [#13746](https://github.com/QwenLM/qwen-code/issues/13746) F1. The H4f slice (#13823) cancelled `child_agent` tasks and deferred every other kind; its follow-up table named this one — "Workflow, automation: with the workflow runtime (#13803) … a stop request on their records, then the same delivery and stop arms" — as did [the workflow runtime note](2026-10-10-managed-workflow-child-runtime.md) ("public cancel — their own named slices") and the `CANCELLABLE_TASK_KINDS` comment itself. The slice's only prerequisite, the workflow child runtime, landed in #13858. This is slice H4f-b of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
 

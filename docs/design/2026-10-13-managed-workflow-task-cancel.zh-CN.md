@@ -2,7 +2,7 @@
 
 [English](2026-10-13-managed-workflow-task-cancel.md) | [简体中文](2026-10-13-managed-workflow-task-cancel.zh-CN.md)
 
-状态：本变更实现。`workflow` 任务类型加入公开任务取消路径：`CANCELLABLE_TASK_KINDS` 放宽以准纳它，契约在 `1.45.0` 中予以点名。它所走的每一个停止机构都已存在且与 kind 无关；本变更打开这道闸门，并用 workflow 链路测试与该类型的 F 阶段故障轮次把它钉住。
+状态：本变更实现，Stage F 待验证。`workflow` 任务类型加入公开任务取消路径：`CANCELLABLE_TASK_KINDS` 放宽以准纳它，契约在 `1.45.0` 中予以点名。它所走的每一个停止机构都已存在且与 kind 无关；本变更打开这道闸门，并用 workflow 链路测试把路径钉住。该类型的 F 阶段故障轮次（决定 6）欠账未跑 —— 下文引用的证据仅为单元、契约与记录层。
 
 这是 [#13746](https://github.com/QwenLM/qwen-code/issues/13746) F1 剩余的一个 `child_run` 类型。H4f 切片（#13823）实现了 `child_agent` 任务的取消，其余类型全部推迟；其 follow-up 表点名了这一片 ——「Workflow, automation: with the workflow runtime (#13803) … a stop request on their records, then the same delivery and stop arms」——[workflow 运行时设计](2026-10-10-managed-workflow-child-runtime.zh-CN.md)（「public cancel —— 各自具名的切片」）与 `CANCELLABLE_TASK_KINDS` 注释本身也各自点名。本片唯一的前置 —— workflow child 运行时 —— 已由 #13858 落地。本片是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H4f-b 切片，即 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。
 
