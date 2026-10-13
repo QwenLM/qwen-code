@@ -434,7 +434,8 @@ export interface SendPromptOptions {
   onAdmitted?: (admission: { promptId: string }) => void;
 }
 
-export interface SubmitPromptOptions extends SendPromptOptions {
+export interface SubmitPromptOptions
+  extends Omit<SendPromptOptions, 'beforeDispatch' | 'source'> {
   sessionId?: string;
   signal?: AbortSignal;
 }

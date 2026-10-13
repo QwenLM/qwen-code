@@ -21,7 +21,6 @@ export interface McpAppMessageRequest {
 
 export interface McpAppMessages {
   sessionId: string;
-  clientId: string;
   requestMessage(request: McpAppMessageRequest): Promise<{ isError?: boolean }>;
 }
 

@@ -166,8 +166,10 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
   const messages = useContext(McpAppMessagesContext);
   const messageHost =
     sessionId && messages?.sessionId === sessionId ? messages : undefined;
-  const requestMessage = messageHost?.requestMessage;
-  const messageClientId = messageHost?.clientId;
+  const requestMessage =
+    import.meta.env.MODE === 'transcript'
+      ? undefined
+      : messageHost?.requestMessage;
   const callTool =
     sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
   const theme = useTheme();
@@ -392,7 +394,6 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     dataSandbox,
     callTool,
     requestMessage,
-    messageClientId,
     sessionId,
     display.serverName,
     display.resourceUri,

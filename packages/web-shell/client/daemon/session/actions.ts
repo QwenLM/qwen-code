@@ -1401,6 +1401,7 @@ export function createDaemonSessionActions({
           if (sessionRef.current?.sessionId === sessionId) {
             store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
           }
+          if (options?.source === 'mcp-app' && admissionError) throw error;
           return { stopReason: 'cancelled' };
         }
         if (isDaemonTurnError(error)) {
@@ -1670,13 +1671,7 @@ export function createDaemonSessionActions({
         const request = promptRequest as Parameters<
           typeof session.submitPrompt
         >[0];
-        accepted = options?.beforeDispatch
-          ? await session.submitPrompt(
-              request,
-              undefined,
-              options.beforeDispatch,
-            )
-          : await session.submitPrompt(request);
+        accepted = await session.submitPrompt(request);
       } catch (error) {
         publishStandaloneWorkingDirectoryError(session.sessionId, error);
         const definiteRejection = isDefinitePromptAdmissionRejection(error);

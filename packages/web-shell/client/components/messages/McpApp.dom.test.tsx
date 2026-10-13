@@ -8,6 +8,7 @@ import {
   McpAppSessionContext,
   McpAppToolsContext,
 } from '../../mcpAppHostContext';
+import { useMcpAppMessages } from '../../hooks/useMcpAppMessages';
 import { ThemeProvider, WebShellThemeId } from '../../themeContext';
 import type { McpAppDisplay } from './McpApp';
 
@@ -132,7 +133,7 @@ describe('McpApp host lifetime', () => {
     const { rerender } = renderApp(appDisplay());
     const wrap = (sessionId: string) => (
       <McpAppMessagesContext.Provider
-        value={{ sessionId: 'live', clientId: 'client', requestMessage }}
+        value={{ sessionId: 'live', requestMessage }}
       >
         <McpAppSessionContext.Provider value={sessionId}>
           <McpApp display={appDisplay()} />
@@ -154,7 +155,7 @@ describe('McpApp host lifetime', () => {
     const { rerender } = renderApp(appDisplay());
     rerender(
       <McpAppMessagesContext.Provider
-        value={{ sessionId: 's', clientId: 'c', requestMessage }}
+        value={{ sessionId: 's', requestMessage }}
       >
         <McpAppSessionContext.Provider value="s">
           <McpApp display={appDisplay()} />
@@ -205,7 +206,7 @@ describe('McpApp host lifetime', () => {
     );
   });
 
-  it('allows one pending message per card and aborts it on resource or client replacement', async () => {
+  it('releases settled message requests and aborts pending ones on resource replacement', async () => {
     let settle!: (result: object) => void;
     const requestMessage = vi.fn(
       (_request: { signal: AbortSignal }) =>
@@ -214,9 +215,9 @@ describe('McpApp host lifetime', () => {
         }),
     );
     const { rerender } = renderApp(appDisplay());
-    const wrap = (resourceUri: string, clientId = 'c') => (
+    const wrap = (resourceUri: string) => (
       <McpAppMessagesContext.Provider
-        value={{ sessionId: 's', clientId, requestMessage }}
+        value={{ sessionId: 's', requestMessage }}
       >
         <McpAppSessionContext.Provider value="s">
           <McpApp display={appDisplay({ resourceUri })} />
@@ -246,11 +247,98 @@ describe('McpApp host lifetime', () => {
     const second = appBridgeMocks.last!.onmessage!(params, {
       signal: new AbortController().signal,
     });
-    rerender(wrap('ui://demo/replacement', 'new-client'));
-    expect(requestMessage.mock.calls[1][0].signal.aborted).toBe(true);
+    settle({});
+    expect(await second).toEqual({});
+    const third = appBridgeMocks.last!.onmessage!(params, {
+      signal: new AbortController().signal,
+    });
+    expect(requestMessage).toHaveBeenCalledTimes(3);
     settle({ isError: true });
-    await second;
+    await third;
   });
+
+  it.each(['client recovery', 'transport reconnect'])(
+    'preserves the iframe and tool calls across %s while invalidating old reviews',
+    async (change) => {
+      let finishTool!: (result: { content: [] }) => void;
+      const callTool = vi.fn(
+        (_request: unknown, _signal: AbortSignal) =>
+          new Promise<{ content: [] }>((resolve) => {
+            finishTool = resolve;
+          }),
+      );
+      const submit = vi.fn().mockResolvedValue(undefined);
+      const captureOwner = () => ({ isCurrent: () => true });
+      function BoundApp({ clientId = 'client-a', enabled = true }) {
+        const { context } = useMcpAppMessages({
+          sessionId: 's',
+          clientId,
+          enabled,
+          captureOwner,
+          submit,
+        });
+        return (
+          <McpAppMessagesContext.Provider value={context}>
+            <McpAppToolsContext.Provider value={{ sessionId: 's', callTool }}>
+              <McpAppSessionContext.Provider value="s">
+                <McpApp display={appDisplay()} />
+              </McpAppSessionContext.Provider>
+            </McpAppToolsContext.Provider>
+          </McpAppMessagesContext.Provider>
+        );
+      }
+      const { container, rerender } = renderApp(appDisplay());
+      await act(async () => rerender(<BoundApp />));
+      const bridge = appBridgeMocks.last!;
+      const iframe = container.querySelector('iframe');
+      const src = iframe!.src;
+      const constructed = appBridgeMocks.constructed;
+      const params = {
+        role: 'user',
+        content: [{ type: 'text', text: 'review' }],
+      };
+      let pendingMessage!: Promise<unknown>;
+      let pendingTool!: Promise<unknown>;
+      await act(async () => {
+        pendingMessage = bridge.onmessage!(params, {
+          signal: new AbortController().signal,
+        });
+        pendingTool = bridge.oncalltool!(
+          { name: 'query' },
+          { signal: new AbortController().signal },
+        );
+      });
+      await act(async () =>
+        rerender(
+          <BoundApp
+            clientId={change === 'client recovery' ? 'client-b' : 'client-a'}
+            enabled={change !== 'transport reconnect'}
+          />,
+        ),
+      );
+      expect(await pendingMessage).toEqual({ isError: true });
+      expect(appBridgeMocks.last).toBe(bridge);
+      expect(appBridgeMocks.constructed).toBe(constructed);
+      expect(container.querySelector('iframe')).toBe(iframe);
+      expect(iframe!.src).toBe(src);
+      expect(callTool.mock.calls[0][1].aborted).toBe(false);
+      await act(async () => rerender(<BoundApp clientId="client-b" />));
+      expect(appBridgeMocks.last).toBe(bridge);
+      let fresh!: Promise<unknown>;
+      await act(async () => {
+        fresh = bridge.onmessage!(params, {
+          signal: new AbortController().signal,
+        });
+      });
+      await act(async () =>
+        rerender(<BoundApp clientId="client-b" enabled={false} />),
+      );
+      expect(await fresh).toEqual({ isError: true });
+      expect(submit).not.toHaveBeenCalled();
+      finishTool({ content: [] });
+      await pendingTool;
+    },
+  );
 
   it('propagates RPC cancellation and revokes messages on failed initialization', async () => {
     appBridgeMocks.sendToolInput.mockRejectedValueOnce(
@@ -264,7 +352,7 @@ describe('McpApp host lifetime', () => {
     const { rerender } = renderApp(appDisplay());
     rerender(
       <McpAppMessagesContext.Provider
-        value={{ sessionId: 's', clientId: 'c', requestMessage }}
+        value={{ sessionId: 's', requestMessage }}
       >
         <McpAppSessionContext.Provider value="s">
           <McpApp display={appDisplay()} />

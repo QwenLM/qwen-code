@@ -561,96 +561,89 @@ describe('sendPrompt client registration recovery', () => {
 });
 
 describe('getConnectionAfterSessionClear', () => {
-  it.each(['sendPrompt', 'submitPrompt'] as const)(
-    'rechecks the source in %s before an SDK recovery retry',
-    async (method) => {
-      const resume = createDeferred<Response>();
-      let promptCount = 0;
-      const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
-        const url = String(input);
-        if (url.endsWith('/resume')) return resume.promise;
-        if (url.endsWith('/prompt')) {
-          promptCount++;
-          return new Response(
-            JSON.stringify(
-              promptCount === 1
-                ? { code: 'invalid_client_id', error: 'unknown client' }
-                : { promptId: 'must-not-be-admitted', lastEventId: 0 },
-            ),
-            { status: promptCount === 1 ? 400 : 202 },
-          );
-        }
-        throw new Error(`Unexpected request: ${url}`);
-      });
-      const session = new DaemonSessionClient({
-        client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
-        session: {
-          sessionId: 'session-a',
-          clientId: 'client-a',
-          attached: true,
-          workspaceCwd: '/workspace',
-        },
-      });
-      const addNotice = vi.fn();
-      const h = createActionsHarness({ addNotice });
-      h.sessionRef.current = session;
-      let sourceCurrent = true;
-      const onAdmissionStarted = vi.fn();
-      const onAdmitted = vi.fn(() => {
-        h.activePromptsRef.current
-          .get('session-a')
-          ?.resolve?.({ stopReason: 'end_turn' });
-      });
-      const beforeDispatch = vi.fn((clientId: string | undefined) => {
-        if (!sourceCurrent || clientId !== 'client-a') {
-          throw new DOMException('Source expired', 'AbortError');
-        }
-      });
-      const result = h.actions[method]('Analyze failures', {
-        ...(method === 'sendPrompt' ? { source: 'mcp-app' as const } : {}),
+  it('rechecks the MCP App source before an SDK recovery retry', async () => {
+    const resume = createDeferred<Response>();
+    let promptCount = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/resume')) return resume.promise;
+      if (url.endsWith('/prompt')) {
+        promptCount++;
+        return new Response(
+          JSON.stringify(
+            promptCount === 1
+              ? { code: 'invalid_client_id', error: 'unknown client' }
+              : { promptId: 'must-not-be-admitted', lastEventId: 0 },
+          ),
+          { status: promptCount === 1 ? 400 : 202 },
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      session: {
+        sessionId: 'session-a',
+        clientId: 'client-a',
+        attached: true,
+        workspaceCwd: '/workspace',
+      },
+    });
+    const addNotice = vi.fn();
+    const h = createActionsHarness({ addNotice });
+    h.sessionRef.current = session;
+    let sourceCurrent = true;
+    const onAdmissionStarted = vi.fn();
+    const onAdmitted = vi.fn(() => {
+      h.activePromptsRef.current
+        .get('session-a')
+        ?.resolve?.({ stopReason: 'end_turn' });
+    });
+    const beforeDispatch = vi.fn((clientId: string | undefined) => {
+      if (!sourceCurrent || clientId !== 'client-a') {
+        throw new DOMException('Source expired', 'AbortError');
+      }
+    });
+    const result = h.actions
+      .sendPrompt('Analyze failures', {
+        source: 'mcp-app',
         onAdmissionStarted,
         onAdmitted,
         beforeDispatch,
-      }).catch((error: unknown) => error);
-      await vi.waitFor(() =>
-        expect(
-          fetch.mock.calls.some(([url]) => String(url).endsWith('/resume')),
-        ).toBe(true),
-      );
-      sourceCurrent = false;
-      resume.resolve(
-        new Response(
-          JSON.stringify({
-            sessionId: 'session-a',
-            clientId: 'client-b',
-            attached: true,
-            workspaceCwd: '/workspace',
-            state: {},
-          }),
-          { status: 200 },
-        ),
-      );
+      })
+      .catch((error: unknown) => error);
+    await vi.waitFor(() =>
+      expect(
+        fetch.mock.calls.some(([url]) => String(url).endsWith('/resume')),
+      ).toBe(true),
+    );
+    sourceCurrent = false;
+    resume.resolve(
+      new Response(
+        JSON.stringify({
+          sessionId: 'session-a',
+          clientId: 'client-b',
+          attached: true,
+          workspaceCwd: '/workspace',
+          state: {},
+        }),
+        { status: 200 },
+      ),
+    );
 
-      expect(await result).toMatchObject(
-        method === 'sendPrompt'
-          ? { stopReason: 'cancelled' }
-          : { name: 'AbortError' },
-      );
-      expect(promptCount).toBe(1);
-      expect(beforeDispatch.mock.calls).toEqual([['client-a'], ['client-b']]);
-      expect(onAdmissionStarted).toHaveBeenCalledOnce();
-      expect(onAdmitted).not.toHaveBeenCalled();
-      expect(addNotice).not.toHaveBeenCalled();
-      if (method === 'sendPrompt') {
-        expect(h.store.dispatch).toHaveBeenCalledWith({
-          type: 'assistant.done',
-          reason: 'cancelled',
-        });
-        expect(h.activePromptsRef.current.has('session-a')).toBe(false);
-        expect(h.setPromptStatus).toHaveBeenLastCalledWith('idle');
-      }
-    },
-  );
+    expect(await result).toMatchObject({ name: 'AbortError' });
+    expect(promptCount).toBe(1);
+    expect(beforeDispatch.mock.calls).toEqual([['client-a'], ['client-b']]);
+    expect(onAdmissionStarted).toHaveBeenCalledOnce();
+    expect(onAdmitted).not.toHaveBeenCalled();
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(h.store.dispatch).toHaveBeenCalledWith({
+      type: 'assistant.done',
+      reason: 'cancelled',
+    });
+    expect(h.activePromptsRef.current.has('session-a')).toBe(false);
+    expect(h.setPromptStatus).toHaveBeenLastCalledWith('idle');
+  });
 
   it('uses the current provider mode for mid-turn admission', async () => {
     const session = {

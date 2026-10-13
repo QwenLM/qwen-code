@@ -40,6 +40,7 @@ import {
   type SessionSourcesResult,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
+import { PromptDispatchCancelledError } from './utils/promptAdmission';
 import type { McpAppPromptSubmission } from './hooks/useMcpAppMessages';
 import type { ArtifactPanel } from './components/artifacts/ArtifactPanel';
 import type { WebShellSettingsOptions } from './settings';
@@ -25181,6 +25182,7 @@ describe('App session callbacks', () => {
       const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
       mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
         options.onAdmissionStarted();
+        options.beforeDispatch?.('client-1');
         options.onAdmitted({ promptId: 'accepted-app-prompt' });
         return turn.promise;
       });
@@ -25295,6 +25297,7 @@ describe('App session callbacks', () => {
           async (_text, options) => {
             await ready.promise;
             options.onAdmissionStarted();
+            options.beforeDispatch?.('client-1');
             daemonDispatch();
           },
         );
@@ -25385,8 +25388,8 @@ describe('App session callbacks', () => {
               );
             });
             await flush();
-            expect(request.onDispatched).toHaveBeenCalledOnce();
             const sentAttempts = attempt === 'retry' ? 1 : 0;
+            expect(request.onDispatched).toHaveBeenCalledTimes(sentAttempts);
             expect(daemonDispatch).toHaveBeenCalledTimes(sentAttempts);
             act(() => {
               if (change === 'sdk-client')
@@ -25404,13 +25407,16 @@ describe('App session callbacks', () => {
             });
             expect(daemonDispatch).toHaveBeenCalledTimes(sentAttempts);
             expect(request.onAdmitted).not.toHaveBeenCalled();
+            expect(
+              sessionCatalogController.promptAdmissionUncertain,
+            ).not.toHaveBeenCalled();
             expect(testState.prompt).toBe('hello');
           },
         );
       },
     );
 
-    it('permits each SDK dispatch with the same live client and notifies admission-start only once', async () => {
+    it('permits each SDK dispatch with the same live client and notifies each actual attempt', async () => {
       const daemonDispatch = vi.fn();
       mockSessionActions.sendPrompt.mockImplementationOnce(
         async (_text, options) => {
@@ -25430,7 +25436,7 @@ describe('App session callbacks', () => {
         await mcpAppMessageHost.current!.submit('Analyze failures', request);
       });
       expect(daemonDispatch).toHaveBeenCalledTimes(2);
-      expect(request.onDispatched).toHaveBeenCalledOnce();
+      expect(request.onDispatched).toHaveBeenCalledTimes(2);
       expect(request.onAdmitted).toHaveBeenCalledWith({
         promptId: 'accepted-retry',
       });
@@ -25459,6 +25465,7 @@ describe('App session callbacks', () => {
       mockSessionActions.sendPrompt.mockImplementationOnce(
         async (_text, options) => {
           options.onAdmissionStarted();
+          options.beforeDispatch?.('client-1');
           throw new TypeError('Lost response');
         },
       );
@@ -25484,6 +25491,7 @@ describe('App session callbacks', () => {
       mockSessionActions.sendPrompt.mockImplementationOnce((text, options) => {
         testState.blocks = [{ id: 'app-user', kind: 'user', text }];
         options.onAdmissionStarted();
+        options.beforeDispatch?.('client-1');
         options.onAdmitted({ promptId: 'app-prompt' });
         return turn.promise;
       });
@@ -25519,6 +25527,91 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
     });
 
+    it.each(['working_directory_missing', 'working_directory_compromised'])(
+      'refuses App messages in a session with %s',
+      async (errorCode) => {
+        const prepareSubmit = vi.fn();
+        mockConnection.standaloneSession = { errorCode };
+        renderApp({ prepareSubmit });
+        await flush();
+        await expect(
+          mcpAppMessageHost.current!.submit('Analyze failures', submission()),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+        expect(prepareSubmit).not.toHaveBeenCalled();
+        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['veto', 'rejected'])(
+      'preserves the earlier composer retry after an App request is %s',
+      async (reason) => {
+        mockSessionActions.sendPrompt.mockImplementationOnce(
+          async (text, options) => {
+            testState.blocks = [{ id: 'composer-user', kind: 'user', text }];
+            options.onAdmissionStarted();
+            options.onAdmitted({ promptId: 'composer-prompt' });
+          },
+        );
+        const { rerender } = renderApp();
+        await flush();
+        const files = [
+          {
+            name: 'failure.log',
+            media_type: 'text/plain',
+            text: 'original evidence',
+          },
+        ];
+        await act(async () => {
+          testState.latestChatEditorProps!.onSubmit(
+            'original composer text',
+            undefined,
+            files,
+          );
+        });
+        await flush();
+        act(() => {
+          testState.blocks = [
+            ...testState.blocks,
+            {
+              id: 'composer-error',
+              kind: 'error',
+              source: 'turn_error',
+              message: 'Network error',
+            },
+          ];
+          rerender();
+        });
+        await flush();
+        mockSessionActions.sendPrompt.mockImplementationOnce(
+          async (_text, options) => {
+            options.onAdmissionStarted();
+            if (reason === 'veto')
+              throw new PromptDispatchCancelledError('Source changed');
+            options.beforeDispatch('client-1');
+            throw new DaemonHttpError(403, {}, 'Denied');
+          },
+        );
+        await act(async () => {
+          await expect(
+            mcpAppMessageHost.current!.submit('App analysis', submission()),
+          ).rejects.toThrow();
+        });
+        expect(
+          sessionCatalogController.promptAdmissionUncertain,
+        ).not.toHaveBeenCalled();
+        await act(async () => {
+          window.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'y', ctrlKey: true }),
+          );
+        });
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(3);
+        expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+          'original composer text',
+          expect.objectContaining({ files, retry: true }),
+        );
+      },
+    );
+
     it('does not retry an earlier composer prompt for a later App turn error', async () => {
       mockSessionActions.sendPrompt.mockImplementation(
         async (text, options) => {
@@ -25527,6 +25620,7 @@ describe('App session callbacks', () => {
             { id: `user-${text}`, kind: 'user', text },
           ];
           options.onAdmissionStarted();
+          options.beforeDispatch?.('client-1');
           options.onAdmitted({ promptId: `prompt-${text}` });
         },
       );

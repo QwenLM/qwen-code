@@ -4,7 +4,10 @@ import type {
   McpAppMessages,
 } from '../mcpAppHostContext';
 import type { DaemonSessionOwnerSnapshot } from '../daemon/session/types';
-import { isDefinitelyRejectedPromptAdmission } from '../utils/promptAdmission';
+import {
+  isMcpAppPromptAdmissionRejected,
+  PromptDispatchCancelledError,
+} from '../utils/promptAdmission';
 import { useI18n } from '../i18n';
 import { Button } from '../components/ui/button';
 import {
@@ -53,6 +56,8 @@ interface Pending extends Review {
   controller: AbortController;
   owner: DaemonSessionOwnerSnapshot;
   finish(phase: Phase, error?: string): void;
+  settle(): void;
+  startTimeout(): void;
   cleanup(): void;
 }
 
@@ -98,16 +103,15 @@ export function useMcpAppMessages(host: MessageHost) {
       return new Promise((resolve) => {
         const controller = new AbortController();
         const signal = AbortSignal.any([input.signal, controller.signal]);
-        const abort = () =>
+        const abort = () => {
           request.finish(
-            request.phase === 'dispatched' ? 'unknown' : 'cancelled',
+            request.phase === 'dispatched' || request.phase === 'unknown'
+              ? 'unknown'
+              : 'cancelled',
           );
-        const timeout = setTimeout(() => {
-          request.finish(
-            request.phase === 'dispatched' ? 'unknown' : 'expired',
-          );
-          controller.abort();
-        }, 90_000);
+          request.settle();
+        };
+        let timeout: ReturnType<typeof setTimeout>;
         const request: Pending = {
           ...input,
           signal,
@@ -116,23 +120,38 @@ export function useMcpAppMessages(host: MessageHost) {
           clientId: current.clientId!,
           owner: current.captureOwner(),
           phase: 'reviewing',
+          startTimeout: () => {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => {
+              request.finish(
+                request.phase === 'dispatched' ? 'unknown' : 'expired',
+              );
+              controller.abort();
+            }, 90_000);
+          },
           cleanup: () => {
             clearTimeout(timeout);
-            signal.removeEventListener('abort', abort);
+            input.signal.removeEventListener('abort', abort);
+          },
+          settle: () => {
+            request.cleanup();
+            resolve(request.phase === 'accepted' ? {} : { isError: true });
           },
           finish: (phase, error) => {
-            if (!isPending(request.phase)) return;
-            request.cleanup();
+            if (!isPending(request.phase) && request.phase !== 'unknown')
+              return;
+            clearTimeout(timeout);
             request.phase = phase;
             request.error = error;
             if (mountedRef.current && pendingRef.current === request) {
               setReview({ ...request });
             }
-            resolve(phase === 'accepted' ? {} : { isError: true });
+            if (phase !== 'unknown') request.settle();
           },
         };
         pendingRef.current = request;
-        signal.addEventListener('abort', abort, { once: true });
+        request.startTimeout();
+        input.signal.addEventListener('abort', abort, { once: true });
         if (!isOwnerCurrent(request)) {
           request.finish('cancelled');
           controller.abort();
@@ -159,9 +178,11 @@ export function useMcpAppMessages(host: MessageHost) {
       const request = pendingRef.current;
       if (request) {
         request.finish(
-          request.phase === 'dispatched' ? 'unknown' : 'cancelled',
+          request.phase === 'dispatched' || request.phase === 'unknown'
+            ? 'unknown'
+            : 'cancelled',
         );
-        request.cleanup();
+        request.settle();
         request.controller.abort();
       }
     };
@@ -180,6 +201,7 @@ export function useMcpAppMessages(host: MessageHost) {
       return;
     }
     request.phase = 'preparing';
+    request.startTimeout();
     setReview({ ...request });
     void Promise.resolve()
       .then(() => {
@@ -195,28 +217,32 @@ export function useMcpAppMessages(host: MessageHost) {
           onAdmitted: ({ promptId }) => {
             if (!promptId) return;
             request.promptId = promptId;
-            if (request.phase === 'unknown') {
-              request.phase = 'accepted';
-              if (mountedRef.current && pendingRef.current === request) {
-                setReview({ ...request });
-              }
-            } else request.finish('accepted');
+            request.finish('accepted');
           },
         });
       })
       .then(() => {
-        request.finish(
-          request.phase === 'dispatched' ? 'unknown' : 'cancelled',
-        );
+        if (isPending(request.phase)) {
+          request.finish(
+            request.phase === 'dispatched' ? 'unknown' : 'cancelled',
+          );
+        }
+        request.settle();
       })
       .catch((error: unknown) => {
         request.finish(
-          request.phase === 'dispatched' &&
-            !isDefinitelyRejectedPromptAdmission(error)
-            ? 'unknown'
-            : 'failed',
+          error instanceof PromptDispatchCancelledError ||
+            (request.phase === 'preparing' &&
+              error instanceof Error &&
+              error.name === 'AbortError')
+            ? 'cancelled'
+            : (request.phase === 'dispatched' || request.phase === 'unknown') &&
+                !isMcpAppPromptAdmissionRejected(error)
+              ? 'unknown'
+              : 'failed',
           error instanceof Error ? error.message : undefined,
         );
+        request.settle();
       });
   }, [isOwnerCurrent]);
 
@@ -227,7 +253,7 @@ export function useMcpAppMessages(host: MessageHost) {
       request.controller.abort();
       return;
     }
-    if (request) {
+    if (request && isPending(request.phase)) {
       request.finish('cancelled');
       request.controller.abort();
     }
@@ -237,10 +263,10 @@ export function useMcpAppMessages(host: MessageHost) {
 
   const context = useMemo<McpAppMessages | undefined>(
     () =>
-      host.enabled && host.sessionId && host.clientId
-        ? { sessionId: host.sessionId, clientId: host.clientId, requestMessage }
+      host.sessionId && host.clientId
+        ? { sessionId: host.sessionId, requestMessage }
         : undefined,
-    [host.enabled, host.sessionId, host.clientId, requestMessage],
+    [host.sessionId, host.clientId, requestMessage],
   );
 
   return {

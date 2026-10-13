@@ -457,7 +457,11 @@ import {
   shouldDisableComposerInput,
   type ComposerPlaceholderState,
 } from './utils/composerInputState';
-import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
+import {
+  isDefinitelyRejectedPromptAdmission,
+  isMcpAppPromptAdmissionRejected,
+  PromptDispatchCancelledError,
+} from './utils/promptAdmission';
 import { base64ToBlob } from './utils/base64';
 import type {
   ACPToolCall,
@@ -11299,13 +11303,13 @@ export function App({
             connectionRef.current.sessionId ?? allocatedSessionId,
           );
           admissionStarted = true;
-          if (preserveComposer) {
-            disarmSubmittedPromptRetry();
-            setShowRetryHint(false);
-          }
         },
         onAdmitted: (admission) => {
           admitted = true;
+          if (preserveComposer && admissionOwnerIsCurrent()) {
+            disarmSubmittedPromptRetry();
+            setShowRetryHint(false);
+          }
           if (sessionIdAfterEnsure && promptWorkspaceCwd) {
             sessionCatalogController.promptAdmitted(
               promptWorkspaceCwd,
@@ -11363,7 +11367,9 @@ export function App({
         if (
           admissionStarted &&
           !admitted &&
-          !isDefinitelyRejectedPromptAdmission(error) &&
+          !(preserveComposer
+            ? isMcpAppPromptAdmissionRejected(error)
+            : isDefinitelyRejectedPromptAdmission(error)) &&
           promptWorkspaceCwd
         ) {
           sessionCatalogController.promptAdmissionUncertain(promptWorkspaceCwd);
@@ -11911,6 +11917,10 @@ export function App({
           sessionWriteBlockGenerationRef.current === writeBlockGeneration &&
           !current.standaloneSession?.creationRecovery &&
           !isSessionWriterBlockedCode(current.standaloneSession?.errorCode) &&
+          current.standaloneSession?.errorCode !==
+            'working_directory_missing' &&
+          current.standaloneSession?.errorCode !==
+            'working_directory_compromised' &&
           !(
             unknownPromptAdmissionRef.current?.payloadAvailable &&
             unknownPromptAdmissionRef.current.sessionId === sessionId
@@ -11945,15 +11955,19 @@ export function App({
           assertIdle();
         },
         beforeDispatch: (dispatchClientId) => {
-          assertCurrent();
-          if (dispatchClientId !== clientId) {
-            throw new DOMException('Session client changed', 'AbortError');
+          try {
+            assertCurrent();
+            if (dispatchClientId !== clientId) {
+              throw new DOMException('Session client changed', 'AbortError');
+            }
+            submission.onDispatched();
+          } catch (error) {
+            throw new PromptDispatchCancelledError('Cancelled before sending', {
+              cause: error,
+            });
           }
         },
-        onAdmissionStarted: () => {
-          assertCurrent();
-          submission.onDispatched();
-        },
+        onAdmissionStarted: assertCurrent,
         onAdmitted: submission.onAdmitted,
       });
     },

@@ -715,8 +715,10 @@ describe('ReportApp', () => {
           .click(),
       );
       await click(container, 'Review selected failures');
-      expect(container.textContent?.toLowerCase()).toContain(
-        'check the host review and original conversation before sending again',
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        outcome === 'host rejection'
+          ? 'The host did not confirm acceptance. Check the host review and original conversation before sending again.'
+          : 'Acceptance is unknown. The request may have timed out or lost its connection; check the host review and original conversation before sending again.',
       );
       expect(container.textContent).not.toContain('daemon accepted');
       expect(container.querySelector('textarea')!.value).toContain(reportId);
