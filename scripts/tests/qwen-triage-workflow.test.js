@@ -4889,6 +4889,10 @@ describe('qwen-triage verify hardening round 2', () => {
     // so the module list it names must exist where the skill says.
     expect(existsSync('scripts/check-flyway-migrations.js')).toBe(true);
     expect(flat).toContain('the module list `sdk-java.yml` passes it');
+    expect(flat).toContain(
+      'FLYWAY_BASE_REF="${BASE_SHA}" node scripts/check-flyway-migrations.js',
+    );
+    expect(flat).toContain('checks uniqueness only');
     expect(readFileSync('.github/workflows/sdk-java.yml', 'utf8')).toContain(
       'node scripts/check-flyway-migrations.js packages/sdk-java/',
     );

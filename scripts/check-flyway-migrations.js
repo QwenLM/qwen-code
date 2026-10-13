@@ -228,6 +228,8 @@ if (baseRef) {
       );
     }
   }
+} else {
+  console.log('ordering not checked: FLYWAY_BASE_REF is unset');
 }
 for (const { module, count, errored } of scanned) {
   if (errored || collided.has(module) || outOfOrder.has(module)) continue;

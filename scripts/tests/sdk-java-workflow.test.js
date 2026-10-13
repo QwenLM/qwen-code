@@ -153,7 +153,7 @@ describe('SDK Java Flyway migration version guard', () => {
   it('fetches the pull request baseline before enforcing migration ordering', () => {
     const steps = parse(workflow).jobs['flyway-migrations'].steps;
     const fetchIndex = steps.findIndex(
-      (step) => step.name === 'Fetch base branch for migration ordering',
+      (step) => step.name === 'Fetch base branch for version checks',
     );
     const checkIndex = steps.findIndex(
       (step) => step.name === 'Check Flyway migration versions are unique',
@@ -168,12 +168,27 @@ describe('SDK Java Flyway migration version guard', () => {
     expect(steps[fetchIndex].env.BASE_REF).toBe(
       '${{ github.event.pull_request.base.ref }}',
     );
+    expect(steps[fetchIndex].id).toBe('version_base');
     expect(steps[fetchIndex].run).toContain(
       'git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"',
     );
-    expect(steps[checkIndex].env.FLYWAY_BASE_REF).toBe(
-      "${{ github.event_name == 'pull_request' && 'FETCH_HEAD' || '' }}",
+    expect(steps[fetchIndex].run).toContain(
+      'BASE_SHA="$(git rev-parse FETCH_HEAD)"',
     );
+    expect(steps[fetchIndex].run).toContain(
+      'echo "sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(steps[checkIndex].env.FLYWAY_BASE_REF).toBe(
+      '${{ steps.version_base.outputs.sha }}',
+    );
+  });
+
+  it('fetches the shared version baseline only once', () => {
+    const steps = parse(workflow).jobs['flyway-migrations'].steps;
+    const fetches = steps.flatMap(
+      (step) => step.run?.match(/\bgit fetch\b/g) ?? [],
+    );
+    expect(fetches).toHaveLength(1);
   });
 
   it('scans every sdk-java module that owns a db/migration directory', () => {
@@ -235,19 +250,20 @@ describe('SDK Java contract version guard', () => {
     const names = parsed.steps.map((s) => s.name);
     const index = names.indexOf('Check the API contract version advances');
     expect(index).toBeGreaterThan(names.indexOf('Checkout'));
+    expect(index).toBeGreaterThan(
+      names.indexOf('Fetch base branch for version checks'),
+    );
     const step = parsed.steps[index];
     // A push has no base ref to compare against; the races that remain
     // after a pull request's check are the re-check workflow's below.
     expect(step.if).toBe("${{ github.event_name == 'pull_request' }}");
     expect(step.env).toEqual({
-      BASE_REF: '${{ github.event.pull_request.base.ref }}',
+      BASE_SHA: '${{ steps.version_base.outputs.sha }}',
     });
     // The default checkout is one commit deep, so the comparison copy comes
     // from a depth-one fetch of the base branch's head — not of a stale
     // merge base.
-    expect(step.run).toContain(
-      'git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"',
-    );
+    expect(step.run).toContain('git show "${BASE_SHA}:${DOCUMENT}"');
     expect(step.run).toContain(CONTRACT_DOCUMENT);
     expect(step.run).toContain('node scripts/check-contract-version.js');
   });

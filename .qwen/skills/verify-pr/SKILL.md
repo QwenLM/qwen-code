@@ -1041,9 +1041,14 @@ workspace roles and dropped `can_read` / `can_create`; the PR's new SQL
 still named the old columns, so on a real stack built from the merge every
 child creation failed on `bad SQL grammar`. If the PR adds a database
 migration, also run `scripts/check-flyway-migrations.js` on the trial-merge
-tree, with the module list `sdk-java.yml` passes it: the PR's own green
-check is only as fresh as the `main` it ran against. One such check
-finished at 13:20 UTC; another PR merged its own `V36` at 13:57.
+tree. Fetch current `main` with
+`git fetch --depth=1 --filter=blob:none origin main` and capture
+`BASE_SHA=$(git rev-parse FETCH_HEAD)`. Run
+`FLYWAY_BASE_REF="${BASE_SHA}" node scripts/check-flyway-migrations.js <modules>`,
+using the module list `sdk-java.yml` passes it. Omitting `FLYWAY_BASE_REF`
+checks uniqueness only; the script reports that ordering was not checked.
+The PR's own green check is only as fresh as the `main` it ran against.
+One such check finished at 13:20 UTC; another PR merged its own `V36` at 13:57.
 Trial-merge in-flight PRs that touch the same files, migration directory
 or contract version too.
 

@@ -93,6 +93,16 @@ const newlineNamesWork = (() => {
 })();
 
 describe('check-flyway-migrations', () => {
+  it('reports that ordering was not checked when the baseline is unset', () => {
+    const dir = module('server', { sql: ['V1__core.sql'] });
+    const result = check(dir);
+    expect(result.status).toBe(0);
+    expect(result.output).toContain(
+      'ordering not checked: FLYWAY_BASE_REF is unset',
+    );
+    expect(result.output).toContain('all versions unique');
+  });
+
   it.each([
     ['64', '58', 1],
     ['64', '65', 0],
@@ -451,6 +461,37 @@ describe('check-flyway-migrations', () => {
       ).toBe(true);
     },
   );
+
+  it.skipIf(!newlineNamesWork).each([
+    [
+      'raw newline',
+      'V15__x\n::error::forged.sql',
+      'V15__x%250A%253A%253Aerror%253A%253Aforged.sql',
+    ],
+    [
+      'percent-encoded newline',
+      'V15__x%0A::error::forged.sql',
+      'V15__x%25250A%253A%253Aerror%253A%253Aforged.sql',
+    ],
+  ])('escapes an out-of-order filename containing a %s', (_, file, encoded) => {
+    module('server', { sql: ['V16__legit.sql'] });
+    snapshot();
+    module('server', { sql: [file] });
+    const result = check('server');
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('V15 is not above V16 (newest on base)');
+    expect(result.output).toContain(encoded);
+    expect(result.output).not.toContain('all versions unique');
+    const decoded = result.output
+      .replace(/%0D/g, '\r')
+      .replace(/%0A/g, '\n')
+      .replace(/%25/g, '%');
+    for (const output of [result.output, decoded]) {
+      expect(
+        output.split('\n').some((line) => line.startsWith('::error::forged')),
+      ).toBe(false);
+    }
+  });
 
   it('reports a three-way collision once, naming every claimant', () => {
     // One version claimed in three modules of one invocation is ONE
