@@ -227,7 +227,7 @@ class HostedWorkspaceToolTurnIT {
             // Give initialized roots an unambiguous birth time without a timing-dependent sleep.
             Files.setLastModifiedTime(workspaces.get(index), FileTime.fromMillis(1));
         }
-        boolean verifiedRecovery = !faults && !latency && !operatorRecovery && "Linux".equals(System.getProperty("os.name"));
+        boolean verifiedRecovery = "Linux".equals(System.getProperty("os.name"));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=" + verifiedRecovery);
         var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
         if (sseGaps) {
@@ -462,10 +462,12 @@ class HostedWorkspaceToolTurnIT {
             assertThat(execution.get("execution_state")).isEqualTo(fault.equals("prepare-twice") ? "PREPARED" : "SETTLED");
             if (started) assertThat(execution.get("execution_status")).isEqualTo("success");
         }
-        String storageKey = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest((tenant + "\u0000storage-" + index).getBytes(StandardCharsets.UTF_8)));
-        Map<String, Object> owner = jdbc.queryForMap("SELECT holder_key, runtime_session_id"
-                + " FROM ma_storage_owner WHERE storage_key = ?", storageKey);
+        String storageId = "storage-" + index;
+        Map<String, Object> owner = jdbc.queryForMap("SELECT o.holder_key, o.runtime_session_id"
+                + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key"
+                + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
+                tenant, storageId);
         boolean released = storeFaults ? fault.equals("turn-reply") : List.of("prepare", "start", "release").contains(fault);
         if (released) assertThat(owner.get("holder_key")).as(fault + " released owner").isNull();
         else {

@@ -87,9 +87,11 @@ MySQL/MariaDB 的两个初始化入口都要求选定应用数据库，在读取
 
 结构化 CASE 比较仅将裸 TRUE/FALSE token 视为数值别名 1/0，与 [MariaDB 布尔字面量](https://mariadb.com/docs/server/reference/sql-structure/sql-language-structure/sql-language-structure-boolean-literals) 一致。带引号字符串、分支顺序/值、操作符和 ELSE 仍属于校验结构，不跳过任何 CHECK。
 
-规模验收在两种保留的数据库族中都读取真实执行统计。MySQL 使用 EXPLAIN ANALYZE 树形算子；MariaDB 使用 [ANALYZE FORMAT=JSON](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/analyze-and-explain-statements/analyze-format-json)，对每个表节点将平均 r_rows 乘以 r_loops。测试辅助代码核对实际选中的 key，不以 possible_keys 代替；拒绝仅有估算或缺失计数的计划，并保留未执行 JOIN 的零循环统计。既有扫描量上限、实际索引检查和 1000→10000 历史规模断言仍是门禁，不跳过任何数据库族。
+规模验收在两种保留的数据库族中都读取真实执行统计。MySQL 使用 EXPLAIN ANALYZE 树形算子；MariaDB 使用 [ANALYZE FORMAT=JSON](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/analyze-and-explain-statements/analyze-format-json)，对每个表节点将平均 r_rows 乘以 r_loops。测试辅助代码核对实际选中的 key，不以 possible_keys 代替；拒绝仅有估算或缺失计数的计划，并保留未执行 JOIN 的零循环统计。MariaDB 可能在优化阶段读取 PRIMARY const 表，执行循环为零且没有 r_rows；其实际 r_engine_stats.pages_accessed 与扫描行数分开记录。每次资源查询必须有正数的实际行或页读取证据，两个指标分别受预算约束。1000→10000 历史规模下行数必须稳定；B-tree 高度可能变化，因此页数在每个规模分别受预算约束。既有扫描量上限与实际索引检查仍是门禁，不跳过任何数据库族。
 
 真实栈 E2E 运行器仅使用 canonical 表播种和验收，审批查询明确限定 ACTION 类型。Linux CI 对首个及替换 Server 都显式开启 verified recovery，在启动任何 Harness 或接纳工作前注册任务专用新存储的原生身份，不使用仅 SQL 的身份证明，不启用 trusted reboot recovery。macOS LOCAL 工具支持仍属待决定的平台边界；文档描述当前要求 Linux 注册的行为，并保留物理排他规则。
+
+Linux Hosted 用例在工具准入前通过生产原生存储 guard 登记每个已配置的 Workspace storage。崩溃及生命周期恢复用例仅在首次启动时登记，重启保留原登记与物理占用证明。物理 owner 断言先将逻辑 alias 解析为物理 key。这些用例不跳过原生存储检查，不通过 SQL 构造身份凭证，也不削弱故障断言。
 
 ## 实施顺序与验收
 

@@ -114,6 +114,14 @@ class HostedShellLifecycleRecoveryIT {
         private void run() throws Exception {
             startHarness();
             startSpring();
+            var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
+            storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+            storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                    new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                            tenant, "storage", root.resolve("workspace").toString())));
+            new com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard(jdbc,
+                    new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), storageRegistrationProperties)
+                    .register(tenant, "storage", UUID.randomUUID().toString());
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'L4', ?, ?, 'ACTIVE')",
                     tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -441,6 +449,7 @@ class HostedShellLifecycleRecoveryIT {
             properties.put(prefix + "runtime-broker.port", brokerPort);
             properties.put(prefix + "runtime-broker.token", TOKEN);
             properties.put(prefix + "runtime-broker.durable-local-process", true);
+            properties.put(prefix + "runtime-broker.verified-workspace-recovery-enabled", true);
             properties.put(prefix + "runtime-broker.trusted-local-reboot-recovery", false);
             properties.put(prefix + "runtime-broker.workspace-cwd", root.resolve("decoy"));
             properties.put(prefix + "runtime-broker.state-directory", root.resolve("broker"));

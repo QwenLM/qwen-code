@@ -793,6 +793,8 @@ class HostedTeamLeadMySqlIT {
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage-0",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace));
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
+        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                + "Linux".equals(System.getProperty("os.name")));
         // The broker's durable local-process mode only exists on Linux;
         // elsewhere it must be opted out, which starts the broker without
         // workspace execution (workspace closes then keep answering the
@@ -804,6 +806,10 @@ class HostedTeamLeadMySqlIT {
                         authentication()))
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
+        if ("Linux".equals(System.getProperty("os.name"))) {
+            spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class)
+                    .register(tenant, "storage-0", UUID.randomUUID().toString());
+        }
     }
 
     private void startHarness(Path cli, String node, Path decoy, int harnessPort, int brokerPort) throws Exception {

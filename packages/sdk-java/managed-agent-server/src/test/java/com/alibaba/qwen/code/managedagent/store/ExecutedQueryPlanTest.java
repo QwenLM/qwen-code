@@ -53,6 +53,36 @@ class ExecutedQueryPlanTest {
                 """);
         assertThat(plan.rowCounts()).containsExactly(0d);
         assertThat(plan.scannedRows()).isZero();
+        assertThat(plan.preExecutionPageReads()).isZero();
+    }
+
+    @Test
+    void keepsOptimizationStagePageReadsSeparateFromRowsAndEstimates() {
+        var plan = ExecutedQueryPlan.mariaDb("""
+                {"query_block":{"nested_loop":[{"table":{
+                  "table_name":"ma_resource","access_type":"const","key":"PRIMARY",
+                  "rows":9999,"r_loops":0,"r_rows":null,
+                  "r_engine_stats":{"pages_accessed":2}}}]}}
+                """);
+        assertThat(plan.scannedRows()).isZero();
+        assertThat(plan.preExecutionPageReads()).isEqualTo(2);
+        assertThat(plan.usesIndex("PRIMARY")).isTrue();
+    }
+
+    @Test
+    void requiresActualPrimaryConstPageEvidence() {
+        for (String access : new String[] {"ref", "const"}) {
+            for (String key : new String[] {"another", "PRIMARY"}) {
+                for (String pages : new String[] {"null", "0", "\"2\"", "2"}) {
+                    var plan = ExecutedQueryPlan.mariaDb("{\"table\":{\"table_name\":\"r\","
+                            + "\"access_type\":\"" + access + "\",\"key\":\"" + key + "\","
+                            + "\"r_rows\":null,\"r_loops\":0,\"r_engine_stats\":{\"pages_accessed\":" + pages + "}}}");
+                    assertThat(plan.scannedRows()).isZero();
+                    assertThat(plan.preExecutionPageReads()).isEqualTo(
+                            access.equals("const") && key.equals("PRIMARY") && pages.equals("2") ? 2 : 0);
+                }
+            }
+        }
     }
 
     @Test

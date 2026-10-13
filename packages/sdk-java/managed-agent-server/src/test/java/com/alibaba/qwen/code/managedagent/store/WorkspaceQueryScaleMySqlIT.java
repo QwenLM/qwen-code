@@ -208,6 +208,7 @@ class WorkspaceQueryScaleMySqlIT {
             assertThat(plan.usesIndex(index)).as(plan.text()).isTrue();
         }
         assertThat(plan.rowCounts()).as(plan.text()).isNotEmpty();
+        assertThat(plan.preExecutionPageReads()).as(plan.text()).isLessThanOrEqualTo(limit);
         for (double count : plan.rowCounts()) {
             assertThat(count).as(plan.text()).isLessThanOrEqualTo(limit);
         }

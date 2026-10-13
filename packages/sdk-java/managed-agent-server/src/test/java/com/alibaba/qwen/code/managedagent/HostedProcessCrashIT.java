@@ -96,6 +96,16 @@ class HostedProcessCrashIT {
 
         private void run() throws Exception {
             startSpring();
+            if ("Linux".equals(System.getProperty("os.name"))) {
+                var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
+                storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+                storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                        new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                                tenant, "storage", root.resolve("workspace").toString())));
+                new com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard(jdbc,
+                        new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()), storageRegistrationProperties)
+                        .register(tenant, "storage", UUID.randomUUID().toString());
+            }
             controller = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
             controller.createContext("/", exchange -> {
                 try {
@@ -213,8 +223,10 @@ class HostedProcessCrashIT {
         }
 
         private Map<String, Object> owner() throws Exception {
-            return jdbc.queryForMap("SELECT * FROM ma_storage_owner WHERE storage_key = ?",
-                    sha256((tenant + "\u0000storage").getBytes(StandardCharsets.UTF_8)));
+            return jdbc.queryForMap("SELECT o.* FROM ma_storage_owner o JOIN ma_storage s"
+                            + " ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+                    com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
+                    tenant, "storage");
         }
 
         private void captureOwner(Map<String, Object> execution) throws Exception {

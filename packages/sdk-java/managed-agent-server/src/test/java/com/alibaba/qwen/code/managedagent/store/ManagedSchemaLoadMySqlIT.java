@@ -49,21 +49,24 @@ class ManagedSchemaLoadMySqlIT extends ManagedSchemaSessionMySqlIT {
         String body =
                 "SELECT inline_bytes, byte_length, sha256 FROM ma_resource WHERE resource_key = ?"
                         + " AND state = 'REFERENCED' AND deletion_operation_key IS NULL";
-        long claims = scanned(due, Long.MAX_VALUE);
-        long reads = scanned(body, resource);
+        var claims = scanned(due, Long.MAX_VALUE);
+        assertThat(claims.scannedRows()).isPositive();
+        var reads = scanned(body, resource);
         seedHistory(tenant, id, 1000, 10_000);
-        assertThat(scanned(due, Long.MAX_VALUE)).isEqualTo(claims);
-        assertThat(scanned(body, resource)).isEqualTo(reads);
+        assertThat(scanned(due, Long.MAX_VALUE).scannedRows()).isEqualTo(claims.scannedRows());
+        assertThat(scanned(body, resource).scannedRows()).isEqualTo(reads.scannedRows());
         assertThat(store.deliverableRenames(Long.MAX_VALUE)).hasSize(1);
         assertThat(store.findSnapshotPage(tenant, id, null, 0, 10).items()).hasSize(1);
     }
 
-    private long scanned(String sql, Object argument) {
+    private ExecutedQueryPlan.Plan scanned(String sql, Object argument) {
         var plan = ExecutedQueryPlan.explain(jdbc, sql, argument);
         assertThat(plan.tableScan()).as(plan.text()).isFalse();
-        long scanned = plan.scannedRows();
-        assertThat(scanned).as(plan.text()).isPositive().isLessThanOrEqualTo(10);
-        return scanned;
+        assertThat(plan.scannedRows()).as(plan.text()).isBetween(0L, 10L);
+        assertThat(plan.preExecutionPageReads()).as(plan.text()).isBetween(0L, 10L);
+        assertThat(plan.scannedRows() > 0 || plan.preExecutionPageReads() > 0)
+                .as("Actual row or optimization-stage page reads: %s", plan.text()).isTrue();
+        return plan;
     }
 
     private void seedHistory(String tenant, String session, int first, int last) {

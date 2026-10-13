@@ -33,22 +33,24 @@ final class ExecutedQueryPlan {
         while (rows.find()) {
             counts.add(Double.parseDouble(rows.group(1)) * Double.parseDouble(rows.group(2)));
         }
-        return new Plan(text, counts, List.of(), text.contains("Table scan"), false);
+        return new Plan(text, counts, List.of(), List.of(), text.contains("Table scan"), false);
     }
 
     static Plan mariaDb(String text) {
         var counts = new ArrayList<Double>();
         var indexes = new ArrayList<String>();
+        var preExecutionPages = new ArrayList<Long>();
         try {
             JsonNode root = new ObjectMapper().readTree(text);
-            boolean tableScan = collect(root, counts, indexes);
-            return new Plan(text, counts, indexes, tableScan, true);
+            boolean tableScan = collect(root, counts, indexes, preExecutionPages);
+            return new Plan(text, counts, indexes, preExecutionPages, tableScan, true);
         } catch (java.io.IOException error) {
             throw new IllegalArgumentException("Invalid MariaDB execution plan", error);
         }
     }
 
-    private static boolean collect(JsonNode node, List<Double> counts, List<String> indexes) {
+    private static boolean collect(JsonNode node, List<Double> counts, List<String> indexes,
+                                   List<Long> preExecutionPages) {
         boolean tableScan = false;
         if (node.has("table_name")) {
             tableScan = "ALL".equals(node.path("access_type").asText());
@@ -61,20 +63,30 @@ final class ExecutedQueryPlan {
                 counts.add(rows.asDouble() * loops.asDouble());
             } else if (loops.isNumber() && loops.asDouble() == 0 && rows.isNull()) {
                 counts.add(0d);
+                JsonNode pages = node.path("r_engine_stats").path("pages_accessed");
+                if ("const".equals(node.path("access_type").asText())
+                        && "PRIMARY".equals(node.path("key").asText())
+                        && pages.isIntegralNumber() && pages.canConvertToLong() && pages.asLong() > 0) {
+                    preExecutionPages.add(pages.asLong());
+                }
             } else {
                 throw new IllegalArgumentException("Missing actual row/loop statistics: " + node);
             }
         }
         for (JsonNode child : node) {
-            tableScan |= collect(child, counts, indexes);
+            tableScan |= collect(child, counts, indexes, preExecutionPages);
         }
         return tableScan;
     }
 
     record Plan(String text, List<Double> rowCounts, List<String> indexes,
-                boolean tableScan, boolean mariaDb) {
+                List<Long> preExecutionPages, boolean tableScan, boolean mariaDb) {
         long scannedRows() {
             return rowCounts.stream().mapToLong(Math::round).sum();
+        }
+
+        long preExecutionPageReads() {
+            return preExecutionPages.stream().mapToLong(Long::longValue).sum();
         }
 
         boolean usesIndex(String index) {

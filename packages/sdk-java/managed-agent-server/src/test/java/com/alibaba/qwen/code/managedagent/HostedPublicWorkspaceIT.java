@@ -1079,6 +1079,8 @@ class HostedPublicWorkspaceIT {
             arguments.add("--qwen.managed-agent.tool-publication.deletion-grace=0s");
         }
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + durableClose);
+        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                + "Linux".equals(System.getProperty("os.name")));
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -1103,6 +1105,12 @@ class HostedPublicWorkspaceIT {
                 })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
+        if ("Linux".equals(System.getProperty("os.name"))) {
+            var guard = spring.getBean(com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard.class);
+            for (int index = 0; index < roots.size(); index++) {
+                guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
+            }
+        }
     }
 
     private FilterRegistrationBean<Filter> authentication() {
