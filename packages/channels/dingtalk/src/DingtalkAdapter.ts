@@ -2931,6 +2931,20 @@ export class DingtalkChannel extends ChannelBase {
               : '');
           plan.chunks[0] =
             prefix + replaceHeader(plan.chunks[0]!.slice(prefix.length));
+          if (
+            replyPlan &&
+            replyPlan.chunks[0]!.length > DINGTALK_MAX_CHUNK_LENGTH
+          ) {
+            replyPlan.chunks.splice(
+              0,
+              1,
+              ...this.createReplyTextDelivery(
+                replyPlan.chunks[0]!.slice(prefix.length),
+                replyPlan.atUserId,
+                target.sourceLabel,
+              ).chunks,
+            );
+          }
           if (proactivePlan) {
             proactivePlan.chunks = proactivePlan.chunks.flatMap((chunk) =>
               Buffer.byteLength(

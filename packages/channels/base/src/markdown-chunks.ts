@@ -245,19 +245,32 @@ function chunkMarkdown(
   const large = size(text) > 100_000;
   const tree = (large ? blockParser : parser).parse(text);
   if (large) {
-    const referenceContext =
-      '\n\n' +
-      tree.children
-        .filter((node) => node.type === 'definition')
-        .map(source)
-        .join('\n');
+    const references = new Map<string, string>();
+    for (const node of tree.children) {
+      if (node.type === 'definition') {
+        const id = node.identifier.toUpperCase();
+        if (!references.has(id)) references.set(id, source(node));
+      }
+    }
     const parseAt = (raw: string, offset: number) => {
+      const context = new Set<string>();
+      for (const match of raw.matchAll(/\[((?:\\.|[^[\]\\])*)\]/gu)) {
+        const id = match[1]!
+          .replace(/[\t\n\r ]+/g, ' ')
+          .replace(/^ | $/g, '')
+          .toLowerCase()
+          .toUpperCase();
+        const definition = references.get(id);
+        if (definition) context.add(definition);
+      }
       const children = parser
-        .parse(raw + referenceContext)
+        .parse(raw + (context.size ? '\n\n' + [...context].join('\n') : ''))
         .children.filter((node) => node.type !== 'definition');
       const shift = (child: Nodes) => {
-        child.position!.start.offset! += offset;
-        child.position!.end.offset! += offset;
+        if (child.position) {
+          child.position.start.offset! += offset;
+          child.position.end.offset! += offset;
+        }
         if ('children' in child) child.children.forEach(shift);
       };
       children.forEach(shift);
@@ -321,6 +334,11 @@ function chunkMarkdown(
 
   function inlineParts(node: Nodes, soft: number, limit: number): string[] {
     if (!('children' in node)) return plainFallback(source(node), limit);
+    // GFM escaped autolink literals can lose their inline source positions.
+    if (node.children.some((child) => !child.position)) {
+      const raw = source(node);
+      return size(raw) <= limit ? [raw] : plainFallback(raw, limit);
+    }
     const parts: string[] = [];
     let current = '';
     const flush = () => {

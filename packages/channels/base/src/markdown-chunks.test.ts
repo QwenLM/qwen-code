@@ -905,3 +905,61 @@ it('preserves fences and top-level references above the large-document threshold
   }
   checkBudget(chunks);
 });
+
+it.each(['utf16', 'utf8'] as const)(
+  'retains escaped autolink source without inline positions (%s)',
+  (unit) => {
+    const options = { ...defaults, unit };
+    for (const url of [
+      'https\\://example\\.com/guide',
+      'www\\.example\\.com',
+      'me\\@example\\.com',
+    ]) {
+      const paragraph = 'x'.repeat(3900) + ` see ${url} done`;
+      const padding = ('padding '.repeat(50) + '\n\n').repeat(260);
+      for (const text of [paragraph, padding + paragraph]) {
+        const chunks = splitMarkdown(text, options);
+        expect(chunks.join('')).toBe(text);
+        expect(chunks.some((chunk) => chunk.includes(url))).toBe(true);
+        checkBudget(chunks, options);
+      }
+      for (const marker of ['> ', '- ']) {
+        const chunks = splitMarkdown(marker + paragraph, options);
+        expect(chunks.some((chunk) => chunk.includes(url))).toBe(true);
+        expect(chunks.join('')).toContain(paragraph);
+        checkBudget(chunks, options);
+      }
+      const oversized = 'x'.repeat(21_000) + ` see ${url} done`;
+      const chunks = splitMarkdown(oversized, options);
+      expect(chunks.flatMap(code).join('')).toBe(oversized);
+      checkBudget(chunks, options);
+    }
+  },
+);
+
+it('avoids reparsing unrelated definitions for every large-document paragraph', () => {
+  const paragraphs = Array.from(
+    { length: 1200 },
+    (_, i) => `paragraph ${i}: ${'word '.repeat(70)}`,
+  ).join('\n\n');
+  const definitions = Array.from(
+    { length: 200 },
+    (_, i) => `[ref ${i}]: https://docs.example.com/${i}`,
+  ).join('\n');
+  const reference = '[shown][REF  \t0] and [ref 1][] and [ref 2]';
+  const text = `${reference}\n\n${paragraphs}\n\n${definitions}`;
+  expect(text.length).toBeGreaterThan(100_000);
+  const start = performance.now();
+  const chunks = splitMarkdown(text, defaults);
+  expect(performance.now() - start).toBeLessThan(2000);
+  expect(chunks.map((chunk) => chunk.split('\n\n[ref 0]:')[0]).join('')).toBe(
+    `${reference}\n\n${paragraphs}`,
+  );
+  expect(chunks.every((chunk) => chunk.includes(definitions))).toBe(true);
+  expect(
+    nodes(chunks[0]!)
+      .filter((node) => node.type === 'linkReference')
+      .map((node) => node.type === 'linkReference' && node.identifier),
+  ).toEqual(['ref 0', 'ref 1', 'ref 2']);
+  checkBudget(chunks);
+});
