@@ -1,6 +1,10 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.math.MathContext;
 import java.math.RoundingMode;
@@ -13,20 +17,36 @@ import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Java mirror of the frozen managed-event-envelope/1 contract (TypeScript:
  * packages/core/src/managed-runtime/managed-event-envelope.ts). Every rule
  * here mirrors the TypeScript side byte-for-byte — canonical JSON, the
  * SHA-256 digest, the validation bounds — and the fixture consumer test
- * proves it against the frozen fixtures. Declared, not enabled (phase MQ2a):
- * no runtime path calls this yet.
+ * proves it against the frozen fixtures. The journal transport (MQ2b) derives
+ * {@code authoritative_journal} envelopes through it, the public-event
+ * transport (MQ2c) {@code public_event} envelopes, and the transport
+ * consumers parse both.
  */
 public final class ManagedEventEnvelopes {
     static final int FORMAT_VERSION = 1;
-    static final String STREAM_AUTHORITATIVE_JOURNAL = "authoritative_journal";
+    public static final String STREAM_AUTHORITATIVE_JOURNAL =
+            "authoritative_journal";
+    public static final String STREAM_PUBLIC_EVENT = "public_event";
+    // Ordered (the failure message joins it), as the TypeScript constant.
+    static final List<String> STREAMS = List.of(
+            STREAM_AUTHORITATIVE_JOURNAL, STREAM_PUBLIC_EVENT);
     static final int MAX_ID_BYTES = 512;
+    // A public kind is the public event type: managed_agent_event.event_type
+    // and the public API both cap it at 128, and the grammar is ASCII.
+    static final int MAX_PUBLIC_KIND_BYTES = 128;
+    static final Pattern PUBLIC_KIND = Pattern.compile(
+            "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$");
     static final long MAX_TIME_MS = 8640000000000000L;
+    // MANAGED_SESSION_LIMITS.maxJsonDepth: the digest refuses a value nested
+    // deeper, counting from the top-level list at depth 0.
+    static final int MAX_JSON_DEPTH = 64;
     // Number.MAX_SAFE_INTEGER - 1: the schema's sequence ceiling (the TypeScript
     // assert rejects exactly MAX_SAFE_INTEGER as "cannot advance").
     static final long MAX_SEQUENCE = 9007199254740990L;
@@ -50,6 +70,11 @@ public final class ManagedEventEnvelopes {
             "v", "sessionId", "tenantId", "workspaceId", "stream", "sequence",
             "eventId", "kind", "occurredAt", "payloadRef");
 
+    // The nine fields of a public event row a public_event envelope binds.
+    private static final List<String> PUBLIC_EVENT_ROW_KEYS = List.of(
+            "tenantId", "sessionId", "sequence", "eventId", "turnId", "type",
+            "data", "terminal", "createdAt");
+
     private ManagedEventEnvelopes() {
     }
 
@@ -70,14 +95,96 @@ public final class ManagedEventEnvelopes {
     }
 
     /**
+     * The public event row a {@code public_event} envelope binds, as the
+     * committed {@link EventRecord} carries it. {@code data} goes through the
+     * store's own mapper, so the tree is the one the store wrote as
+     * data_json and a receiver reading the row back recomputes the same
+     * digest.
+     */
+    public static ObjectNode publicEventRow(EventRecord event,
+            ObjectMapper mapper) {
+        ObjectNode row = JsonNodeFactory.instance.objectNode();
+        row.put("tenantId", event.tenantId());
+        row.put("sessionId", event.sessionId());
+        row.put("sequence", event.sequence());
+        row.put("eventId", event.eventId());
+        if (event.turnId() == null) {
+            row.putNull("turnId");
+        } else {
+            row.put("turnId", event.turnId());
+        }
+        row.put("type", event.type());
+        row.set("data", mapper.valueToTree(event.data()));
+        row.put("terminal", event.terminal());
+        row.put("createdAt", event.createdAt());
+        return row;
+    }
+
+    /**
+     * The envelope of one committed public event row, mirroring
+     * managedEventEnvelopeFromPublicEvent: the row carries no workspace, so
+     * the Session's binding is passed alongside it, and the digest is SHA-256
+     * over the canonical JSON of the one-element list {@code [row]}.
+     */
+    public static ManagedEventEnvelope fromPublicEventRow(JsonNode row,
+            String workspaceId) {
+        if (row == null || !row.isObject()) {
+            fail("publicEvent must be a plain JSON object.");
+        }
+        if (row.size() != PUBLIC_EVENT_ROW_KEYS.size()) {
+            fail("publicEvent must have exactly the keys "
+                    + String.join(", ", PUBLIC_EVENT_ROW_KEYS) + ".");
+        }
+        for (String name : PUBLIC_EVENT_ROW_KEYS) {
+            if (!row.has(name)) {
+                fail("publicEvent must have exactly the keys "
+                        + String.join(", ", PUBLIC_EVENT_ROW_KEYS) + ".");
+            }
+        }
+        long sequence = finiteInteger(row.get("sequence"),
+                "publicEvent.sequence");
+        if (sequence < 1) {
+            fail("publicEvent.sequence must start at 1.");
+        }
+        if (!row.get("terminal").isBoolean()) {
+            fail("publicEvent.terminal must be a boolean.");
+        }
+        JsonNode turnId = row.get("turnId");
+        if (!turnId.isNull()) {
+            stableId(turnId, "publicEvent.turnId");
+        }
+        String type = publicKind(row.get("type"), "publicEvent.type");
+        ObjectNode bound = JsonNodeFactory.instance.objectNode();
+        for (String name : PUBLIC_EVENT_ROW_KEYS) {
+            bound.set(name, row.get(name));
+        }
+        var listed = JsonNodeFactory.instance.arrayNode().add(bound);
+        requireDepth(listed, 0);
+        ManagedEventEnvelope candidate = new ManagedEventEnvelope(
+                FORMAT_VERSION,
+                stableId(row.get("sessionId"), "publicEvent.sessionId"),
+                stableId(row.get("tenantId"), "publicEvent.tenantId"),
+                workspaceId,
+                STREAM_PUBLIC_EVENT,
+                sequence,
+                stableId(row.get("eventId"), "publicEvent.eventId"),
+                type,
+                timeMs(row.get("createdAt"), "publicEvent.createdAt"),
+                new ManagedEventEnvelope.PayloadRef(sha256Hex(canonicalJson(
+                        listed))));
+        // The envelope's own rules (the workspace id among them) decide last,
+        // exactly as the TypeScript derivation re-parses what it built.
+        return parse(toTree(candidate));
+    }
+
+    /**
      * The digest of the full committed event: SHA-256 over the canonical JSON
      * of the one-element list `[event]` — the same canonical form the commit
      * marker's transaction-wide eventsDigest uses.
      */
     public static String digest(JsonNode event) {
         String encoded = canonicalJson(
-                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance
-                        .arrayNode().add(event));
+                JsonNodeFactory.instance.arrayNode().add(event));
         return sha256Hex(encoded);
     }
 
@@ -147,16 +254,28 @@ public final class ManagedEventEnvelopes {
                 || payloadRef.size() != 1 || !payloadRef.has("digest")) {
             fail("envelope.payloadRef must have exactly the keys digest.");
         }
+        String sessionId = stableId(value.get("sessionId"),
+                "envelope.sessionId");
+        String tenantId = stableId(value.get("tenantId"), "envelope.tenantId");
+        String workspaceId = stableId(value.get("workspaceId"),
+                "envelope.workspaceId");
+        String stream = stream(value.get("stream"));
+        String eventId = stableId(value.get("eventId"), "envelope.eventId");
+        // The kind vocabulary is the stream's: the closed record vocabulary
+        // on the journal, the open public type grammar on the public stream.
+        String kind = STREAM_AUTHORITATIVE_JOURNAL.equals(stream)
+                ? kind(value.get("kind"))
+                : publicKind(value.get("kind"), "envelope.kind");
         return new ManagedEventEnvelope(
                 FORMAT_VERSION,
-                stableId(value.get("sessionId"), "envelope.sessionId"),
-                stableId(value.get("tenantId"), "envelope.tenantId"),
-                stableId(value.get("workspaceId"), "envelope.workspaceId"),
-                stream(value.get("stream")),
+                sessionId,
+                tenantId,
+                workspaceId,
+                stream,
                 sequence,
-                stableId(value.get("eventId"), "envelope.eventId"),
-                kind(value.get("kind")),
-                timeMs(value.get("occurredAt")),
+                eventId,
+                kind,
+                timeMs(value.get("occurredAt"), "envelope.occurredAt"),
                 new ManagedEventEnvelope.PayloadRef(
                         digestValue(payloadRef.get("digest"))));
     }
@@ -166,8 +285,11 @@ public final class ManagedEventEnvelopes {
      * TypeScript producer emits — so a receiver recomputes the same bytes.
      */
     public static String toJson(ManagedEventEnvelope envelope) {
-        var node = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance
-                .objectNode();
+        return canonicalJson(toTree(envelope));
+    }
+
+    private static ObjectNode toTree(ManagedEventEnvelope envelope) {
+        ObjectNode node = JsonNodeFactory.instance.objectNode();
         node.put("v", envelope.v());
         node.put("sessionId", envelope.sessionId());
         node.put("tenantId", envelope.tenantId());
@@ -178,7 +300,7 @@ public final class ManagedEventEnvelopes {
         node.put("kind", envelope.kind());
         node.put("occurredAt", envelope.occurredAt());
         node.putObject("payloadRef").put("digest", envelope.payloadRef().digest());
-        return canonicalJson(node);
+        return node;
     }
 
     // --- canonical JSON (mirrors canonicalManagedSessionJson) ---
@@ -401,11 +523,10 @@ public final class ManagedEventEnvelopes {
         return finiteInteger(node, "envelope.sequence");
     }
 
-    private static long timeMs(JsonNode node) {
-        long value = finiteInteger(node, "envelope.occurredAt");
+    private static long timeMs(JsonNode node, String label) {
+        long value = finiteInteger(node, label);
         if (value > MAX_TIME_MS) {
-            fail("envelope.occurredAt exceeds the maximum UTC Unix millisecond"
-                    + " value.");
+            fail(label + " exceeds the maximum UTC Unix millisecond value.");
         }
         return value;
     }
@@ -442,9 +563,20 @@ public final class ManagedEventEnvelopes {
 
     private static String stream(JsonNode node) {
         if (node == null || !node.isTextual()
-                || !STREAM_AUTHORITATIVE_JOURNAL.equals(node.textValue())) {
-            fail("envelope.stream must be one of: "
-                    + STREAM_AUTHORITATIVE_JOURNAL + ".");
+                || !STREAMS.contains(node.textValue())) {
+            fail("envelope.stream must be one of: " + String.join(", ", STREAMS)
+                    + ".");
+        }
+        return node.textValue();
+    }
+
+    private static String publicKind(JsonNode node, String label) {
+        if (node == null || !node.isTextual()
+                || node.textValue().length() > MAX_PUBLIC_KIND_BYTES
+                || !PUBLIC_KIND.matcher(node.textValue()).matches()) {
+            fail(label + " must be a public event type: lowercase"
+                    + " dot-separated segments of at most "
+                    + MAX_PUBLIC_KIND_BYTES + " characters.");
         }
         return node.textValue();
     }
@@ -465,6 +597,25 @@ public final class ManagedEventEnvelopes {
                     + " digest.");
         }
         return node.textValue();
+    }
+
+    /**
+     * The TypeScript digest's depth bound: a container deeper than
+     * MAX_JSON_DEPTH is refused, counting the digested list as depth 0 — so
+     * a row's {@code data} sits at depth 2. Stops at the bound, so a deep
+     * value never recurses far.
+     */
+    private static void requireDepth(JsonNode node, int depth) {
+        if (!node.isContainerNode()) {
+            return;
+        }
+        if (depth > MAX_JSON_DEPTH) {
+            fail("publicEvent.data exceeds the maximum JSON depth of "
+                    + MAX_JSON_DEPTH + ".");
+        }
+        for (JsonNode child : node) {
+            requireDepth(child, depth + 1);
+        }
     }
 
     private static void fail(String message) {
