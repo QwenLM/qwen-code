@@ -94,7 +94,11 @@ public class SessionLifecycleCoordinator {
     }
 
     public boolean supportsWorkspaceLifecycle() {
-        return runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
+        return supportsWorkspaceLifecycle("hosted-workspace-files/1");
+    }
+
+    public boolean supportsWorkspaceLifecycle(String profile) {
+        return runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(profile);
     }
 
     private final ManagedSessionStore sessionStore;
@@ -258,7 +262,9 @@ public class SessionLifecycleCoordinator {
                 failureCode = "hosted_harness_protocol_error";
             } else if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError) {
                 failureCode = brokerError.getCode();
-                if ("workspace_close_execution_unsettled".equals(brokerError.getCode())) {
+                if (brokerError.getCode().startsWith("workspace_lifecycle")
+                        || "runtime_admission_closed".equals(brokerError.getCode())
+                        || "workspace_close_execution_unsettled".equals(brokerError.getCode())) {
                     blocked = brokerError.getCode();
                 } else if ("workspace_close_identity_unverified".equals(brokerError.getCode())
                         || "runtime_broker_recovery_blocked".equals(brokerError.getCode())) {
@@ -272,7 +278,11 @@ public class SessionLifecycleCoordinator {
             if ((cause instanceof com.alibaba.qwen.code.daemon.DaemonHttpException
                     || cause instanceof com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException)
                     && operationIsLifecycle(claimed)) {
-                blocked = "workspace_lifecycle_hooks_unsettled";
+                blocked = cause instanceof com.alibaba.qwen.code.daemon.DaemonHttpException httpError
+                        && httpError.getErrorCode() != null
+                        && (httpError.getErrorCode().startsWith("workspace_lifecycle") || httpError.getErrorCode().startsWith("workspace_close")
+                                || "runtime_admission_closed".equals(httpError.getErrorCode()))
+                        ? httpError.getErrorCode() : "workspace_lifecycle_hooks_unsettled";
             }
             if (blocked != null) {
                 failureCode = blocked;
@@ -544,7 +554,7 @@ public class SessionLifecycleCoordinator {
     }
 
     private static boolean operationIsLifecycle(OperationRecord operation) {
-        return operation.lifecycleProtocolVersion() == 1;
+        return com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.lifecycleProtocol(operation.lifecycleProtocolVersion());
     }
 
     // A cwd change settles without Harness or worker involvement: the probe
@@ -621,6 +631,9 @@ public class SessionLifecycleCoordinator {
     // answers too, but its answer confirms nothing about the Session.
     private boolean settle(OperationRecord operation,
             java.util.concurrent.atomic.AtomicBoolean harnessSettled) {
+        if (operation.lifecycleProtocolVersion() < 0 || operation.lifecycleProtocolVersion() > 2) {
+            throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+        }
         boolean harnessConfirmed = false;
         boolean bound = store.requireSession(operation.tenantId(), operation.sessionId()).workspace() != null;
         if (bound && closedSessionDeletion(operation)) {
@@ -630,18 +643,18 @@ public class SessionLifecycleCoordinator {
                 || operation.kind() == OperationKind.DELETE) {
             cascadeChildScopes(operation);
         }
-        if (bound && operation.lifecycleProtocolVersion() == 1) {
+        if (bound && operationIsLifecycle(operation)) {
             if (lifecycle == null || !runtimeWarmer.supportsWorkspaceClose()) {
                 throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
             }
-            JsonNode recovered = lifecycle.recoverEffects(operation);
-            if (recovered == null) {
-                if (!harness.supportsLifecycle()) {
+            lifecycle.requireSettledExecutions(operation);
+            JsonNode effects = lifecycle.recoverEffects(operation);
+            if (effects == null) {
+                if (!harness.supportsLifecycle(store.requireSession(operation.tenantId(), operation.sessionId()).toolProfile())) {
                     throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }
-                JsonNode receipt;
                 try {
-                    receipt = harness.settleLifecycle(operation);
+                    effects = harness.settleLifecycle(operation);
                 } catch (com.alibaba.qwen.code.daemon.HostedHarnessSettleAnsweredException answered) {
                     // The Harness answered the settle but Java could not
                     // process the receipt — the latch still sets: a later
@@ -657,14 +670,55 @@ public class SessionLifecycleCoordinator {
                 // Harness and a later failure of this attempt is not "the
                 // settle never happened" (review round 9, R7-2).
                 harnessSettled.set(true);
-                lifecycle.saveEffects(operation, receipt);
+                lifecycle.saveEffects(operation, effects);
             } else {
                 // A receipt a prior attempt saved from the Harness is
                 // durable proof it reached the Harness; a neverInitialized
                 // receipt was synthesized and persisted by the store itself
                 // for a Session the Harness never booted, with zero Harness
                 // contact (review round 11, R11-2).
-                harnessSettled.set(!recovered.path("neverInitialized").asBoolean(false));
+                harnessSettled.set(!effects.path("neverInitialized").asBoolean(false));
+            }
+            if (operation.lifecycleProtocolVersion() == 2
+                    && !effects.path("neverInitialized").asBoolean()) {
+                String profile = store.requireSession(operation.tenantId(), operation.sessionId()).toolProfile();
+                try {
+                    harness.prepareLifecycleResources(operation);
+                    if (com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.SHELL.equals(profile)) {
+                        runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
+                                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.authority(operation))
+                                .toCompletableFuture().join();
+                    }
+                    harness.settleLifecycleResources(operation);
+                    runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
+                            com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.authority(operation))
+                            .toCompletableFuture().join();
+                } catch (RuntimeException unsettled) {
+                    if (!(unsettled instanceof com.alibaba.qwen.code.daemon.DaemonException)
+                            || unsettled instanceof com.alibaba.qwen.code.daemon.HostedHarnessGenerationException) {
+                        throw unsettled;
+                    }
+                    if (unsettled instanceof com.alibaba.qwen.code.daemon.DaemonHttpException http
+                            && (http.getErrorCode() != null && (http.getErrorCode().startsWith("workspace_lifecycle_claim")
+                                    || http.getErrorCode().startsWith("workspace_lifecycle_authorization")
+                                    || http.getErrorCode().startsWith("workspace_close")
+                                            && !(com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.MCP.equals(profile)
+                                                    && "workspace_close_identity_unverified".equals(http.getErrorCode()))
+                                    || "runtime_admission_closed".equals(http.getErrorCode())))) {
+                        throw unsettled;
+                    }
+                    if (com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.MCP.equals(profile)) {
+                        runtimeWarmer.recoverStoppedWorkspaceResources(operation.tenantId(), operation.sessionId(),
+                                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.authority(operation))
+                                .toCompletableFuture().join();
+                    } else {
+                        throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
+                    }
+                }
+            }
+            if (operation.lifecycleProtocolVersion() == 2) {
+                lifecycle.verifyOutputContents(operation);
+                lifecycle.verifyResources(operation);
             }
             harness.detachLifecycle(operation);
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
@@ -1056,7 +1110,7 @@ public class SessionLifecycleCoordinator {
      * tests pin the tagging contract directly. */
     void runLifecycleChildOperation(OperationRecord parent,
             Map<String, Object> childBody) {
-        if (parent.lifecycleProtocolVersion() == 1) {
+        if (operationIsLifecycle(parent)) {
             childBody.put("authority", Map.of(
                     "operationId", parent.operationId(),
                     "claimGeneration", parent.claimGeneration(),

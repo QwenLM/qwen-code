@@ -244,6 +244,34 @@ function committed(
 }
 
 describe('HostedMonitorLoop', () => {
+  it('keeps observations but suppresses wakes and premature stop during lifecycle drain', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    await rig.loop.start(params({ maxEvents: 1, idleTimeoutMs: 2_000 }));
+    rig.loop.prepareLifecycle();
+    rig.executor.onLine?.('output during stop');
+    await rig.clock.advance(3_000);
+    expect(rig.executor.terminateCalls).toBe(0);
+    expect(committed(rig.authority)).toMatchObject({
+      observationSequence: 1,
+      notifiedThrough: 0,
+      stopReason: null,
+      run: { state: 'running' },
+    });
+    expect(
+      rig.authority
+        .eventsInSequenceRange(1, rig.authority.committedSequence)
+        .filter((event) => event.kind === 'input.accepted'),
+    ).toHaveLength(0);
+    await rig.executor.exitStopped();
+    await rig.loop.done;
+    expect(committed(rig.authority)).toMatchObject({
+      stopReason: 'stop_requested',
+      run: { state: 'cancelled', execution: 'settled' },
+    });
+    await closeLoop(rig);
+  });
+
   it('does not resume a record the publisher already settled', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);

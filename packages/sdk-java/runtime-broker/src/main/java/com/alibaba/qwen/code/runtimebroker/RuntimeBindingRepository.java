@@ -82,9 +82,27 @@ public interface RuntimeBindingRepository {
         }
     }
 
+    default boolean requireHarnessRecovery(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        if (authority != null) {
+            requireHarnessCleanup(scope, harnessSessionId, authority);
+        }
+        return authority != null;
+    }
+
+    default void requireHarnessCleanup(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        throw new RuntimeBrokerException(409, "runtime_admission_closed", "Lifecycle cleanup is unavailable", false);
+    }
+
     default void requireHookAdmission(RuntimeScope scope, String harnessSessionId,
             RuntimeLifecycleAuthority authority) {
         requireHarnessAdmission(scope, harnessSessionId, authority);
+    }
+
+    default List<RuntimeBindingRecord> verifyHarnessResources(java.sql.Connection connection,
+            String tenantId, String harnessSessionId) throws java.sql.SQLException {
+        throw new RuntimeBrokerException(409, "workspace_close_identity_unverified", "Resource verification is unavailable", false);
     }
 
     default void verifyHarnessStopped(java.sql.Connection connection, String tenantId, String harnessSessionId)

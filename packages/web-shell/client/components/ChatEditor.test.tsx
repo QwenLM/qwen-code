@@ -1681,6 +1681,16 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(
       latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
     ).toBe(true);
+    renderChatEditor({
+      composerScopeKey: 'managed:tenant:actor:session',
+      workspaceFeaturesEnabled: false,
+      disableLegacyHistoryFallback: true,
+      shellModeEnabled: false,
+    });
+    expect(
+      latestComposerCoreOptions.current?.disableLegacyHistoryFallback,
+    ).toBe(true);
+    expect(latestComposerCoreOptions.current?.shellModeEnabled).toBe(false);
   });
 
   it('shows the workspace indicator when the workspace action is visible', () => {
@@ -1699,6 +1709,23 @@ describe('ChatEditor workspace toolbar integration', () => {
     expect(chip?.getAttribute('title')).toBeNull();
     expect(
       container.querySelector('[data-web-shell-workspace]'),
+    ).not.toBeNull();
+  });
+
+  it('retains the native Workspace selector for a sole explicit Managed choice', () => {
+    const container = renderChatEditor({
+      workspaces: [
+        { id: 'ws-a', cwd: 'ws-a', label: 'A', primary: false, trusted: true },
+      ],
+      onSelectWorkspace: vi.fn(),
+      workspaceSelectorAlwaysVisible: true,
+      contextChipPlacement: 'below',
+      visibleToolbarActions: ['workspace'],
+    });
+    expect(
+      container.querySelector(
+        '[data-web-shell-composer-context-row] button[aria-label="Workspace"]',
+      ),
     ).not.toBeNull();
   });
 
@@ -3574,6 +3601,24 @@ describe('ChatEditor mobile composer actions', () => {
     ).toBe(false);
     await clickButton('Input history');
     expect(composerCoreState.openHistorySearch).toHaveBeenCalledOnce();
+  });
+
+  it('hides the mobile Shell entry for Managed while retaining the ordinary default', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      shellModeEnabled: false,
+    });
+    expect(
+      container.querySelector('[data-web-shell-mobile-editing-actions]'),
+    ).not.toBeNull();
+    const shellButton = () =>
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Shell mode',
+      );
+    expect(shellButton()).toBeUndefined();
+    rerenderChatEditor(container, { visibleToolbarActions: [] });
+    expect(shellButton()).toBeDefined();
   });
 
   it('returns focus to the composer after entering Shell from the drawer', async () => {

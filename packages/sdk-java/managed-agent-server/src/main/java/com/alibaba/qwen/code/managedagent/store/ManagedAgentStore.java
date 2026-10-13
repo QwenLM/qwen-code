@@ -1235,7 +1235,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
             OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean closeSupported) {
         // H4b child close is the only production caller. Public lifecycle uses
-        // the protocol overload and still refuses a Shell profile.
+        // the protocol overload and requires v2 for an active Shell or MCP Session.
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, key, digest, actorId, closeSupported, 0, false);
     }
 
@@ -1293,6 +1293,11 @@ public class ManagedAgentStore implements AgentStateStore {
         if ("DELETED".equals(session.status())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
         }
+        if (WorkspaceToolProfiles.isShellOrMcp(session.toolProfile())
+                && (WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) != 2
+                        || !List.of("CLOSED", "ARCHIVED").contains(session.status()))) {
+            throw workspaceExecutionUnavailable();
+        }
         String namespace = "UNARCHIVE_WORKSPACE_SESSION";
         Optional<CommandRecord> existing = findCommand(tenantId, namespace, scopedKey, true);
         if (existing.isPresent()) {
@@ -1301,9 +1306,6 @@ public class ManagedAgentStore implements AgentStateStore {
                         "The idempotency key was reused with different content.");
             }
             return new SessionMutation(session, true);
-        }
-        if (WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
-            throw workspaceExecutionUnavailable();
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         requireSessionStatus(session.status(), "ARCHIVED");
@@ -1335,15 +1337,16 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion,
-            boolean refuseShell) {
+            boolean publicLifecycle) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         // A resumed admission pins the new operation to the failed one's
-        // protocol (below), so the v1 tenant lock keys on the prospect of
-        // that pin too — otherwise the resumed v1 admission's
+        // protocol (below), so the tenant lock keys on the prospect of
+        // that pin too — otherwise the resumed lifecycle admission's
         // journal-idleness read would race the retention sweep.
-        if (protocolVersion == 1
+        if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)
                 || latestFailedLifecycleOperation(tenantId, sessionId, kind)
-                        .filter(failed -> failed.lifecycleProtocolVersion() == 1)
+                        .filter(failed -> WorkspaceToolProfiles.lifecycleProtocol(
+                                failed.lifecycleProtocolVersion()))
                         .isPresent()) {
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         }
@@ -1368,7 +1371,18 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new OperationAdmission(existing.get(), true);
         }
-        if (refuseShell && WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
+        if ("DELETED".equals(session.status())) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
+                    "The Session was not found.");
+        }
+        if (protocolVersion < 0 || protocolVersion > 2
+                || protocolVersion != 0 && protocolVersion != WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile())) {
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+        }
+        if (publicLifecycle && WorkspaceToolProfiles.isShellOrMcp(session.toolProfile())
+                && (WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) != 2
+                        || protocolVersion != 2 && (!List.of("CLOSED", "ARCHIVED").contains(session.status())
+                                || !hasCompletedWorkspaceClose(tenantId, sessionId)))) {
             throw workspaceExecutionUnavailable();
         }
         if (hasPendingRenameDelivery(tenantId, sessionId)) {
@@ -1378,16 +1392,12 @@ public class ManagedAgentStore implements AgentStateStore {
         if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
-        if ("DELETED".equals(session.status())) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
-                    "The Session was not found.");
-        }
         if (kind == OperationKind.DELETE && List.of("CLOSED", "ARCHIVED").contains(session.status())) {
             protocolVersion = 0;
         }
         if (session.workspace() != null) {
-            if (kind == OperationKind.CLOSE || kind == OperationKind.DELETE && "ACTIVE".equals(session.status()) && protocolVersion == 1) {
-                if (!supported || !workspaceFilesEnabled) {
+            if (kind == OperationKind.CLOSE || kind == OperationKind.DELETE && "ACTIVE".equals(session.status()) && WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
+                if (!supported || protocolVersion == 1 && !workspaceFilesEnabled) {
                     throw workspaceExecutionUnavailable();
                 }
                 if ("ACTIVE".equals(session.status())) {
@@ -1442,8 +1452,8 @@ public class ManagedAgentStore implements AgentStateStore {
         } else {
             validateOperationStart(session, kind);
         }
-        if (protocolVersion == 1) {
-            WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId, true);
+        if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
+            WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId, true, protocolVersion == 2);
         }
         long now = lifecycleDatabaseTime();
         String operationId = publicId("op");
@@ -1465,7 +1475,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 archive ? "CONFIRMED" : "PENDING", sessionStatusBefore,
                 archive ? publicId("rcpt") : null, now, now, now,
                 archive ? now : null, protocolVersion);
-        if (protocolVersion == 1 && resumed) {
+        if (resumed && WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
             // failOperation kept the fence row and released the dead
             // operation's claim on it, so the re-admitted operation rebinds
             // the row rather than inserting a duplicate.
@@ -1478,7 +1488,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                     JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
                     tenantId, sessionId);
-        } else if (protocolVersion == 1) {
+        } else if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
                 return null;
@@ -2085,15 +2095,15 @@ public class ManagedAgentStore implements AgentStateStore {
             String operationId, String owner, long claimGeneration,
             boolean harnessConfirmed) {
         var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
-        if (target.lifecycleProtocolVersion() == 1) {
+        if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         }
-        if (target.kind() == OperationKind.DELETE && target.lifecycleProtocolVersion() != 1) {
+        if (target.kind() == OperationKind.DELETE && !WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
         }
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
-        if (target.lifecycleProtocolVersion() == 1 && target.kind() == OperationKind.DELETE) {
+        if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion()) && target.kind() == OperationKind.DELETE) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
         }
         OperationRecord operation = jdbc.query("SELECT * FROM"
@@ -2116,7 +2126,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     + session.status() + " during its "
                     + operation.kind() + " operation");
         }
-        if (operation.lifecycleProtocolVersion() == 1) {
+        if (WorkspaceToolProfiles.lifecycleProtocol(operation.lifecycleProtocolVersion())) {
             if (lifecycle == null) {
                 throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
             }
@@ -2125,7 +2135,7 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = lifecycleDatabaseTime();
         if (operation.kind() == OperationKind.DELETE) {
             if (session.workspace() != null && !List.of("CLOSED", "ARCHIVED").contains(operation.sessionStatusBefore())
-                    && operation.lifecycleProtocolVersion() != 1) {
+                    && !WorkspaceToolProfiles.lifecycleProtocol(operation.lifecycleProtocolVersion())) {
                 throw new IllegalStateException("Workspace deletion requires a closed Session");
             }
             ToolPublicationRetentionStore.retire(jdbc, tenantId, sessionId, operationId);
@@ -2238,13 +2248,14 @@ public class ManagedAgentStore implements AgentStateStore {
     private void syncLifecycleClaim(String tenantId, String sessionId, String operationId) {
         var rows = jdbc.queryForList("SELECT lifecycle_protocol_version, claim_generation, lease_until FROM managed_agent_operation"
                 + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", tenantId, sessionId, operationId);
-        if (!rows.isEmpty() && ((Number) rows.getFirst().get("lifecycle_protocol_version")).intValue() == 1) {
+        if (!rows.isEmpty() && WorkspaceToolProfiles.lifecycleProtocol(((Number) rows.getFirst().get("lifecycle_protocol_version")).intValue())) {
             var row = rows.getFirst();
             jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_generation = ?, claim_lease_until = ?"
                     + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
-                    + " AND operation_id = ? AND phase = 'LIFECYCLE_ONLY'",
+                    + " AND operation_id = ? AND (phase = 'LIFECYCLE_ONLY' OR ? = 2 AND phase = 'DRAINING')",
                     row.get("claim_generation"), row.get("lease_until"), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId, operationId);
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId, operationId,
+                    row.get("lifecycle_protocol_version"));
         }
     }
 
