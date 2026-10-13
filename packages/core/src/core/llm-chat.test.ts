@@ -12458,6 +12458,34 @@ describe('LlmChat', async () => {
       expect(resultChars(1)).toBe(20_000);
     });
 
+    it('does not reanchor a retried response after fixed inputs change during backoff', async () => {
+      // `request` is built once, so the retry still carries the pre-change
+      // system instruction; its usage must not anchor the next send.
+      mockRetryWithBackoff.mockImplementationOnce(async (apiCall) => {
+        await apiCall().catch(() => {});
+        chat.setSystemInstruction('x'.repeat(20_000));
+        return apiCall();
+      });
+      streamMock()
+        .mockRejectedValueOnce(new Error('network error for request https://x'))
+        .mockResolvedValueOnce(
+          textStream('ok', {
+            promptTokenCount: NEAR_AUTO,
+            totalTokenCount: NEAR_AUTO + 10,
+          }),
+        );
+      mockStreamsOnce(textStream('done'));
+      await sendDrain('start', 'first');
+      expectStreamCalls(2);
+      // Both dispatches of the first send carry the same pre-change fixed
+      // inputs, so neither usage report covers the new system instruction.
+      expect(requestAt(1).config?.systemInstruction).toBe(
+        requestAt(0).config?.systemInstruction,
+      );
+      await sendDrain([result()], 'second');
+      expect(resultChars(2)).toBe(20_000);
+    });
+
     it('leaves results alone when the session is far from auto-compaction', async () => {
       await reportUsage(500_000);
       await sendDrain([result()], 'second');

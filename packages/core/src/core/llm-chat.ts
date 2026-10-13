@@ -5598,7 +5598,10 @@ export class LlmChat {
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
-    let fixedInputVersion = this.toolBudgetFixedInputVersion;
+    // Bound to the `request.config` snapshot below: `request` is built once and
+    // every retry re-sends it, so re-reading this per dispatch would let a
+    // setter that fires during backoff relabel stale usage as current.
+    const fixedInputVersion = this.toolBudgetFixedInputVersion;
     const request: PromptCacheSharingParameters = {
       model,
       contents: requestContents,
@@ -5642,7 +5645,6 @@ export class LlmChat {
     }
     params.config?.abortSignal?.throwIfAborted();
     const apiCall = () => {
-      fixedInputVersion = this.toolBudgetFixedInputVersion;
       // A dispatched request supersedes the report that sized it; only its own
       // successful response may anchor the next send.
       this.toolBudgetUsageAnchor = undefined;
