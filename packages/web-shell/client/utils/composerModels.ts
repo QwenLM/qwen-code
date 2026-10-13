@@ -19,22 +19,23 @@ export function isVisibleComposerModel(model: { id: string }): boolean {
 /**
  * Whether Settings ▸ Model must hide a row for the discontinued built-in OAuth
  * entry. Settings holds the structured form (`authType` on the provider, the
- * base id and the runtime flag on the model), so the policy the other two
- * surfaces express over an encoded id is expressed over those fields here, in
- * one place, rather than hardcoded at the call site.
+ * base id on the model), so it rebuilds the encoded id the composer hides by
+ * and asks that shared policy instead of restating it at the call site.
  *
- * Runtime snapshots are deliberately kept, matching `isDiscontinuedModel` in
- * the VS Code webview: a session already authenticated on the model keeps
- * seeing the one it is running, and only the registry entry is hidden.
+ * The row the session is actually running is deliberately kept, matching
+ * `isDiscontinuedModel` in the VS Code webview, so a live qwen-oauth session
+ * still lists its own model. `isCurrent` is the only usable signal for that:
+ * the daemon's provider list skips runtime rows and hardcodes `isRuntime:
+ * false`, so the runtime flag never marks the running model.
  */
 export function isDiscontinuedSettingsModel(
   provider: { authType: string },
-  model: { baseModelId: string; isRuntime: boolean },
+  model: { baseModelId: string; isCurrent: boolean },
 ): boolean {
   return (
-    provider.authType === 'qwen-oauth' &&
-    model.baseModelId === 'coder-model' &&
-    !model.isRuntime
+    !isVisibleComposerModel({
+      id: `${model.baseModelId}(${provider.authType})`,
+    }) && !model.isCurrent
   );
 }
 
