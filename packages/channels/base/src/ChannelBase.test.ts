@@ -19124,9 +19124,7 @@ describe('ChannelBase', () => {
       for (let i = 0; i < 50; i++) await Promise.resolve();
 
       // A best-effort cancel was requested...
-      expect(bridge.cancelSession).toHaveBeenCalledWith(sid, {
-        cancelReason: 'interrupted',
-      });
+      expect(bridge.cancelSession).toHaveBeenCalledWith(sid);
       // ...but B has NOT started: the only bridge.prompt so far is A's, and B's
       // onPromptStart has not fired (A is still the sole started/unfinished turn).
       expect(bridge.prompt).toHaveBeenCalledTimes(1);
@@ -19559,9 +19557,7 @@ describe('ChannelBase', () => {
 
       // Authorized steer-cancel went through: the running turn was cancelled and the
       // new turn carried the cancellation note.
-      expect(bridge.cancelSession).toHaveBeenCalledWith(sid, {
-        cancelReason: 'interrupted',
-      });
+      expect(bridge.cancelSession).toHaveBeenCalledWith(sid);
       expect(active.cancelled).toBe(true);
       const modText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[1][1] as string;
@@ -19607,9 +19603,7 @@ describe('ChannelBase', () => {
       await p1;
       await p2;
 
-      expect(bridge.cancelSession).toHaveBeenCalledWith(sid, {
-        cancelReason: 'interrupted',
-      });
+      expect(bridge.cancelSession).toHaveBeenCalledWith(sid);
       const secondText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[1][1] as string;
       expect(secondText).toContain('previous request has been cancelled');
@@ -22797,9 +22791,7 @@ describe('ChannelBase', () => {
 
         await vi.advanceTimersByTimeAsync(1000);
         await expect(loopRun).rejects.toThrow('loop timed out');
-        expect(bridge.cancelSession).toHaveBeenCalledWith(expect.any(String), {
-          cancelReason: 'interrupted',
-        });
+        expect(bridge.cancelSession).toHaveBeenCalledWith(expect.any(String));
         expect(ch.proactive).toEqual([]);
       } finally {
         vi.useRealTimers();
@@ -22860,9 +22852,7 @@ describe('ChannelBase', () => {
         await expect(loopResult).resolves.toMatchObject({
           message: 'loop timed out',
         });
-        expect(bridge.cancelSession).toHaveBeenCalledWith('s-1', {
-          cancelReason: 'interrupted',
-        });
+        expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
         expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
         expect(ch.retiringSessions).toEqual(['s-1']);
         expect(btwSignal?.aborted).toBe(true);

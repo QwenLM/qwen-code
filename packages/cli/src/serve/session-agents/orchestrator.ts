@@ -121,10 +121,6 @@ import {
   type BridgeClientRequestContext,
 } from '../acp-session-bridge.js';
 import {
-  INTERRUPTED_PROMPT_ABORT_REASON,
-  USER_CANCEL_ABORT_REASON,
-} from '@qwen-code/acp-bridge/bridgeTypes';
-import {
   MAX_EXTERNAL_RECORD_ID_LENGTH,
   MAX_EXTERNAL_RECORD_MENTION_IDS,
   MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH,
@@ -297,20 +293,14 @@ export interface SessionAgentMentionResult {
 /**
  * Answer to a Host's lease renewal, event batch or result. A failure means
  * the Host must stop the turn; `reason: 'cancelled'` (with `cancelled:
- * true`) fences the run: abort it and post no result. `cancelReason` keeps
- * a person's Stop distinct from restart fencing. Host routes map it to
- * `HostLeaseStatus.cancelled` (heartbeat) and
+ * true`) means the person stopped the run here: abort it and post no
+ * result. Host routes map it to `HostLeaseStatus.cancelled` (heartbeat) and
  * to 409 `{error: 'cancelled', cancelled: true}` (events, result).
  */
 export type HostAck =
   | { ok: true; duplicate?: boolean; leaseExpiresAt?: number }
   | { ok: false; reason: 'unknown_run' | 'lease_mismatch' }
-  | {
-      ok: false;
-      reason: 'cancelled';
-      cancelled: true;
-      cancelReason: 'user' | 'interrupted';
-    };
+  | { ok: false; reason: 'cancelled'; cancelled: true };
 
 export interface SessionAgentOrchestratorOptions {
   workspaceCwd: string;
@@ -451,7 +441,6 @@ interface SquadTarget {
 }
 
 interface CancelledLease {
-  cancelReason: 'user' | 'interrupted';
   sessionId: string;
   hostId: string;
   leaseId: string;
@@ -1422,7 +1411,7 @@ export class SessionAgentOrchestrator {
         pending.reject(new Error('daemon stopping'));
       }
       live.pendingPermissions.clear();
-      live.controller?.abort(INTERRUPTED_PROMPT_ABORT_REASON);
+      live.controller?.abort();
     }
     for (const state of this.dirty) await this.persist(state).catch(() => {});
     this.dirty.clear();
@@ -1773,7 +1762,7 @@ export class SessionAgentOrchestrator {
       if (live.frame.permission) continue;
       if (now - live.frame.activityAt >= this.stallTimeoutMs) {
         live.abortReason = 'stalled';
-        live.controller?.abort(INTERRUPTED_PROMPT_ABORT_REASON);
+        live.controller?.abort();
       }
     }
   }
@@ -2611,7 +2600,6 @@ export class SessionAgentOrchestrator {
     if (live.remote) {
       // From here on the Host's renew / events / result calls answer
       // `cancelled`: it aborts the turn and posts no result.
-      if (run.lease) run.lease.cancelReason = 'user';
       this.rememberCancelledLease(state.sessionId, run);
       await live.sendChain;
       await this.finishRun(state, live, {
@@ -2631,7 +2619,7 @@ export class SessionAgentOrchestrator {
       run.status = 'running';
       this.publish(live);
     }
-    live.controller?.abort(USER_CANCEL_ABORT_REASON);
+    live.controller?.abort();
   }
 
   /**
@@ -3098,12 +3086,7 @@ export class SessionAgentOrchestrator {
       cancelled.attempt === attempt &&
       (sessionId === undefined || cancelled.sessionId === sessionId)
     ) {
-      return {
-        ok: false,
-        reason: 'cancelled',
-        cancelled: true,
-        cancelReason: cancelled.cancelReason,
-      };
+      return { ok: false, reason: 'cancelled', cancelled: true };
     }
     const live = this.live.get(runId);
     if (!live || (sessionId !== undefined && live.sessionId !== sessionId)) {
@@ -3129,7 +3112,6 @@ export class SessionAgentOrchestrator {
   ): void {
     if (!run.lease) return;
     this.cancelledLeases.set(run.id, {
-      cancelReason: run.lease.cancelReason === 'user' ? 'user' : 'interrupted',
       sessionId,
       hostId: run.lease.hostId,
       leaseId: run.lease.leaseId,

@@ -272,16 +272,7 @@ import {
   ManagedRuntimeOutcomeUnknownError,
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
-import {
-  getLastApiHistoryPromptId,
-  restoreApiHistoryPromptIds,
-} from '@qwen-code/qwen-code-core/services/session-api-history.js';
-import {
-  isTodoStopGuardPromptText,
-  TODO_STOP_GUARD_PROMPT_PREFIX,
-  TODO_STOP_GUARD_PROMPT_BODY_SUFFIX,
-  TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX,
-} from '@qwen-code/qwen-code-core/services/api-user-prompt.js';
+import { getLastApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -583,6 +574,37 @@ function readDaemonInputAnnotations(
   );
   return annotations.length > 0 ? structuredClone(annotations) : undefined;
 }
+const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
+const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
+  ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
+const TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX =
+  ' This is the final automatic continuation. Before ending, either complete/update the todos or report the completed progress and the exact blocker.';
+// Content has no private metadata slot, so history cleanup recognizes only
+// these exact templates; byte-identical user text is intentionally ambiguous.
+function isTodoStopGuardPromptText(text: unknown): text is string {
+  if (typeof text !== 'string') return false;
+  if (!text.startsWith(TODO_STOP_GUARD_PROMPT_PREFIX)) return false;
+
+  const remainder = text.slice(TODO_STOP_GUARD_PROMPT_PREFIX.length);
+  const separator = remainder.indexOf(' ');
+  if (separator <= 0) return false;
+  const countText = remainder.slice(0, separator);
+  const count = Number(countText);
+  if (
+    !Number.isSafeInteger(count) ||
+    count <= 0 ||
+    String(count) !== countText
+  ) {
+    return false;
+  }
+
+  const body = `${countText}${TODO_STOP_GUARD_PROMPT_BODY_SUFFIX}`;
+  return (
+    remainder === body ||
+    remainder === body + TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX
+  );
+}
+
 /**
  * ACP rewind's binding of the shared user-prompt classifier
  * (`isApiUserPrompt` in core). The three deltas from the TUI binding are
@@ -5011,10 +5033,7 @@ export class Session implements SessionContext {
       );
     }
 
-    const client = this.config.getLlmClient()!;
-    const restored = structuredClone(history);
-    restoreApiHistoryPromptIds(client.getChat().getHistoryShallow(), restored);
-    client.setHistory(restored);
+    this.config.getLlmClient()!.setHistory(structuredClone(history));
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead

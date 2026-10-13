@@ -69,10 +69,8 @@ import {
   type SessionWriterCommitProof,
   type SessionWriterLease,
 } from './session-writer-lease.js';
-import {
-  prepareTranscriptRecords,
-  getApiHistoryPromptId,
-} from '../utils/transcript-records.js';
+import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import { getApiHistoryPromptId } from './session-api-history.js';
 import type {
   AgentMentionRecordPayload,
   AgentMessageRecordPayload,

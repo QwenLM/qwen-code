@@ -483,12 +483,6 @@ describe('AcpBridge', () => {
 
     await bridge.newSession('/tmp');
     await bridge.cancelSession('s-1');
-    expect(cancel).toHaveBeenLastCalledWith({ sessionId: 's-1' });
-    await bridge.cancelSession('s-1', { cancelReason: 'interrupted' });
-    expect(cancel).toHaveBeenLastCalledWith({
-      sessionId: 's-1',
-      _meta: { 'qwen.cancelReason': 'interrupted' },
-    });
     await expect(
       bridge.handleExtMethod('craft/claimTodoStopGuardContinuation', {
         sessionId: 's-1',

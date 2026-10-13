@@ -72,9 +72,7 @@ export function agentTools(state: BridgeState): any[] {
           // if collector was NOT already resolved by _meta
           if (timedOut && !collector.resolved) {
             try {
-              await state.client.cancel(sessionId, undefined, {
-                cancelReason: 'interrupted',
-              });
+              await state.client.cancel(sessionId);
             } catch {
               /* best-effort */
             }

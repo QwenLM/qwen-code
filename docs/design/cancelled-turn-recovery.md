@@ -4,22 +4,18 @@
 
 ## Problem and scope
 
-An explicitly cancelled daemon turn can resemble unfinished work after restart. Recovery must refuse work the user stopped while allowing a genuinely interrupted turn to continue. This change records cancellation intent in the existing terminal result and reuses the existing execution identity. Confirmation of legacy cancellation and UI wording belong to a follow-up change.
+After explicit daemon Cancel, restored history can resemble a crashed turn. Recovery must consult the existing turn result and refuse the stopped task. A truly interrupted task stays recoverable. This fix covers ordinary daemon Cancel/active Close and SDK transport interruptions; it does not redesign remote Host or channel cancellation policy.
 
-## Identity and terminal outcome
+## Minimal lifecycle
 
-Client prompt IDs identify input; daemon prompt IDs identify executions. User records and existing turn attempts bind them on the active transcript branch. Full and selective restore resolve the same ownership independently of the replay window, including history before compression. A user cancellation requires a validated cancelled result with a finite cancellation timestamp, explicit user provenance and unambiguous ownership. Timestamped legacy cancellations or uncertain ownership remain unknown and refuse both automatic and direct continuation. Newer model input, attempts and terminal outcomes supersede an older boundary; completed local commands excluded from model history do not.
+Use the existing recorded prompt identity, compression prompt IDs and turn result. A validated cancelled result with a finite cancellation timestamp blocks recovery. Explicit user provenance distinguishes current user cancellation from transport interruption; timestamp-only legacy results remain unknown and also block Continue. New accepted model input replaces the boundary. Local commands, reminders, compression and unrelated late terminals do not. Retry/Continue records only the execution attempt needed when no new visible user record is written.
 
-LlmClient owns the current execution ID and normalized terminal cancellation. Live settlement and cold restore use the same normalization. Successful input preparation accepts the existing invocation or model prompt ID; failed preparation cannot replace ownership. Settlement only updates its owning execution. A preserved pre-send input is accepted explicitly; admission-only cancellation and stale settlement cannot cancel unrelated work. Durable Retry/Continue attempts advance ownership while preserving the boundary until preparation. Compression, startup reminders and idle cleanup preserve the outcome. Explicit history replacement, rewind and clear invalidate it. Message arrays need no separate cancellation snapshots.
+The client retains the owning execution and normalized terminal outcome through content rewrites. Successful input preparation accepts the execution; rollback does not. Settlement only updates the owning execution. Explicit history replacement, rewind and clear invalidate it. Cold full/selective restore binds the result to existing transcript identities on the active branch. No message-array cancellation snapshots, symbol migration or Todo-text classifier are added.
 
-## Cancellation intent
+Cancellation admission and final Continue execution both consult this boundary. Rejected Continue creates no attempt or terminal. Transport failures carry interruption metadata through the ordinary SDK/REST/ACP path. Later human Cancel remains an independent request, and the server drains both handshakes before advancing its FIFO. The SDK keeps its existing public cancel method and Promise deduplication.
 
-Human Cancel, queued-input removal and active client Close carry user intent through existing cancellation metadata. Transport failures, deadlines, automatic teardown, disposal and ordinary SDK aborts carry interruption. A later human cancellation can upgrade an in-flight interruption; FIFO handshakes must finish before the next input starts. Only user intent writes the durable user marker. Recovery admission and execution both inspect the current terminal boundary. Invalid terminal payloads do not certify provenance; history gaps retain the degraded-history guard.
+## Acceptance and limits
 
-## Validation and acceptance
+With a built daemon and an isolated provider, Cancel after read_file, restart, reattach and Continue must refuse with zero further requests. SIGKILL without Cancel must still continue and complete. A timestamp-only cancellation must refuse repeated Continue without changing the transcript. Verify newer input, local commands, rollback, compression, stale results and active Close using focused checks.
 
-Use a real built daemon with an isolated loopback provider. Execute read_file, hold the next response, Cancel, kill/restart, reattach and Continue: require refusal and zero further provider requests. Omit Cancel and kill during the held response: require continuation and a completed terminal. Remove only the user provenance from the first transcript: the unknown legacy cancellation must also refuse continuation. Unit checks cover ownership, selective restore, compression, rollback, newer input, stale results and user cancellation upgrades.
-
-## Remaining work
-
-The follow-up adds explicit confirmation of unknown legacy cancellations and cancellation/interruption display wording. Untagged cron/steering ownership remains in #13502. Idle Close after an earlier interruption lacks a durable closed marker. Independent TUI paths are outside this recorded daemon scope. No transcript migration or release is included.
+Legacy confirmation remains in draft #14087. Remote Host/channel attribution extensions are removed from this PR; their existing policy is unchanged. Untagged automatic input and idle Close after an earlier interruption remain separate work in #13502. No migration or release is included.

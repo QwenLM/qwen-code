@@ -508,16 +508,20 @@ describe('explicitly cancelled recorded turns', () => {
     ).toBe('clean');
   });
   it.each([undefined, 'session-1########2'])(
-    'does not let an old cancel suppress later input with ID=%s',
+    'requires recorded identity to supersede cancellation with newer input ID=%s',
     (promptId) => {
       const newer = {
         ...record(3, userText('read file')),
         promptId,
         daemonPromptId: 'daemon-2',
       };
-      expect(
-        planFor(conversationFromRecords([prompt(), result(), newer])).kind,
-      ).toBe('interrupted_prompt');
+      const plan = planFor(
+        conversationFromRecords([prompt(), result(), newer]),
+      );
+      expect(plan.kind).toBe(
+        promptId === undefined ? 'clean' : 'interrupted_prompt',
+      );
+      expect(plan.canContinue).toBe(promptId !== undefined);
     },
   );
   it('does not reuse a terminal that precedes its user record', () => {
@@ -552,6 +556,12 @@ describe('explicitly cancelled recorded turns', () => {
   });
   it('keeps legacy cancellation blocked after a completed local command', () => {
     const original = prompt();
+    const response = {
+      ...toolResult(),
+      uuid: 'response',
+      parentUuid: original.uuid,
+      promptId: original.promptId,
+    };
     const terminal = result();
     delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
     const command = {
@@ -585,6 +595,7 @@ describe('explicitly cancelled recorded turns', () => {
       sessionId: 'session-1',
       conversation: conversationFromRecords([
         original,
+        response,
         terminal,
         command,
         output,
@@ -594,6 +605,7 @@ describe('explicitly cancelled recorded turns', () => {
     });
     expect(structuredClone(plan.originalApiHistory)).toEqual([
       original.message,
+      response.message,
     ]);
     expect(plan.canContinue).toBe(false);
     expect(plan.canAutoContinue).toBe(false);

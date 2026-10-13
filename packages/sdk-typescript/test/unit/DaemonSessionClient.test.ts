@@ -2510,8 +2510,8 @@ describe('DaemonSessionClient', () => {
     }
   });
 
-  it.each(['user', 'interrupted'] as const)(
-    'coalesces a prompt abort with an explicit %s session cancel',
+  it.each(['qwen:user-cancel', undefined] as const)(
+    'keeps prompt abort provenance separate from a later explicit cancel (%s)',
     async (reason) => {
       let eventsController:
         | ReadableStreamDefaultController<Uint8Array>
@@ -2569,20 +2569,23 @@ describe('DaemonSessionClient', () => {
         .catch((error: unknown) => error);
       await waitForPendingPrompt(session, 'p-1');
 
-      promptAbort.abort();
-      const explicitCancel =
-        reason === 'user'
-          ? session.cancel()
-          : session.cancel({ cancelReason: reason });
+      promptAbort.abort(reason);
+      const explicitCancel = session.cancel();
       await vi.waitFor(() => {
         expect(
           calls.filter((call) => call.url.endsWith('/cancel')),
-        ).toHaveLength(1);
+        ).toHaveLength(reason === 'qwen:user-cancel' ? 1 : 2);
       });
 
       expect(
-        JSON.parse(calls.find((call) => call.url.endsWith('/cancel'))!.body!),
-      ).toEqual({ _meta: { 'qwen.cancelReason': reason } });
+        calls
+          .filter((call) => call.url.endsWith('/cancel'))
+          .map((call) => JSON.parse(call.body!)),
+      ).toEqual(
+        reason === 'qwen:user-cancel'
+          ? [{}]
+          : [{ _meta: { 'qwen.cancelReason': 'interrupted' } }, {}],
+      );
       resolveCancel(new Response(null, { status: 204 }));
       await explicitCancel;
       await prompt;
@@ -2592,30 +2595,26 @@ describe('DaemonSessionClient', () => {
     },
   );
 
-  it('upgrades an in-flight interruption once and never downgrades user intent', async () => {
+  it('coalesces duplicate public cancellations with the existing request shape', async () => {
     const { fetch } = recordingFetch(() => new Response(null, { status: 204 }));
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-    const releases: Array<() => void> = [];
-    const cancel = vi
-      .spyOn(client, 'cancel')
-      .mockImplementation(
-        () => new Promise<void>((resolve) => releases.push(resolve)),
-      );
+    let release!: () => void;
+    const cancel = vi.spyOn(client, 'cancel').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
     const session = new DaemonSessionClient({
       client,
       session: { sessionId: 's-1', workspaceCwd: '/work/a', attached: true },
     });
-    const interrupted = session.cancel({ cancelReason: 'interrupted' });
-    await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
-    const user = session.cancel();
-    const duplicate = session.cancel({ cancelReason: 'interrupted' });
-    await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(2));
-    expect(cancel.mock.calls.map((call) => call[2]?.cancelReason)).toEqual([
-      'interrupted',
-      'user',
-    ]);
-    releases.forEach((release) => release());
-    await Promise.all([interrupted, user, duplicate]);
+    const first = session.cancel();
+    const duplicate = session.cancel();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledWith('s-1', undefined);
+    release();
+    await Promise.all([first, duplicate]);
   });
 
   it('releases a subscription prompt slot after a non-202 result', async () => {
