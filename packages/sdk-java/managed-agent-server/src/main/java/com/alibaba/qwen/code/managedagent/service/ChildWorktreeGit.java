@@ -458,10 +458,15 @@ public final class ChildWorktreeGit {
     /**
      * The paths of a clean merge that cannot be written into the parent's
      * working tree, which decision 5 reports as conflicts: a submodule
-     * pointer the merge moves (a patch cannot move one), and a path the
+     * pointer the merge moves (a patch cannot move one), a path the
      * merge adds where the parent holds content its snapshot does not
      * carry: an ignored file or directory at the path, or an ignored file
-     * or link where one of its directories must be.
+     * or link where one of its directories must be, and a path the merge
+     * deletes that the parent's HEAD does not commit. That last is
+     * content the working tree alone holds (a child that untracks it, for
+     * one: the snapshot the child started from committed it as its own,
+     * so removing it there is no statement about the parent's copy):
+     * writing the deletion would erase the only copy.
      */
     private List<String> unwritable(Path root, Repository repository, String parentTree, String mergedTree) {
         Map<String, Change> changes = diffTree(root, repository, parentTree, mergedTree);
@@ -471,11 +476,18 @@ public final class ChildWorktreeGit {
             // A name that is not UTF-8 decodes to U+FFFD and cannot be
             // written back byte for byte.
             if (record.gitlink() || change.getKey().indexOf('\uFFFD') >= 0 || ABSENT.equals(record.fromMode())
-                    && occupied(repository.top(), change.getKey(), changes)) {
+                    && occupied(repository.top(), change.getKey(), changes)
+                    || ABSENT.equals(record.toMode()) && !committedAtHead(root, repository, change.getKey())) {
                 unwritable.add(change.getKey());
             }
         }
         return unwritable;
+    }
+
+    /** Whether the parent's HEAD commits content at {@code path}. */
+    private boolean committedAtHead(Path root, Repository repository, String path) {
+        Result found = run(repository.top(), root, null, List.of("cat-file", "-t", "HEAD:" + path));
+        return found.exit == 0 && "blob".equals(firstLine(found.out));
     }
 
     /**
