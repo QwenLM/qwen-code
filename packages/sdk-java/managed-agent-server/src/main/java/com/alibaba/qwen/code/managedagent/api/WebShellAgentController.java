@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskCancelRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskEventQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
@@ -24,13 +25,13 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
+import com.alibaba.qwen.code.managedagent.service.ManagedTaskCancelService;
 import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
-import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -47,14 +48,17 @@ public class WebShellAgentController {
     private final ManagedEventStreamService streams;
     private final SessionLifecycleService lifecycle;
     private final ManagedTaskService tasks;
+    private final ManagedTaskCancelService taskCancels;
 
     public WebShellAgentController(ManagedAgentService service,
             ManagedEventStreamService streams,
-            SessionLifecycleService lifecycle, ManagedTaskService tasks) {
+            SessionLifecycleService lifecycle, ManagedTaskService tasks,
+            ManagedTaskCancelService taskCancels) {
         this.service = service;
         this.streams = streams;
         this.lifecycle = lifecycle;
         this.tasks = tasks;
+        this.taskCancels = taskCancels;
     }
 
     @PostMapping("/tasks/query")
@@ -79,6 +83,18 @@ public class WebShellAgentController {
                 tenant.actorId(), request.sessionId(), request.taskId(),
                 request.after(),
                 request.limit() == null ? 20 : request.limit());
+    }
+
+    @PostMapping("/tasks/cancel")
+    public ResponseEntity<WebShellCommandOperation> cancelTask(
+            TenantContext tenant,
+            @Valid @RequestBody WebShellTaskCancelRequest request,
+            HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        RequestIdFilter.useClientId(httpRequest, httpResponse,
+                request.requestId());
+        return ResponseEntity.accepted().body(taskCancels.cancelWebShell(
+                tenant.tenantId(), tenant.actorId(), request.idempotencyKey(),
+                request.sessionId(), request.taskId()));
     }
 
     @PostMapping("/sessions/query")
@@ -138,7 +154,10 @@ public class WebShellAgentController {
                     "unsupported_feature",
                     "Standalone Phase 1 has no environment templates.");
         }
-        validateTraceMetadata(request.metadata());
+        // The WebShell handlers forward no metadata at all (null in its
+        // slot): whatever the client sends is accepted and ignored, so no
+        // clientId-only contract is asserted here and immediately
+        // discarded. The Session title travels in the title field.
         WebShellAdmission admission = webShell(selection == null
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         request.idempotencyKey(), request.agentId(), null,
@@ -156,7 +175,6 @@ public class WebShellAgentController {
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse,
                 request.requestId());
-        validateTraceMetadata(request.metadata());
         WebShellAdmission admission = webShell(service.submitTurn(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(),
@@ -234,20 +252,6 @@ public class WebShellAgentController {
         return ResponseEntity.accepted().body(lifecycle.admitWebShell(
                 tenant.tenantId(), tenant.actorId(),
                 request.idempotencyKey(), request.sessionId(), kind));
-    }
-
-    private static void validateTraceMetadata(Map<String, Object> metadata) {
-        if (metadata == null || metadata.isEmpty()) {
-            return;
-        }
-        Object clientId = metadata.get("clientId");
-        if (metadata.size() != 1 || !(clientId instanceof String)
-                || ((String) clientId).isBlank()
-                || ((String) clientId).length() > 128) {
-            throw new ApiException(HttpStatus.BAD_REQUEST,
-                    "unsupported_feature",
-                    "WebShell metadata accepts clientId only.");
-        }
     }
 
     private static WebShellAdmission webShell(CommandAdmission admission) {

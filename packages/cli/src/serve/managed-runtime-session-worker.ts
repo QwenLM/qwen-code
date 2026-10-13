@@ -6,7 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -43,6 +43,7 @@ import {
   LedgerSweepRetiredError,
   LedgerSweepUnprovenError,
   MANAGED_RUNTIME_LEDGER_ENV,
+  ensureLedgerDirectory,
   processGroupLiveness,
   startLedgerReaper,
   sweepStaleLedgers,
@@ -509,8 +510,14 @@ export class ManagedSessionRuntimeWorker {
     for (const ledgerPath of [...this.ledgerPaths]) {
       // A path whose unproven sweep already armed a reaper is the reaper's
       // to settle: re-sweeping it here pays a second proof budget over the
-      // same groups and re-reports a quarantine that is already counted.
-      if (this.unprovenLedgerPaths.has(ledgerPath)) continue;
+      // same groups and re-reports a quarantine that is already counted. But
+      // deferring is not proving: close() must reject with the reason that
+      // armed the reaper rather than resolve as if the stop were done.
+      const armedReason = this.unprovenLedgerPaths.get(ledgerPath);
+      if (armedReason !== undefined) {
+        failures.push(armedReason);
+        continue;
+      }
       try {
         await this.sweepLedgerOnce(ledgerPath);
       } catch (error) {
@@ -522,8 +529,13 @@ export class ManagedSessionRuntimeWorker {
     }
   }
 
-  /** Ledger paths whose unproven stop is already reported and being retried. */
-  private readonly unprovenLedgerPaths = new Set<string>();
+  /**
+   * Ledger paths whose unproven stop is already reported and being retried,
+   * with the reason that armed them: a close() that defers the sweep to the
+   * armed reaper must reject with THAT reason rather than resolve as if the
+   * stop were proven.
+   */
+  private readonly unprovenLedgerPaths = new Map<string, Error>();
 
   /**
    * Reports a stop the ledger's sweep could not prove: the engine is
@@ -533,7 +545,7 @@ export class ManagedSessionRuntimeWorker {
    */
   private reportUnproven(ledgerPath: string, reason: Error): void {
     if (this.unprovenLedgerPaths.has(ledgerPath)) return;
-    this.unprovenLedgerPaths.add(ledgerPath);
+    this.unprovenLedgerPaths.set(ledgerPath, reason);
     this.options.quarantine?.report(reason);
     // The groups the last failure named: a sweep that finds the file gone
     // has proven nothing about them, so the lift waits for their own
@@ -737,7 +749,7 @@ export class ManagedSessionRuntimeWorker {
       : undefined;
     if (ledgerPath !== undefined) {
       // Fail before spawn: a worker without its ledger cannot be swept.
-      mkdirSync(path.dirname(ledgerPath), { recursive: true });
+      ensureLedgerDirectory(path.dirname(ledgerPath));
       this.ledgerPaths.add(ledgerPath);
       launchedLedgerPaths.add(ledgerPath);
     }
@@ -1241,6 +1253,16 @@ export function createManagedRuntimeEnvironment(
   // admission it runs with: a stop it cannot prove quarantines the engine
   // for every admission AFTER the report — a session just admitted has its
   // own ledger and its own close-time sweep, so it is never untracked work.
+  // The sweep is the read side of the directory and runs before any launch,
+  // so the owner-only heal runs here too: a session whose admissions are
+  // refused never reaches the launch-path heal at all. Only the heal, though:
+  // a directory that cannot be created fails the first Runtime call at its
+  // launch, never the creation of every Managed session.
+  try {
+    ensureLedgerDirectory(ledgerDir);
+  } catch {
+    // The launch path's own ensureLedgerDirectory reports it, per call.
+  }
   sweepStaleRuntimeLedgers(ledgerDir, quarantine);
   const worker = new ManagedSessionRuntimeWorker(
     config.getSessionId(),

@@ -14,6 +14,9 @@ public final class ManagedSessionStoreModels {
     public static final String WRITER_TOKEN_HEADER =
             "X-Qwen-Managed-Writer-Token";
     public static final int MAX_INLINE_RESOURCE_BYTES = 64 * 1024;
+    /** The agent-instructions bound the publisher and both verifiers
+     * must agree on (admission, publish, verify, recovery read). */
+    public static final int MAX_AGENT_INSTRUCTIONS_BYTES = 64 * 1024;
     public static final int MAX_RESOURCES_PER_TRANSACTION = 1024;
     public static final int MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
     public static final int MAX_TRANSACTION_EVENTS = 256;
@@ -95,7 +98,12 @@ public final class ManagedSessionStoreModels {
     public record WriterGrant(long writerGeneration, long leaseUntil,
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
-            boolean replayed) {
+            boolean replayed, int supportedStorageVersion) {
+        public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
+                long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed) {
+            this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
+                    activationEpoch, replayed, ManagedSessionReaderVersion.SUPPORTED);
+        }
     }
 
     public record SealReceipt(long writerGeneration, String state,

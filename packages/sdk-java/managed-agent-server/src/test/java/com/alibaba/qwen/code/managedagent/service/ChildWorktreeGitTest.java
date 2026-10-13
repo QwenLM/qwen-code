@@ -943,7 +943,9 @@ class ChildWorktreeGitTest {
         Files.delete(heads);
         Files.move(aside, heads);
 
-        for (String planted : List.of(".git/refs/qwen-elsewhere", ".git/objects/ff", ".git/worktrees/elsewhere",
+        // A hex pair like ff collides with the fanout directory Git creates
+        // for an object of that prefix; zz is never one.
+        for (String planted : List.of(".git/refs/qwen-elsewhere", ".git/objects/zz", ".git/worktrees/elsewhere",
                 ".git/packed-refs")) {
             Path link = project.resolve(planted);
             Files.createDirectories(link.getParent());

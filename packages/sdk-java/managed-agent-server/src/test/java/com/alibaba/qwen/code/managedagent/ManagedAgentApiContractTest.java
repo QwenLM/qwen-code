@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
@@ -64,8 +65,10 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -99,6 +102,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.HttpMethod;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.web.bind.annotation.RequestMethod;
@@ -120,6 +124,8 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 // SSE responses are still being written when MockMvc runs its result printer.
 @AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
+// Keep background recovery from claiming the synchronous schema-check rename.
+@MockitoBean(types = SessionRenameCoordinator.class)
 class ManagedAgentApiContractTest {
     private static final String KNOWN_GAPS = "openapi/contract-known-gaps.txt";
     private static final List<String> GAP_CATEGORIES = List.of("route",
@@ -236,6 +242,8 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellTaskGetRequest")),
                     entry(WebShellTaskEventQueryRequest.class,
                             List.of("WebShellTaskEventQueryRequest")),
+                    entry(ApiModels.WebShellTaskCancelRequest.class,
+                            List.of("WebShellTaskCancelRequest")),
                     entry(WebShellEvent.class, List.of("WebShellEvent")),
                     entry(WebShellResyncRequired.class,
                             List.of("WebShellResyncRequired")),
@@ -785,6 +793,17 @@ class ManagedAgentApiContractTest {
                  "agentId":"qwen-code","title":"web",
                  "metadata":{"clientId":"contract"},"input":[]}
                 """)).get("sessionId").asText();
+        // The widened metadata contract: a body with keys beyond clientId
+        // is both served (202) and schema-valid. exchange() validates
+        // sub-300 request bodies, so re-tightening WebShellMetadata to
+        // additionalProperties: false turns this arm red.
+        exchange(drift, "webShellCreateSession", 202,
+                post(WEB_SHELL + "/sessions/create").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"contract-web-metadata",
+                 "agentId":"qwen-code","input":[],
+                 "metadata":{"clientId":"client-1","other":"trace"}}
+                """);
         MockHttpServletResponse webShellStream = stream(drift,
                 "webShellStreamEvents",
                 post(WEB_SHELL + "/events/stream").header(TENANT, tenant),
@@ -1525,6 +1544,7 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/tasks/events/query").header(TENANT,
                         tenant),
                 "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchangeTaskCancels(drift, tenant, otherTenant, sessionId, taskId);
 
         // The served task bodies say exactly what the shared fixture views
         // say, down to the settled task's start and settle times.
@@ -1574,6 +1594,133 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
                         .formatted(emptySession,
                                 rest.at("/data/0/id").asText()));
+    }
+
+    /**
+     * H4f: the cancel routes over a monitor task (no cancel action) and a
+     * running child-agent task row. Delivery is the coordinator's and is
+     * asserted elsewhere; here the admission answers and the read-back of
+     * the admitted task_cancel operation meet the contract.
+     */
+    private void exchangeTaskCancels(Map<String, String> drift, String tenant,
+            String otherTenant, String sessionId, String monitorTask)
+            throws Exception {
+        String recordKey = "c".repeat(64);
+        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, runtime_state,"
+                        + " delivery_target, delivery_state, created_at,"
+                        + " started_at) VALUES (?, ?, ?, 'workspace-contract',"
+                        + " ?, 'child_run', 'run-contract', ?, 1,"
+                        + " 'resource-run-contract', 'child_agent', 'running',"
+                        + " 'ready', 'session', 'planned', 1, 2)",
+                com.alibaba.qwen.code.managedagent.store.ManagedSessionStore
+                        .sessionScopeKey(tenant, sessionId),
+                recordKey, tenant, sessionId, "d".repeat(64));
+        String childTask = "task_" + recordKey;
+        JsonNode view = json(exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        childTask).header(TENANT, tenant), null));
+        assertThat(view.get("action_capabilities").toString())
+                .isEqualTo("[\"cancel\"]");
+        String cancelPath = "/v1/agents/sessions/{id}/tasks/{task}/cancel";
+        JsonNode admitted = json(exchange(drift, "cancelSessionTask", 202,
+                post(cancelPath, sessionId, childTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-task-cancel"),
+                null));
+        assertThat(admitted.get("type").asText()).isEqualTo("task_cancel");
+        assertThat(admitted.get("task_id").asText()).isEqualTo(childTask);
+        assertThat(admitted.get("replayed").asBoolean()).isFalse();
+        JsonNode replayed = json(exchange(drift, "cancelSessionTask", 202,
+                post(cancelPath, sessionId, childTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-task-cancel"),
+                null));
+        assertThat(replayed.get("id").asText())
+                .isEqualTo(admitted.get("id").asText());
+        assertThat(replayed.get("replayed").asBoolean()).isTrue();
+        JsonNode readBack = json(exchange(drift, "getSessionCwdOperation", 200,
+                get("/v1/agents/sessions/{id}/operations/{operation}",
+                        sessionId, admitted.get("id").asText())
+                        .header(TENANT, tenant), null));
+        assertThat(readBack.get("task_id").asText()).isEqualTo(childTask);
+        exchange(drift, "webShellQueryCwdOperation", 200,
+                post(WEB_SHELL + "/operations/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"operationId\":\"%s\"}"
+                        .formatted(sessionId, admitted.get("id").asText()));
+        // The same key for another task is another request.
+        exchange(drift, "cancelSessionTask", 409,
+                post(cancelPath, sessionId, monitorTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-task-cancel"),
+                null);
+        // A monitor task has no cancel path: a new key is refused.
+        exchange(drift, "cancelSessionTask", 409,
+                post(cancelPath, sessionId, monitorTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-monitor-cancel"),
+                null);
+        exchange(drift, "cancelSessionTask", 400,
+                post(cancelPath, sessionId, childTask).header(TENANT, tenant),
+                null);
+        exchange(drift, "cancelSessionTask", 404,
+                post(cancelPath, sessionId, "task_missing")
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-missing-cancel"),
+                null);
+        exchange(drift, "cancelSessionTask", 404,
+                post(cancelPath, sessionId, childTask)
+                        .header(TENANT, otherTenant)
+                        .header(IDEMPOTENCY_KEY, "contract-foreign-cancel"),
+                null);
+        exchange(drift, "cancelSessionTask", 403,
+                post(cancelPath, sessionId, childTask).header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-scope-cancel")
+                        .principal(actor(otherTenant)), null);
+
+        JsonNode webShell = json(exchange(drift, "cancelWebShellTask", 202,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"requestId\":\"contract-request\",\"sessionId\":\"%s\","
+                        + "\"taskId\":\"%s\",\"idempotencyKey\":"
+                        + "\"contract-task-cancel\"}")
+                        .formatted(sessionId, childTask)));
+        assertThat(webShell.get("operationId").asText())
+                .isEqualTo(admitted.get("id").asText());
+        assertThat(webShell.get("taskId").asText()).isEqualTo(childTask);
+        assertThat(webShell.get("replayed").asBoolean()).isTrue();
+        exchange(drift, "cancelWebShellTask", 409,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-web-monitor\"}")
+                        .formatted(sessionId, monitorTask));
+        exchange(drift, "cancelWebShellTask", 400,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, childTask));
+        // The closed request object refuses an unknown field, and an
+        // overlong key is the contract's malformed-key refusal.
+        exchange(drift, "cancelWebShellTask", 400,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-web-unknown\","
+                        + "\"extra\":true}").formatted(sessionId, childTask));
+        assertThat(json(exchange(drift, "cancelWebShellTask", 400,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"%s\"}").formatted(sessionId,
+                        childTask, "k".repeat(129))))
+                .at("/error/code").asText())
+                .isEqualTo("invalid_idempotency_key");
+        exchange(drift, "cancelWebShellTask", 404,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"task_missing\","
+                        + "\"idempotencyKey\":\"contract-web-missing\"}")
+                        .formatted(sessionId));
+        exchange(drift, "cancelWebShellTask", 403,
+                post(WEB_SHELL + "/tasks/cancel").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                ("{\"sessionId\":\"%s\",\"taskId\":\"%s\","
+                        + "\"idempotencyKey\":\"contract-web-scope\"}")
+                        .formatted(sessionId, childTask));
     }
 
     /**
@@ -2143,7 +2290,7 @@ class ManagedAgentApiContractTest {
                 assertThat(other.get("capabilities"))
                         .isEqualTo(json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false}
                                 """));
             }
         }
@@ -2164,6 +2311,171 @@ class ManagedAgentApiContractTest {
                     .at("/error/code").asText())
                     .isEqualTo("session_not_found");
         }
+    }
+
+    @Test
+    void webShellSubmitAcceptsTheWidenedMetadataShape() throws Exception {
+        // The exact body the integration suite posts to /turns/submit for
+        // the metadata widening must conform to the published
+        // WebShellSubmitRequest: re-tightening WebShellMetadata (or the
+        // request's additionalProperties) turns this red.
+        assertThat(CONTRACT.validate(
+                "#/components/schemas/WebShellSubmitRequest",
+                objectMapper.readTree("""
+                        {"sessionId":"00000000-0000-4000-8000-000000000000",
+                         "idempotencyKey":"metadata-submit",
+                         "input":[{"type":"input_text","text":"hi"}],
+                         "metadata":{"clientId":"client-1","other":"trace"}}
+                        """))).isEmpty();
+    }
+
+    @Test
+    void thePublishedAggregateBudgetIsTheEnforcedOne() throws Exception {
+        String tenant = "tenant-contract-budget-" + UUID.randomUUID();
+        String sessionId = json(webShell(tenant, "/sessions/create",
+                "{\"idempotencyKey\":\"budget-create\","
+                        + "\"agentId\":\"qwen-code\",\"input\":[]}"))
+                .get("sessionId").asText();
+        // Every published copy of the budget states the same three
+        // enforced numbers: the aggregate, the per-block cap and the
+        // durable-record ceiling.
+        long publishedAggregate = 0, publishedBlock = 0, publishedKib = 0;
+        for (String schema : List.of("CreateSessionRequest",
+                "InputMessageEventRequest", "WebShellCreateRequest",
+                "WebShellSubmitRequest")) {
+            String description = CONTRACT.node("/components/schemas/"
+                    + schema + "/properties/input/description").asText();
+            long aggregate = publishedNumber(description,
+                    "([0-9,]+)-character aggregate", schema);
+            long perBlock = publishedNumber(description,
+                    "per-block ([0-9,]+)-character cap", schema);
+            long kib = publishedNumber(description,
+                    "(\\d+) KiB durable-record limit", schema);
+            if (publishedAggregate == 0) {
+                publishedAggregate = aggregate;
+                publishedBlock = perBlock;
+                publishedKib = kib;
+            } else {
+                assertThat(aggregate).as("%s aggregate", schema)
+                        .isEqualTo(publishedAggregate);
+                assertThat(perBlock).as("%s per-block cap", schema)
+                        .isEqualTo(publishedBlock);
+                assertThat(kib).as("%s durable-record KiB", schema)
+                        .isEqualTo(publishedKib);
+            }
+        }
+        assertThat(publishedKib * 1024)
+                .as("published durable-record limit is the enforced one")
+                .isEqualTo(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES);
+        assertThat(CONTRACT.node("/components/schemas/InputBlock"
+                + "/properties/text/maxLength").asLong())
+                .as("published per-block maxLength is the enforced"
+                        + " per-block cap")
+                .isEqualTo(publishedBlock);
+
+        // The enforced numbers are read out of the 400s the server
+        // returns, so no copy of either constant lives in this test.
+        String block = "{\"type\":\"input_text\",\"text\":\""
+                + "x".repeat((int) publishedBlock) + "\"}";
+        String oversizedInput = (block + ",").repeat(4) + block;
+        String oversized = "{\"idempotencyKey\":\"budget-submit\","
+                + "\"sessionId\":\"" + sessionId + "\",\"input\":["
+                + oversizedInput + "]}";
+        String message = json(webShell(tenant, "/turns/submit", oversized))
+                .path("error").path("message").asText();
+        var enforcedMatcher = java.util.regex.Pattern
+                .compile("exceeds the (\\d+) character aggregate limit")
+                .matcher(message);
+        assertThat(enforcedMatcher.find())
+                .as("400 message names the budget: %s", message).isTrue();
+        assertThat(Long.parseLong(enforcedMatcher.group(1)))
+                .as("enforced aggregate matches the published one")
+                .isEqualTo(publishedAggregate);
+
+        // The public events route enforces the same budget, not just the
+        // WebShell one; there the idempotency key travels in the
+        // Idempotency-Key header instead of the body.
+        MockHttpServletResponse publicRefusal = mvc.perform(
+                        post("/v1/agents/sessions/{id}/events", sessionId)
+                                .header(TENANT, tenant)
+                                .header(IDEMPOTENCY_KEY,
+                                        "budget-public-submit")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"type\":\"agent.session.input."
+                                        + "message\",\"input\":["
+                                        + oversizedInput + "]}"))
+                .andReturn().getResponse();
+        assertThat(publicRefusal.getStatus())
+                .as("public events route refuses the oversized body")
+                .isEqualTo(400);
+        JsonNode publicError = json(publicRefusal.getContentAsString(
+                StandardCharsets.UTF_8)).path("error");
+        assertThat(publicError.path("code").asText())
+                .isEqualTo("invalid_input");
+        assertThat(publicError.path("message").asText())
+                .as("public route 400 names the same aggregate budget")
+                .isEqualTo(message);
+
+        // One block at published+1 characters stays under the aggregate,
+        // so this 400 can only come from the per-block cap.
+        String overCap = "{\"idempotencyKey\":\"budget-block\","
+                + "\"sessionId\":\"" + sessionId + "\",\"input\":["
+                + "{\"type\":\"input_text\",\"text\":\""
+                + "x".repeat((int) publishedBlock + 1) + "\"}]}";
+        String blockMessage = json(webShell(tenant, "/turns/submit", overCap))
+                .path("error").path("message").asText();
+        var enforcedBlockMatcher = java.util.regex.Pattern
+                .compile("exceeds the (\\d+) character per-block limit")
+                .matcher(blockMessage);
+        assertThat(enforcedBlockMatcher.find())
+                .as("400 message names the per-block cap: %s", blockMessage)
+                .isTrue();
+        assertThat(Long.parseLong(enforcedBlockMatcher.group(1)))
+                .as("enforced per-block cap matches the published one")
+                .isEqualTo(publishedBlock);
+
+        // The counted unit is the code point, matching the published
+        // maxLength: a 600,000-emoji block is 1,200,000 UTF-16 units, so a
+        // String.length()-based cap would refuse what the schema admits.
+        // Each arm submits to its own session: a second submit while a Turn
+        // is active is a 409, not a budget decision.
+        String emojiBlock = "{\"type\":\"input_text\",\"text\":\""
+                + "\uD83D\uDE00".repeat(600_000) + "\"}";
+        mvc.perform(post(WEB_SHELL + "/turns/submit").header(TENANT, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"budget-emoji-block\","
+                                + "\"sessionId\":\"" + budgetSession(tenant, 1)
+                                + "\",\"input\":[" + emojiBlock + "]}"))
+                .andExpect(status().isAccepted());
+        // 2,000,001 code points stay inside the 4,000,000 aggregate but are
+        // 4,000,002 UTF-16 units: admitted only when the aggregate counts
+        // code points too.
+        String emojiThird = "{\"type\":\"input_text\",\"text\":\""
+                + "\uD83D\uDE00".repeat(666_667) + "\"}";
+        mvc.perform(post(WEB_SHELL + "/turns/submit").header(TENANT, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"budget-emoji-sum\","
+                                + "\"sessionId\":\"" + budgetSession(tenant, 2)
+                                + "\",\"input\":[" + emojiThird + ","
+                                + emojiThird + "," + emojiThird + "]}"))
+                .andExpect(status().isAccepted());
+    }
+
+    private String budgetSession(String tenant, int index) throws Exception {
+        return json(webShell(tenant, "/sessions/create",
+                "{\"idempotencyKey\":\"budget-create-" + index + "\","
+                        + "\"agentId\":\"qwen-code\",\"input\":[]}"))
+                .get("sessionId").asText();
+    }
+
+    private static long publishedNumber(String description, String pattern,
+            String schema) {
+        var matcher = java.util.regex.Pattern.compile(pattern)
+                .matcher(description);
+        assertThat(matcher.find())
+                .as("%s input description publishes %s", schema, pattern)
+                .isTrue();
+        return Long.parseLong(matcher.group(1).replace(",", ""));
     }
 
     @Test

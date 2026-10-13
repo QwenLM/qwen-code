@@ -9,6 +9,7 @@ import type { SessionSourcesSnapshot } from './session-sources.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
+import type { ToolLifecycleRecord } from '../telemetry/tool-lifecycle.js';
 import type { RequestLifecycleRecord } from '../telemetry/request-lifecycle.js';
 import {
   backgroundTurnContext,
@@ -858,7 +859,7 @@ export function sessionModelPayloadsEqual(
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
-  uiEvent: UiEvent | RequestLifecycleRecord;
+  uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord;
 }
 
 /**
@@ -3114,7 +3115,9 @@ export class ChatRecordingService {
   /**
    * Records a UI telemetry event for replaying metrics on resume.
    */
-  recordUiTelemetryEvent(uiEvent: UiEvent | RequestLifecycleRecord): void {
+  recordUiTelemetryEvent(
+    uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord,
+  ): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
