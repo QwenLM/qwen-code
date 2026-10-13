@@ -3548,7 +3548,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const sseConnectReason = nextSseConnectReason;
           nextSseConnectReason = undefined;
           const recoveryEventCursor = activeSession.lastEventId ?? 0;
-          trajectoryLiveStore.reconnect(activeSession);
+          trajectoryLiveStore.reconnect(
+            activeSession,
+            activeSession.lastEventId === undefined,
+          );
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
@@ -4609,13 +4612,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       const isUnmounting = !mountedRef.current;
       if (ownsCurrentSession || ownsEmptyState) {
-        if (keepSessionForNextEffect && !isUnmounting && session) {
-          trajectoryLiveStore.invalidate(session, 'stream_closed');
-        } else {
+        if (!keepSessionForNextEffect || isUnmounting || !session) {
           trajectoryLiveStore.clear();
         }
-      }
-      if (ownsCurrentSession || ownsEmptyState) {
         // A same-attachment effect restart must flush events already yielded by
         // the SSE client, because its resume cursor has advanced past them.
         flushTranscriptSync();

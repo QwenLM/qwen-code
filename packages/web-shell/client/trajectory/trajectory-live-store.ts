@@ -43,7 +43,7 @@ export interface TrajectoryLiveStore {
   getSnapshot(): TrajectoryLiveSnapshot;
   subscribe(listener: () => void): () => void;
   begin(owner: object, input: TrajectoryLiveInput): void;
-  reconnect(owner: object): void;
+  reconnect(owner: object, liveOnly?: boolean): void;
   ingest(owner: object, event: DaemonEvent, epoch?: string): void;
   invalidate(owner: object, reason: string): void;
   clear(): void;
@@ -112,9 +112,13 @@ function applyLifecycleUnchecked(
   });
   if (requests === state.requests && tools === state.tools) return state;
   const evicted =
-    [...state.requests.entries.keys()].some(
-      (key) => !requests.entries.has(key),
-    ) || [...state.tools.entries.keys()].some((key) => !tools.entries.has(key));
+    !state.truncated &&
+    ((request !== undefined &&
+      state.requests.entries.size === 256 &&
+      !state.requests.entries.has(keyOf(request))) ||
+      (tool !== undefined &&
+        state.tools.entries.size === 256 &&
+        !state.tools.entries.has(keyOf(tool))));
   return { ...state, requests, tools, truncated: state.truncated || evicted };
 }
 
@@ -135,12 +139,15 @@ function applyLifecycle(
 export function createTrajectoryLiveStore(): TrajectoryLiveStore {
   let owner: object | undefined;
   let snapshot = emptySnapshot();
+  let cursor: number | undefined;
+  let busEpoch: string | undefined;
+  let liveOnly = false;
   const transient = (reason?: string) =>
     reason === 'stream_closed' || reason === 'stream_error';
   const listeners = new Set<() => void>();
   const publish = (next: TrajectoryLiveSnapshot) => {
     if (next === snapshot) return;
-    snapshot = next;
+    snapshot = { ...next, lastEventId: cursor, epoch: busEpoch };
     listeners.forEach((listener) => listener());
   };
   const invalidate = (candidate: object, reason: string) => {
@@ -157,6 +164,9 @@ export function createTrajectoryLiveStore(): TrajectoryLiveStore {
     begin(candidate, input) {
       if (candidate === owner) return;
       owner = candidate;
+      cursor = input.lastEventId;
+      busEpoch = input.epoch;
+      liveOnly = false;
       let next: TrajectoryLiveSnapshot = {
         ...emptySnapshot(),
         sessionId: input.sessionId,
@@ -170,12 +180,13 @@ export function createTrajectoryLiveStore(): TrajectoryLiveStore {
         next = applyLifecycle(next, event, 'replay');
       publish(next);
     },
-    reconnect(candidate) {
+    reconnect(candidate, nextLiveOnly = false) {
       if (
         candidate !== owner ||
         (snapshot.status === 'stale' && !transient(snapshot.reason))
       )
         return;
+      liveOnly = nextLiveOnly;
       publish({
         ...unknownRunning(snapshot),
         status: 'catching-up',
@@ -184,11 +195,9 @@ export function createTrajectoryLiveStore(): TrajectoryLiveStore {
     },
     ingest(candidate, event, epoch) {
       if (candidate !== owner) return;
-      if (
-        epoch !== undefined &&
-        snapshot.epoch !== undefined &&
-        epoch !== snapshot.epoch
-      ) {
+      if (epoch !== undefined && busEpoch !== undefined && epoch !== busEpoch) {
+        cursor = undefined;
+        busEpoch = epoch;
         publish({
           ...unknownRunning(snapshot),
           status: 'stale',
@@ -198,6 +207,7 @@ export function createTrajectoryLiveStore(): TrajectoryLiveStore {
         });
         return;
       }
+      busEpoch = epoch ?? busEpoch;
       if (event.type === 'state_resync_required') {
         const data = event.data;
         const reason =
@@ -220,41 +230,36 @@ export function createTrajectoryLiveStore(): TrajectoryLiveStore {
       }
       if (snapshot.status === 'stale') return;
       if (event.type === 'replay_complete') {
+        liveOnly = false;
         publish({
           ...snapshot,
-          epoch: epoch ?? snapshot.epoch,
-          status:
-            (epoch ?? snapshot.epoch) === undefined ? 'unavailable' : 'live',
-          reason:
-            (epoch ?? snapshot.epoch) === undefined
-              ? 'epoch_unavailable'
-              : undefined,
+          epoch: busEpoch,
+          status: busEpoch === undefined ? 'unavailable' : 'live',
+          reason: busEpoch === undefined ? 'epoch_unavailable' : undefined,
         });
         return;
       }
-      if (
-        event.id !== undefined &&
-        snapshot.lastEventId !== undefined &&
-        event.id <= snapshot.lastEventId
-      )
+      if (event.id !== undefined && cursor !== undefined && event.id <= cursor)
         return;
-      let next = applyLifecycle(
-        snapshot,
+      cursor = event.id ?? cursor;
+      const state =
+        liveOnly && busEpoch !== undefined
+          ? { ...snapshot, status: 'live' as const, reason: undefined }
+          : snapshot;
+      if (state !== snapshot) liveOnly = false;
+      const next = applyLifecycle(
+        state,
         event,
-        snapshot.status === 'live' ? 'live' : 'replay',
+        state.status === 'live' ? 'live' : 'replay',
       );
-      if (event.id !== undefined || epoch !== undefined) {
-        next = {
-          ...next,
-          lastEventId: event.id ?? next.lastEventId,
-          epoch: epoch ?? next.epoch,
-        };
-      }
       publish(next);
     },
     invalidate,
     clear() {
       owner = undefined;
+      cursor = undefined;
+      busEpoch = undefined;
+      liveOnly = false;
       publish(emptySnapshot());
     },
   };

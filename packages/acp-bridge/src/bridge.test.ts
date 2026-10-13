@@ -7030,6 +7030,73 @@ describe('createAcpSessionBridge', () => {
     },
   );
 
+  it('supplements a persisted page with tool lifecycle metadata only', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+          throw new Error(`unexpected ${method}`);
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const lifecycle = {
+        v: 1,
+        kind: 'tool',
+        executionId: 'tool-execution',
+        sessionId: session.sessionId,
+        callId: 'tool-call',
+        toolName: 'read_file',
+        phase: 'ended',
+        startedAt: 1,
+        endedAt: 2,
+        executionDurationMs: 1,
+        executionStatus: 'success',
+        outcome: 'success',
+      };
+      await handle.agentConnection.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-call',
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'private tool body' },
+            },
+          ],
+          _meta: { toolLifecycle: lifecycle },
+        },
+      });
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        liveReplayMode: 'summary',
+        historyPageSize: 100,
+      });
+      expect(refreshed.compactedReplay).toEqual([]);
+      expect(refreshed.lifecycleReplay).toEqual([
+        {
+          v: 1,
+          type: 'session_update',
+          id: expect.any(Number),
+          data: { _meta: { toolLifecycle: lifecycle } },
+        },
+      ]);
+      expect(refreshed.lifecycleReplayIncomplete).toBe(false);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('preserves completed request lifecycles before transcript persistence', async () => {
     const handle = makeChannel({
       promptImpl: async (params) => {
@@ -8271,6 +8338,7 @@ describe('createAcpSessionBridge', () => {
         historyPageSize: 100,
       });
 
+      expect(refreshed.lifecycleReplayIncomplete).toBe(true);
       const compactedReplay = refreshed.compactedReplay ?? [];
       expect(compactedReplay).toHaveLength(2);
       expect(compactedReplay[0]).toMatchObject({

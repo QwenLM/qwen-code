@@ -147,10 +147,17 @@ describe('useTrajectoryWindow', () => {
     const frames: Array<{
       loader: TrajectoryPageLoader;
       trajectory: TrajectoryWindow['trajectory'];
+      status: TrajectoryWindow['status'];
+      loadedPages: number;
     }> = [];
     function Probe({ loader }: { loader: TrajectoryPageLoader }) {
       const state = useTrajectoryWindow(loader);
-      frames.push({ loader, trajectory: state.trajectory });
+      frames.push({
+        loader,
+        trajectory: state.trajectory,
+        status: state.status,
+        loadedPages: state.loadedPages,
+      });
       return null;
     }
     container = document.createElement('div');
@@ -162,7 +169,12 @@ describe('useTrajectoryWindow', () => {
     expect(
       frames
         .filter((frame) => frame.loader === second)
-        .every((frame) => frame.trajectory === undefined),
+        .every(
+          (frame) =>
+            frame.trajectory === undefined &&
+            frame.status !== 'ready' &&
+            frame.loadedPages === 0,
+        ),
     ).toBe(true);
   });
 

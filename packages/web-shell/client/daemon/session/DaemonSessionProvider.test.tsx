@@ -14,7 +14,10 @@ import {
   type ContextType,
   type ReactNode,
 } from 'react';
-import { useTrajectoryLiveSnapshot } from '../../trajectory/trajectory-live-context.js';
+import {
+  TrajectoryLiveContext,
+  useTrajectoryLiveSnapshot,
+} from '../../trajectory/trajectory-live-context.js';
 import { McpAppToolsContext } from '../../mcpAppHostContext.js';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
@@ -608,22 +611,27 @@ describe('DaemonSessionProvider', () => {
     id: number,
     phase: 'started' | 'ended',
     executionId = 'tool-1',
+    kind: 'request' | 'tool' = 'tool',
   ): DaemonEvent => ({
     id,
     v: 1,
     type: 'session_update',
     data: {
       update: {
-        sessionUpdate: 'tool_call_update',
-        toolCallId: 'call-1',
+        sessionUpdate:
+          kind === 'tool' ? 'tool_call_update' : 'agent_message_chunk',
+        ...(kind === 'tool'
+          ? { toolCallId: 'call-1' }
+          : { content: { type: 'text', text: '' } }),
         _meta: {
-          toolLifecycle: {
+          [kind === 'tool' ? 'toolLifecycle' : 'executionLifecycle']: {
             v: 1,
-            kind: 'tool',
+            kind,
             executionId,
             sessionId: 'session-1',
-            callId: 'call-1',
-            toolName: 'read_file',
+            ...(kind === 'tool'
+              ? { callId: 'call-1', toolName: 'read_file' }
+              : { promptId: 'prompt-1', model: 'qwen-test' }),
             phase,
             startedAt: 100,
             ...(phase === 'ended'
@@ -631,6 +639,7 @@ describe('DaemonSessionProvider', () => {
                   executionStatus: 'success',
                   endedAt: 120,
                   executionDurationMs: 20,
+                  durationMs: 20,
                   outcome: 'success',
                 }
               : { executionStatus: 'running' }),
@@ -650,99 +659,143 @@ describe('DaemonSessionProvider', () => {
       else signal?.addEventListener('abort', () => resolve(), { once: true });
     });
 
-  it('bridges trajectory replay and metadata-only events on the existing subscription', async () => {
-    const release = createDeferred<void>();
-    const seen = createDeferred<void>();
-    const events = vi.fn(async function* (opts: { signal?: AbortSignal } = {}) {
-      await release.promise;
-      yield lifecycleFrame(2, 'ended');
-      yield replayComplete;
-      yield lifecycleFrame(3, 'started', 'tool-2');
-      seen.resolve();
-      await untilAborted(opts.signal);
+  it.each(['request', 'tool'] as const)(
+    'bridges trajectory replay and metadata-only events on the existing subscription (%s)',
+    async (kind) => {
+      const frame = (
+        id: number,
+        phase: 'started' | 'ended',
+        executionId = 'tool-1',
+      ) => lifecycleFrame(id, phase, executionId, kind);
+      const release = createDeferred<void>();
+      const seen = createDeferred<void>();
+      const events = vi.fn(async function* (
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await release.promise;
+        yield frame(2, 'ended');
+        yield replayComplete;
+        yield frame(3, 'started', 'tool-2');
+        seen.resolve();
+        await untilAborted(opts.signal);
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          lastEventId: 1,
+          replaySnapshot: {
+            compactedReplay: [frame(1, 'started')],
+            liveJournal: [],
+          },
+          events,
+        }),
+      );
+      let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        snapshot = useTrajectoryLiveSnapshot();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(snapshot?.status).toBe('catching-up');
+      expect(
+        [
+          ...snapshot![kind === 'tool' ? 'tools' : 'requests'].entries.values(),
+        ].map((entry) => entry.status),
+      ).toEqual(['unknown']);
+      await act(async () => {
+        release.resolve();
+        await seen.promise;
+        await flushPromises();
+      });
+      expect(events).toHaveBeenCalledTimes(1);
+      expect(snapshot).toMatchObject({
+        status: 'live',
+        epoch: 'epoch-1',
+        lastEventId: 3,
+      });
+      expect(
+        [
+          ...snapshot![kind === 'tool' ? 'tools' : 'requests'].entries.values(),
+        ].map((entry) => entry.status),
+      ).toEqual(['success', 'running']);
+      expect(blocks).toEqual([]);
+    },
+  );
+
+  it.each(['request', 'tool'] as const)(
+    'seeds trajectory from the memory supplement while paged history is not yet persisted (%s)',
+    async (kind) => {
+      const frame = (
+        id: number,
+        phase: 'started' | 'ended',
+        executionId = 'tool-1',
+      ) => lifecycleFrame(id, phase, executionId, kind);
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_transcript_pagination'],
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          lastEventId: 2,
+          replaySnapshot: {
+            compactedReplay: [frame(1, 'started')],
+            liveJournal: [],
+            lifecycleReplay: [frame(1, 'started'), frame(2, 'ended')],
+            lifecycleReplayIncomplete: true,
+          },
+          async *events(opts = {}) {
+            yield replayComplete;
+            await untilAborted(opts.signal);
+          },
+        }),
+      );
+      let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        snapshot = useTrajectoryLiveSnapshot();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        historyPageSize: 100,
+      });
+      expect(snapshot).toMatchObject({
+        status: 'live',
+        lastEventId: 2,
+        incomplete: true,
+      });
+      expect(
+        [
+          ...snapshot![kind === 'tool' ? 'tools' : 'requests'].entries.values(),
+        ].map((entry) => entry.status),
+      ).toEqual(['success']);
+      expect(blocks).toEqual([]);
+    },
+  );
+
+  it('tracks live lifecycle events on a cursorless attachment without replay_complete', async () => {
+    const session = createMockSession({
+      lastEventId: undefined,
+      async *events(opts = {}) {
+        session.eventEpoch = 'learned-epoch';
+        yield lifecycleFrame(1, 'started', 'request-1', 'request');
+        await untilAborted(opts.signal);
+      },
     });
-    sdkMocks.sessions.push(
-      createMockSession({
-        lastEventId: 1,
-        replaySnapshot: {
-          compactedReplay: [lifecycleFrame(1, 'started')],
-          liveJournal: [],
-        },
-        events,
-      }),
-    );
+    session.eventEpoch = undefined;
+    sdkMocks.sessions.push(session);
     let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
-    let blocks: readonly DaemonTranscriptBlock[] = [];
     function Harness() {
       snapshot = useTrajectoryLiveSnapshot();
-      blocks = useDaemonTranscriptBlocks();
       return null;
     }
     await renderWithProvider(<Harness />, { autoConnect: true });
-    expect(snapshot?.status).toBe('catching-up');
-    expect(
-      [...snapshot!.tools.entries.values()].map((entry) => entry.status),
-    ).toEqual(['unknown']);
-    await act(async () => {
-      release.resolve();
-      await seen.promise;
-      await flushPromises();
-    });
-    expect(events).toHaveBeenCalledTimes(1);
-    expect(snapshot).toMatchObject({
-      status: 'live',
-      epoch: 'epoch-1',
-      lastEventId: 3,
-    });
-    expect(
-      [...snapshot!.tools.entries.values()].map((entry) => entry.status),
-    ).toEqual(['success', 'running']);
-    expect(blocks).toEqual([]);
-  });
-
-  it('seeds trajectory from the memory supplement while paged history is not yet persisted', async () => {
-    sdkMocks.capabilities.mockResolvedValue({
-      workspaceCwd: '/mock-workspace',
-      features: ['session_transcript_pagination'],
-    });
-    sdkMocks.sessions.push(
-      createMockSession({
-        lastEventId: 2,
-        replaySnapshot: {
-          compactedReplay: [],
-          liveJournal: [],
-          lifecycleReplay: [
-            lifecycleFrame(1, 'started'),
-            lifecycleFrame(2, 'ended'),
-          ],
-          lifecycleReplayIncomplete: true,
-        },
-        async *events(opts = {}) {
-          yield replayComplete;
-          await untilAborted(opts.signal);
-        },
-      }),
-    );
-    let snapshot: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
-    let blocks: readonly DaemonTranscriptBlock[] = [];
-    function Harness() {
-      snapshot = useTrajectoryLiveSnapshot();
-      blocks = useDaemonTranscriptBlocks();
-      return null;
-    }
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      historyPageSize: 100,
-    });
-    expect(snapshot).toMatchObject({
-      status: 'live',
-      lastEventId: 2,
-      incomplete: true,
-    });
-    expect(
-      [...snapshot!.tools.entries.values()].map((entry) => entry.status),
-    ).toEqual(['success']);
-    expect(blocks).toEqual([]);
+    expect(snapshot).toMatchObject({ status: 'live', epoch: 'learned-epoch' });
+    expect([...snapshot!.requests.entries.values()]).toEqual([
+      expect.objectContaining({ status: 'running' }),
+    ]);
   });
 
   it('retains trajectory terminals and recovers a short disconnect on the same session', async () => {
@@ -823,12 +876,13 @@ describe('DaemonSessionProvider', () => {
       });
       await flushPromises();
     });
-    expect(snapshot?.status).not.toBe('live');
-    expect(
-      [...snapshot!.tools.entries.values()].some(
-        (entry) => entry.status === 'running',
-      ),
-    ).toBe(false);
+    expect(snapshot).toMatchObject({ status: 'stale' });
+    expect([...snapshot!.tools.entries.values()]).toEqual([
+      expect.objectContaining({
+        event: expect.objectContaining({ executionId: 'tool-1' }),
+        status: 'unknown',
+      }),
+    ]);
     await act(async () => {
       pendingLoad.resolve(
         createMockSession({
@@ -1952,10 +2006,12 @@ describe('DaemonSessionProvider', () => {
       events: createIdleEvents(),
     });
     sdkMocks.sessions.push(activeSession);
+    let trajectoryStore: ContextType<typeof TrajectoryLiveContext>;
     let actions: DaemonSessionActions | undefined;
     let connection: DaemonConnectionState | undefined;
 
     function Harness() {
+      trajectoryStore = useContext(TrajectoryLiveContext);
       actions = useDaemonActions();
       connection = useDaemonConnection();
       return null;
@@ -1969,6 +2025,7 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       await vi.waitFor(() => expect(connection?.status).toBe('connected'));
     });
+    const invalidation = vi.spyOn(trajectoryStore!, 'invalidate');
     sdkMocks.MockDaemonSessionClient.load.mockClear();
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', fetchMock);
@@ -1988,6 +2045,11 @@ describe('DaemonSessionProvider', () => {
     });
     await act(async () => flushPromises());
 
+    expect(
+      invalidation.mock.calls.filter(
+        ([, reason]) => reason === 'stream_closed',
+      ),
+    ).toHaveLength(2);
     expect(connection).toMatchObject({
       status: 'error',
       error: 'standalone session context cannot include workspaceCwd',

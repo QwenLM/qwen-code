@@ -6607,7 +6607,13 @@ export function App({
               sessionContextKey(connection.sessionContext),
             ),
       );
-      setArtifactPanelTabs(retainedTabs);
+      setArtifactPanelTabs(
+        retainedTabs.map((tab) =>
+          tab.kind === 'trajectory'
+            ? { ...tab, historyGapRevision: (tab.historyGapRevision ?? 0) + 1 }
+            : tab,
+        ),
+      );
       setActiveArtifactPanelTabId(
         retainedTabs.some(
           (tab) => tab.id === activeArtifactPanelTabIdRef.current,
@@ -6952,12 +6958,13 @@ export function App({
       const desiredActiveTabId =
         savedState?.activeTabId ?? persisted?.activeTabId ?? null;
       const tabsOpenedDuringRestore = artifactPanelTabsRef.current;
-      const newlyOpenedIds = new Set(
-        tabsOpenedDuringRestore.map((tab) => tab.id),
+      const openedById = new Map(
+        tabsOpenedDuringRestore.map((tab) => [tab.id, tab]),
       );
+      const restoredIds = new Set(mergedRestoredTabs.map((tab) => tab.id));
       const candidateTabs = [
-        ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
-        ...tabsOpenedDuringRestore,
+        ...mergedRestoredTabs.map((tab) => openedById.get(tab.id) ?? tab),
+        ...tabsOpenedDuringRestore.filter((tab) => !restoredIds.has(tab.id)),
       ];
       const mergedTabs = candidateTabs.filter(
         (tab) =>

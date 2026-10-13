@@ -6025,7 +6025,28 @@ describe('task activity key', () => {
       rows,
     );
     expect(rows.scrollTop).toBe(118);
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).toContain('History may have changed while disconnected');
+    expect(
+      Array.from(
+        container.querySelectorAll('[role="tablist"] [role="tab"]'),
+      ).map((tab) => tab.getAttribute('title')),
+    ).toEqual(['Trajectory', 'README.md']);
     expect(container.querySelector('button[title="README.md"]')).not.toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-window-latest"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container.querySelector('[data-testid="trajectory-context-notice"]')!
+        .textContent,
+    ).not.toContain('History may have changed while disconnected');
   });
 
   it('drops a restored trajectory tab when the host stopped listing it', async () => {
@@ -6068,7 +6089,9 @@ describe('task activity key', () => {
         '/tmp/project\0session-1': { open: true, activeTabId: null, tabs: [] },
       }),
     );
-    const { container } = renderApp({ rightPanel: { items: ['trajectory'] } });
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['trajectory'] },
+    });
     await flush();
     await flush();
 
@@ -6082,6 +6105,16 @@ describe('task activity key', () => {
     expect(
       container.querySelector('button[title="Trajectory"]'),
     ).not.toBeNull();
+    const panel = container.querySelector('[data-testid="trajectory-panel"]');
+    mockConnection.loadingTranscript = true;
+    rerender({ rightPanel: { items: ['trajectory'] } });
+    await flush();
+    expect(container.querySelector('[data-testid="trajectory-panel"]')).toBe(
+      panel,
+    );
+    mockConnection.loadingTranscript = false;
+    rerender({ rightPanel: { items: ['trajectory'] } });
+    await flush();
     const persisted = JSON.parse(
       window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
         '{}',
@@ -6098,6 +6131,12 @@ describe('task activity key', () => {
         sessionId: 'session-1',
       },
     ]);
+    mockConnection.loadingTranscript = true;
+    rerender({ rightPanel: { items: ['review'] } });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="trajectory-panel"]'),
+    ).toBeNull();
   });
 
   it('reclaims pane-bound token usage tabs restored outside a split view', async () => {

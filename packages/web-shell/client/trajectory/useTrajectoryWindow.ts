@@ -432,7 +432,8 @@ export function useTrajectoryWindow(
     };
   }, [loadPage, refresh, update]);
 
-  const pages = pagesOwnerRef.current === loadPage ? state.pages : undefined;
+  const windowState = pagesOwnerRef.current === loadPage ? state : EMPTY_STATE;
+  const pages = windowState.pages;
   const {
     requests,
     tools,
@@ -483,32 +484,33 @@ export function useTrajectoryWindow(
     ],
   );
   const navigable =
-    state.status !== 'loading' &&
-    !state.blocked &&
-    !state.olderFailure &&
-    !state.navigationError &&
+    windowState.status !== 'loading' &&
+    !windowState.blocked &&
+    !windowState.olderFailure &&
+    !windowState.navigationError &&
     !pendingRef.current;
 
   return {
     lifecycle,
     trajectory,
-    status: state.status,
-    error: state.error,
-    loadedPages: state.loadedPages,
-    windowPages: state.pages?.length ?? 0,
-    truncated: state.truncated,
-    olderFailure: state.olderFailure,
-    navigationError: state.navigationError,
-    mode: state.mode,
-    navigationVersion: state.navigationVersion,
+    status: windowState.status,
+    error: windowState.error,
+    loadedPages: windowState.loadedPages,
+    windowPages: windowState.pages?.length ?? 0,
+    truncated: windowState.truncated,
+    olderFailure: windowState.olderFailure,
+    navigationError: windowState.navigationError,
+    mode: windowState.mode,
+    navigationVersion: windowState.navigationVersion,
     canRefresh: Boolean(
       loadPage &&
-        (state.status !== 'loading' || pendingRef.current?.kind !== 'latest'),
+        (windowState.status !== 'loading' ||
+          pendingRef.current?.kind !== 'latest'),
     ),
-    canOlder: Boolean(navigable && state.nextCursor),
-    canNewer: Boolean(navigable && state.index > 0),
-    historyReleased: state.historyReleased,
-    bookmarks: state.cursors.length,
+    canOlder: Boolean(navigable && windowState.nextCursor),
+    canNewer: Boolean(navigable && windowState.index > 0),
+    historyReleased: windowState.historyReleased,
+    bookmarks: windowState.cursors.length,
     refresh,
     older,
     newer,

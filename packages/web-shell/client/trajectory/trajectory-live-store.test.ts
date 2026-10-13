@@ -69,6 +69,181 @@ function setup(events: DaemonEvent[] = []) {
 }
 
 describe('trajectory live store', () => {
+  it('advances the delivery cursor without publishing plain text frames', () => {
+    const { store, owner } = setup();
+    store.ingest(owner, complete, 'a');
+    store.ingest(owner, lifecycle('request', 'active', 'started', 1), 'a');
+    const listener = vi.fn();
+    store.subscribe(listener);
+    const before = store.getSnapshot();
+    for (let id = 2; id <= 21; id++) {
+      store.ingest(
+        owner,
+        {
+          v: 1,
+          type: 'session_update',
+          id,
+          data: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'token' },
+          },
+        },
+        'a',
+      );
+    }
+    expect(listener).not.toHaveBeenCalled();
+    expect(store.getSnapshot()).toBe(before);
+    store.ingest(owner, lifecycle('request', 'duplicate', 'started', 21), 'a');
+    expect(store.getSnapshot()).toBe(before);
+    store.ingest(owner, lifecycle('request', 'active', 'ended', 22), 'a');
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot().lastEventId).toBe(22);
+  });
+
+  it('does not scan retained keys when updating an existing execution', () => {
+    const { store, owner } = setup();
+    store.ingest(owner, complete);
+    store.ingest(owner, lifecycle('request', 'request', 'started', 1));
+    store.ingest(owner, lifecycle('tool', 'tool', 'started', 2));
+    const requestKeys = vi.spyOn(store.getSnapshot().requests.entries, 'keys');
+    const toolKeys = vi.spyOn(store.getSnapshot().tools.entries, 'keys');
+    store.ingest(owner, lifecycle('request', 'request', 'ended', 3));
+    expect(requestKeys).not.toHaveBeenCalled();
+    expect(toolKeys).not.toHaveBeenCalled();
+  });
+
+  it('keeps a permanent failure after a transient failure', () => {
+    const { store, owner } = setup();
+    store.ingest(owner, complete);
+    store.invalidate(owner, 'stream_closed');
+    store.invalidate(owner, 'auth_failure');
+    store.reconnect(owner);
+    store.ingest(owner, complete);
+    expect(store.getSnapshot()).toMatchObject({
+      status: 'stale',
+      reason: 'auth_failure',
+    });
+  });
+
+  it('invalidates when a stream_error event arrives', () => {
+    const { store, owner } = setup();
+    store.ingest(owner, complete);
+    store.ingest(owner, lifecycle('request', 'active', 'started', 1));
+    store.ingest(owner, { v: 1, type: 'stream_error', data: {} });
+    expect(store.getSnapshot()).toMatchObject({
+      status: 'stale',
+      reason: 'stream_error',
+    });
+    expect([...store.getSnapshot().requests.entries.values()][0].status).toBe(
+      'unknown',
+    );
+  });
+
+  it('ignores reconnect from a foreign owner', () => {
+    const { store, owner } = setup();
+    store.ingest(owner, complete);
+    const snapshot = store.getSnapshot();
+    store.reconnect({});
+    expect(store.getSnapshot()).toBe(snapshot);
+  });
+
+  it.each(['request', 'tool'] as const)(
+    'keeps disconnected %s starts unknown until terminal evidence arrives',
+    (kind) => {
+      const { store, owner } = setup();
+      store.ingest(owner, complete);
+      store.ingest(owner, lifecycle(kind, 'active', 'started', 1));
+      store.invalidate(owner, 'stream_closed');
+      store.reconnect(owner);
+      store.ingest(owner, complete);
+      store.ingest(owner, lifecycle(kind, 'active', 'started', 2));
+      const state = () =>
+        kind === 'request'
+          ? store.getSnapshot().requests
+          : store.getSnapshot().tools;
+      expect([...state().entries.values()][0].status).toBe('unknown');
+      store.ingest(owner, lifecycle(kind, 'active', 'ended', 3));
+      expect([...state().entries.values()][0].status).toBe('success');
+    },
+  );
+
+  it('learns the epoch without treating a cursor-bearing replay as live', () => {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, { ...input, epoch: undefined, lastEventId: 0 });
+    store.ingest(owner, lifecycle('request', 'replayed', 'started', 1), 'b');
+    expect(store.getSnapshot()).toMatchObject({
+      status: 'catching-up',
+      epoch: 'b',
+    });
+    expect([...store.getSnapshot().requests.entries.values()][0].status).toBe(
+      'unknown',
+    );
+    store.ingest(owner, complete, 'b');
+    expect(store.getSnapshot().status).toBe('live');
+  });
+
+  it('enters live on a cursorless subscription only after learning its epoch', () => {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, { ...input, epoch: undefined });
+    store.reconnect(owner, true);
+    store.ingest(owner, lifecycle('request', 'live', 'started', 1), 'b');
+    expect(store.getSnapshot()).toMatchObject({ status: 'live', epoch: 'b' });
+    expect([...store.getSnapshot().requests.entries.values()][0].status).toBe(
+      'running',
+    );
+  });
+
+  it('does not promote cursorless streams without an epoch or across a gap', () => {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, { ...input, epoch: undefined });
+    store.reconnect(owner, true);
+    store.ingest(owner, lifecycle('request', 'old', 'started', 1));
+    expect(store.getSnapshot().status).not.toBe('live');
+    expect([...store.getSnapshot().requests.entries.values()][0].status).toBe(
+      'unknown',
+    );
+    store.invalidate(owner, 'ring_evicted');
+    store.ingest(owner, lifecycle('request', 'new', 'started', 2), 'b');
+    expect(store.getSnapshot()).toMatchObject({
+      status: 'stale',
+      reason: 'ring_evicted',
+    });
+    store.reconnect(owner, true);
+    store.ingest(owner, complete, 'b');
+    expect(store.getSnapshot().status).toBe('stale');
+  });
+
+  it('does not carry cursorless promotion into a cursor-bearing reconnect', () => {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, { ...input, epoch: undefined });
+    store.reconnect(owner, true);
+    store.ingest(owner, lifecycle('request', 'old', 'started', 1));
+    store.invalidate(owner, 'stream_closed');
+    store.reconnect(owner, false);
+    store.ingest(owner, lifecycle('request', 'replayed', 'started', 2), 'b');
+    expect(store.getSnapshot().status).toBe('catching-up');
+    expect(
+      [...store.getSnapshot().requests.entries.values()].map(
+        (entry) => entry.status,
+      ),
+    ).toEqual(['unknown', 'unknown']);
+  });
+
+  it('invalidates an epoch reset even on a cursorless subscription', () => {
+    const { store, owner } = setup();
+    store.reconnect(owner, true);
+    store.ingest(owner, lifecycle('request', 'new', 'started', 1), 'b');
+    expect(store.getSnapshot()).toMatchObject({
+      status: 'stale',
+      reason: 'epoch_reset',
+      epoch: 'b',
+    });
+  });
+
   it('unwraps daemon session_update envelopes', () => {
     const event = lifecycle('tool', 'wrapped', 'ended', 1);
     const { store, owner } = setup([
@@ -273,11 +448,13 @@ describe('trajectory live store', () => {
     (kind) => {
       const { store, owner } = setup();
       store.ingest(owner, complete);
-      for (let index = 0; index < 257; index++)
+      for (let index = 0; index < 256; index++)
         store.ingest(
           owner,
           lifecycle(kind, `execution-${index}`, 'started', index + 1),
         );
+      expect(store.getSnapshot().truncated).toBe(false);
+      store.ingest(owner, lifecycle(kind, 'execution-256', 'started', 257));
       const state =
         kind === 'request'
           ? store.getSnapshot().requests
@@ -287,6 +464,8 @@ describe('trajectory live store', () => {
       expect([...state.entries.values()][0].event.executionId).toBe(
         'execution-1',
       );
+      store.ingest(owner, lifecycle(kind, 'execution-256', 'ended', 258));
+      expect(store.getSnapshot().truncated).toBe(true);
     },
   );
 
