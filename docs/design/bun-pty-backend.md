@@ -124,7 +124,11 @@ Reaching a cap is **never a silent drop and never an auto-resume**: the pty
 is explicitly terminated — the child process tree is killed by real
 ownership (process group and pid, SIGTERM, then SIGKILL after a 500 ms
 grace), the master fd is closed, and every drain path (retry timer, pending
-exit, hold, write queue) is ended. Exactly one structured `PtyLimitError`
+exit, hold, write queue) is ended. After the failure, `write` and `resize`
+are no-ops (matching the registry guards above them), held bytes still in
+flight from an in-flight read are neither delivered nor re-charged, and a
+`resume()` replay stops at the first data listener that terminates the pty.
+Exactly one structured `PtyLimitError`
 is then emitted on the `error` event, carrying a stable `code`
 (`QWEN_PTY_OUTPUT_LIMIT`, `QWEN_PTY_WRITE_LIMIT` or
 `QWEN_PTY_ACTIVE_LIMIT`), the `limitKind`, the `limit`, the bytes accepted

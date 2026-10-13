@@ -594,6 +594,9 @@ export class BunPtyProcess extends EventEmitter {
     ) {
       throw new Error('resizing must be done using positive cols and rows');
     }
+    // A terminated or closed pty has no window left to resize; write()
+    // already treats this state as a no-op rather than an EBADF throw.
+    if (this.fdClosed || this.resourceFailed) return;
     this.addon.resize(
       this.fd,
       columns,
@@ -627,6 +630,9 @@ export class BunPtyProcess extends EventEmitter {
     const fill = this.pausedFill;
     this.pausedFill = 0;
     for (let i = 0; i < blocks.length; i += 1) {
+      // A data listener that terminates this pty mid-replay must not keep
+      // receiving the remaining held bytes after the structured error.
+      if (this.resourceFailed) break;
       const block = blocks[i]!;
       this.emitData(i === blocks.length - 1 ? block.subarray(0, fill) : block);
     }
@@ -688,6 +694,10 @@ export class BunPtyProcess extends EventEmitter {
           return;
         }
         const chunk = Buffer.from(this.readBuffer.subarray(0, bytesRead));
+        // A failure terminated this pty while this read was in flight; the
+        // fd is already closed, so the bytes must neither be delivered nor
+        // re-charged to the (already released) hold budget.
+        if (this.resourceFailed) return;
         if (this.paused) {
           this.holdPaused(chunk);
         } else {

@@ -104,7 +104,10 @@ decoder 尾巴被跳过，与 wrapper 对齐：onExit 仍恰好一次、fd 被�
 触及上限**绝不是静默丢弃，也绝不会自动恢复**：该 pty 被显式终止——
 按真实归属杀死子进程树（进程组 + pid，先 SIGTERM，500 ms 宽限后
 SIGKILL），关闭 master fd，终结所有排空路径（重试定时器、挂起的 exit、
-保持区、写队列）。随后在 `error` 事件上恰好投递一次结构化
+保持区、写队列）。失败之后 `write` 与 `resize` 均为 no-op（与其上层的
+registry 守卫一致），在途读取迟到的字节既不投递也不重新计入（已释放
+的）保持预算，`resume()` 重放会在第一个终止本 pty 的数据监听器处停止。
+随后在 `error` 事件上恰好投递一次结构化
 `PtyLimitError`，带稳定 `code`（`QWEN_PTY_OUTPUT_LIMIT`、
 `QWEN_PTY_WRITE_LIMIT` 或 `QWEN_PTY_ACTIVE_LIMIT`）、`limitKind`、
 `limit`、已接收字节数，以及是否丢弃了未投递数据。`onExit` 仍只为真实
