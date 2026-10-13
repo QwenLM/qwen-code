@@ -48,8 +48,8 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** Explicit SQL integration gate; requires built Node native producer modules. */
-class WorkspaceCsiNativeActivationGate {
+/** Native SQL proof tests require built Node producer modules. */
+class WorkspaceCsiNativeActivationGateTest {
     private static final ObjectMapper JSON = new ObjectMapper()
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     private JdbcTemplate jdbc;

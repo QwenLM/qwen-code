@@ -176,6 +176,8 @@ Tests against the original proposal do not qualify the extracted branch.
 
 ### Observed evidence and remaining acceptance work
 
+The 16 native activation proof tests use the standard Surefire `Test` suffix, so ordinary Server test discovery includes them. Both Server CI lanes build their Node producer prerequisites before Maven runs. These H2-backed native proof tests do not replace the actual SQL grant-to-worker acceptance below.
+
 The extraction has been externally marked Ready and still requires maintainer review. Local build, typecheck, bundle, focused
 Java and worker tests have passed. An independent owned MySQL 8.4 run applied
 the complete migration inventory and observed real private CREATE/replay,

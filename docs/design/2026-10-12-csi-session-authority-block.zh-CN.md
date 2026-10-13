@@ -149,6 +149,8 @@ Darwin 上的正向私有 worker 执行需要明确记录 Linux metadata/procfs 
 
 ### 已观察证据与待完成验收
 
+16 项原生 activation proof 测试使用标准 Surefire `Test` 后缀，由普通 Server 测试发现自动收集。两个 Server CI lane 均在 Maven 运行前构建 Node producer 前置产物。这些基于 H2 的原生 proof 测试不能替代下述实际 SQL grant 到 worker 的验收。
+
 本拆分已由外部操作转为 Ready，仍需 maintainer 评审。本地 build、typecheck、bundle、定向 Java 与 worker
 测试已通过。独立自有 MySQL 8.4 测试应用了完整 migration 清单，并观察到实际
 私有 CREATE/replay、七个原生日志 commit 及其 replay、原 activation/renewal、
