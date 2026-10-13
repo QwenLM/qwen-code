@@ -49,9 +49,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain(
       'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
     );
-    expect(block).toContain('flock --wait 1200 9');
+    expect(block).toContain('flock --wait 2400 9');
     expect(block).toContain(
-      '::error::sdk-java host lock not acquired within 20 minutes',
+      '::error::sdk-java host lock not acquired within 40 minutes',
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
@@ -414,10 +414,10 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     ).toBeGreaterThanOrEqual(mavenSteps.length * 2400 + 14 * 60);
     // The sibling test job shares the same per-host lock: its ceiling must
     // cover one full wait plus its own measured locked work (~5 minutes on
-    // the Java 21 leg of run 37743332082) — this job's holds now consume
-    // part of that wait budget, and nothing else asserts the headroom.
+    // the Java 21 leg of run 37743332082) and setup headroom. This job's holds
+    // now consume part of that wait budget.
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      1200 + 5 * 60,
+      2400 + 10 * 60,
     );
   });
 
