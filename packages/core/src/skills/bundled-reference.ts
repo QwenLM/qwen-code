@@ -209,24 +209,13 @@ export function resolveBundledReferenceSurface(
  * `tools.visible`. A ToolSearch reveal is not consulted, because `/clear`
  * drops it — a decision recorded once has to ask this. CodeModeOnly discovers
  * schemas through top-level search and invokes deferred tools through exec.
- * Session Hybrid exec also carries their schemas when the bridge is incomplete.
- * AgentCore filters eager-hidden tools from its nested bindings, so an agent
- * registry cannot use that session fallback, even before prepareTools runs.
+ * A registry can be shared with an AgentCore that filters eager-hidden tools
+ * from exec. Inline the reference without a complete bridge rather than assume
+ * every consumer can use the session exec bindings.
  */
 function isToolDeferredBehindToolSearch(config: Config, name: string): boolean {
   const mode = config.getToolMode?.();
   if (mode === ToolMode.CodeModeOnly) return false;
-  const names = config.getToolRegistry?.()?.getAllToolNames?.() ?? [];
-  if (
-    mode === ToolMode.CodeMode &&
-    !config.getToolRegistry?.()?.forSubAgent &&
-    names.includes(ToolNames.EXEC) &&
-    !(
-      names.includes(ToolNames.TOOL_SEARCH) &&
-      names.includes(ToolNames.TOOL_CALL)
-    )
-  )
-    return false;
   if (!config.getToolRegistry?.()?.isPermissionDeferred?.(name)) return false;
   return !config.getVisibleTools?.()?.has(name);
 }

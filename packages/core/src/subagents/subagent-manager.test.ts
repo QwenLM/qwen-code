@@ -3144,7 +3144,7 @@ describe('SubagentManager', () => {
             .ensureTool(ToolNames.AGENT)) as AgentTool;
           await agentTool.refreshSubagents();
           expect(agentTool.description).toContain(
-            'Skills cannot be loaded in this session',
+            'The delegation reference follows in full',
           );
         },
       );

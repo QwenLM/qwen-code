@@ -24,7 +24,15 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { AGENT_DELEGATION_SKILL_NAME } from './agent-delegation-skill.js';
+import { AgentCore } from '../agents/runtime/agent-core.js';
+import {
+  AGENT_DELEGATION_SKILL_NAME,
+  resolveAgentDelegationSurface,
+} from './agent-delegation-skill.js';
+import { MockTool } from '../test-utils/mock-tool.js';
+import { ToolRegistry } from '../tools/tool-registry.js';
+import { ExecTool } from '../tools/exec.js';
+import { ToolMode } from '../tools/code-mode.js';
 import {
   readBundledReference,
   resolveBundledReferenceRoute,
@@ -77,9 +85,9 @@ describe('hybrid reference routes', () => {
   );
 
   it.each([
-    [[], 'skill'],
-    [['tool_search'], 'skill'],
-    [['tool_call'], 'skill'],
+    [[], 'inline'],
+    [['tool_search'], 'inline'],
+    [['tool_call'], 'inline'],
     [['tool_search', 'tool_call'], 'skill-via-tool-search'],
   ] as const)('uses a reachable skill with bridge %j', (bridge, route) => {
     const config = {
@@ -94,9 +102,7 @@ describe('hybrid reference routes', () => {
     expect(resolveBundledReferenceRoute(config, 'agent-delegation')).toBe(
       route,
     );
-    expect(isToolHiddenBehindToolSearch(config, 'skill')).toBe(
-      bridge.length === 2,
-    );
+    expect(isToolHiddenBehindToolSearch(config, 'skill')).toBe(true);
   });
 
   it('inlines a hidden skill when both exec and the bridge are unavailable', () => {
@@ -164,3 +170,64 @@ describe('readBundledReference', () => {
     }
   });
 });
+
+it.each([ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL])(
+  'inlines Skill guidance for a child reusing the session registry without %s',
+  async (missingBridge) => {
+    const config = makeFakeConfig({
+      toolMode: ToolMode.CodeMode,
+      eagerTools: [ToolNames.EXEC, ToolNames.READ_FILE],
+      disabledTools: [missingBridge],
+    });
+    vi.spyOn(config, 'getSkillManager').mockReturnValue({} as never);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+    for (const name of [
+      ToolNames.READ_FILE,
+      ToolNames.TOOL_SEARCH,
+      ToolNames.TOOL_CALL,
+    ]) {
+      registry.registerTool(new MockTool({ name }));
+    }
+    registry.registerPermissionDeferredFactory(
+      ToolNames.SKILL,
+      async () => new MockTool({ name: ToolNames.SKILL }),
+    );
+    try {
+      // Descriptions are chosen before the child warms its inherited registry.
+      const surface = resolveAgentDelegationSurface(config);
+      const core = new AgentCore(
+        'workflow-child',
+        config,
+        { systemPrompt: '' },
+        { model: 'test' },
+        { max_turns: 1 },
+        { tools: ['*'] },
+      );
+      const declarations = await core.runInAgentFrames(() =>
+        core.prepareTools(),
+      );
+      expect(registry.forSubAgent).toBe(false);
+      expect(registry.isDeferredAndHidden(ToolNames.SKILL)).toBe(true);
+      expect(
+        registry
+          .getCodeModeBindingPlan()
+          .bindings.map((binding) => binding.name),
+      ).toContain(ToolNames.SKILL);
+      expect(declarations.map((tool) => tool.name)).not.toContain(
+        ToolNames.SKILL,
+      );
+      expect(
+        declarations.find((tool) => tool.name === ToolNames.EXEC)?.description,
+      ).not.toContain('"name":"skill"');
+      expect(Reflect.get(core, 'codeModeAllowedToolNames')).not.toContain(
+        ToolNames.SKILL,
+      );
+      expect(surface).toBe('inline');
+    } finally {
+      await registry.stop();
+      vi.restoreAllMocks();
+    }
+  },
+);
