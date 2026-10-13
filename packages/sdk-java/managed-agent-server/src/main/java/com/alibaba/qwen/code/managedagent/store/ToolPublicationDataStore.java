@@ -1026,6 +1026,16 @@ public final class ToolPublicationDataStore {
         return finishedInternal(key, publicationId);
     }
 
+    public JsonNode verifyReceiptForLifecycle(com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord execution) {
+        JsonNode finished = finishedForBroker(execution);
+        if (finished == null) {
+            return null;
+        }
+        JsonNode binding = finished.path("binding");
+        validateFinished(binding.path("sessionKey"), text(binding, "publicationId"), binding, finished.path("result"), () -> {});
+        return receiptForBroker(execution);
+    }
+
     public JsonNode receiptForBroker(
             com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord execution) {
         JsonNode finished = finishedForBroker(execution);

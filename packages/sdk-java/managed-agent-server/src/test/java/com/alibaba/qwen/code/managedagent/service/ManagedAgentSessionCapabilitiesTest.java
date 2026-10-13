@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -31,6 +32,9 @@ class ManagedAgentSessionCapabilitiesTest {
         when(store.workspaceFilesEnabled()).thenReturn(true);
         when(warmer.supportsWorkspaceClose()).thenReturn(true);
         when(harness.supportsLifecycle()).thenReturn(true);
+        // The private CSI refusal comes from the service's own profile guard,
+        // so the profile-aware probe may answer true for every profile here.
+        when(harness.supportsLifecycle(anyString())).thenReturn(true);
         when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
         var workspace = new ContextBinding("tenant", "workspace", 1,
                 "storage", ".", "config", 1);

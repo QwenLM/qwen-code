@@ -127,6 +127,7 @@ export class HostedMonitorLoop {
   private pending = 0;
   private readonly idleWaiters: Array<() => void> = [];
   private failure: unknown;
+  private lifecycleCleanup = false;
 
   constructor(
     private readonly monitors: HostedMonitorSession,
@@ -336,6 +337,12 @@ export class HostedMonitorLoop {
     await this.monitors.settleStopRequested(this.monitorId);
   }
 
+  prepareLifecycle(): void {
+    this.lifecycleCleanup = true;
+    if (this.idle !== undefined) this.clock.clearTimeout(this.idle);
+    this.idle = undefined;
+  }
+
   private onLine(line: string): void {
     if (this.ended) return;
     this.buffered.push(line);
@@ -368,14 +375,22 @@ export class HostedMonitorLoop {
     this.buffered = [];
     const nextSequence =
       (this.monitors.record(this.monitorId)?.observationSequence ?? 0) + 1;
-    const input = await this.notification(nextSequence, lines);
-    await this.monitors.observe(this.monitorId, { lines }, { input });
-    // The wake is live: the embedded scheduler may deliver it now.
-    this.onNotification?.();
-    this.armIdle();
+    const input = this.lifecycleCleanup
+      ? undefined
+      : await this.notification(nextSequence, lines);
+    await this.monitors.observe(
+      this.monitorId,
+      { lines },
+      this.lifecycleCleanup || !input ? undefined : { input },
+    );
+    if (!this.lifecycleCleanup) {
+      this.onNotification?.();
+      this.armIdle();
+    }
     const sequence = this.monitors.record(this.monitorId)?.observationSequence;
     if (
       settleQuota &&
+      !this.lifecycleCleanup &&
       this.params !== undefined &&
       sequence !== undefined &&
       sequence >= this.params.maxEvents

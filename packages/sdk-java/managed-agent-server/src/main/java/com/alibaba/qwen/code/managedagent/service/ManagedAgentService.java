@@ -120,10 +120,8 @@ public class ManagedAgentService {
         if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
             return false;
         }
-        return session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
-                && store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
-                && harness.supportsLifecycle();
+        return session.workspace() == null || runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
+                && harness.supportsLifecycle(session.toolProfile());
     }
 
     private boolean hasActions(SessionRecord session) {
@@ -840,8 +838,10 @@ public class ManagedAgentService {
     private static boolean retention(SessionRecord session,
             Set<String> closed) {
         return session.workspace() == null
-                || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
-                        && closed.contains(session.sessionId());
+                || closed.contains(session.sessionId())
+                        && (!WorkspaceToolProfiles.isShellOrMcp(session.toolProfile())
+                                || WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2
+                                        && List.of("CLOSED", "ARCHIVED").contains(session.status()));
     }
 
     private PublicSession publicSession(SessionRecord session) {
@@ -979,9 +979,8 @@ public class ManagedAgentService {
         if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
             return false;
         }
-        return retention || session.workspace() != null && !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
-                && store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
+        return retention || session.workspace() != null && runtimeWarmer != null
+                && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(session.toolProfile());
     }
 
     private Boolean foregroundShell(SessionRecord session) {
