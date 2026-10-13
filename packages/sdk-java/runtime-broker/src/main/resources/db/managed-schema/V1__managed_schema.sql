@@ -174,6 +174,7 @@ CREATE TABLE ma_event_stream (
     last_sequence BIGINT NOT NULL DEFAULT 0,
     replay_floor_sequence BIGINT NOT NULL DEFAULT 0,
     covered_sequence BIGINT NOT NULL DEFAULT 0,
+    wake_covered_sequence BIGINT,
     projection_version INT NOT NULL DEFAULT 1,
     snapshot_stale_since BIGINT,
     current_snapshot_id VARBINARY(512),
@@ -184,6 +185,7 @@ CREATE TABLE ma_event_stream (
     PRIMARY KEY (tenant_id, session_id, stream_kind, stream_id),
     CONSTRAINT ck_ma_stream_kind CHECK ((CASE stream_kind WHEN 'SESSION' THEN 7 WHEN 'TASK' THEN 4 ELSE -1 END = CHAR_LENGTH(stream_kind))),
     CONSTRAINT ck_ma_stream_counters CHECK (last_sequence >= 0 AND replay_floor_sequence >= 0 AND replay_floor_sequence <= last_sequence AND covered_sequence >= 0 AND covered_sequence <= last_sequence),
+    CONSTRAINT ck_ma_stream_wake CHECK (wake_covered_sequence IS NULL OR (stream_kind = 'SESSION' AND wake_covered_sequence >= 0)),
     CONSTRAINT fk_ma_stream_session FOREIGN KEY (tenant_id, session_id) REFERENCES ma_session (tenant_id, session_id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 

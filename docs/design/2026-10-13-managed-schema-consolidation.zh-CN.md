@@ -25,6 +25,8 @@
 
 `ma_session` 保存公开身份、actor/Workspace 绑定、父子关系、标题版本和退役墓碑。`ma_session_head` 分字段保存 writer generation、租约、activation、私有日志 revision/checkpoint、恢复状态和准入 fence。`ma_event_stream` 按 `(tenant, session, stream_kind, stream_id)` 保存永久 tail 与 retention floor；Session 流额外保存投影进度和当前快照身份。重建投影不能清空 tail/floor。
 
+Session 流的可空 `wake_covered_sequence` 独立去重已经尝试的日志唤醒，其私有日志序号可以大于公开事件 tail。原子的严格递增领取只修改该字段，保留消息 `covered_sequence`、retention floor、tail 和物化调度时间；投影重建保留它。传输消费者只读取公开 Session 状态，排除 Control 根记录和已退役 Session。日志所有权通过 head 的摘要主键定位，并核对原始身份、排除仅用于 Harness 的 head；批量所有权读取限制为每批 200 个请求身份。
+
 Broker 单独使用时，Harness 准入屏障可能先于 Managed Session 登记存在。这样的 head 必须明确是仅控制状态，缺少日志权威不能解释为活跃 writer。storage 准入 fence 同样可能先于 CSI 登记存在；未登记的逻辑行不证明物理身份或挂载。两种占位均不授予执行权限。公开 Session 的 Workspace 绑定必须全部缺省或完整存在，Workspace/context revision 必须为正数；仅控制状态的墓碑允许保留局部内部绑定。
 
 私有日志精确字节与摘要链不可变。日志追加、资源引用、领域投影和 head 推进在同一事务提交。公开事件只包含公开投影，Session/task 的事件流、序号、去重和保留独立。`ma_session_record` 保存 task、approval、Hook、MCP、Team 等有类型的最新领域投影，保留 Hook once/occurrence 约束。Agent 定义版本不可变且由 Session 固定。

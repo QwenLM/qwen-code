@@ -89,3 +89,7 @@ Node build/typecheck/bundle、相关 ESLint/yamllint 通过；两组 CI 检查�
 推送前，另一位贡献者将主线至 `8515d82f80` 合入 PR，生成 `740f8e8c5d`。保留该合并，仅在其上重放本轮修复。整合后的 Server 全量验证通过 2,506 项（0 失败/错误，7 项按环境跳过），包含新增的 cold child 与 procfs 竞争契约，Checkstyle、SpotBugs 通过。整合前后的已测试 CLI 源码/测试字节完全一致。整合后本地 Server 制品 SHA256 为 `38c79e949cc74370ff2fa4531fd54c00ffdd7b2287cc1c47b2fa2b102b660a26`，canonical DDL digest 不变。
 
 独立只读探针在任务专用 MySQL 上发现系统库准入漏洞：Connector/J 9.7.0 的 TABLE/VIEW 筛选隐藏了 mysql 库的全部表。Server 和 Broker 现共用检查，在元数据枚举、DDL 或 Flyway 前拒绝系统库及未选择的应用库。Broker 的 20 项 schema 单测和 70 项真实 MySQL 用例通过；Server 的 9 项准入/Flyway/连接池用例及静态检查通过。该检查阶段 Server SHA256 为 `01be4715ac1c792bfb53a2f8d2d570e927c5fde1e05130426ec86e08caa4e96a`，DDL 不变。只清理隔离任务实例 mysql 库中由测试创建的 32 张表，核实保留全部 38 张系统表身份；未改动应用数据库。
+
+独立制品探针随后验证四个系统库的 8 次 Broker/Server 调用全部拒绝，写语句尝试和 Flyway 调用均为零，前后表目录完全一致。后续合入主线至 `6212189f1f`，包含 MQ2c 公开事件消费者。其原生产查询在 32 表库中独立复现失败，同时 7 项旧表夹具失败。适配后的消费者使用 canonical 表、独立的可空 wake 水位，以及摘要索引和原始身份核对。整合后 Server 验证通过 2,561 项（7 项按环境跳过）；最后补充 Control/退役作用域检查后，61 项重点用例和 10 项真实 MySQL 消费者用例通过。Broker 的 70 项原生用例、Node build/typecheck/bundle、128 项 core envelope 和 4 项 CLI 审批用例通过。修正 CI 指出的两处生成器空格后，全仓库 Prettier 通过。
+
+独立真实 MySQL 探针对最终制品验证：16 个并发 wake 领取者只有一个成功，公开 tail/floor/投影/调度字段不变，真实消息物化及输出撤回/重建保留 wake 水位，实体作用域、字节精确身份和摘要碰撞原值校验正确。历史 head 从 1,000 增至 10,000 时，单行读取始终使用主键常量查询；205 个请求身份分成 200 和 5 两批主键范围查询。这属于 SQL 侧验收，未测试真实 MQ 服务或当前 head 的 Linux 重启。最终 Server SHA256 为 `467d6b34877bdb047949e1cdbc4857e8f20f1753515c4c777fdc8321c97ce9b0`，共享 DDL SHA256 为 `9800309ca17f5b0c65cb11c29d349385f2c0a23a77d43f098f2d0d4c46368e2b`；恰好 32 张业务表，568 个生产 class 均与已测试源码树对应。

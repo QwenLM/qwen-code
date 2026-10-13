@@ -1105,7 +1105,7 @@ describe('verifyRecoverySession', () => {
     ) as RecoverySessionSource;
     const io = {
       ...f.io,
-      async *transactions () {},
+      async *transactions() {},
       nextReference: vi.fn(async () => null),
       enqueue: vi.fn(async () => {}),
     };
@@ -1142,7 +1142,7 @@ describe('verifyRecoverySession', () => {
     await expect(
       verifyRecoverySession(source, {
         ...f.io,
-        async *transactions () {},
+        async *transactions() {},
       }),
     ).rejects.toThrow('invalid collected retirement head');
   });

@@ -41,6 +41,16 @@ MQ2 是把命名的 seam 变成接好线的传输的阶段:outbox 排出的 MQ �
 
 扩展已冻结的信封词表,加入 `public_event` 流(MQ1 seam 所在通道所需的、有跟踪的契约扩展),然后由第二个 `EventTransport` 实现把公开 `managed_agent_event` 流(MQ1 seam 所在通道)以 `public_event` 信封承载;两个消费者角色落地:唤醒消费者经 Session Authority 围栏尝试激活,物化消费者触发现有 `MessageMaterializer` 路径。消费者拓扑遵循 §11 路由决策:待激活唤醒走共享 bootstrap 组,加 owner 侧按 Session 动态订阅。每个消费者以 `(tenantId, sessionId, stream, sequence)` 对照 SQL 水位去重。交接窗口期旧订阅可能短暂共存(租约到期而未干净退订);旧订阅者被围栏拒绝的空操作 ACK 仍会推进组位点,新 owner 可能错过该次通知,必须靠 SQL 对账恢复该待办——绝不能假设 MQ 已送达。
 
+**落地情况。** 契约扩展记录在 [2026-10-06-managed-event-envelope](2026-10-06-managed-event-envelope.zh-CN.md)(v1 内增量扩展;`public_event` 的 kind 即公开事件类型,按形状校验;digest 绑定九字段的行;`workspaceId` 取 Session 的绑定,未绑定时取其 journal 的 workspace)。接线如下:
+
+- **生产者。** `LiteTopicPublicEventTransport` 是 MQ1 seam 上的 `EventTransport`:把借来的批次拷贝进有界单线程队列(队列满则丢弃该批并记录其身份),查到 Session 的 workspace 后即缓存(两个来源都只写入一次、从不更新),发往该 Session 自己的 LiteTopic——与 journal 信封共用,由 `stream` 区分。journal 生产者另把每个 `wake.requested` 信封发往唤醒 bootstrap LiteTopic。两个生产者共用一个 RocketMQ producer,并隔离同步被拒的发送。
+- **通道。** 两个绑定到该 topic 的 LITE 组:唤醒 bootstrap 组——每个节点都订阅同一个 bootstrap LiteTopic(它按序、同一时刻只由一个成员消费);owner 组——每个节点只订阅其 Harness 正在写入的 Session:连接器的 attachment 经 SQL 收窄为 writer 是本节点 Harness、租约未过期的 `ACTIVE` journal,因为 attachment 会在租约失效或被接管后依然留存(`OwnerSubscriptions` 每隔 `owner-reconcile-interval`(默认 1 秒)对账该集合,唤醒激活成功后立即订阅)。两个通道共用一个监听器,对每条消息都 ACK:LiteTopic 按序消费,FAILURE 会把后续通知全部压在重试之后,而且任何结果都与恢复无关。
+- **唤醒消费者。** journal 的 `wake.requested` 只有在 SQL 能证明时才尝试:Session 与其 journal 存在、信封的 workspace 与 journal 一致、序号已提交、Session 为 `ACTIVE` 且 journal 为 `ACTIVE` 或 `SEALED`、且没有 writer 持有它——即与 `hasLiveWriter` 的判定相同:`ACTIVE` journal 且租约未过期(按数据库时间),因此已封存 journal 残留的租约不算数。随后在消费进度水位(`journal_wake`)上认领该唤醒——重投、重复或更旧的唤醒即使两个节点竞争也会被拒。上述检查与认领在监听器上执行,加载交给一个小的有界线程池,慢加载因此不会堵住有序的 bootstrap 通道。加载走 relay 类操作的 new-work 准入(先 Workspace 检查,再对其他控制面进程 attach 过的 Session 走接管加载),Harness 的 writer 获取即激活围栏;加载失败时,只有 SQL 随后显示另有活 writer 才判为被围栏。本节点已持有的 Session 不会重新加载。
+- **物化消费者。** 序号不高于消息投影已覆盖序号的 `public_event` 是空操作。高于时,该 Session 在单个物化线程上排入一个批次——排队期间到达的通知并入该批次——由 `MessageMaterializer.materializeNotified` 以与定时扫描相同的 store 调用执行,且绝不绕过该扫描的退避。
+- **配置。** `qwen.managed-agent.event-transport.*` 新增 `wake-bootstrap-lite-topic`、`wake-bootstrap-group`、`owner-group`、`owner-reconcile-interval`;整个配置类以 `enabled` 为条件,flag 关闭的部署仍不产生任何 transport bean。
+
+MQ2c 不包含:真实 broker 故障行(MQ2d)、接收侧对 journal 事实的 digest 校验(消费者依据 SQL 行事,不依据正文),以及新的通用 SQL 唤醒扫描(现有中继扫描与被加载 Session 自身的唤醒泵仍是兜底)。
+
 ### MQ2d——CI 中的真实 broker E2E
 
 新增 failsafe profile + 带 RocketMQ 5.5.1 service 容器的 CI 作业,跑 MQ2 退出检查点名的 §8 故障注入行:重复与乱序注入均为无操作,post-commit SSE 延迟 p95 不回退,flag 关闭的部署字节级一致。其中一条验收行是 owner 交接窗口:旧订阅与新 owner 共存时,旧 owner 不执行副作用且 ACK,新 owner 在未收到该 MQ 通知的情况下仍由 SQL 对账发现并处理待办。本机无容器运行时,因此本切片按构造只属于 CI/云环境。

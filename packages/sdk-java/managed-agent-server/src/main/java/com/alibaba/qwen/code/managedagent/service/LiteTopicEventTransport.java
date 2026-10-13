@@ -5,8 +5,6 @@ import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.store.ManagedEventEnvelopes;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.Closeable;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -24,31 +22,35 @@ import org.slf4j.LoggerFactory;
  * it over RocketMQ. Delivery is best-effort — it never blocks the committing
  * thread and never propagates a failure, because consumers reconcile against
  * SQL and a dropped notice only delays a wake or a materialization.
+ *
+ * <p>A {@code wake.requested} envelope is also sent to the shared wake
+ * bootstrap LiteTopic (phase MQ2c, the §11 routing decision): a Session whose
+ * wake nobody owns yet has no subscriber on its own LiteTopic, so the
+ * bootstrap lane is how any node learns of it and attempts activation
+ * through the fence.
  */
-public class LiteTopicEventTransport
-        implements JournalEventTransport, Closeable {
+public class LiteTopicEventTransport implements JournalEventTransport {
     private static final Logger LOG = LoggerFactory.getLogger(
             LiteTopicEventTransport.class);
     private static final ObjectMapper JSON = new ObjectMapper();
     // The managed_session_commit_v1 marker and any non-event record carry a
     // different subtype and are not events.
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
+    private static final String WAKE_KIND = "wake.requested";
 
+    // Shared with the public-event transport; the configuration closes it.
     private final Producer producer;
     private final ClientServiceProvider provider;
     private final String topic;
+    private final String wakeBootstrapLiteTopic;
 
     public LiteTopicEventTransport(Producer producer,
-            ClientServiceProvider provider, String topic) {
+            ClientServiceProvider provider, String topic,
+            String wakeBootstrapLiteTopic) {
         this.producer = producer;
         this.provider = provider;
         this.topic = topic;
-    }
-
-    /** Closes the producer and its broker connections on shutdown. */
-    @Override
-    public void close() throws IOException {
-        producer.close();
+        this.wakeBootstrapLiteTopic = wakeBootstrapLiteTopic;
     }
 
     /** Publish one envelope per event in a committed journal record. */
@@ -63,7 +65,10 @@ public class LiteTopicEventTransport
             return;
         }
         for (ManagedEventEnvelope envelope : envelopes) {
-            publish(envelope);
+            publish(envelope, envelope.sessionId());
+            if (WAKE_KIND.equals(envelope.kind())) {
+                publish(envelope, wakeBootstrapLiteTopic);
+            }
         }
     }
 
@@ -88,12 +93,12 @@ public class LiteTopicEventTransport
         return envelopes;
     }
 
-    private void publish(ManagedEventEnvelope envelope) {
+    private void publish(ManagedEventEnvelope envelope, String liteTopic) {
         Message message;
         try {
             message = provider.newMessageBuilder()
                     .setTopic(topic)
-                    .setLiteTopic(envelope.sessionId())
+                    .setLiteTopic(liteTopic)
                     .setKeys(envelope.eventId())
                     .setBody(ManagedEventEnvelopes.toJson(envelope)
                             .getBytes(StandardCharsets.UTF_8))
@@ -103,13 +108,24 @@ public class LiteTopicEventTransport
                     envelope.eventId(), failure);
             return;
         }
-        producer.sendAsync(message).whenComplete((receipt, failure) -> {
-            if (failure != null) {
-                LOG.warn("dropped authoritative_journal envelope eventId={}"
-                        + " sessionId={}", envelope.eventId(),
-                        envelope.sessionId(), failure);
-            }
-        });
+        try {
+            producer.sendAsync(message).whenComplete((receipt, failure) -> {
+                if (failure != null) {
+                    dropped(envelope, liteTopic, failure);
+                }
+            });
+        } catch (RuntimeException failure) {
+            // A send refused synchronously (a closing producer) must not
+            // reach the committing thread or skip the remaining envelopes.
+            dropped(envelope, liteTopic, failure);
+        }
+    }
+
+    private static void dropped(ManagedEventEnvelope envelope,
+            String liteTopic, Throwable failure) {
+        LOG.warn("dropped authoritative_journal envelope eventId={}"
+                + " sessionId={} liteTopic={}", envelope.eventId(),
+                envelope.sessionId(), liteTopic, failure);
     }
 
     private static JsonNode readLine(String line) {
