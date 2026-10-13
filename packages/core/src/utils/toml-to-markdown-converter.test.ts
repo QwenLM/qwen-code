@@ -139,4 +139,14 @@ Prompt content`;
 
     expect(isTomlFormat(markdown)).toBe(false);
   });
+
+  it('agrees with convertTomlToMarkdown on BOM-prefixed input', () => {
+    // The two exported functions must not disagree: a consumer composing them
+    // as `if (isTomlFormat(c)) convertTomlToMarkdown(c)` would otherwise skip a
+    // command file a Windows editor saved with a BOM.
+    const withBom = '\uFEFFprompt = "x"';
+
+    expect(isTomlFormat(withBom)).toBe(true);
+    expect(convertTomlToMarkdown(withBom)).toBe('x\n');
+  });
 });
