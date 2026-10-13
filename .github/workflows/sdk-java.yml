@@ -738,14 +738,15 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (40 + 9×10 + 20 = 150 — the Verify and O4 steps
-    # sit above their failsafe fork timeouts; the FG7 channel classes
-    # raised the hosted fork 900→1200 s, and the FG8 monitor/run letters
-    # raised it 1200→1800 s) plus ~13 minutes for the uncapped setup steps
-    # (Checkout..Install MySQL binaries, the report checks) need ~163;
-    # 165 keeps a thin margin, and each arm buys its own 10 instead of
-    # sharing an envelope.
-    timeout-minutes: 165
+    # The step ceilings (40 + 9×10 + 20 + 50 = 200 — the Verify, admission
+    # and O4 steps sit above their failsafe fork timeouts (the FG7 channel
+    # classes raised the hosted fork 900→1200 s; the admission gates share
+    # a 2400 s fork for both witness classes; the FG8 monitor/run letters
+    # raised the hosted fork 1200→1800 s)) plus ~13 minutes for the
+    # uncapped setup steps (Checkout..Install MySQL binaries, the report
+    # checks) need ~213; 215 keeps a thin margin, and each arm buys its
+    # own 10 instead of sharing an envelope.
+    timeout-minutes: 215
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -887,7 +888,29 @@ jobs:
             packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
             packages/sdk-java/managed-agent-server/target/fg7-cases/
             packages/sdk-java/managed-agent-server/target/fg8-cases/
+            packages/sdk-java/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
+
+      - name: 'Verify Hosted admission gates'
+        # Its clean would otherwise discard the hosted lane's failsafe
+        # reports and the fg7-cases evidence the hosts upload above, so it
+        # runs after the fixture. The hosted-harness-gates profile carries a
+        # 2400 s failsafe fork budget for both admission witness classes
+        # (@Timeout(1800) each); the same killed-after-timeout pattern as the
+        # hosted-harness-mysql verify applies.
+        timeout-minutes: 50
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+        run: >-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml
+          -Phosted-harness-gates
+          -Dnode.executable="$(command -v node)"
+          -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"
+          -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
+          -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
+      - name: 'Check that every Hosted admission gate class ran'
+        run: 'node scripts/check-failsafe-reports.js hosted-gates packages/sdk-java/managed-agent-server'
 
       - name: 'Verify O4 filesystem process and capacity gates'
         id: 'o4_mysql'
