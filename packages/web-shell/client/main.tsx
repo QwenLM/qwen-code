@@ -427,6 +427,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
                     },
                     rightPanel: {
                       items: [
+                        'files',
                         'review',
                         'sideTask',
                         'terminal',
