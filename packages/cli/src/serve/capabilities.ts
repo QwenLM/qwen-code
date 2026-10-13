@@ -67,6 +67,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_source_metadata: { since: 'v1' },
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
+  session_prompt_regenerate_of: { since: 'v1' },
   session_turn_status: { since: 'v1' },
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.

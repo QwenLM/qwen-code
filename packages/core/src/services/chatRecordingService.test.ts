@@ -688,6 +688,30 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toEqual({ displayText: 'save logs' });
     });
 
+    it('persists regeneration lineage separately from model-facing content', async () => {
+      const regenerateOf = '11111111-1111-4111-8111-111111111111';
+      const daemonPromptId = '22222222-2222-4222-8222-222222222222';
+      svc.recordUserMessage(
+        'same question',
+        undefined,
+        { displayText: 'same question', hookContext: '', regenerateOf },
+        'session########1',
+        daemonPromptId,
+      );
+
+      const record = await flushed();
+      expect(record.daemonPromptId).toBe(daemonPromptId);
+      expect(record.systemPayload).toEqual({
+        displayText: 'same question',
+        hookContext: '',
+        regenerateOf,
+      });
+      expect(record.message).toEqual({
+        role: 'user',
+        parts: [{ text: 'same question' }],
+      });
+    });
+
     it('writes original resource links on an attachment-only user record', async () => {
       const resourceLinks = [
         {

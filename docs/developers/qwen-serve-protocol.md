@@ -209,7 +209,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 ['health', 'capabilities', 'session_create', 'session_startup_config', 'session_id_override', 'session_scope_override',
  'session_load', 'session_resume', 'session_transcript',
  'unstable_session_resume',
- 'session_list', 'session_catalog_batch', 'session_info', 'session_prompt', 'session_mid_turn_message_mutation',
+ 'session_list', 'session_catalog_batch', 'session_info', 'session_prompt', 'session_prompt_regenerate_of', 'session_mid_turn_message_mutation',
  'session_mid_turn_send_now',
  'session_cancel', 'session_events',
  'slow_client_warning', 'typed_event_schema',
@@ -3349,6 +3349,17 @@ optional top-level extension with the same scope (invalid values are JSON-RPC
 `-32602`); it is not a standard ACP field and is not forwarded to the child.
 
 Forward a prompt to the agent. Multi-prompt callers FIFO-queue per session (ACP guarantees one active prompt per session).
+
+With `session_prompt_regenerate_of`, optional top-level
+`_meta["qwen.regenerateOf"]` carries the original daemon prompt UUID for UI
+answer-version grouping. Valid UUID-shaped strings are saved in the session
+journal and restored on live and replayed `user_message_chunk._meta` under the
+same key; malformed values are ignored. The original turn's stable identifier is
+the admitted `promptId`, also restored as `user_message_chunk._meta.promptId`.
+This metadata does not change model content or history: both turns remain
+ordinary appended turns. It grants no permissions, is not a rewind target, and
+clients must resolve it against an existing original turn in the same session.
+Without this feature, clients must not assume the relationship survives refresh.
 
 Request:
 

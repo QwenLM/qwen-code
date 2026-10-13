@@ -6,7 +6,9 @@
 
 import {
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
+  REGENERATE_OF_META_KEY,
   parseBackgroundNotificationTurn,
+  parseRegenerateOfPromptId,
 } from './bridgeTypes.js';
 import type {
   SessionUpdate,
@@ -1306,6 +1308,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       : [];
     const replayedInputAnnotations =
       savedInputAnnotationList.filter(isObjectRecord);
+    const regenerateOf = parseRegenerateOfPromptId(payload?.['regenerateOf']);
     const userMeta: UpdateMetaOptions = {
       ...meta,
       extra: {
@@ -1317,6 +1320,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         ...(replayedInputAnnotations.length > 0
           ? { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: replayedInputAnnotations }
           : {}),
+        ...(regenerateOf ? { [REGENERATE_OF_META_KEY]: regenerateOf } : {}),
       },
     };
     if (

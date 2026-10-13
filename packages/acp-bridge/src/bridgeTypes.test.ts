@@ -6,7 +6,35 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { parseBridgeManagedSessionStore } from './bridgeTypes.js';
+import {
+  parseBridgeManagedSessionStore,
+  parseRegenerateOfPromptId,
+} from './bridgeTypes.js';
+
+describe('parseRegenerateOfPromptId', () => {
+  it('preserves the original daemon prompt UUID', () => {
+    const promptId = '11111111-1111-4111-8111-111111111111';
+    expect(parseRegenerateOfPromptId(promptId)).toBe(promptId);
+  });
+
+  it.each([
+    undefined,
+    null,
+    '',
+    ' ',
+    'prompt-id',
+    '11111111-1111-4111-8111-111111111111\n',
+    1,
+    {},
+    [],
+    'x'.repeat(1000),
+  ])(
+    'ignores a malformed regeneration marker (%j)',
+    (value) => {
+      expect(parseRegenerateOfPromptId(value)).toBeUndefined();
+    },
+  );
+});
 
 const fixture = JSON.parse(
   readFileSync(

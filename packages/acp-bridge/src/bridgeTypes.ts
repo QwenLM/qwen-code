@@ -1423,6 +1423,17 @@ export const IMAGE_ONLY_PROMPT_TEXT = '[image]';
 // (`sdk-typescript/src/daemon/ui/types.ts`) and already-written transcripts
 // pin the value, so it must stay `inputAnnotations`.
 export const DAEMON_INPUT_ANNOTATIONS_META_KEY = 'inputAnnotations';
+export const REGENERATE_OF_META_KEY = 'qwen.regenerateOf';
+
+export function parseRegenerateOfPromptId(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length !== 36) return undefined;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value,
+  )
+    ? value
+    : undefined;
+}
+
 // Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
 // dependency path between them, so a cross-package test pins the value.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';

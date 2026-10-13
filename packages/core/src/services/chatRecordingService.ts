@@ -589,6 +589,8 @@ export interface UserPromptRecordPayload {
   hookContext: string;
   /** UI-only annotations; interpreted by transcript consumers, not the model. */
   inputAnnotations?: unknown[];
+  /** UI-only original daemon prompt ID; does not alter model history. */
+  regenerateOf?: string;
   /** Daemon-owned attachment references used to restore prompt previews. */
   attachmentReferences?: UserPromptAttachmentReference[];
   /** Original ACP resource references, independent of model-input expansion. */

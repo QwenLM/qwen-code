@@ -164,6 +164,7 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
+  REGENERATE_OF_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   IMAGE_ONLY_PROMPT_TEXT,
@@ -189,6 +190,7 @@ import {
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   activeWorkCloseRetryDelayMs,
   isValidTrustedModelPrompt,
+  parseRegenerateOfPromptId,
   sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
 import type {
@@ -1286,13 +1288,15 @@ function parseWorkspaceMemoryDreamResult(
 }
 
 function pickUserInputEchoMeta(meta: unknown): Record<string, unknown> {
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return {};
-  const inputAnnotations = (meta as Record<string, unknown>)[
-    DAEMON_INPUT_ANNOTATIONS_META_KEY
-  ];
-  return Array.isArray(inputAnnotations)
-    ? { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: inputAnnotations }
-    : {};
+  if (!isRecord(meta)) return {};
+  const inputAnnotations = meta[DAEMON_INPUT_ANNOTATIONS_META_KEY];
+  const regenerateOf = parseRegenerateOfPromptId(meta[REGENERATE_OF_META_KEY]);
+  return {
+    ...(Array.isArray(inputAnnotations)
+      ? { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: inputAnnotations }
+      : {}),
+    ...(regenerateOf ? { [REGENERATE_OF_META_KEY]: regenerateOf } : {}),
+  };
 }
 
 /**
