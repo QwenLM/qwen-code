@@ -821,8 +821,17 @@ try {
         (turn.attemptAt && Date.now() - turn.attemptAt > 30_000) ||
         (turn.attemptHangingAt && Date.now() - turn.attemptHangingAt > 45_000)
       ) {
-        turn.outcome = 'wedged';
-        return turn;
+        const active = (
+          await daemon.json(`/session/${entry.sessionId}/status`, clientId)
+        ).hasActivePrompt;
+        if (active) {
+          turn.outcome = 'wedged';
+          return turn;
+        }
+        // The turn ended (completed or failed) before the threshold — fall
+        // through to the transcript gate instead of inventing a wedge that a
+        // dead turn cannot have.
+        break;
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
@@ -840,6 +849,21 @@ try {
           .hasActivePrompt,
       120_000,
     );
+    const transcript = await daemon.json(
+      `/session/${entry.sessionId}/transcript?cursor=0&limit=256`,
+      clientId,
+    );
+    const events = (
+      transcript as { events: Array<{ type: string; promptId?: string }> }
+    ).events;
+    const complete = events.filter(
+      (event) =>
+        event.promptId === turn.promptId && event.type === 'turn_complete',
+    );
+    if (complete.length !== 1)
+      throw new Error(
+        `Probe turn ${turn.sessionId} ended without exactly one turn_complete for its promptId — it failed instead of completing, so it can never be journaled as not-wedged: ${JSON.stringify(events.slice(-40))}`,
+      );
     console.log(
       `PROBE_TURN_COMPLETED session=${entry.sessionId} attemptAt=+${turn.attemptAt - turn.promptAt}ms commitMessageAt=+${turn.commitMessageAt - turn.promptAt}ms modelAt=+${modelBAnsweredAt - turn.promptAt}ms`,
     );

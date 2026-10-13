@@ -143,4 +143,24 @@ describe('Hosted proxy header relay', () => {
       'hosted-workspace-tool-turn-driver.ts',
     ]);
   });
+
+  it('pins the probe driver to certify completed turns by their transcript', () => {
+    // R3-18 sentinel: classifying a probe turn from wall clock alone lets a
+    // failed turn journal green beside a wedged one's evidence; the
+    // transcript gate is the only honest completed-path verdict — removing
+    // it must turn this pin red.
+    const source = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        'hosted-recovery-blocked-wedge-driver.ts',
+      ),
+      'utf8',
+    );
+    const completedArm = source.slice(
+      source.indexOf('const transcript = await daemon.json('),
+    );
+    expect(completedArm).toContain('/transcript?cursor=0&limit=256');
+    expect(completedArm).toContain("event.type === 'turn_complete'");
+    expect(completedArm).toContain('event.promptId === turn.promptId');
+  });
 });
