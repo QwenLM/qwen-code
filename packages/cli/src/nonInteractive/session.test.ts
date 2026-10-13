@@ -297,7 +297,9 @@ describe('runNonInteractiveStreamJson', () => {
   });
 
   type CapturedControlContext = {
-    onContinueLastTurn?: () => Promise<Record<string, unknown>>;
+    onContinueLastTurn?: (
+      confirmation?: string,
+    ) => Promise<Record<string, unknown>>;
     onInterrupt?: () => void;
     abortSignal?: AbortSignal;
     getActiveTurnAbortSignal?: () => AbortSignal | undefined;
@@ -313,7 +315,9 @@ describe('runNonInteractiveStreamJson', () => {
 
     (ControlContext as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       (options: {
-        onContinueLastTurn?: () => Promise<Record<string, unknown>>;
+        onContinueLastTurn?: (
+          confirmation?: string,
+        ) => Promise<Record<string, unknown>>;
       }) => {
         controlContext = options;
         return {};
@@ -328,7 +332,9 @@ describe('runNonInteractiveStreamJson', () => {
         if (request.request.subtype !== 'continue_last_turn') {
           return undefined;
         }
-        const result = await controlContext?.onContinueLastTurn?.();
+        const result = await controlContext?.onContinueLastTurn?.(
+          request.request.confirmCancellation,
+        );
         continueResults.push(result);
         return result;
       })();
@@ -556,7 +562,7 @@ describe('runNonInteractiveStreamJson', () => {
     expect(runNonInteractiveMock).not.toHaveBeenCalled();
   });
 
-  it('refuses stream-json continuation of an unknown legacy cancellation', async () => {
+  it('requires the legacy boundary confirmation before scheduling stream-json continuation', async () => {
     const { continueResults } = installContinueDispatch();
     const { llmClient } = createInitializedLlmClient([
       { role: 'user', parts: [{ text: 'resume me' }] },
@@ -565,15 +571,37 @@ describe('runNonInteractiveStreamJson', () => {
       reason: 'unknown',
       promptId: 'legacy-daemon',
     });
+    const confirmation = createContinueRequest('confirmed');
+    confirmation.request = {
+      subtype: 'continue_last_turn',
+      confirmCancellation: 'legacy-daemon',
+    };
     mockInputReader.read = async function* () {
       yield createControlRequest('initialize');
-      yield createContinueRequest();
+      yield createContinueRequest('unconfirmed');
+      await vi.waitFor(() => expect(continueResults).toHaveLength(1));
+      expect(runNonInteractiveMock).not.toHaveBeenCalled();
+      yield confirmation;
     };
     await runNonInteractiveStreamJson(config, '');
     expect(continueResults).toEqual([
-      { accepted: false, interruption: 'none' },
+      {
+        accepted: false,
+        interruption: 'interrupted_prompt',
+        cancellationConfirmationId: 'legacy-daemon',
+      },
+      { accepted: true, interruption: 'interrupted_prompt' },
     ]);
-    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+    expect(runNonInteractiveMock).toHaveBeenCalledExactlyOnceWith(
+      config,
+      expect.anything(),
+      '',
+      expect.any(String),
+      expect.objectContaining({
+        continueInterrupted: true,
+        confirmCancellation: 'legacy-daemon',
+      }),
+    );
   });
 
   it('deduplicates continue_last_turn while a continuation is pending or running', async () => {

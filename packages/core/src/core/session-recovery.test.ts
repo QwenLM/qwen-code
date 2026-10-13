@@ -430,12 +430,12 @@ describe('explicitly cancelled recorded turns', () => {
     },
   );
   it.each(['other-daemon', 'session-1########1'])(
-    'blocks uncertain cancellation when terminal identifier %s does not match its owner',
+    'does not confuse terminal identifier %s with its owner',
     (id) => {
       expect(
         planFor(conversationFromRecords([prompt(), result('cancelled', id)]))
           .canContinue,
-      ).toBe(false);
+      ).toBe(true);
     },
   );
   it('keeps the crash path without a terminal outcome', () => {
@@ -452,7 +452,7 @@ describe('explicitly cancelled recorded turns', () => {
     ['duplicate result', false],
     ['different client', false],
   ])(
-    'blocks uncertain cancellation with %s (legacy=%s)',
+    'conservatively gates the latest legacy cancellation with %s (legacy=%s)',
     (ownership, legacy) => {
       const owner = prompt();
       if (ownership === 'missing owner') delete owner.daemonPromptId;
@@ -478,13 +478,14 @@ describe('explicitly cancelled recorded turns', () => {
         conversation: conversationFromRecords(records),
         options: { allowAutoContinue: true },
       });
+      expect(plan.cancellationConfirmationId).toBe('daemon-1');
       expect(plan.canAutoContinue).toBe(false);
-      expect(plan.requiresUserConfirmation).toBe(false);
-      expect(plan.canContinue).toBe(false);
+      expect(plan.requiresUserConfirmation).toBe(true);
+      expect(plan.canContinue).toBe(true);
     },
   );
 
-  it('blocks legacy cancellation even when auto continuation is enabled', () => {
+  it('requires confirmation for legacy cancellation even when auto continuation is enabled', () => {
     const terminal = result();
     delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
     const plan = buildSessionRecoveryPlan({
@@ -492,20 +493,31 @@ describe('explicitly cancelled recorded turns', () => {
       conversation: conversationFromRecords([prompt(), terminal]),
       options: { allowAutoContinue: true },
     });
-    expect(plan.kind).toBe('clean');
-    expect(plan.canContinue).toBe(false);
+    expect(plan.canContinue).toBe(true);
     expect(plan.canAutoContinue).toBe(false);
-    expect(plan.continuation).toBeUndefined();
+    expect(plan.requiresUserConfirmation).toBe(true);
+    expect(plan.cancellationConfirmationId).toBe('daemon-1');
   });
 
-  it('blocks uncertain cancellation behind an unanswered automatic notification', () => {
+  it('keeps abort-only or legacy cancellation recoverable without user-cancel provenance', () => {
+    const terminal = result();
+    delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
+    const plan = planFor(
+      conversationFromRecords([prompt(), toolResult(), terminal]),
+    );
+    expect(plan.canContinue).toBe(true);
+    expect(plan.cancellationConfirmationId).toBe('daemon-1');
+    expect(plan.canAutoContinue).toBe(false);
+    expect(plan.requiresUserConfirmation).toBe(true);
+  });
+  it('keeps an unanswered reminder-bearing notification after an older user cancellation', () => {
     const notification = notificationRecord(2, 'Agent done.');
     notification.message!.parts!.unshift({
       text: '<system-reminder>Plan mode is active.</system-reminder>',
     });
     expect(
       planFor(conversationFromRecords([prompt(), result(), notification])).kind,
-    ).toBe('clean');
+    ).toBe('interrupted_prompt');
   });
   it.each([undefined, 'session-1########2'])(
     'does not let an old cancel suppress later input with ID=%s',
@@ -546,11 +558,12 @@ describe('explicitly cancelled recorded turns', () => {
       conversation: conversationFromRecords([prompt(), result(), compression]),
       options: { allowAutoContinue: true },
     });
-    expect(plan.kind).toBe('clean');
+    expect(plan.kind).toBe('interrupted_prompt');
+    expect(plan.cancellationConfirmationId).toBe('daemon-1');
     expect(plan.canAutoContinue).toBe(false);
-    expect(plan.requiresUserConfirmation).toBe(false);
+    expect(plan.requiresUserConfirmation).toBe(true);
   });
-  it('keeps legacy cancellation blocked after a completed local command', () => {
+  it('retains resolved legacy confirmation after a completed local command', () => {
     const original = prompt();
     const terminal = result();
     delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
@@ -595,9 +608,10 @@ describe('explicitly cancelled recorded turns', () => {
     expect(structuredClone(plan.originalApiHistory)).toEqual([
       original.message,
     ]);
-    expect(plan.canContinue).toBe(false);
+    expect(plan.canContinue).toBe(true);
+    expect(plan.cancellationConfirmationId).toBe('daemon-1');
     expect(plan.canAutoContinue).toBe(false);
-    expect(plan.requiresUserConfirmation).toBe(false);
+    expect(plan.requiresUserConfirmation).toBe(true);
   });
   it('ignores cold notifications while retaining cancellation provenance', () => {
     const plan = planFor(

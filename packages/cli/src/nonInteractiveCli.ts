@@ -479,6 +479,7 @@ export interface RunNonInteractiveOptions {
    * cleanly the run emits a no-op result and exits 0.
    */
   continueInterrupted?: boolean;
+  confirmCancellation?: string;
 }
 
 /**
@@ -1217,6 +1218,28 @@ export async function runNonInteractive(
           repairs: recoveryPlan.repairs,
           hasContinuation: recoveryPlan.continuation !== undefined,
         });
+        // Only a plan that carries a continuation has a confirmation to
+        // check: `clean` and `degraded_history` spread no
+        // `cancellationConfirmationId`, so a caller that passed the
+        // confirmation it read for a turn that has since settled compared two
+        // unrelated things and got a mismatch error where the no-op below is
+        // the answer.
+        if (
+          recoveryPlan.continuation &&
+          options.confirmCancellation !==
+            recoveryPlan.cancellationConfirmationId
+        ) {
+          await emitNonInteractiveFinalMessage({
+            message:
+              'Recovery confirmation does not match the current turn. Refresh recovery status before continuing.',
+            isError: true,
+            adapter,
+            config,
+            startTimeMs: startTime,
+            beforeEmit: settleBeforeTerminalOutput,
+          });
+          return 1;
+        }
         if (!recoveryPlan.continuation) {
           await emitNonInteractiveFinalMessage({
             message: 'No interrupted turn to continue.',

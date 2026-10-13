@@ -181,10 +181,15 @@ describe('DaemonSessionClient', () => {
       eventEpoch: 'epoch-1',
     });
 
-    await expect(session.continueSession()).resolves.toEqual(body);
+    await expect(
+      session.continueSession(undefined, {
+        confirmCancellation: 'legacy-daemon',
+      }),
+    ).resolves.toEqual(body);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       url: 'http://daemon/session/s-1/continue',
+      body: JSON.stringify({ confirmCancellation: 'legacy-daemon' }),
       headers: { 'x-qwen-client-id': 'client-1' },
     });
     expect(session.lastEventId).toBe(20);

@@ -1773,6 +1773,7 @@ function appendPromptCancelledBlock(
       block.serverTimestamp = event.serverTimestamp;
     }
     if (event.sourceRecordIds) block.sourceRecordIds = event.sourceRecordIds;
+    if (event.reason) block.reason = event.reason;
     block.updatedAt = state.now;
     state.retainedBytes += estimateBlockBytes(block) - bytesBefore;
     return;

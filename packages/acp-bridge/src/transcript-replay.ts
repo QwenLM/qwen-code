@@ -1759,7 +1759,16 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       const payload = isObjectRecord(record.systemPayload)
         ? record.systemPayload
         : undefined;
-      const cancelledAt = finiteNumber(payload?.['cancelledAt']);
+      const cancelledAt = finiteNumber(
+        payload?.['cancelledAt'] === undefined
+          ? payload?.['endedAt']
+          : payload?.['cancelledAt'],
+      );
+      // Only an explicit user cancel persists `cancelReason: 'user'`. Every
+      // other cancelled terminal — including the `endedAt` fallback above — is
+      // an interruption, and the notice must not claim user intent.
+      const reason =
+        payload?.['cancelReason'] === 'user' ? 'user' : 'interrupted';
       const startedAt = finiteNumber(payload?.['startedAt']);
       const promptId = payload?.['promptId'];
       if (
@@ -1779,7 +1788,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           ...meta,
           extra: {
             qwenDiscreteMessage: true,
-            promptCancelled: { promptId, cancelledAt, elapsedMs },
+            promptCancelled: { promptId, cancelledAt, elapsedMs, reason },
           },
         }),
       );

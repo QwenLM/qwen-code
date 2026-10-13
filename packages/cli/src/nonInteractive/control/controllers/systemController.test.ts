@@ -313,11 +313,13 @@ describe('SystemController', () => {
       );
 
       const result = await controller.handleRequest(
-        { subtype: 'continue_last_turn' },
+        { subtype: 'continue_last_turn', confirmCancellation: 'legacy-daemon' },
         'continue-1',
       );
 
-      expect(onContinueLastTurn).toHaveBeenCalledTimes(1);
+      expect(onContinueLastTurn).toHaveBeenCalledExactlyOnceWith(
+        'legacy-daemon',
+      );
       expect(result).toEqual({
         subtype: 'continue_last_turn',
         accepted: true,

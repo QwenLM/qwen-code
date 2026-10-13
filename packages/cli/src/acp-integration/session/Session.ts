@@ -207,6 +207,7 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   applyPendingGoalProposal,
   formatProposeGoalRecoveryFailed,
@@ -3000,13 +3001,14 @@ export class Session implements SessionContext {
         const pauseReason =
           turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
             ? GOAL_PAUSE_REASON_SESSION_DISPOSED
-            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
-                turn.controller.signal.reason ===
-                  INTERRUPTED_PROMPT_ABORT_REASON
+            : turn.controller.signal.reason === USER_CANCEL_ABORT_REASON
               ? GOAL_PAUSE_REASON_USER_INTERRUPT
-              : managedSessionBlock
-                ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
-                : undefined;
+              : turn.controller.signal.reason ===
+                  INTERRUPTED_PROMPT_ABORT_REASON
+                ? GOAL_PAUSE_REASON_PROMPT_INTERRUPTED
+                : managedSessionBlock
+                  ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
+                  : undefined;
         if (
           pauseReason !== undefined &&
           runtime.getSnapshot().goal?.status === 'active'
@@ -3075,7 +3077,9 @@ export class Session implements SessionContext {
       const pauseReason = supersededByNewPrompt
         ? undefined
         : cancelledTurn
-          ? GOAL_PAUSE_REASON_USER_INTERRUPT
+          ? turn.controller.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON
+            ? GOAL_PAUSE_REASON_PROMPT_INTERRUPTED
+            : GOAL_PAUSE_REASON_USER_INTERRUPT
           : result?.stopReason === 'max_tokens'
             ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
             : turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
@@ -5192,11 +5196,15 @@ export class Session implements SessionContext {
     if (managedSessionBlock) {
       throw managedOutcomeUnknownError(managedSessionBlock);
     }
-    if (
-      params._meta?.[DAEMON_CONTINUE_META_KEY] === true &&
-      !this.#getRecoveryPlan(true)?.continuation
-    ) {
-      return { stopReason: 'end_turn' };
+    if (params._meta?.[DAEMON_CONTINUE_META_KEY] === true) {
+      const recoveryPlan = this.#getRecoveryPlan(true);
+      if (
+        !recoveryPlan?.continuation ||
+        params._meta?.['qwen.daemon.confirmCancellation'] !==
+          recoveryPlan.cancellationConfirmationId
+      ) {
+        return { stopReason: 'end_turn' };
+      }
     }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
     const controller = new AbortController();
@@ -5958,6 +5966,11 @@ export class Session implements SessionContext {
     // task capture is queued for no admission-side reason.
     return {
       kind: recoveryPlan?.kind ?? 'clean',
+      ...(recoveryPlan?.cancellationConfirmationId
+        ? {
+            cancellationConfirmationId: recoveryPlan.cancellationConfirmationId,
+          }
+        : {}),
       canContinue:
         recoveryPlan?.canContinue === true &&
         !this.closing &&
@@ -5978,9 +5991,10 @@ export class Session implements SessionContext {
    * tracked like any other prompt; `prompt()` then re-detects/strips
    * authoritatively. Powers `qwen/control/session/continue`.
    */
-  async continueLastTurn(): Promise<{
+  async continueLastTurn(confirmCancellation?: string): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    cancellationConfirmationId?: string;
   }> {
     const recovery = this.getRecoveryStatus();
     if (!recovery.canContinue && recovery.kind !== 'clean') {
@@ -6012,7 +6026,13 @@ export class Session implements SessionContext {
       });
     }
     return {
-      accepted: recovery.canContinue,
+      accepted:
+        recovery.canContinue &&
+        confirmCancellation === recovery.cancellationConfirmationId,
+      ...(recovery.cancellationConfirmationId &&
+      confirmCancellation !== recovery.cancellationConfirmationId
+        ? { cancellationConfirmationId: recovery.cancellationConfirmationId }
+        : {}),
       interruption:
         recovery.kind === 'interrupted_prompt' ||
         recovery.kind === 'interrupted_turn'
@@ -6467,7 +6487,11 @@ export class Session implements SessionContext {
               );
             } else if (isContinue) {
               const recoveryPlan = this.#getRecoveryPlan(true);
-              if (!recoveryPlan?.continuation) {
+              if (
+                !recoveryPlan?.continuation ||
+                promptMetadata?.['qwen.daemon.confirmCancellation'] !==
+                  recoveryPlan.cancellationConfirmationId
+              ) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
                 // continue; log so an abandoned continuation is diagnosable.
@@ -8993,15 +9017,15 @@ export class Session implements SessionContext {
     if (recording === null) return;
     const cancelledAt =
       state === 'cancelled' ? recording.cancelledAt : undefined;
-    if (cancelledAt !== undefined && response) {
+    const noticeAt =
+      state === 'cancelled' ? (cancelledAt ?? Date.now()) : undefined;
+    if (noticeAt !== undefined && response) {
       response._meta = {
         ...response._meta,
         'qwen.promptCancelled': {
-          cancelledAt,
-          elapsedMs: Math.max(
-            0,
-            cancelledAt - (recording.startedAt ?? cancelledAt),
-          ),
+          cancelledAt: noticeAt,
+          elapsedMs: Math.max(0, noticeAt - (recording.startedAt ?? noticeAt)),
+          reason: cancelledAt !== undefined ? 'user' : 'interrupted',
         },
       };
     }

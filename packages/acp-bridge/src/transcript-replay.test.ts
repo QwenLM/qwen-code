@@ -87,6 +87,114 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('replays an interrupted cancellation without changing its persisted provenance', () => {
+    const payload = {
+      promptId: 'prompt-1',
+      state: 'cancelled',
+      startedAt: 1000,
+      endedAt: 2500,
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('interrupted-result', 'system', {
+        subtype: 'turn_result',
+        systemPayload: payload,
+      }),
+    );
+
+    expect(projected).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'agent_message_chunk',
+        _meta: expect.objectContaining({
+          qwenDiscreteMessage: true,
+          promptCancelled: {
+            promptId: 'prompt-1',
+            cancelledAt: 2500,
+            elapsedMs: 1500,
+            reason: 'interrupted',
+          },
+        }),
+      }),
+    ]);
+    expect(payload).not.toHaveProperty('cancelledAt');
+  });
+
+  it('preserves the explicit cancellation time when the terminal record ends later', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-cancel-result', 'system', {
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          startedAt: 1000,
+          cancelledAt: 2200,
+          endedAt: 2500,
+        },
+      }),
+    );
+
+    expect(projected).toEqual([
+      expect.objectContaining({
+        _meta: expect.objectContaining({
+          promptCancelled: {
+            promptId: 'prompt-1',
+            cancelledAt: 2200,
+            elapsedMs: 1200,
+            reason: 'interrupted',
+          },
+        }),
+      }),
+    ]);
+  });
+
+  it('labels a persisted user cancel as user provenance', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-marker-result', 'system', {
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          startedAt: 1000,
+          cancelledAt: 2200,
+          cancelReason: 'user',
+          endedAt: 2500,
+        },
+      }),
+    );
+
+    expect(projected).toEqual([
+      expect.objectContaining({
+        _meta: expect.objectContaining({
+          promptCancelled: {
+            promptId: 'prompt-1',
+            cancelledAt: 2200,
+            elapsedMs: 1200,
+            reason: 'user',
+          },
+        }),
+      }),
+    ]);
+  });
+
+  it('does not replace a malformed cancellation time with the terminal time', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('invalid-cancel-result', 'system', {
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          cancelledAt: null,
+          endedAt: 2500,
+        },
+      }),
+    );
+
+    expect(projected).toEqual([]);
+  });
+
   it('replays exported artifact descriptors with the slash command result', () => {
     const sessionArtifacts = [
       {

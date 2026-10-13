@@ -44,6 +44,7 @@ export interface SessionRecoveryPlan {
   canContinue: boolean;
   canAutoContinue: boolean;
   requiresUserConfirmation: boolean;
+  cancellationConfirmationId?: string;
   visibleNotice?: string;
   continuation?: SessionRecoveryContinuation;
 }
@@ -190,7 +191,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
     completedToolCallIds,
     trailingSystemNotifications,
   );
-  if (turnCancellation || interruption.kind === 'none') {
+  if (turnCancellation?.reason === 'user' || interruption.kind === 'none') {
     return {
       planId,
       sessionId,
@@ -204,6 +205,10 @@ export function buildSessionRecoveryPlanFromApiHistory({
     };
   }
 
+  const cancellationConfirmationId =
+    turnCancellation?.reason === 'unknown'
+      ? turnCancellation.promptId
+      : undefined;
   if (interruption.kind === 'interrupted_prompt') {
     const continuation: SessionRecoveryContinuation = {
       mode: 'retry_user_parts',
@@ -218,8 +223,12 @@ export function buildSessionRecoveryPlanFromApiHistory({
       apiHistory,
       repairs,
       canContinue: true,
-      canAutoContinue: options?.allowAutoContinue === true,
-      requiresUserConfirmation: options?.allowAutoContinue !== true,
+      canAutoContinue:
+        !cancellationConfirmationId && options?.allowAutoContinue === true,
+      requiresUserConfirmation:
+        Boolean(cancellationConfirmationId) ||
+        options?.allowAutoContinue !== true,
+      ...(cancellationConfirmationId ? { cancellationConfirmationId } : {}),
       visibleNotice: buildVisibleNotice('interrupted_prompt', repairs, gaps),
       continuation,
     };
@@ -238,6 +247,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
     planId,
     sessionId,
     kind: 'interrupted_turn',
+    ...(cancellationConfirmationId ? { cancellationConfirmationId } : {}),
     originalApiHistory,
     apiHistory,
     repairs,

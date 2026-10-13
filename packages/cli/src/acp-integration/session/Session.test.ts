@@ -46,6 +46,7 @@ import {
   GOAL_PAUSE_REASON_SESSION_DISPOSED,
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
+  GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   goalPauseReasonForFailure,
@@ -7004,8 +7005,111 @@ describe('Session', () => {
       expect(mockLlmClient.getTurnCancellation()).toBeUndefined();
     });
 
+    it('rejects explicitly cancelled history in both status and authoritative re-detection', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unfinished' }] },
+      ]);
+      mockLlmClient.getTurnCancellation.mockReturnValue({
+        reason: 'user',
+        promptId: 'stopped-daemon',
+      });
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: false,
+        interruption: 'none',
+      });
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
+      const result = await session.prompt({
+        sessionId: session.sessionId,
+        prompt: [],
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      });
+      expect(result.stopReason).toBe('end_turn');
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('requires current legacy confirmation at admission and final execution', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unfinished' }] },
+      ]);
+      mockLlmClient.getTurnCancellation.mockReturnValue({
+        reason: 'unknown',
+        promptId: 'legacy-daemon',
+      });
+      expect(session.getRecoveryStatus()).toMatchObject({
+        canContinue: true,
+        cancellationConfirmationId: 'legacy-daemon',
+      });
+      for (const confirmation of [undefined, 'older-daemon']) {
+        expect(await session.continueLastTurn(confirmation)).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+          cancellationConfirmationId: 'legacy-daemon',
+        });
+        await session.prompt({
+          sessionId: session.sessionId,
+          prompt: [],
+          _meta: {
+            'qwen.daemon.continueLastTurn': true,
+            'qwen.daemon.confirmCancellation': confirmation,
+          },
+        });
+      }
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(await session.continueLastTurn('legacy-daemon')).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      await session.prompt({
+        sessionId: session.sessionId,
+        prompt: [],
+        _meta: {
+          'qwen.daemon.continueLastTurn': true,
+          'qwen.daemon.confirmCancellation': 'legacy-daemon',
+        },
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+    });
+
+    it('rejects an old confirmation after the boundary becomes an ordinary interruption', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'new interrupted work' }] },
+      ]);
+      expect(await session.continueLastTurn('older-daemon')).toEqual({
+        accepted: false,
+        interruption: 'interrupted_prompt',
+      });
+      await session.prompt({
+        sessionId: session.sessionId,
+        prompt: [],
+        _meta: {
+          'qwen.daemon.continueLastTurn': true,
+          'qwen.daemon.confirmCancellation': 'older-daemon',
+        },
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+    });
+
+    it('confirmation never overrides an explicit user cancellation', async () => {
+      mockLlmClient.getTurnCancellation.mockReturnValue({
+        reason: 'user',
+        promptId: 'stopped-daemon',
+      });
+      expect(await session.continueLastTurn('legacy-daemon')).toEqual({
+        accepted: false,
+        interruption: 'none',
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
     it.each(['user', 'unknown'] as const)(
-      'rejects %s cancellation in status and direct continuation',
+      'rejected %s continuation preserves its terminal boundary',
       async (reason) => {
         vi.mocked(mockChat.getHistory).mockReturnValue([
           { role: 'user', parts: [{ text: 'unfinished' }] },
@@ -7019,14 +7123,6 @@ describe('Session', () => {
           endedAt: 1,
         });
         mockLlmClient.acceptTurnInput.mockClear();
-        expect(await session.continueLastTurn()).toEqual({
-          accepted: false,
-          interruption: 'none',
-        });
-        expect(session.getRecoveryStatus()).toEqual({
-          kind: 'clean',
-          canContinue: false,
-        });
         for (const promptId of ['rejected-continue-1', 'rejected-continue-2']) {
           const result = await session.prompt(
             {
@@ -7041,10 +7137,7 @@ describe('Session', () => {
             reason,
             promptId: 'stopped-daemon',
           });
-          expect(await session.continueLastTurn()).toEqual({
-            accepted: false,
-            interruption: 'none',
-          });
+          expect((await session.continueLastTurn()).accepted).toBe(false);
         }
         expect(mockLlmClient.acceptTurnInput).not.toHaveBeenCalled();
         expect(
@@ -12570,6 +12663,7 @@ describe('Session', () => {
               'qwen.promptCancelled': {
                 cancelledAt: 4_500,
                 elapsedMs: 0,
+                reason: 'user',
               },
             },
           });
@@ -12721,6 +12815,12 @@ describe('Session', () => {
           ),
         ).resolves.toMatchObject({
           stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': {
+              cancelledAt: expect.any(Number),
+              reason: 'interrupted',
+            },
+          },
         });
         const payload =
           mockChatRecordingService.recordTurnResult.mock.calls[0][0];
@@ -12886,15 +12986,12 @@ describe('Session', () => {
           );
           expect(settled).toBe(false);
           releaseFlush();
-          const response = await prompt;
-          expect(response.stopReason).toBe('cancelled');
-          if (reason === 'qwen:user-cancel') {
-            expect(response._meta?.['qwen.promptCancelled']).toMatchObject({
-              cancelledAt: expect.any(Number),
-            });
-          } else {
-            expect(response._meta?.['qwen.promptCancelled']).toBeUndefined();
-          }
+          await expect(prompt).resolves.toMatchObject({
+            stopReason: 'cancelled',
+            _meta: {
+              'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
+            },
+          });
         },
       );
 
@@ -34447,7 +34544,7 @@ describe('Session', () => {
                 expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
                   expect.objectContaining({
                     action: 'pause',
-                    reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+                    reason: GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
                   }),
                 ),
               );
@@ -34465,6 +34562,52 @@ describe('Session', () => {
             });
           },
         );
+
+        it('names a cancel that arrives after the model started by its transport reason', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'interrupted-mid-model',
+          };
+          const turnKey = `goal-runtime:${permit.turnId}`;
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          let releaseStream!: () => void;
+          const streamGate = new Promise<void>((resolve) => {
+            releaseStream = resolve;
+          });
+          // Held open past the request, which is what puts the turn on the
+          // post-model settlement path rather than the pre-model one.
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            (async function* () {
+              await streamGate;
+              yield* createEmptyStream();
+            })(),
+          );
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
+          );
+
+          await session.cancelPendingPrompt('qwen:prompt-interrupted');
+          releaseStream();
+
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
+              expect.objectContaining({
+                action: 'pause',
+                reason: GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
+              }),
+            ),
+          );
+          expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        });
 
         it('does not record a clean boundary when cancellation arrives during settlement flush', async () => {
           const permit: core.GoalTurnPermit = {
