@@ -23,6 +23,7 @@ import {
 import {
   downloadWorkspaceFile,
   getImageMimeTypeFromPath,
+  isExcelFile,
 } from './artifactUtils';
 import { writeClipboardText } from '../../utils/clipboard';
 import { Input } from '../ui/input';
@@ -308,7 +309,8 @@ export function WorkspaceFileBrowser({
             }}
           >
             {(/\.(?:md|markdown|html?)$/i.test(menu.path) ||
-              getImageMimeTypeFromPath(menu.path)) && (
+              getImageMimeTypeFromPath(menu.path) ||
+              isExcelFile(menu.path)) && (
               <DropdownMenuItem
                 onSelect={() =>
                   void runMenuAction(() => onOpenPreview(menu.path), true)

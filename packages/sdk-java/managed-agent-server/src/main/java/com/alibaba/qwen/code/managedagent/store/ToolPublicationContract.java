@@ -55,7 +55,7 @@ public final class ToolPublicationContract {
             case "binding" -> binding(value);
             case "request" -> request(value);
             case "grant" -> grant(value);
-            default -> throw new IllegalArgumentException("Unknown publication record");
+            default -> throw new ContractViolationException("Unknown publication record");
         }
         return value.deepCopy();
     }
@@ -240,7 +240,7 @@ public final class ToolPublicationContract {
             return JSON.reader().with(com.fasterxml.jackson.databind.DeserializationFeature
                     .FAIL_ON_TRAILING_TOKENS).readTree(text);
         } catch (IOException error) {
-            throw new IllegalArgumentException("Invalid publication JSON", error);
+            throw new ContractViolationException("Invalid publication JSON", error);
         }
     }
 
@@ -411,9 +411,19 @@ public final class ToolPublicationContract {
         return node == null ? "" : node.path(key).asText("");
     }
 
+    static final class ContractViolationException extends IllegalArgumentException {
+        private ContractViolationException(String message) {
+            super(message);
+        }
+
+        private ContractViolationException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     static void require(boolean condition, String reason) {
         if (!condition) {
-            throw new IllegalArgumentException(reason);
+            throw new ContractViolationException(reason);
         }
     }
 }

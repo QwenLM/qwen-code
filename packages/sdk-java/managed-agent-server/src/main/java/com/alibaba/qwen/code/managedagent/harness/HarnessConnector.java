@@ -14,6 +14,8 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsLifecycle() { return false; }
 
+    default boolean supportsFencedTitles() { return false; }
+
     default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
@@ -113,10 +115,12 @@ public interface HarnessConnector extends AutoCloseable {
      * result relay's stop of a stopped run's message turns (stop). The
      * Hosted side settles it before answering. A receive or consume starts
      * work in the Session, so it takes the same Workspace admission as a
-     * submit.
+     * submit. H4e-b3's command operations ride the same route when the body
+     * names a command id, and a settled {@code execute} answers with the
+     * reply the relay copies back.
      */
-    default void runMessageOperation(String tenantId, String sessionId,
-            Map<String, Object> body) {
+    default Map<String, Object> runMessageOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
         throw new UnsupportedOperationException(
                 "Message operations are unavailable");
     }
@@ -135,6 +139,10 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     void rename(String tenantId, String sessionId, String title);
+
+    default void rename(String tenantId, String sessionId, String title, long revision) {
+        throw new UnsupportedOperationException("Fenced Session titles are unavailable");
+    }
 
     /**
      * Closes the Session and returns the boot ID of the Harness that

@@ -68,6 +68,11 @@ import {
   parseSessionMessage,
 } from './managed-session-message-record.js';
 import {
+  isSessionCommandStart,
+  isSessionCommandSuccessor,
+  parseSessionCommand,
+} from './managed-session-command-record.js';
+import {
   isTeamMessageStart,
   isTeamMessageSuccessor,
   isTeamPlanStart,
@@ -279,6 +284,15 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isStart: isSessionMessageStart,
     isSuccessor: isSessionMessageSuccessor,
   }),
+  session_command: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseSessionCommand(value);
+      return { record, recordId: record.commandId, run: record.run };
+    },
+    isStart: isSessionCommandStart,
+    isSuccessor: isSessionCommandSuccessor,
+  }),
   team_state: Object.freeze({
     taskKindOf: () => null,
     parse: (value: unknown) => {
@@ -348,6 +362,16 @@ export function managedExtensionRecordKey(
 
 export function managedTaskId(recordKey: string): string {
   return `task_${recordKey}`;
+}
+
+/** The task ID of one child run: what its launch answers and `send_message` takes. */
+export function managedChildTaskId(
+  sessionId: string,
+  childRunId: string,
+): string {
+  return managedTaskId(
+    managedExtensionRecordKey(sessionId, 'child_run', childRunId),
+  );
 }
 
 /** The part of `SessionTaskView` that the record revisions determine. */

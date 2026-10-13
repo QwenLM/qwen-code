@@ -89,6 +89,8 @@ reads. Users can download these files from the file menu. Files translations are
 excluded from the transcript-only bundle. The actual shadow tree and file menu
 have accessible names.
 
+The file menu also offers Preview for `.xlsx` files, reusing the shared spreadsheet preview in a separate workspace-scoped file tab. Opening the same file again reuses that tab; returning to Files retains the tree and inline selection. Other Excel formats retain the existing download-only behavior.
+
 ## File changes assessment
 
 Pierre FileDiff can render the existing before/after text, unified/split views,

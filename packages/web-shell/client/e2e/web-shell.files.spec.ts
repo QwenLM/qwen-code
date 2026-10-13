@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import ExcelJS from 'exceljs';
 import { expect, test, type Page } from '@playwright/test';
 import {
   assistantTextEvent,
@@ -72,6 +73,10 @@ async function openFiles(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aSxkAAAAASUVORK5CYII=',
     'base64',
   );
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Summary');
+  sheet.addRow(['Files workbook', 42]);
+  buffers['report.xlsx'] = Buffer.from(await workbook.xlsx.writeBuffer());
   const directoryReads: string[] = [];
   const byteReads: string[] = [];
   const contentReads: string[] = [];
@@ -109,6 +114,8 @@ async function openFiles(
               { name: 'README.md', kind: 'file', ignored: false },
               { name: 'index.html', kind: 'file', ignored: false },
               { name: 'image.png', kind: 'file', ignored: false },
+              { name: 'report.xlsx', kind: 'file', ignored: false },
+              { name: 'legacy.xls', kind: 'file', ignored: false },
               { name: 'notes draft.md', kind: 'file', ignored: false },
               ...(rootUpdated
                 ? [{ name: 'new.txt', kind: 'file', ignored: false }]
@@ -276,6 +283,57 @@ test('@smoke reads a secondary workspace through qualified content endpoints', a
       path.startsWith('/workspaces/%2Ftmp%2Fsecondary/'),
     ),
   ).toBe(true);
+});
+
+test('@smoke opens an Excel preview in a separate workspace file tab', async ({
+  page,
+}, testInfo) => {
+  const { browser, contentReads } = await openFiles(
+    page,
+    String(testInfo.project.use.baseURL),
+    '/tmp/secondary',
+    undefined,
+    false,
+  );
+  const workbook = browser.getByRole('treeitem', {
+    name: 'report.xlsx',
+    exact: true,
+  });
+  await workbook.click();
+  await expect(browser.locator('[data-web-shell-excel-preview]')).toContainText(
+    'Files workbook',
+  );
+  const initialReadCount = contentReads.length;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await workbook.click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Preview', exact: true }).click();
+    await expect(
+      page.getByRole('tab', { name: 'report.xlsx', exact: true }),
+    ).toHaveCount(1);
+    await expect(browser).toBeHidden();
+    const preview = page
+      .locator('[data-web-shell-excel-preview]')
+      .filter({ visible: true });
+    await expect(preview).toContainText('Files workbook');
+    await expect(preview.getByRole('tab', { name: 'Summary' })).toBeVisible();
+    await page.getByRole('tab', { name: 'Files', exact: true }).click();
+    await expect(browser).toBeVisible();
+    await expect(
+      browser.locator('[data-web-shell-excel-preview]'),
+    ).toContainText('Files workbook');
+  }
+  expect(contentReads.length).toBeGreaterThan(initialReadCount);
+  expect(
+    contentReads.every((path) =>
+      path.startsWith('/workspaces/%2Ftmp%2Fsecondary/'),
+    ),
+  ).toBe(true);
+  await browser
+    .getByRole('treeitem', { name: 'legacy.xls', exact: true })
+    .click({ button: 'right' });
+  await expect(
+    page.getByRole('menuitem', { name: 'Preview', exact: true }),
+  ).toHaveCount(0);
 });
 
 for (const module of ['WorkspaceFileBrowser', 'PierreFilePreview']) {
