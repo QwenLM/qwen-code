@@ -73,6 +73,27 @@ describe('daemon trust policy', () => {
     });
   });
 
+  it('accepts a UTF-8 BOM in user settings', async () => {
+    installFiles({
+      '/config/user.json': `\uFEFF${JSON.stringify({
+        security: { folderTrust: { enabled: false } },
+      })}`,
+      '/config/system.json': '{}',
+      '/config/trusted.json': '{}',
+    });
+
+    const snapshot = await readDaemonTrustPolicySnapshot();
+
+    expect(snapshot.settingsError).toBeUndefined();
+    expect(
+      evaluateDaemonWorkspaceTrust(snapshot, '/work/project'),
+    ).toMatchObject({
+      state: 'trusted',
+      targetTrusted: true,
+      source: 'disabled',
+    });
+  });
+
   it('uses system folder trust to enable over user', async () => {
     installFiles({
       '/config/user.json': JSON.stringify({

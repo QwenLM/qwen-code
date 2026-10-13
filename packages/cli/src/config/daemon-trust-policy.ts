@@ -148,7 +148,7 @@ async function readJsonObjectOnce(
   }
 
   try {
-    const raw = await fs.readFile(filePath, 'utf8');
+    const raw = (await fs.readFile(filePath, 'utf8')).replace(/^\uFEFF/, '');
     const parsed: unknown = allowTrailingComma
       ? parseJsoncObject(raw)
       : JSON.parse(stripJsonComments(raw));
