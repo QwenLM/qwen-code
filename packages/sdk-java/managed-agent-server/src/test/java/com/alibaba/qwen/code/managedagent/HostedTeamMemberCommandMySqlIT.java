@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -61,6 +62,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -184,52 +186,111 @@ class HostedTeamMemberCommandMySqlIT {
     }
 
     /**
-     * carol commits her command and parks; the Harness dies before her
-     * relay could hand it over, the new worker's wake re-enters her wait,
-     * the relay hands it over and executes it, and her report still
-     * lands — the relay's answer never asked the dead process anything.
+     * carol commits her command and parks; the Harness dies while her
+     * command is still planned, the new worker takes her Session over and
+     * resumes the parked wait, the relay hands the command over and
+     * executes it, and her report still lands — the relay's answer never
+     * asked the dead process anything. The relay is held from the start,
+     * so the kill always lands mid-wait (without the hold carol finishes
+     * long before the lead's Turn settles, and the restart interrupts
+     * nothing), and it is released only after a new writer generation
+     * holds her Session, so the reply folds into the wait the dead
+     * generation parked.
      */
     @Test
-    @Timeout(150)
+    @Timeout(180)
     void memberHarnessRestartDuringCommandWait() throws Exception {
         boot();
-        String lead = createLead("H4EB3_CMD_RESTART");
-        // Wait until carol's park is durable: the await_command
-        // checkpoint is committed before her outbox is, so sighting it
-        // fires the kill while the relay's next scan is still ahead —
-        // the Harness dies before the handover. The lead's own Turn must
-        // have settled first: a Harness dying mid-model-round loses that
-        // Turn for good (its input re-drives as a fresh one), and a
-        // FAILED row would break the acceptance below.
-        waiting().atMost(Duration.ofSeconds(60))
-                .pollInterval(Duration.ofMillis(50)).untilAsserted(() -> {
-                    assertNoModelFailure();
-                    assertNoFailedTurn(lead);
-                    assertNoFailedChild(lead);
-                    assertThat(openTurns(lead)).isEmpty();
-                    assertThat(parkedOnCommand(onlyChildOf(lead))).isTrue();
-                });
+        CountDownLatch releaseRelay = holdMessageRelay();
+        try {
+            String lead = createLead("H4EB3_CMD_RESTART");
+            // The lead's own Turn must have settled before the kill: a
+            // Harness dying mid-model-round loses that Turn for good (its
+            // input re-drives as a fresh one), and a FAILED row would
+            // break the acceptance below. carol's command cannot move
+            // while the relay is held, so it is still planned.
+            waiting().atMost(Duration.ofSeconds(60))
+                    .pollInterval(Duration.ofMillis(200)).untilAsserted(() -> {
+                        assertNoModelFailure();
+                        assertNoFailedTurn(lead);
+                        assertNoFailedChild(lead);
+                        assertThat(openTurns(lead)).isEmpty();
+                        assertThat(parkedOnCommand(onlyChildOf(lead))).isTrue();
+                        List<JsonNode> commands = commandsOf(lead, "carol");
+                        assertThat(commands).hasSize(1);
+                        assertThat(commands.get(0).path("run").path("delivery")
+                                .path("state").asText()).isEqualTo("planned");
+                    });
+            String carol = onlyChildOf(lead);
+            long parkedGeneration = writerGeneration(carol);
 
-        harness.descendants().forEach(ProcessHandle::destroyForcibly);
-        harness.destroyForcibly();
-        harness.waitFor(20, TimeUnit.SECONDS);
-        startHarness();
+            harness.descendants().forEach(ProcessHandle::destroyForcibly);
+            harness.destroyForcibly();
+            harness.waitFor(20, TimeUnit.SECONDS);
+            startHarness();
+            // The relay goes on only once the takeover holds carol's
+            // Session: while it is held, nothing but the coordinator's
+            // takeover load can fence the dead generation. A relay attach
+            // that wins the load race instead leaves the parked Turn
+            // without its continue — a separate race this case does not
+            // pin.
+            waiting().atMost(Duration.ofSeconds(100))
+                    .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
+                            assertThat(writerGeneration(carol))
+                                    .isGreaterThan(parkedGeneration));
+            releaseRelay.countDown();
 
-        waiting().atMost(Duration.ofSeconds(100))
-                .pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
-                    assertNoModelFailure();
-                    assertNoFailedTurn(lead);
-                    assertNoFailedChild(lead);
-                    // Her report after the dead generation is durable on
-                    // the lead's journal: the result was accepted, never
-                    // asked of the dead process.
-                    assertThat(childResultAccepted(lead)).isTrue();
-                    List<JsonNode> commands = commandsOf(lead, "carol");
-                    assertThat(commands).isNotEmpty();
-                    assertThat(commands.get(0).path("run").path("delivery")
-                            .path("state").asText()).isEqualTo("consumed");
-                });
-        closeAndSettle(lead);
+            waiting().atMost(Duration.ofSeconds(110))
+                    .pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
+                        assertNoModelFailure();
+                        assertNoFailedTurn(lead);
+                        assertNoFailedChild(lead);
+                        // Her report after the dead generation is durable on
+                        // the lead's journal: the result was accepted, never
+                        // asked of the dead process.
+                        assertThat(childResultAccepted(lead)).isTrue();
+                        List<JsonNode> commands = commandsOf(lead, "carol");
+                        assertThat(commands).hasSize(1);
+                        assertThat(commands.get(0).path("run").path("delivery")
+                                .path("state").asText()).isEqualTo("consumed");
+                    });
+            closeAndSettle(lead);
+        } finally {
+            releaseRelay.countDown();
+        }
+    }
+
+    /**
+     * Holds the session message relay: its scheduler runs one thread, so a
+     * task parked on it keeps every scan, and with it every command
+     * handover, from running until the latch is released.
+     */
+    private CountDownLatch holdMessageRelay() throws InterruptedException {
+        ThreadPoolTaskScheduler scheduler = spring.getBean(
+                "messageRelayScheduler", ThreadPoolTaskScheduler.class);
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        scheduler.execute(() -> {
+            held.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertThat(held.await(30, TimeUnit.SECONDS))
+                .as("the message relay's scheduler takes the hold")
+                .isTrue();
+        return release;
+    }
+
+    /** The writer generation of a Session's journal head. */
+    private long writerGeneration(String session) {
+        Long generation = jdbc.queryForObject(
+                "SELECT writer_generation FROM qwen_managed_session_journal_head"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session);
+        return generation == null ? 0 : generation;
     }
 
     // ------------------------------------------------------------ scenario plumbing
@@ -752,6 +813,10 @@ class HostedTeamMemberCommandMySqlIT {
                 "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:"
                         + port,
                 "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
+                // A dead writer's lease lapses within the member command's
+                // own 2-minute bound with room to spare, so the restart
+                // case's takeover resumes a wait that is still open.
+                "--qwen.managed-agent.session-store.writer-lease-duration=15s",
                 "--qwen.managed-agent.harness.enabled=true",
                 "--qwen.managed-agent.harness.workspace-files-enabled=true",
                 "--qwen.managed-agent.harness.base-url=http://127.0.0.1:"
