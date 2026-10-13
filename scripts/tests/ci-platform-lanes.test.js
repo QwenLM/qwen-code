@@ -519,6 +519,14 @@ describe('post-merge push lane', () => {
     ).toContain(
       'git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt',
     );
+    const checkNotices = stepByName.get(
+      'Check Web Shell and VS Code companion notices are up-to-date',
+    );
+    expect(checkNotices['continue-on-error']).toBeUndefined();
+    expect(checkNotices.run).toContain(
+      'if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt) ]]; then',
+    );
+    expect(checkNotices.run).toContain('exit 1');
     for (const n of FULL_PAYLOAD) {
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
     }

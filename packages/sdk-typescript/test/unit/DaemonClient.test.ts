@@ -10759,10 +10759,25 @@ describe('DaemonClient', () => {
           code: 'untrusted_workspace',
         }),
       );
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const transportFetch = vi.fn(async () => {
+        throw new Error('must use workspace REST');
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport: {
+          type: 'acp-http',
+          supportsReplay: true,
+          connected: true,
+          fetch: transportFetch,
+          async *subscribeEvents() {},
+          dispose() {},
+        },
+      });
       await expect(
         client.workspaceById('removed-owner').dirList('.'),
       ).rejects.toThrow();
+      expect(transportFetch).not.toHaveBeenCalled();
       expect(calls.map((call) => call.url)).toEqual([
         'http://daemon/workspaces/removed-owner/list?path=.',
       ]);

@@ -1,3 +1,4 @@
+import { safeDisplayText } from '../../hooks/useAtMentionSources';
 import { usePanelRef } from 'react-resizable-panels';
 import { FileTree, type ContextMenuOpenContext } from '@pierre/trees';
 import {
@@ -59,6 +60,8 @@ export function WorkspaceFileBrowser({
   const treePanelRef = usePanelRef();
   const contentPanelRef = usePanelRef();
   const hostRef = useRef<HTMLDivElement>(null);
+  const treeLabelRef = useRef(t('files.title'));
+  treeLabelRef.current = t('files.title');
   const treeRef = useRef<FileTree | undefined>(undefined);
   const retryRef = useRef<((path: string) => void) | undefined>(undefined);
   const [selectedPath, setSelectedPath] = useState<string>();
@@ -154,6 +157,14 @@ export function WorkspaceFileBrowser({
     setDirectories([]);
     setNoMatches(false);
     tree.render({ fileTreeContainer: host });
+    const shadow = tree.getFileTreeContainer()?.shadowRoot;
+    const labelTree = () =>
+      shadow
+        ?.querySelector('[role="tree"]')
+        ?.setAttribute('aria-label', treeLabelRef.current);
+    const observer = new MutationObserver(labelTree);
+    if (shadow) observer.observe(shadow, { childList: true, subtree: true });
+    labelTree();
 
     const publish = () => {
       if (!disposed) setDirectories([...cache.values()]);
@@ -206,6 +217,7 @@ export function WorkspaceFileBrowser({
     return () => {
       disposed = true;
       if (lifetimeRef.current === lifetime) lifetimeRef.current = undefined;
+      observer.disconnect();
       unsubscribe();
       tree.cleanUp();
       host.replaceChildren();
@@ -217,6 +229,13 @@ export function WorkspaceFileBrowser({
   useEffect(() => {
     treeRef.current?.setSearch(filter || null);
   }, [filter, version, actions]);
+
+  useEffect(() => {
+    treeRef.current
+      ?.getFileTreeContainer()
+      ?.shadowRoot?.querySelector('[role="tree"]')
+      ?.setAttribute('aria-label', t('files.title'));
+  }, [t]);
 
   const runMenuAction = async (
     action: () => void | Promise<void>,
@@ -236,7 +255,11 @@ export function WorkspaceFileBrowser({
   };
 
   const separator = /^(?:[a-z]:[\\/]|\\\\)/i.test(workspaceCwd) ? '\\' : '/';
-  const absoluteMenuPath = `${workspaceCwd.replace(separator === '\\' ? /[\\/]+$/ : /\/+$/, '')}${separator}${menu?.path.replaceAll('/', separator) ?? ''}`;
+  const absolutePath = (path: string) =>
+    path
+      ? `${workspaceCwd.replace(separator === '\\' ? /[\\/]+$/ : /\/+$/, '')}${separator}${path.replaceAll('/', separator)}`
+      : workspaceCwd;
+  const absoluteMenuPath = absolutePath(menu?.path ?? '');
   const canPreview =
     selectedPath && /\.(?:md|markdown|html?)$/i.test(selectedPath);
   const notices = directories.filter(
@@ -276,6 +299,8 @@ export function WorkspaceFileBrowser({
           </DropdownMenuTrigger>
           <DropdownMenuContent
             className="w-48"
+            aria-label={`${t('files.title')}: ${safeDisplayText(menu.path)}`}
+            aria-labelledby={undefined}
             data-file-tree-context-menu-root="true"
             onCloseAutoFocus={(event) => {
               event.preventDefault();
@@ -335,10 +360,10 @@ export function WorkspaceFileBrowser({
       <header className={styles.toolbar}>
         <span
           className={styles.path}
-          title={`${workspaceCwd}/${selectedPath ?? ''}`}
+          title={safeDisplayText(absolutePath(selectedPath ?? ''))}
         >
-          {workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1)}
-          {selectedPath && <> / {selectedPath}</>}
+          {safeDisplayText(workspaceCwd.split(/[\\/]/).filter(Boolean).at(-1))}
+          {selectedPath && <> / {safeDisplayText(selectedPath)}</>}
         </span>
         {canPreview && (
           <Button
@@ -445,7 +470,6 @@ export function WorkspaceFileBrowser({
               ref={hostRef}
               className={styles.tree}
               hidden={noMatches}
-              aria-label={t('files.title')}
               onClickCapture={(event) => {
                 const row = event.nativeEvent
                   .composedPath()
@@ -495,7 +519,12 @@ export function WorkspaceFileBrowser({
               <div className={styles.notices}>
                 {notices.map((directory) => (
                   <div key={directory.path}>
-                    <span>{directory.path || t('files.title')}: </span>
+                    <span>
+                      {directory.path
+                        ? safeDisplayText(directory.path)
+                        : t('files.title')}
+                      :{' '}
+                    </span>
                     {directory.empty && (
                       <span>{t('files.emptyDirectory')}</span>
                     )}

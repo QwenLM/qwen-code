@@ -14,15 +14,17 @@ async function openFiles(
   baseURL: string,
   workspaceCwd = '/tmp/qwen-web-shell-e2e',
   afterOpen?: () => Promise<void>,
+  primary = true,
 ) {
   const scenario = createWebShellDaemonScenario({
     workspaceCwd,
     capabilities: {
+      workspaceCwd: primary ? workspaceCwd : '/tmp/primary',
       workspaces: [
         {
           id: 'files-workspace',
           cwd: workspaceCwd,
-          primary: true,
+          primary,
           trusted: true,
         },
       ],
@@ -41,7 +43,8 @@ async function openFiles(
     'src/app.ts':
       'export const greeting: string = "Hello, files";\nconsole.log(greeting);\n',
     'index.html': '<h1>Workspace HTML</h1>',
-    'src/guide.md': '# Workspace guide\n\nA nested document.\n',
+    'broken/recovered.ts': 'export const recovered = true;',
+    'src/guide.md': '# Nested guide\n\nA nested document.\n',
     'notes draft.md': '# Draft notes',
     'src/large.ts': Array.from(
       { length: 1500 },
@@ -70,11 +73,15 @@ async function openFiles(
     'base64',
   );
   const directoryReads: string[] = [];
+  const byteReads: string[] = [];
+  const contentReads: string[] = [];
   let rootUpdated = false;
   let failedReads = 0;
   await page.route('**/*', async (route) => {
     const url = new URL(route.request().url());
     const path = url.searchParams.get('path') ?? '';
+    if (/\/(?:stat|file(?:\/bytes)?)$/.test(url.pathname))
+      contentReads.push(url.pathname);
     if (/^(?:\/workspaces\/[^/]+)?\/list$/.test(url.pathname)) {
       directoryReads.push(`${url.pathname}?path=${path}`);
       if (!path) {
@@ -119,18 +126,20 @@ async function openFiles(
                 { name: 'long.ts', kind: 'file', ignored: false },
                 { name: 'large.ts', kind: 'file', ignored: false },
               ]
-            : path === 'deep' || path.startsWith('deep/')
-              ? [
-                  {
-                    name: deepFolders[path.split('/').length - 1] ?? deepFile,
-                    kind:
-                      path.split('/').length <= deepFolders.length
-                        ? 'directory'
-                        : 'file',
-                    ignored: false,
-                  },
-                ]
-              : [];
+            : path === 'broken'
+              ? [{ name: 'recovered.ts', kind: 'file', ignored: false }]
+              : path === 'deep' || path.startsWith('deep/')
+                ? [
+                    {
+                      name: deepFolders[path.split('/').length - 1] ?? deepFile,
+                      kind:
+                        path.split('/').length <= deepFolders.length
+                          ? 'directory'
+                          : 'file',
+                      ignored: false,
+                    },
+                  ]
+                : [];
       await route.fulfill({
         json: { kind: 'list', path, entries, truncated: path === '.' },
       });
@@ -149,6 +158,7 @@ async function openFiles(
       return;
     }
     if (/^(?:\/workspaces\/[^/]+)?\/file\/bytes$/.test(url.pathname)) {
+      byteReads.push(`${url.pathname}?path=${path}`);
       const buffer = buffers[path];
       const offset = Number(url.searchParams.get('offset') ?? 0);
       const chunk = buffer?.subarray(
@@ -179,10 +189,19 @@ async function openFiles(
               json: {
                 kind: 'file',
                 path,
-                content,
+                content: buffers[path]!.subarray(
+                  0,
+                  Number(
+                    url.searchParams.get('maxBytes') ?? buffers[path]!.length,
+                  ),
+                ).toString('utf8'),
                 encoding: 'utf-8',
-                truncated: false,
-                sizeBytes: content.length,
+                truncated:
+                  buffers[path]!.length >
+                  Number(
+                    url.searchParams.get('maxBytes') ?? buffers[path]!.length,
+                  ),
+                sizeBytes: buffers[path]!.length,
               },
             },
       );
@@ -200,7 +219,7 @@ async function openFiles(
   await expect(
     page.getByRole('button', { name: /Files.*Browse workspace files/ }),
   ).toBeVisible();
-  await page.screenshot({ path: '/tmp/qwen-web-shell-files-entry.png' });
+
   await page
     .getByRole('button', { name: /Files.*Browse workspace files/ })
     .click();
@@ -219,12 +238,45 @@ async function openFiles(
   return {
     browser,
     directoryReads,
+    byteReads,
+    contentReads,
     scenario,
     addRootFile: () => {
       rootUpdated = true;
     },
   };
 }
+
+test('@smoke reads a secondary workspace through qualified content endpoints', async ({
+  page,
+}, testInfo) => {
+  const { browser, contentReads } = await openFiles(
+    page,
+    String(testInfo.project.use.baseURL),
+    '/tmp/secondary',
+    undefined,
+    false,
+  );
+  await browser
+    .getByRole('treeitem', { name: 'README.md', exact: true })
+    .click();
+  await expect(
+    browser.getByRole('heading', { name: 'Workspace guide' }),
+  ).toBeVisible();
+  await browser
+    .getByRole('treeitem', { name: 'image.png', exact: true })
+    .click();
+  await expect(
+    browser.getByRole('img', { name: 'image.png', exact: true }),
+  ).toBeVisible();
+  for (const suffix of ['/stat', '/file', '/file/bytes'])
+    expect(contentReads).toContain('/workspaces/%2Ftmp%2Fsecondary' + suffix);
+  expect(
+    contentReads.every((path) =>
+      path.startsWith('/workspaces/%2Ftmp%2Fsecondary/'),
+    ),
+  ).toBe(true);
+});
 
 for (const module of ['WorkspaceFileBrowser', 'PierreFilePreview']) {
   test(`@smoke contains ${module} import failures and reloads successfully`, async ({
@@ -298,6 +350,10 @@ for (const fullscreen of [false, true]) {
       await page
         .getByRole('button', { name: 'Fullscreen', exact: true })
         .click();
+    if (fullscreen)
+      await expect(
+        page.getByRole('button', { name: 'Exit fullscreen', exact: true }),
+      ).toBeVisible();
     const filter = browser.getByRole('textbox', { name: 'Filter files…' });
     await page
       .locator('[data-slot="drawer-content"]')
@@ -323,7 +379,11 @@ test('@smoke filters loaded paths without changing input or fetching directories
     String(testInfo.project.use.baseURL),
   );
   const tree = browser.getByTestId('workspace-file-sidebar');
+  await expect(
+    tree.getByRole('tree', { name: 'Files', exact: true }),
+  ).toBeVisible();
   const filter = tree.getByRole('textbox', { name: 'Filter files…' });
+  const initialReadCount = directoryReads.length;
   await filter.fill('Read ');
   await expect(filter).toHaveValue('Read ');
   await expect(
@@ -339,9 +399,12 @@ test('@smoke filters loaded paths without changing input or fetching directories
     tree.getByRole('treeitem', { name: 'src', exact: true }),
   ).toBeVisible();
   await page.waitForTimeout(300);
-  expect(new Set(directoryReads)).toEqual(
-    new Set(['/workspaces/%2Ftmp%2Fqwen-web-shell-e2e/list?path=.']),
-  );
+  expect(
+    directoryReads.every(
+      (read) => read === '/workspaces/%2Ftmp%2Fqwen-web-shell-e2e/list?path=.',
+    ),
+  ).toBe(true);
+  expect(directoryReads.length).toBe(initialReadCount);
   await filter.fill('');
   await tree.getByRole('treeitem', { name: 'src', exact: true }).click();
   await expect(
@@ -366,11 +429,14 @@ test('@smoke filters loaded paths without changing input or fetching directories
     }
     await filter.fill('not-a-loaded-path');
     await expect(tree.getByRole('treeitem')).toHaveCount(0);
-    await filter.dispatchEvent('keydown', {
-      key: 'Escape',
-      isComposing: true,
-      keyCode: 229,
-    });
+    for (const isComposing of [true, false]) {
+      await filter.dispatchEvent('keydown', {
+        key: 'Escape',
+        isComposing,
+        keyCode: 229,
+      });
+      await expect(filter).toHaveValue('not-a-loaded-path');
+    }
     await expect(filter).toHaveValue('not-a-loaded-path');
     await expect(browser).toBeVisible();
     await filter.press('Escape');
@@ -410,7 +476,7 @@ test('@smoke browses files with Pierre, previews Markdown and source, and restor
   const contentBox = await content.boundingBox();
   const treeBox = await tree.boundingBox();
   expect(contentBox!.x + contentBox!.width).toBeLessThanOrEqual(treeBox!.x + 1);
-  await page.screenshot({ path: '/tmp/qwen-web-shell-files-markdown.png' });
+
   await browser.getByRole('button', { name: 'Source', exact: true }).click();
   await expect(content.getByTestId('pierre-file-preview')).toContainText(
     '# Workspace guide',
@@ -437,7 +503,7 @@ test('@smoke browses files with Pierre, previews Markdown and source, and restor
   await expect(
     tree.getByRole('treeitem', { name: 'app.ts', exact: true }),
   ).toBeFocused();
-  await page.screenshot({ path: '/tmp/qwen-web-shell-files-source.png' });
+
   await tree.locator('[data-file-tree-virtualized-scroll]').evaluate((node) => {
     node.scrollTop = 0;
   });
@@ -468,8 +534,14 @@ test('@smoke browses files with Pierre, previews Markdown and source, and restor
   await browser
     .getByRole('button', { name: 'Toggle file tree', exact: true })
     .click();
+  await expect(tree).toBeVisible();
   await page.reload();
   await expect(page.getByTestId('workspace-file-browser')).toBeVisible();
+  await expect(
+    page
+      .getByTestId('workspace-file-browser')
+      .getByRole('treeitem', { name: 'README.md', exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByRole('tab', { name: 'Files', exact: true }),
   ).toHaveCount(1);
@@ -491,7 +563,7 @@ test('retains the expanded tree, selected source and scroll position across tab 
   await tree.getByRole('treeitem', { name: 'guide.md', exact: true }).click();
   await browser.getByRole('button', { name: 'Source', exact: true }).click();
   const source = content.getByTestId('pierre-file-preview');
-  await expect(source).toContainText('# Workspace guide');
+  await expect(source).toContainText('# Nested guide');
   const separator = browser.getByRole('separator', {
     name: 'Resize file preview and tree',
   });
@@ -525,10 +597,10 @@ test('retains the expanded tree, selected source and scroll position across tab 
   await page.getByRole('menuitem', { name: 'Preview', exact: true }).click();
   await expect(browser).toBeHidden();
   await expect(
-    page.getByRole('heading', { name: 'Workspace guide' }),
+    page.getByRole('heading', { name: 'Nested guide' }),
   ).toBeVisible();
   await page.getByRole('tab', { name: 'Files', exact: true }).click();
-  await expect(source).toContainText('# Workspace guide');
+  await expect(source).toContainText('# Nested guide');
   await expect(
     browser.getByRole('button', { name: 'Preview', exact: true }),
   ).toBeVisible();
@@ -555,7 +627,7 @@ test('retains the expanded tree, selected source and scroll position across tab 
   ).toBeVisible();
 });
 
-test('handles empty folders, directory errors, truncation, refresh, and narrow panels', async ({
+test('@smoke handles empty folders, directory errors, truncation, refresh, and narrow panels', async ({
   page,
 }, testInfo) => {
   const { browser, directoryReads, addRootFile } = await openFiles(
@@ -572,8 +644,17 @@ test('handles empty folders, directory errors, truncation, refresh, and narrow p
   await expect(tree.getByRole('alert')).toContainText(
     'Directory temporarily unavailable',
   );
+  const failedReadCount = directoryReads.filter((read) =>
+    read.endsWith('path=broken'),
+  ).length;
   await tree.getByRole('button', { name: 'Try again', exact: true }).click();
   await expect(tree.getByRole('alert')).toHaveCount(0);
+  await expect(
+    tree.getByRole('treeitem', { name: 'recovered.ts', exact: true }),
+  ).toBeVisible();
+  expect(
+    directoryReads.filter((read) => read.endsWith('path=broken')),
+  ).toHaveLength(failedReadCount + 1);
   await tree.getByRole('treeitem', { name: 'linked', exact: true }).click();
   await expect(browser.getByTestId('workspace-file-content')).toContainText(
     'No such file',
@@ -604,7 +685,6 @@ test('handles empty folders, directory errors, truncation, refresh, and narrow p
   await expect(
     browser.getByRole('button', { name: 'Toggle file tree', exact: true }),
   ).toBeInViewport();
-  await page.screenshot({ path: '/tmp/qwen-web-shell-files-narrow.png' });
 });
 
 test('virtualizes a long source file and keeps its final lines reachable', async ({
@@ -623,6 +703,7 @@ test('virtualizes a long source file and keeps its final lines reachable', async
   await browser.getByRole('treeitem', { name: 'long.ts', exact: true }).click();
   const source = browser.getByTestId('pierre-file-preview');
   await expect(source).toContainText('export const line0');
+  expect(await source.locator('[data-line]').count()).toBeGreaterThan(0);
   expect(await source.locator('[data-line]').count()).toBeLessThan(500);
   await source.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
@@ -635,10 +716,10 @@ test('virtualizes a long source file and keeps its final lines reachable', async
   expect(await source.evaluate((node) => node.scrollTop)).toBe(scrollTop);
 });
 
-test('keeps large source files readable without tokenizing the entire text', async ({
+test('@smoke keeps large source files readable without tokenizing the entire text', async ({
   page,
 }, testInfo) => {
-  const { browser } = await openFiles(
+  const { browser, byteReads } = await openFiles(
     page,
     String(testInfo.project.use.baseURL),
   );
@@ -647,8 +728,15 @@ test('keeps large source files readable without tokenizing the entire text', asy
     .getByRole('treeitem', { name: 'large.ts', exact: true })
     .click();
   const source = browser.getByTestId('pierre-file-preview');
+  await expect
+    .poll(
+      () =>
+        byteReads.filter((path) => path.endsWith('path=src/large.ts')).length,
+    )
+    .toBeGreaterThan(1);
   await expect(source).toContainText('export const large0');
   await expect(source.locator('[data-line] span[style]')).toHaveCount(0);
+  expect(await source.locator('[data-line]').count()).toBeGreaterThan(0);
   expect(await source.locator('[data-line]').count()).toBeLessThan(500);
 });
 
@@ -727,6 +815,9 @@ test('offers file context actions, previews images and HTML, and references a fi
     )
     .toBe('README.md');
   await rightClick('README.md');
+  await expect(
+    page.getByRole('menu', { name: 'Files: README.md', exact: true }),
+  ).toBeVisible();
   await page
     .getByRole('menuitem', { name: 'Copy absolute path', exact: true })
     .click();
@@ -802,7 +893,7 @@ test('offers file context actions, previews images and HTML, and references a fi
   await expect(editor).toContainText('notes draft.md');
   await expect(editor).toBeFocused();
   await rightClick('README.md');
-  await page.screenshot({ path: '/tmp/qwen-web-shell-files-context-menu.png' });
+
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menu')).toHaveCount(0);
   await expect
@@ -892,7 +983,7 @@ test('scrolls the entire deep tree horizontally without squeezing names', async 
   expect(leafBox.x + leafBox.width).toBeLessThanOrEqual(
     treeBox.x + treeBox.width,
   );
-  await page.screenshot({ path: '/tmp/qwen-web-shell-files-deep-tree.png' });
+
   await leaf.click();
   await expect(browser.getByTestId('workspace-file-content')).toContainText(
     'export const deep = true',

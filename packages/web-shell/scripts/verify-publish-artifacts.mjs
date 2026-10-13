@@ -36,10 +36,7 @@ try {
 // membership check have to be reduced to that form first.
 const packPath = (target) => relative(root, target).split(sep).join('/');
 
-if (
-  !existsSync(join(root, 'NOTICES.txt')) ||
-  (packed && !packed.has('NOTICES.txt'))
-) {
+if (packed && !packed.has('NOTICES.txt')) {
   problems.push(
     'bundled dependency NOTICES.txt is missing from the npm package',
   );

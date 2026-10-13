@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
+import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
 import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
 
@@ -81,7 +82,14 @@ describe('build artifact — package boundary', () => {
     for (const name of ['diffs', 'trees', 'theming', 'theme']) {
       expect(notices).toContain(`@pierre/${name}@`);
     }
-    expect(notices).toContain('@headless-tree/core');
+    const treeAttribution = notices
+      .split('@pierre/trees@')[1]!
+      .split(
+        '============================================================',
+      )[0]!;
+    // This is the bundled tree's NOTICE credit, not a separate dependency entry.
+    expect(treeAttribution).toContain('Original license for');
+    expect(treeAttribution).toContain('headless-tree/core');
     expect(notices).toContain('shiki@4.');
     expect(readPackageJavascript()).not.toMatch(
       /(?:from\s*|import\s*\()\s*["']@pierre\//,
@@ -437,6 +445,16 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js.length).toBeLessThan(1_323_000);
+  });
+
+  it('excludes Files-only messages from the transcript entry', () => {
+    const bundle = readTranscriptBundle();
+    for (const key of [
+      'files.description',
+      'files.reloadUnavailable',
+      'files.sourceTooLarge',
+    ] as const)
+      expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
   });
 
   it('carries no Live Voice strings and looks none up', () => {

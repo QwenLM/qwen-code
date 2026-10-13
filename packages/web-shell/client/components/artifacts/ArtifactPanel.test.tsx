@@ -96,6 +96,20 @@ vi.mock(
   }),
 );
 
+const reloadPolicy = vi.hoisted(() => ({
+  standalone: true,
+  token: undefined as string | undefined,
+  survives: true,
+}));
+vi.mock('../../config/daemon-target', () => ({
+  useDaemonTargetOptional: () =>
+    reloadPolicy.standalone ? { activeToken: reloadPolicy.token } : undefined,
+}));
+vi.mock('../../config/daemon', async (original) => ({
+  ...(await original<typeof import('../../config/daemon')>()),
+  hasReloadSurvivableDaemonToken: () => reloadPolicy.survives,
+}));
+
 const fileBrowserProps = vi.hoisted(() => ({
   loadError: undefined as Error | undefined,
   sourceError: undefined as Error | undefined,
@@ -110,6 +124,7 @@ vi.mock('./WorkspaceFileBrowser', () => {
   const WorkspaceFileBrowser = (props: {
     workspaceCwd: string;
     onReferenceFile?: (path: string) => void;
+    actions: ArtifactWorkspaceTarget['actions'];
     renderPreview: (
       path: string,
       source: boolean,
@@ -117,6 +132,9 @@ vi.mock('./WorkspaceFileBrowser', () => {
     ) => React.ReactNode;
   }) => {
     fileBrowserProps.current = props;
+    useEffect(() => {
+      void props.actions.listDirectory('.').catch(() => {});
+    }, [props.actions]);
     return (
       <div data-testid="workspace-file-browser" data-cwd={props.workspaceCwd}>
         {fileBrowserProps.previewPath &&
@@ -400,6 +418,9 @@ function scheduledTaskPanel(
 }
 
 afterEach(() => {
+  reloadPolicy.standalone = true;
+  reloadPolicy.token = undefined;
+  reloadPolicy.survives = true;
   fileBrowserProps.loadError = undefined;
   fileBrowserProps.sourceError = undefined;
   fileBrowserProps.previewPath = undefined;
@@ -2391,6 +2412,47 @@ describe('ArtifactPanel add menu', () => {
     expect(onOpenFiles).toHaveBeenCalledTimes(2);
   });
 
+  it('hides Files in both entry points when the item is not opted in', () => {
+    const onOpenFiles = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderPanel = (tabs: ArtifactPanelTab[]) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={tabs}
+          activeTabId={tabs[0]?.id ?? null}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          items={['review']}
+          workspaceCwd="/primary"
+          onOpenFiles={onOpenFiles}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+    act(() => root.render(renderPanel([])));
+    expect(container.textContent).not.toContain('Browse workspace files');
+    act(() =>
+      root.render(
+        renderPanel([
+          { id: 'terminal:test', kind: 'terminal', title: 'Terminal' },
+        ]),
+      ),
+    );
+    openAddMenu(container);
+    expect(
+      Array.from(document.body.querySelectorAll('[role="menuitem"]')).some(
+        (item) => item.textContent === 'Files',
+      ),
+    ).toBe(false);
+  });
+
   it.each(['browser import', 'source initialization'] as const)(
     'contains a failed %s inside the files pane and offers recovery',
     async (failure) => {
@@ -2479,6 +2541,99 @@ describe('ArtifactPanel add menu', () => {
     },
   );
 
+  it.each(['embedded', 'memory-token'] as const)(
+    'does not reload the host for an import failure (%s)',
+    async (mode) => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      reloadPolicy.standalone = mode !== 'embedded';
+      reloadPolicy.token = 'test-memory-only';
+      reloadPolicy.survives = false;
+      fileBrowserProps.loadError = new Error('Chunk unavailable');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <ArtifactPanel
+              artifacts={[]}
+              tabs={[
+                {
+                  id: 'files:primary',
+                  kind: 'files',
+                  title: 'Files',
+                  workspaceCwd: '/primary',
+                  workspaceId: 'primary-id',
+                },
+              ]}
+              activeTabId="files:primary"
+              reviewChanges={[]}
+              selectedReviewPath={null}
+              workspaceCwd="/primary"
+              onSelectTab={() => {}}
+              onCloseTab={() => {}}
+              onOpenFilePreview={() => {}}
+              onClose={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      await vi.waitFor(() =>
+        expect(container.querySelector('[role="alert"]')).not.toBeNull(),
+      );
+      expect(container.textContent).toContain(
+        'Reloading could lose your connection',
+      );
+      expect(container.textContent).not.toContain('Reload page');
+      expect(container.textContent).not.toContain('Try again');
+    },
+  );
+
+  it('refuses oversized source files before reading any content bytes', async () => {
+    fileBrowserProps.previewPath = 'huge.log';
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: 90 * 1024 * 1024,
+      modifiedMs: 1,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    await act(async () =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'files:primary',
+                kind: 'files',
+                title: 'Files',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="files:primary"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            workspaceCwd="/primary"
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('4 MiB source preview limit'),
+    );
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+  });
+
   it('retains files panes across tab switches and revokes a hidden workspace owner', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -2551,7 +2706,12 @@ describe('ArtifactPanel add menu', () => {
     await act(async () => root.render(renderPanel(files.id)));
     expect(
       container.querySelector('[data-testid="workspace-file-browser"]'),
-    ).not.toBe(browser);
+    ).not.toBeNull();
+    const restored = container.querySelector(
+      '[data-testid="workspace-file-browser"]',
+    );
+    expect(restored).not.toBe(browser);
+    expect(restored?.getAttribute('data-cwd')).toBe('/secondary');
     act(() => root.render(renderPanel(terminal.id, [terminal])));
     expect(
       container.querySelector('[data-testid="workspace-file-browser"]'),
@@ -2560,13 +2720,13 @@ describe('ArtifactPanel add menu', () => {
 
   it.each([undefined, 'old-owner'])(
     'allows reopening files when a persisted owner is stale (%s)',
-    (workspaceId) => {
+    async (workspaceId) => {
       const onOpenFiles = vi.fn();
       const container = document.createElement('div');
       document.body.appendChild(container);
       const root = createRoot(container);
       mounted.push({ root, container });
-      act(() =>
+      await act(async () =>
         root.render(
           <I18nProvider language="en">
             <ArtifactPanel
@@ -2690,7 +2850,6 @@ describe('ArtifactPanel add menu', () => {
       'removed',
     );
     expect(mockSecondaryWorkspaceActions.dirList).not.toHaveBeenCalled();
-    expect(mockWorkspaceActions.listDirectory).not.toHaveBeenCalled();
     expect(
       container.querySelector('[data-testid="workspace-file-browser"]'),
     ).toBeNull();

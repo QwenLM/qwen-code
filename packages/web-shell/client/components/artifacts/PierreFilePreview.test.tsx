@@ -20,8 +20,8 @@ vi.mock('@pierre/diffs', () => ({
     cleanUp = mocks.virtualizerCleanUp;
   },
   VirtualizedFile: class {
-    constructor() {
-      mocks.create();
+    constructor(options: unknown) {
+      mocks.create(options);
     }
     render = mocks.render;
     cleanUp = mocks.cleanUp;
@@ -96,13 +96,72 @@ it('updates the theme without replacing the virtualized file or scroll position'
     expect(mocks.create).toHaveBeenCalledOnce();
     expect(mocks.render).toHaveBeenCalledOnce();
     expect(mocks.cleanUp).not.toHaveBeenCalled();
-    expect(mocks.setThemeType.mock.calls).toEqual([['light'], ['dark']]);
+    expect(mocks.setThemeType.mock.calls).toEqual([['dark']]);
+    expect(mocks.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        themeType: 'light',
+        disableErrorHandling: true,
+        tokenizeMaxLength: 10_000,
+      }),
+    );
     expect(host.firstChild).toBe(file);
     expect(host.scrollTop).toBe(123);
     await act(async () => root.unmount());
     expect(mocks.cleanUp).toHaveBeenCalledOnce();
   } finally {
     if (container.hasChildNodes()) act(() => root.unmount());
+    vi.unstubAllGlobals();
+  }
+});
+
+it('recreates changed files with the current shell theme and pins the character fallback', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  mocks.create.mockClear();
+  mocks.render.mockClear();
+  mocks.cleanUp.mockClear();
+  const root = createRoot(document.createElement('div'));
+  const render = (path: string, content: string) => (
+    <ThemeProvider value="dark">
+      <PierreFilePreview path={path} content={content} />
+    </ThemeProvider>
+  );
+  try {
+    await act(async () => root.render(render('first.ts', 'small')));
+    expect(mocks.render).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        file: expect.objectContaining({ name: 'first.ts', lang: undefined }),
+      }),
+    );
+    await act(async () =>
+      root.render(render('second.ts', 'x'.repeat(1024 * 1024 + 1))),
+    );
+    expect(mocks.create).toHaveBeenCalledTimes(2);
+    expect(mocks.cleanUp).toHaveBeenCalledOnce();
+    expect(mocks.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        themeType: 'dark',
+        disableErrorHandling: true,
+        tokenizeMaxLength: 10_000,
+      }),
+    );
+    expect(mocks.render).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        file: expect.objectContaining({ name: 'second.ts', lang: 'text' }),
+      }),
+    );
+    await act(async () => root.render(render('second.ts', 'changed')));
+    expect(mocks.create).toHaveBeenCalledTimes(3);
+    expect(mocks.render).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        file: expect.objectContaining({
+          name: 'second.ts',
+          contents: 'changed',
+          lang: undefined,
+        }),
+      }),
+    );
+  } finally {
+    await act(async () => root.unmount());
     vi.unstubAllGlobals();
   }
 });

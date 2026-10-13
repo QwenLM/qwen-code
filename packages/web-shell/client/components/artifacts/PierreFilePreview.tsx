@@ -10,6 +10,9 @@ export default function PierreFilePreview({
   content: string;
 }) {
   const theme = useTheme();
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
+  const appliedThemeRef = useRef(theme);
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<VirtualizedFile | undefined>(undefined);
   useEffect(() => {
@@ -35,6 +38,8 @@ export default function PierreFilePreview({
       view = new VirtualizedFile(
         {
           theme: { light: 'github-light', dark: 'github-dark' },
+          themeType: themeRef.current,
+          disableErrorHandling: true,
           preferredHighlighter: 'shiki-js',
           overflow: 'wrap',
           disableFileHeader: true,
@@ -44,6 +49,7 @@ export default function PierreFilePreview({
         virtualizer,
       );
       viewRef.current = view;
+      appliedThemeRef.current = themeRef.current;
       view.render({
         file: {
           name: path,
@@ -59,7 +65,10 @@ export default function PierreFilePreview({
     return cleanUp;
   }, [path, content]);
   useEffect(() => {
-    viewRef.current?.setThemeType(theme);
+    if (appliedThemeRef.current !== theme) {
+      viewRef.current?.setThemeType(theme);
+      appliedThemeRef.current = theme;
+    }
   }, [theme, path, content]);
   return (
     <div

@@ -163,6 +163,10 @@ const TRANSCRIPT_DEAD_MESSAGES = new Map(
   [
     ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
     [
+      './client/components/artifacts/files-messages.ts',
+      './client/components/artifacts/files-messages.transcript-stub.ts',
+    ],
+    [
       './client/trajectory/window-messages.ts',
       './client/trajectory/window-messages.transcript-stub.ts',
     ],

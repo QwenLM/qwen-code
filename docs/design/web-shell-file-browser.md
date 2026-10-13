@@ -74,13 +74,20 @@ The explicit `bundledDevDependencies` list seeds license generation without
 including unrelated development tools. Bundled dependency licenses and NOTICE
 credits ship in the npm package and the VS Code companion notice file.
 Tree and source loading have local error boundaries. Failed imports offer a page
-reload to clear the browser's cached rejection; renderer initialization errors
-release their resources and can retry locally. Floating drawers traverse shadow-root tab
+reload only in the standalone shell when credentials survive it (or no token is
+needed). Embedded hosts and memory-only credentials instead offer Close Files,
+without reloading the host or presenting a cached import as a local retry.
+Pierre render errors propagate to the local boundary after resource cleanup.
+The constructor uses the resolved shell theme; theme changes update it in place. Floating drawers traverse shadow-root tab
 stops before Radix's light-DOM focus loop can skip the tree.
 Source rendering is virtualized; theme changes update the renderer in place. The library
 build bundles Pierre's compatible Shiki 3/4 dependency in the lazy preview chunk,
 while retaining the existing Shiki 1 dependency for other renderers; files over 10,000 lines or 1,048,576 characters use plain
-text to bound syntax-highlighting work.
+text to bound syntax-highlighting work. Files source previews refuse files above
+4 MiB before reading their content, and apply the same cap to chunked fallback
+reads. Users can download these files from the file menu. Files translations are
+excluded from the transcript-only bundle. The actual shadow tree and file menu
+have accessible names.
 
 ## File changes assessment
 

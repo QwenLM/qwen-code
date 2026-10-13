@@ -413,60 +413,64 @@ export async function collectDependencies(
 }
 
 async function main({ packageDir = packagePath, bundledOnly = false } = {}) {
-  try {
-    const packageJsonPath = path.join(packageDir, 'package.json');
-    const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8');
-    const packageJson = JSON.parse(packageJsonContent);
+  const packageJsonPath = path.join(packageDir, 'package.json');
+  const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8');
+  const packageJson = JSON.parse(packageJsonContent);
 
-    const allDependencies = new Map();
-    const visitedDirs = new Set();
-    const directDependencies = bundledOnly
-      ? (packageJson.bundledDevDependencies ?? [])
-      : Object.keys(packageJson.dependencies);
+  const allDependencies = new Map();
+  const visitedDirs = new Set();
+  const directDependencies = bundledOnly
+    ? (packageJson.bundledDevDependencies ?? [])
+    : Object.keys(packageJson.dependencies);
 
-    // Sequential on purpose: the traversal order is the file's order, and it
-    // must not depend on which filesystem read finishes first.
-    for (const depName of directDependencies) {
-      await collectDependencies(
-        depName,
-        packageDir,
-        allDependencies,
-        visitedDirs,
-      );
+  if (bundledOnly) {
+    if (directDependencies.length === 0)
+      throw new Error('No bundled dependency seeds declared');
+    for (const name of directDependencies) {
+      if (!(await resolveInstalled(name, packageDir)))
+        throw new Error(`Bundled dependency ${name} is not installed`);
     }
-
-    const dependencyEntries = Array.from(allDependencies.values());
-
-    const licensePromises = dependencyEntries.map(({ name, version, dir }) =>
-      getDependencyLicense(name, version, dir),
-    );
-
-    const dependencyLicenses = await Promise.all(licensePromises);
-
-    let noticeText =
-      'This file contains third-party software notices and license terms.\n\n';
-
-    for (const dep of dependencyLicenses) {
-      noticeText +=
-        '============================================================\n';
-      noticeText += `${dep.name}@${dep.version}\n`;
-      noticeText += `(${dep.repository})\n\n`;
-      noticeText += `${dep.license}\n\n`;
-    }
-
-    // Normalize line endings to LF. Third-party license files may use CRLF,
-    // which would otherwise be embedded verbatim and produce spurious diffs
-    // (the file is declared `eol=lf` in .gitattributes).
-    noticeText = noticeText.replace(/\r\n/g, '\n');
-
-    const noticeFilePath = path.join(packageDir, 'NOTICES.txt');
-    await fs.writeFile(noticeFilePath, noticeText);
-    console.log(`NOTICES.txt generated at ${noticeFilePath}`);
-    console.log(`Total dependencies: ${dependencyEntries.length}`);
-  } catch (error) {
-    console.error('Error generating NOTICES.txt:', error);
-    process.exit(1);
   }
+
+  // Sequential on purpose: the traversal order is the file's order, and it
+  // must not depend on which filesystem read finishes first.
+  for (const depName of directDependencies) {
+    await collectDependencies(
+      depName,
+      packageDir,
+      allDependencies,
+      visitedDirs,
+    );
+  }
+
+  const dependencyEntries = Array.from(allDependencies.values());
+
+  const licensePromises = dependencyEntries.map(({ name, version, dir }) =>
+    getDependencyLicense(name, version, dir),
+  );
+
+  const dependencyLicenses = await Promise.all(licensePromises);
+
+  let noticeText =
+    'This file contains third-party software notices and license terms.\n\n';
+
+  for (const dep of dependencyLicenses) {
+    noticeText +=
+      '============================================================\n';
+    noticeText += `${dep.name}@${dep.version}\n`;
+    noticeText += `(${dep.repository})\n\n`;
+    noticeText += `${dep.license}\n\n`;
+  }
+
+  // Normalize line endings to LF. Third-party license files may use CRLF,
+  // which would otherwise be embedded verbatim and produce spurious diffs
+  // (the file is declared `eol=lf` in .gitattributes).
+  noticeText = noticeText.replace(/\r\n/g, '\n');
+
+  const noticeFilePath = path.join(packageDir, 'NOTICES.txt');
+  await fs.writeFile(noticeFilePath, noticeText);
+  console.log(`NOTICES.txt generated at ${noticeFilePath}`);
+  console.log(`Total dependencies: ${dependencyEntries.length}`);
 }
 
 export async function runNoticeGeneration(env = process.env, options) {
@@ -494,5 +498,8 @@ if (
     process.argv[2] === '--bundled'
       ? { packageDir: path.resolve(process.argv[3]), bundledOnly: true }
       : undefined;
-  runNoticeGeneration(process.env, options).catch(console.error);
+  runNoticeGeneration(process.env, options).catch((error) => {
+    console.error('Error generating NOTICES.txt:', error);
+    process.exitCode = 1;
+  });
 }

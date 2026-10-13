@@ -1,3 +1,5 @@
+import { useDaemonTargetOptional } from '../../config/daemon-target';
+import { hasReloadSurvivableDaemonToken } from '../../config/daemon';
 import type {
   DaemonSessionArtifact,
   SessionSource,
@@ -377,14 +379,13 @@ export type ArtifactPanelTab =
 
 type WorkspaceScopedArtifactPanelTab = Extract<
   ArtifactPanelTab,
-  { kind: 'review' | 'file' | 'files' | 'artifact' | 'scheduled_task' }
+  { kind: 'review' | 'file' | 'artifact' | 'scheduled_task' }
 >;
 
 function isWorkspaceScopedTab(
   tab: ArtifactPanelTab,
 ): tab is WorkspaceScopedArtifactPanelTab {
   return (
-    tab.kind === 'files' ||
     tab.kind === 'review' ||
     tab.kind === 'file' ||
     tab.kind === 'artifact' ||
@@ -520,13 +521,16 @@ function WorkspaceFilesPane({
   workspaceCwd,
   onOpenFilePreview,
   onReferenceFile,
+  onClose,
 }: {
+  onClose: () => void;
   tab: Extract<ArtifactPanelTab, { kind: 'files' }>;
 } & Pick<
   ArtifactPanelProps,
   'workspaceCwd' | 'onOpenFilePreview' | 'onReferenceFile'
 >) {
   const { t, language } = useI18n();
+  const daemonTarget = useDaemonTargetOptional();
   const WorkspaceFileBrowser = useMemo(
     () => lazy(loadWorkspaceFileBrowser),
     [],
@@ -546,12 +550,32 @@ function WorkspaceFilesPane({
     // Browsers cache rejected module imports too; only a page reload clears
     // that cache. Renderer errors can remount locally without losing the tree.
     const reload = error instanceof FilePaneImportError;
+    const canReload = () =>
+      Boolean(
+        daemonTarget &&
+          (!daemonTarget.activeToken || hasReloadSurvivableDaemonToken()),
+      );
+    if (reload && !canReload())
+      return (
+        <div role="alert" className={styles.empty}>
+          <p>{t('files.loadFailed')}</p>
+          <p>{t('files.reloadUnavailable')}</p>
+          <Button onClick={onClose}>{t('files.close')}</Button>
+        </div>
+      );
     return (
       <RootErrorFallback
         error={error}
         language={language}
         retryMode={reload ? 'reload' : 'reset'}
-        onRetry={reload ? () => window.location.reload() : reset}
+        onRetry={
+          reload
+            ? () => {
+                if (canReload()) window.location.reload();
+                else onClose();
+              }
+            : reset
+        }
       />
     );
   };
@@ -1055,6 +1079,7 @@ export function ArtifactPanel({
               hidden={tab.id !== activeTab?.id}
             >
               <WorkspaceFilesPane
+                onClose={() => onCloseTab(tab.id)}
                 tab={tab}
                 workspaceCwd={workspaceCwd}
                 onOpenFilePreview={onOpenFilePreview}
@@ -3937,6 +3962,7 @@ function useWorkspaceFileContent({
   previewContent,
   previewOnly,
   onLoadError,
+  maxPreviewBytes,
 }: {
   workspacePath: string;
   artifactVersion?: string;
@@ -3944,7 +3970,9 @@ function useWorkspaceFileContent({
   previewContent?: string;
   previewOnly?: boolean;
   onLoadError?: (error: string) => void;
+  maxPreviewBytes?: number;
 }) {
+  const { t } = useI18n();
   const [content, setContent] = useState<string | null>(previewContent ?? null);
   const [sizeBytes, setSizeBytes] = useState<number>();
   const [error, setError] = useState<string | null>(null);
@@ -3962,6 +3990,8 @@ function useWorkspaceFileContent({
         if (stat.type === 'directory') {
           throw new Error('Directories cannot be opened as artifacts.');
         }
+        if (maxPreviewBytes !== undefined && stat.sizeBytes > maxPreviewBytes)
+          throw new Error(t('files.sourceTooLarge'));
         return workspaceActions.readWorkspaceFile(workspacePath, {
           maxBytes: 256 * 1024,
         });
@@ -3975,6 +4005,7 @@ function useWorkspaceFileContent({
           {
             statFile: (filePath) => workspaceActions.stat(filePath),
             isCancelled: () => cancelled,
+            maxBytes: maxPreviewBytes,
           },
         );
         return {
@@ -4005,6 +4036,8 @@ function useWorkspaceFileContent({
     onLoadError,
     workspaceActions,
     workspacePath,
+    maxPreviewBytes,
+    t,
   ]);
 
   return { content, error, sizeBytes };
@@ -4130,6 +4163,7 @@ function FileArtifactPreview({
     previewContent,
     previewOnly,
     onLoadError,
+    maxPreviewBytes: sourceRenderer ? 4 * 1024 * 1024 : undefined,
   });
 
   useEffect(() => {

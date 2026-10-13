@@ -2,6 +2,7 @@ import {
   createComposerTagForItem,
   fileReferenceInsertText,
   FILE_PROVIDER_ID,
+  sanitizeAtMentionItem,
 } from './hooks/useAtMentionSources';
 import {
   isModelSetupCommand,
@@ -9260,6 +9261,8 @@ export function App({
       ) {
         return;
       }
+      if (!event.nativeEvent.composedPath().includes(event.currentTarget))
+        return;
       const candidates = getArtifactPanelTabStops(event.currentTarget);
       const first = candidates[0];
       const last = candidates[candidates.length - 1];
@@ -18621,7 +18624,18 @@ export function App({
         if (escArmedActionRef.current !== null) {
           resetEscapeState();
         }
-        if (e.key === 'Tab' && e.shiftKey && !live.interactionBlocked) {
+        if (
+          e.key === 'Tab' &&
+          e.shiftKey &&
+          !live.interactionBlocked &&
+          !e
+            .composedPath()
+            .some(
+              (node) =>
+                node instanceof Element &&
+                node.matches('[role="dialog"], [role="alertdialog"]'),
+            )
+        ) {
           e.preventDefault();
           live.handleCycleMode();
         }
@@ -20099,13 +20113,13 @@ export function App({
         ? (path: string) => {
             const tag = createComposerTagForItem(
               FILE_PROVIDER_ID,
-              {
+              sanitizeAtMentionItem({
                 id: `file:${path}`,
                 label: path.split('/').at(-1) ?? path,
                 description: path,
                 kind: 'insert',
                 fileKind: 'file',
-              },
+              }),
               fileReferenceInsertText(path),
             );
             if (!tag) return;
