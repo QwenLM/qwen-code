@@ -199,6 +199,31 @@ export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
 const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
 
 /**
+ * Whether a stream event restarts the current attempt from scratch (the
+ * failed attempt's partial output is discarded and re-streamed), so any
+ * attempt-scoped observations recorded after the last committed round-trip
+ * must be rolled back. The client's stream loop consumes it for both of its
+ * attempt-scoped states — the exploration budget's phase and the loop-guard
+ * feed set (`modelRequestAccepted`/`hasToolCalls`/`loopGuardFedCallIds`) — so
+ * a new restart-style event lands in both of them or in neither.
+ *
+ * It is deliberately not consumed by the loop detector, which has no call
+ * site here: that module's own per-turn cap rollback stays `Retry`-only, and
+ * `checkAlwaysOnSafeties` already treats a fallback as a no-op through its
+ * non-`ToolCallRequest` early return (a fallback cannot have streamed calls,
+ * and clearing the detector's streak evidence per round-trip would silence
+ * the consecutive-identical and stagnation guards). A restart-style event
+ * added here does NOT propagate to the detector; add it there separately and
+ * justify it.
+ */
+export function isAttemptRestartEvent(event: ServerLlmStreamEvent): boolean {
+  return (
+    event.type === LlmEventType.Retry ||
+    event.type === LlmEventType.ModelFallback
+  );
+}
+
+/**
  * Halt predicate of the per-turn tool-call cap, shared with the daemon's
  * turn-loop guard (ACP Session's recordDaemonToolCalls) so both runtimes
  * decide identically and cannot drift. `cap` is the resolved effective cap
@@ -450,6 +475,10 @@ export class LoopDetectionService {
       this.config,
       new LoopDetectionDisabledEvent(this.promptId),
     );
+  }
+
+  isDisabledForSession(): boolean {
+    return this.disabledForSession;
   }
 
   /**

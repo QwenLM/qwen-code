@@ -47,6 +47,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Repository
 public class ManagedSessionStore {
@@ -66,6 +68,7 @@ public class ManagedSessionStore {
     private final JdbcTemplate jdbc;
     private ToolPublicationObjectStore publicationObjects;
     private ManagedToolResultStore toolResults;
+    private JournalEventTransport journalEventTransport;
     private WriterCredentialPolicy credentials = WriterCredentialPolicy.unbound();
     private final ManagedExtensionRecordStore extensionRecords;
     private final ManagedActionStore actions;
@@ -180,7 +183,10 @@ public class ManagedSessionStore {
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
-        if (authority != null) {
+        boolean v2 = !jdbc.queryForList("SELECT o.operation_id FROM managed_agent_operation o JOIN qwen_runtime_harness_drain f"
+                + " ON o.tenant_id = f.tenant_id AND o.session_id = f.harness_session_id AND o.operation_id = f.operation_id"
+                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.lifecycle_protocol_version = 2", tenantId, sessionId).isEmpty();
+        if (authority != null || v2) {
             WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
         }
     }
@@ -235,6 +241,13 @@ public class ManagedSessionStore {
         this.toolResults = toolResults;
     }
 
+    // Present only when the journal event transport is enabled; absent by
+    // default so a flag-off deployment stays byte-identical (design MQ2b).
+    @Autowired(required = false)
+    public void setJournalEventTransport(JournalEventTransport transport) {
+        this.journalEventTransport = transport;
+    }
+
     // The policy bean is unconditional, so required injection fails closed
     // in a Spring context; direct constructor use keeps the unbound default.
     @Autowired
@@ -284,7 +297,8 @@ public class ManagedSessionStore {
                 writerToken);
         checkLifecycleWriter(tenantId, sessionId, authority);
         if (authority != null) {
-            WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, false);
+            WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority,
+                    WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority));
         } else {
             requireOrdinaryAdmission(tenantId, sessionId);
         }
@@ -397,8 +411,11 @@ public class ManagedSessionStore {
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         Timestamp now = databaseNow();
+        boolean cleanup = authority != null && WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
+        // A resident cleanup writer may outlive its lease while the coordinator
+        // is down; its token and generation must still own the locked head.
         requireWriter(head, request.writerId(), request.writerGeneration(),
-                writerToken, now, true);
+                writerToken, now, !cleanup);
         Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                 plusMillis(now, request.leaseMillis()));
         jdbc.update("UPDATE qwen_managed_session_journal_head SET"
@@ -561,8 +578,12 @@ public class ManagedSessionStore {
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
         }
+        boolean v2 = authority != null && jdbc.queryForObject("SELECT lifecycle_protocol_version FROM managed_agent_operation"
+                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", Integer.class,
+                tenantId, sessionId, authority.operationId()) == 2;
+        boolean resourcePhase = v2 && WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
         if (authority != null && extensionRecords.hasNewLifecycleDispatch(tenantId, sessionId, validated.recordBytes(),
-                reader)) {
+                reader, v2, resourcePhase)) {
             if (lifecycleExecution == null || lifecycleSessions == null) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
             }
@@ -670,10 +691,33 @@ public class ManagedSessionStore {
         if (toolResults != null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
+        publishJournalAfterCommit(validated.recordBytes());
         return new CommitReceipt(revision, request.transactionId(),
                 request.commandId(), request.operation(),
                 request.firstSequence(), request.lastSequence(),
                 request.lastSequence(), request.commitDigest(), false);
+    }
+
+    // The authoritative-journal wire (design 2026-10-04-managed-agent-event-transport,
+    // MQ2b): hands the committed journal record to the transport only after the
+    // transaction is durable, and never from a replayed commit (those return
+    // before this point). A no-op when no transport is enabled.
+    private void publishJournalAfterCommit(byte[] recordBytes) {
+        JournalEventTransport transport = journalEventTransport;
+        if (transport == null) {
+            return;
+        }
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            transport.publishCommitted(recordBytes);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        transport.publishCommitted(recordBytes);
+                    }
+                });
     }
 
     @Transactional(readOnly = true)
@@ -849,9 +893,17 @@ public class ManagedSessionStore {
     @Transactional
     public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request) {
+        return publishToolResult(tenantId, sessionId, writerToken, request, null);
+    }
+
+    @Transactional
+    public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
+            String writerToken, PublishToolResultRequest request,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
+        checkLifecycleWriter(tenantId, sessionId, authority);
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateStableId(request.resourceId(), "resourceId");

@@ -33,7 +33,8 @@ public final class ManagedExtensionRecords {
             "schedule", "automation_run", "child_run", "child_acceptance",
             "memory_job", "monitor_run", "goal_state", "todo_state",
             "plan_mode", "team_state", "team_task", "team_message",
-            "team_plan", "session_message", "session_metadata",
+            "team_plan", "session_message", "session_command",
+            "session_metadata",
             "file_history", "session_source");
     /** The event kinds of managed-session/1, as the authority writes them. */
     public static final List<String> EVENT_KINDS = List.of("input.accepted",

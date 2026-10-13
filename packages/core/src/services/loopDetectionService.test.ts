@@ -1051,6 +1051,127 @@ describe('LoopDetectionService', () => {
     });
   });
 
+  describe('ModelFallback must not clear committed guard evidence', () => {
+    it('keeps the consecutive-identical streak across per-round-trip ModelFallback', () => {
+      service.reset('');
+      // Production can only emit ModelFallback before its own attempt's
+      // calls (the fallback chain is gated on !streamYieldedAnyChunk, and a
+      // streamed functionCall counts as candidate output), and the chain is
+      // per-request, so a capacity-limited primary can prefix every round-trip
+      // of one turn with ModelFallback. The streak evidence accumulated by
+      // earlier committed round-trips must survive the switch, or this guard
+      // never fires again.
+      const finished = {
+        type: LlmEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerLlmStreamEvent;
+      const fallback = {
+        type: LlmEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        fallbackIndex: 1,
+      } satisfies ServerLlmModelFallbackEvent as ServerLlmStreamEvent;
+      // TOOL_CALL_LOOP_THRESHOLD - 1 identical calls, each in its own
+      // round-trip separated by Finished + ModelFallback.
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(guardTool('read_file', { absolute_path: '/repo/a.ts' })).toBe(
+          false,
+        );
+        guard(finished);
+        guard(fallback);
+      }
+      // The threshold call must still fire: the streak reached 5 across the
+      // committed round-trips instead of being zeroed by each fallback.
+      expect(guardTool('read_file', { absolute_path: '/repo/a.ts' })).toBe(
+        true,
+      );
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
+    it('keeps the shell-inspection stagnation streak across per-round-trip ModelFallback', () => {
+      service.reset('');
+      // Same reachable shape as above but with varied git-inspection
+      // wording, which only the stagnation guard (keyed on command family)
+      // can see — the consecutive-identical guard never fires on it.
+      const finished = {
+        type: LlmEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerLlmStreamEvent;
+      const fallback = {
+        type: LlmEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        fallbackIndex: 1,
+      } satisfies ServerLlmModelFallbackEvent as ServerLlmStreamEvent;
+      const VARIANTS = [
+        'git status --short',
+        'git diff --stat',
+        'git ls-files --modified',
+        'git status --porcelain=v1',
+        'git diff --name-only HEAD',
+        'git -C . status --short',
+        'git --no-pager diff --stat',
+      ];
+      for (let i = 0; i < SHELL_COMMAND_STAGNATION_THRESHOLD - 1; i++) {
+        expect(
+          guardTool('run_shell_command', {
+            command: VARIANTS[i % VARIANTS.length],
+            description: 'Inspect repository changes',
+          }),
+        ).toBe(false);
+        guard(finished);
+        guard(fallback);
+      }
+      expect(
+        guardTool('run_shell_command', {
+          command: 'git status --short',
+          description: 'Inspect repository changes',
+        }),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.SHELL_COMMAND_STAGNATION);
+    });
+
+    it('keeps capMaxKeyRepeat accumulating across per-round-trip ModelFallback', () => {
+      service.reset('');
+      // The adaptive cap's stuck signal (capMaxKeyRepeat >=
+      // GLOBAL_DUPLICATE_THRESHOLD) is what halts a productive-looking but
+      // stuck diverse turn past the soft cap; per-round-trip fallbacks must
+      // not zero it either. Diverse calls keep every other guard quiet.
+      const finished = {
+        type: LlmEventType.Finished,
+        value: { reason: 'STOP' },
+      } as unknown as ServerLlmStreamEvent;
+      const fallback = {
+        type: LlmEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        fallbackIndex: 1,
+      } satisfies ServerLlmModelFallbackEvent as ServerLlmStreamEvent;
+      // Diverse calls past DEFAULT_MAX_TOOL_CALLS_PER_TURN (the soft cap,
+      // where the adaptive cap starts halting on the stuck signal), then
+      // round-trips of alternating stuck keys, each separated by Finished +
+      // ModelFallback: the repeat evidence must accumulate ACROSS the
+      // fallback boundaries, or the adaptive cap's stuck signal never
+      // reaches its threshold and the turn runs to the 1000-call backstop.
+      const SOFT_CAP = DEFAULT_MAX_TOOL_CALLS_PER_TURN;
+      for (let i = 0; i < SOFT_CAP; i++) {
+        expect(guardTool('any_tool', { i })).toBe(false);
+        guard(finished);
+        guard(fallback);
+      }
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 1; i++) {
+        expect(guardTool('any_tool', { stuck: 'a' })).toBe(false);
+        expect(guardTool('any_tool', { stuck: 'b' })).toBe(false);
+        guard(finished);
+        guard(fallback);
+      }
+      expect(guardTool('any_tool', { stuck: 'a' })).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+  });
+
   describe('Truncation hysteresis', () => {
     // The physical trim walks the whole contentStats map (one entry per
     // window position at saturation): Θ(window) synchronous CPU per event.
