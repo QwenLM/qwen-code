@@ -152,8 +152,9 @@ class ChildResultRelayStoreTest {
                 "accepted", "completed");
         insertRecordRow(scopeKey, session, "shell-x", "shell", null,
                 "running");
-        // H4c registers the workflow kind ahead of its runtime: neither
-        // the relay nor the close cascade acts on its rows yet.
+        // #13803 (K2): the runtime exists now — the relay's discovery page
+        // and the cascade's live-scope query return workflow rows beside
+        // child_agent rows; the shell kind still has no delivery to drive.
         insertRecordRow(scopeKey, session, "workflow-live", "workflow",
                 "planned", "pending");
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
@@ -163,7 +164,7 @@ class ChildResultRelayStoreTest {
                 TENANT, session);
         List<PendingChild> pending = relayStore.findPendingChildren("probe", 10);
         assertThat(pending).extracting(PendingChild::childRunId)
-                .containsExactly("run-live");
+                .containsExactly("run-live", "workflow-live");
         // Every column the relay binds to is selected and mapped (the
         // discovery claim's projected shape).
         assertThat(pending.get(0)).satisfies(row -> {
@@ -176,18 +177,21 @@ class ChildResultRelayStoreTest {
         });
         assertThat(relayStore.findLiveScopes(TENANT, session))
                 .extracting(ChildResultRelayStore.LiveScope::childRunId)
-                .containsExactly("run-live");
-        // A live ledger claim leaves the run discoverable; a terminal
-        // classification retires it even though the extension record
-        // still sits delivery-pending.
+                .containsExactly("run-live", "workflow-live");
+        // A live ledger claim leaves its own run discoverable beside the
+        // still-unclaimed workflow row; a terminal classification retires
+        // the claimed run even though its extension record still sits
+        // delivery-pending.
         RelayRow claimed = relayStore.claim(TENANT, session, "run-live",
                 "key-live", "owner", 30_000, 100);
         assertThat(claimed).isNotNull();
         assertThat(relayStore.findPendingChildren("probe", 10))
                 .extracting(PendingChild::childRunId)
-                .containsExactly("run-live");
+                .containsExactly("run-live", "workflow-live");
         relayStore.classify(claimed, "owner", "done", null, 200);
-        assertThat(relayStore.findPendingChildren("probe", 10)).isEmpty();
+        assertThat(relayStore.findPendingChildren("probe", 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("workflow-live");
         // A record the consumer already advanced owes the delivering
         // ledger its owed step: it surfaces, until classify retires it.
         jdbc.update("UPDATE qwen_managed_session_extension_record SET"
@@ -201,10 +205,12 @@ class ChildResultRelayStoreTest {
                 30_000, 400);
         assertThat(relayStore.findPendingChildren("probe", 10))
                 .extracting(PendingChild::childRunId)
-                .containsExactly("run-settled");
+                .containsExactly("run-settled", "workflow-live");
         relayStore.classify(relayStore.find(TENANT, session, "run-settled"),
                 "owner", "done", null, 500);
-        assertThat(relayStore.findPendingChildren("probe", 10)).isEmpty();
+        assertThat(relayStore.findPendingChildren("probe", 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("workflow-live");
         // A parked backoff row and a lease-ahead row stay out of the
         // bounded window; each resurfaces exactly when owed.
         RelayRow parked = relayStore.claim(TENANT, session, "run-parked",
@@ -213,18 +219,28 @@ class ChildResultRelayStoreTest {
                 "planned", "pending");
         relayStore.defer(parked, "owner",
                 System.currentTimeMillis() + 60_000, "flap", 30_000, 100);
-        assertThat(relayStore.findPendingChildren("probe", 10)).isEmpty();
+        assertThat(relayStore.findPendingChildren("probe", 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("workflow-live");
         RelayRow leased = relayStore.claim(TENANT, session, "run-leased",
                 "key-leased", "owner",
                 System.currentTimeMillis() + 60_000, 100);
         insertRecordRow("scope-x", session, "run-leased", "child_agent",
                 "planned", "pending");
-        assertThat(relayStore.findPendingChildren("probe", 10)).isEmpty();
+        assertThat(relayStore.findPendingChildren("probe", 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("workflow-live");
         // ...but the claimant itself always sees its own live claim.
         assertThat(relayStore.findPendingChildren("owner", 10))
                 .extracting(PendingChild::childRunId)
-                .containsExactly("run-leased");
+                .containsExactly("run-leased", "workflow-live");
         relayStore.classify(leased, "owner", "done", null, 100);
+        // Tidy the fixture row the runtime now discovers: retire it like
+        // every other row of this class, so no other probe sees it.
+        relayStore.classify(relayStore.claim(TENANT, session,
+                "workflow-live", "key-workflow-live", "owner", 30_000, 100),
+                "owner", "done", null, 100);
+        assertThat(relayStore.findPendingChildren("probe", 10)).isEmpty();
         // And classify respects the claimant: a stale writer mutates nothing.
         RelayRow guarded = relayStore.claim(TENANT, session, "run-guarded",
                 "key-guarded", "owner-a", 30_000, 100);

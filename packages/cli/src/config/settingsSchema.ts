@@ -1296,6 +1296,16 @@ const SETTINGS_SCHEMA = {
           'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
         showInDialog: true,
       },
+      arrowKeysScrollTranscript: {
+        type: 'boolean',
+        label: 'Arrow Keys Scroll Transcript (Virtualized History)',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Let a bare ↑/↓ scroll the transcript while the composer is empty in Virtualized History, instead of recalling input history. Off by default: ↑/↓ walk your previous prompts, and the transcript scrolls with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Turn it on only for terminals that cannot report the mouse wheel to the app — macOS Terminal.app is the common case — where a wheel or trackpad scroll arrives as a burst of ↑/↓ key presses and would otherwise silently replace the composer with an older prompt. While it is on, use Ctrl+P / Ctrl+N for input history from an empty composer.',
+        showInDialog: true,
+      },
       showToolCallDetails: {
         type: 'boolean',
         label: 'Show Tool Call Details',

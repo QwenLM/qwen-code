@@ -72,6 +72,46 @@ export interface HostedHarnessTextDeltas {
   retract(): Promise<void>;
 }
 
+/**
+ * Applies a Session's AgentDefinition model pin to a fresh per-turn config:
+ * exactly one configured, non-runtime model must match, and it is switched
+ * to with cached credentials. A pin that does not resolve fails the Turn
+ * (the config is shut down first) instead of falling back to the default.
+ * Every Turn lane a pinned Session runs — text and workflow alike — goes
+ * through here.
+ */
+export async function applyHostedModelPin(
+  config: Awaited<ReturnType<typeof loadCliConfig>>,
+  model: HostedAgentDefinition['model'] | undefined,
+): Promise<void> {
+  if (!model) return;
+  try {
+    const matches = config
+      .getAllConfiguredModels()
+      .filter((entry) => !entry.isRuntimeModel && entry.id === model.id);
+    if (matches.length !== 1) throw new HostedModelUnavailableError();
+    const selected = matches[0]!;
+    await config.switchModel(selected.authType, selected.id, {
+      requireCachedCredentials: true,
+      ...(selected.registryBaseUrl
+        ? { baseUrl: selected.registryBaseUrl }
+        : {}),
+    });
+  } catch (cause) {
+    try {
+      await config.shutdown({
+        shutdownTelemetry: false,
+        strictResourceCleanup: true,
+      });
+    } catch (cleanupCause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Harness model cleanup failed: ${String(cleanupCause)}`,
+      );
+    }
+    throw new HostedModelUnavailableError(cause);
+  }
+}
+
 export async function runHostedHarnessTextTurn(input: {
   sessionId: string;
   cwd: string;
@@ -142,33 +182,7 @@ export async function runHostedHarnessTextTurn(input: {
       .filter(Boolean)
       .join('\n\n');
   const model = input.agentDefinition?.model;
-  if (model) {
-    try {
-      const matches = config
-        .getAllConfiguredModels()
-        .filter((entry) => !entry.isRuntimeModel && entry.id === model.id);
-      if (matches.length !== 1) throw new HostedModelUnavailableError();
-      const selected = matches[0]!;
-      await config.switchModel(selected.authType, selected.id, {
-        requireCachedCredentials: true,
-        ...(selected.registryBaseUrl
-          ? { baseUrl: selected.registryBaseUrl }
-          : {}),
-      });
-    } catch (cause) {
-      try {
-        await config.shutdown({
-          shutdownTelemetry: false,
-          strictResourceCleanup: true,
-        });
-      } catch (cleanupCause) {
-        writeStderrLineSafe(
-          `qwen serve: Hosted Harness model cleanup failed: ${String(cleanupCause)}`,
-        );
-      }
-      throw new HostedModelUnavailableError(cause);
-    }
-  }
+  await applyHostedModelPin(config, model);
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
   let historyReady = false;
