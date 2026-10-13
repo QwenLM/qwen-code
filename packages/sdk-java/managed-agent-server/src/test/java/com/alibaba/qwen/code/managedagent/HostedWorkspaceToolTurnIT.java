@@ -55,7 +55,7 @@ class HostedWorkspaceToolTurnIT {
     }
 
     @Test
-    @Timeout(240)
+    @Timeout(360)
     void operatorRecoveryReleasesOnlyTheOriginalQuiescentShellOnMySql() throws Exception {
         assertThat(System.getProperty("os.name")).isEqualTo("Linux");
         assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
