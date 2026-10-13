@@ -617,6 +617,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public void runChildOperation(String tenantId, String sessionId,
             Map<String, Object> body) {
         try {
+            AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+            if (!attachments.containsKey(key)
+                    && sessions.requireSession(tenantId, sessionId)
+                            .harnessBootId() != null) {
+                // Relay writes reattach the original Session without
+                // driving the parent's parked Turn.
+                createOrLoad(tenantId, sessionId, true, true);
+            }
             // Same ordering as the automation relay: the attachment
             // resolves first, the client reads after it.
             HarnessSessionRef ref = attachment(tenantId, sessionId, true);
