@@ -25,10 +25,10 @@ public final class InMemoryRuntimeSessionRepository
     public synchronized RuntimeSessionRecord findOrCreate(
             RuntimeSessionRecord candidate) {
         if (candidate == null || candidate.getVersion() != 0
-                || candidate.getState()
-                        != RuntimeSessionRecord.State.ACQUIRING) {
+                || (candidate.getState() != RuntimeSessionRecord.State.ACQUIRING
+                        && candidate.getState() != RuntimeSessionRecord.State.RELEASED)) {
             throw new IllegalArgumentException(
-                    "candidate must be a new acquiring Session");
+                    "candidate must be a new acquiring Session or release tombstone");
         }
         RuntimeScope scope = candidate.getSession().getScope();
         Map<String, RuntimeSessionRecord> scopedRecords = records.computeIfAbsent(
@@ -56,6 +56,19 @@ public final class InMemoryRuntimeSessionRepository
                 "runtimeSessionId");
         Map<String, RuntimeSessionRecord> scopedRecords = records.get(scope);
         return scopedRecords == null ? null : scopedRecords.get(id);
+    }
+
+    @Override
+    public synchronized RuntimeSessionRecord findHistorical(String tenantId, String harnessSessionId, String runtimeSessionId) {
+        var matches = records.values().stream().flatMap(scoped -> scoped.values().stream())
+                .filter(record -> tenantId.equals(record.getSession().getScope().getTenantId())
+                        && harnessSessionId.equals(record.getSession().getHarnessSessionId())
+                        && runtimeSessionId.equals(record.getRuntimeSessionId())).limit(2).toList();
+        if (matches.size() > 1) {
+            throw new RuntimeBrokerException(409, "runtime_session_ambiguous",
+                    "Historical Runtime Session is ambiguous", false);
+        }
+        return matches.isEmpty() ? null : matches.getFirst();
     }
 
     @Override

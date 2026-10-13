@@ -49,8 +49,8 @@ correct `cursor_expired` or resync.
 
 ## 3. Non-goals
 
-- Pruning events. Nothing raises the floor in production yet; that belongs to
-  the retention work.
+- Pruning events. A flag-gated scheduled pass now raises the floor (see 4.4),
+  but it deletes nothing; pruning still belongs to the retention work.
 - The WebShell Session's `replayFloorSequence` and `snapshotThroughSequence`,
   which stay `planned`.
 - `listItems`, which stays `partial` until Snapshot versions are paged.
@@ -77,7 +77,8 @@ correct `cursor_expired` or resync.
   `PublicContentPart.part_id`. A Part id ends with a sequence, so it exceeds 64
   characters once the sequence has ten digits.
 - `replay_floor_sequence` gains a description: events at or below it may be
-  pruned, and a cursor below it has expired.
+  pruned, and a cursor below it has expired while the Snapshot backs the
+  floor.
 - `SessionResyncRequired` tells a client to resume after the
   `snapshot_through_sequence` that the Items list returns, since the value in
   the frame can be older than the Snapshot the client then reads.
@@ -152,8 +153,9 @@ follows tells clients to reload the Snapshot.
 
 ### 4.4 Replay floor
 
-- A cursor has expired when it is below the floor. A cursor equal to the floor
-  is valid, because the next event is retained.
+- A cursor has expired when it is below the floor and the Snapshot backs the
+  floor. A cursor equal to the floor is valid, because the next event is
+  retained.
 - A read checks the floor after it reads the events. The floor only rises and
   the retention work prunes only below it, so a floor that is not above the
   cursor after the read was not above it during the read.
@@ -169,14 +171,22 @@ follows tells clients to reload the Snapshot.
 - `ManagedAgentStore.advanceReplayFloor` raises the floor and never lowers it.
   It caps the floor at the Snapshot's covered sequence, so that a client that
   reloads the Snapshot can resume after `snapshot_through_sequence`. Tests call
-  it; the retention work will call it before it deletes events.
+  it, and the scheduled `ReplayFloorAdvancer` pass calls it with the cap, so an
+  enabled deployment raises each Session's floor as far as its Snapshot proves
+  safe; the retention work will call it before it deletes events. The pass is
+  gated by `qwen.managed-agent.events.replay-floor-enabled`
+  (`QWEN_MANAGED_AGENT_REPLAY_FLOOR_ENABLED`, default `false`) and runs every
+  `qwen.managed-agent.events.replay-floor-interval`
+  (`QWEN_MANAGED_AGENT_REPLAY_FLOOR_INTERVAL`, default 60s).
 - `PublicSession.replay_floor_sequence` returns the stored floor.
-- A stream reconciliation discards the Snapshot, so its covered sequence is `0`
-  until the Items are rebuilt. With a raised floor, a public client told to
-  resync during that time would find its cursor expired again, with `409` or
-  another resync frame, until the rebuild finishes.
-  Nothing raises the floor in production yet; the retention work must close
-  this window before it does.
+- A stream reconciliation discards the Snapshot, so its covered sequence is
+  `0` until the Items are rebuilt, and the floor never lowers, so it can exceed
+  the coverage during the rebuild. A read expires a cursor below the floor only
+  while the Snapshot backs it (`floor <= snapshot_through_sequence`); nothing
+  prunes events yet, so during the rebuild the cursor is still served from the
+  retained events instead of looping `409` or another resync frame. The
+  retention work must revisit this condition once it deletes rows below the
+  stored floor: a cursor it then serves could name events that are gone.
 - The WebShell transcript does not check the floor. Once events are pruned,
   its older pages must end at the floor; that also belongs to the retention
   work.
@@ -194,8 +204,41 @@ one response.
 
 The client recognizes the resync frame by its event name and the missing id.
 The provider turns it into the existing `stream_gap` event, so the session hook
-reloads the transcript and resumes after its `lastSequence`, as it does after
+reloads the transcript and resumes from the transcript head, as it does after
 `stream.reconciled`.
+
+The hook's gap recovery merges the fresh transcript into the displayed events
+instead of replacing them. The snapshot is authoritative for the range it
+covers ([first event, lastSequence]): live events missing from it — for
+example, streamed deltas the server has since assembled into an Item — are
+dropped rather than duplicated, while live events newer than the snapshot head
+survive a lagging read. Below the window, events the user paged in survive
+only while the paged region stays contiguous with the window — a hole between
+them would otherwise render two unrelated delta runs as one assistant bubble,
+so on a hole the pages drop and the window's cursor is adopted to page them
+back — and item projections never survive — after a retraction the server
+stands behind the raw events. The paging cursor follows the retained content:
+cleared when a non-empty snapshot carries the full history, adopted from the
+snapshot when the client has none or a hole opens between the paged pages and
+the window, and left with the user otherwise. A gap resync that does not
+advance the cursor counts as a stall; the third consecutive stall surfaces a
+persistent error, and any delivered event or advancing snapshot resets the
+count.
+
+The stream client tolerates corrupt frames. A frame whose data payload does
+not parse, parses to something without a string `type`, or — mid-stream —
+carries no `data:` line at all counts as corrupt. The default is fail closed:
+only the delta types whose text the snapshot re-assembles
+(`item.output_text.delta`, `item.reasoning.delta`) are skipped, with a
+rate-limited warning, and later frames move the consumer's cursor past them.
+Every other corrupt frame yields a resync — including one whose `event:` name
+is unusable. A resync also fires when more than three corrupt frames arrive
+with no decoded event between them (heartbeats do not reset the count — only
+a delivered event does), or when a whole connection delivered nothing but
+skips. A torn final buffer is a mid-frame disconnect: logged as such and
+never charged to the corruption budget. Synthesized resync frames carry
+placeholder watermarks (`replayFloorSequence: 0`,
+`snapshotThroughSequence: 0`) that no client code reads.
 
 ## 5. Tests
 
@@ -226,6 +269,12 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
   idle stream does not read the store during a test and live events can reach
   it only through the hub.
 
+- `ReplayFloorRetractionTest` pauses the materializer, raises the floor to the
+  Snapshot and retracts the continuation output, then checks that a cursor
+  below the floor is still served while the Snapshot is gone, that the stored
+  floor never regresses, and that the cursor expires again once the rebuilt
+  Snapshot backs the floor.
+
 - `EventIdentityTest` pins the rule. Integration tests compare every event's
   identity with the materialized Snapshot after deltas appended in two batches
   with a reasoning Part that spans both, after single appends, and after
@@ -236,7 +285,16 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
   floor there.
 - The web-shell tests decode a resync frame and check that the provider yields
   one `stream_gap` and stops, and that the session hook then reloads the
-  transcript and resubscribes after its `lastSequence`.
+  transcript and resubscribes from its head. The hook's gap-merge tests pin
+  the window semantics: paged pages survive while contiguous with the window,
+  superseded deltas drop, the cursor tracks the retained content, and
+  repeated non-advancing resyncs surface an error. The stream client's tests
+  pin the corrupt-frame policy: only re-assemblable deltas skip (at a bounded
+  warning rate), every other corrupt frame resyncs — including one with no
+  usable event name — more than three corrupt frames with no decoded event
+  between them resync (heartbeats do not dilute the count), a mid-frame close
+  logs distinctly and spares the budget, and a connection of only skips ends
+  with a resync.
 
 ## 6. Compatibility
 
@@ -253,7 +311,8 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
   have.
 - A client that ignores the resync frame sees the stream end, reconnects with
   the same cursor and gets the frame again. The web-shell client handles it.
-  Until the retention work raises the floor, no production stream sends it.
+  Only a deployment that opts in to the replay-floor pass sends it in
+  production.
 - The generated `@qwen-code/web-shell` types add `WebShellResyncRequired`, and
   the stream operation no longer lists `409`. The optional event fields were
   already in the WebShell event schema.
@@ -277,9 +336,10 @@ reloads the transcript and resumes after its `lastSequence`, as it does after
 
 ## 8. Follow-up
 
-- Retention: prune events, raise the floor before pruning, keep the floor at
-  or below the Snapshot while a stream reconciliation rebuilds the Items, and
-  end the WebShell transcript's older pages at the floor.
+- Retention: prune events below the floor the pass already raises, and end
+  the WebShell transcript's older pages at the floor. The Snapshot-discard
+  window above is closed at the read site only while nothing prunes; the
+  pruning half must re-decide the effective floor before it deletes rows.
 - The WebShell Session's floor and Snapshot watermarks.
 - `listItems` with paged Snapshot versions.
 - Lifecycle work: the three remaining gap lines.

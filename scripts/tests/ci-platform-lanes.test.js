@@ -482,8 +482,8 @@ describe('post-merge push lane', () => {
       'Run i18n check',
       'Generate settings schema',
       'Check settings schema is up-to-date',
-      'Generate VS Code companion notices',
-      'Check VS Code companion notices are up-to-date',
+      'Generate Web Shell and VS Code companion notices',
+      'Check Web Shell and VS Code companion notices are up-to-date',
       'Check serve fast-path bundle closure',
       'Check core subpath exports resolve',
       'Run .github/scripts helper tests',
@@ -503,6 +503,30 @@ describe('post-merge push lane', () => {
         )
         .map((x) => x.name),
     ).toEqual(FULL_PAYLOAD);
+    const generateNotices = stepByName.get(
+      'Generate Web Shell and VS Code companion notices',
+    ).run;
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=@qwen-code/web-shell',
+    );
+    expect(generateNotices).toContain(
+      'npm run generate:notices --workspace=qwen-code-vscode-ide-companion',
+    );
+    expect(
+      stepByName.get(
+        'Check Web Shell and VS Code companion notices are up-to-date',
+      ).run,
+    ).toContain(
+      'git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt',
+    );
+    const checkNotices = stepByName.get(
+      'Check Web Shell and VS Code companion notices are up-to-date',
+    );
+    expect(checkNotices['continue-on-error']).toBeUndefined();
+    expect(checkNotices.run).toContain(
+      'if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt) ]]; then',
+    );
+    expect(checkNotices.run).toContain('exit 1');
     for (const n of FULL_PAYLOAD) {
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
     }

@@ -28,6 +28,7 @@ import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { isComposerTask } from '../../utils/composerTasks';
 import { BranchPickerPopover } from '../BranchPickerPopover';
+import { artifactDisplayName } from '../artifacts/artifactUtils';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { Skeleton } from '../ui/skeleton';
 import styles from './EnvironmentPanel.module.css';
@@ -497,28 +498,31 @@ export function EnvironmentPanel({
                 <FileListSkeleton label={t('common.loading')} />
               ) : artifacts?.length ? (
                 <ul className={styles.attachmentFiles}>
-                  {artifacts.map((artifact) => (
-                    <li key={artifact.id}>
-                      <button
-                        type="button"
-                        className={styles.attachmentFile}
-                        title={artifact.title}
-                        onClick={() => onOpenArtifact?.(artifact.id)}
-                      >
-                        <FileTypeIcon
-                          name={artifact.workspacePath ?? artifact.title}
-                          mimeType={artifact.mimeType}
-                          size={16}
-                          strokeWidth={1.7}
-                          className={styles.attachmentFileIcon}
-                          aria-hidden="true"
-                        />
-                        <span className={styles.attachmentFileName}>
-                          {artifact.title}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
+                  {artifacts.map((artifact) => {
+                    const displayName = artifactDisplayName(artifact);
+                    return (
+                      <li key={artifact.id}>
+                        <button
+                          type="button"
+                          className={styles.attachmentFile}
+                          title={displayName}
+                          onClick={() => onOpenArtifact?.(artifact.id)}
+                        >
+                          <FileTypeIcon
+                            name={artifact.workspacePath ?? artifact.title}
+                            mimeType={artifact.mimeType}
+                            size={16}
+                            strokeWidth={1.7}
+                            className={styles.attachmentFileIcon}
+                            aria-hidden="true"
+                          />
+                          <span className={styles.attachmentFileName}>
+                            {displayName}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               ) : (
                 <p className={styles.emptyDescription}>

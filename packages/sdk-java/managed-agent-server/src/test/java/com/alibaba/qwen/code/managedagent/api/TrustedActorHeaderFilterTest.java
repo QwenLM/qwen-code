@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
@@ -14,13 +15,14 @@ class TrustedActorHeaderFilterTest {
     private static final String HEADER = "X-E2E-Trusted-Actor";
 
     @Test
-    void isDisabledByDefaultAndRunsFirst() throws Exception {
+    void isDisabledByDefaultAndRunsAfterSignatureAuth() throws Exception {
         TrustedActorHeaderFilter filter = filter(" ");
         MockHttpServletRequest request = request();
         MockFilterChain chain = new MockFilterChain();
         filter.doFilter(request, new MockHttpServletResponse(), chain);
         assertThat(((HttpServletRequest) chain.getRequest()).getUserPrincipal()).isNull();
-        assertThat(filter.getOrder()).isEqualTo(Ordered.HIGHEST_PRECEDENCE);
+        assertThat(filter.getOrder())
+                .isEqualTo(Ordered.HIGHEST_PRECEDENCE + 20);
     }
 
     @Test
@@ -63,10 +65,20 @@ class TrustedActorHeaderFilterTest {
         assertThat(((HttpServletRequest) chain.getRequest()).getUserPrincipal()).isNull();
     }
 
-    private static TrustedActorHeaderFilter filter(String configured) {
+    private static TrustedActorHeaderFilter filter(String configured)
+            throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.setTrustedActorHeader(configured);
-        return new TrustedActorHeaderFilter(properties);
+        return new TrustedActorHeaderFilter(properties, security(properties));
+    }
+
+    private static BrokerSecurity security(ManagedAgentProperties properties)
+            throws Exception {
+        org.springframework.boot.autoconfigure.web.ServerProperties server =
+                new org.springframework.boot.autoconfigure.web.ServerProperties();
+        server.setAddress(java.net.InetAddress.getByName("127.0.0.1"));
+        return new BrokerSecurity(properties, server,
+                new org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties());
     }
 
     private static MockHttpServletRequest request() {

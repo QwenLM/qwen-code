@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -16,6 +17,8 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import * as fs from 'node:fs';
+import * as runnerPaths from './landlock-runner-path.js';
 import os from 'node:os';
 import path from 'node:path';
 import type {
@@ -197,6 +200,75 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
     await runToResult(policy(), { ...payload(), inheritStdin: true });
     expect(launch.mock.calls[0][0].inheritStdin).toBe(true);
+  });
+
+  it('retains bwrap admission on architectures without a bundled input helper', async () => {
+    vi.spyOn(process, 'arch', 'get').mockReturnValue('arm');
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await expect(
+      runToResult(policy(), { ...payload(), inheritStdin: true }),
+    ).resolves.toMatchObject({
+      sandboxStatus: { state: 'confirmed', exitCode: 0 },
+    });
+    expect(launch.mock.calls[0][0].args.slice(4, 6)).toEqual([
+      '',
+      realpathSync(bwrap),
+    ]);
+  });
+
+  it('avoids input-helper resolution for launches without inherited stdin', async () => {
+    const bridge = vi
+      .spyOn(runnerPaths, 'resolveStdinBridge')
+      .mockImplementation(() => {
+        throw new Error('must not resolve');
+      });
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await runToResult();
+    expect(bridge).not.toHaveBeenCalled();
+    expect(launch.mock.calls[0][0].args[4]).toBe('');
+  });
+
+  it('passes the resolved input helper for inherited stdin', async () => {
+    const helper = path.join(installation, 'input-helper');
+    writeFileSync(helper, 'fixture');
+    vi.spyOn(runnerPaths, 'resolveStdinBridge').mockReturnValue(helper);
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await runToResult(policy(), { ...payload(), inheritStdin: true });
+    expect(launch.mock.calls[0][0].args.slice(4, 6)).toEqual([
+      helper,
+      realpathSync(bwrap),
+    ]);
+  });
+
+  it('keeps bwrap available when the optional input helper is missing', async () => {
+    const originalExists = fs.existsSync;
+    vi.spyOn(fs, 'existsSync').mockImplementation((value) =>
+      String(value).includes('vendor/landlock-run/')
+        ? false
+        : originalExists(value),
+    );
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await runToResult(policy(), { ...payload(), inheritStdin: true });
+    expect(launch.mock.calls[0][0].args[4]).toBe('');
+  });
+
+  it('keeps bwrap available when the optional helper cannot be chmodded', async () => {
+    const helper = path.join(installation, 'input-helper');
+    writeFileSync(helper, 'fixture');
+    chmodSync(helper, 0o644);
+    const originalRealpath = fs.realpathSync;
+    vi.spyOn(fs, 'realpathSync').mockImplementation((value) =>
+      String(value).includes('vendor/landlock-run/')
+        ? helper
+        : originalRealpath(value),
+    );
+    vi.spyOn(fs, 'chmodSync').mockImplementation(() => {
+      throw new Error('EROFS');
+    });
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await runToResult(policy(), { ...payload(), inheritStdin: true });
+    expect(launch.mock.calls[0][0].args[4]).toBe('');
+    expect(statSync(helper).mode & 0o777).toBe(0o644);
   });
 
   it('rejects conflicting stdin modes before creating control state', async () => {

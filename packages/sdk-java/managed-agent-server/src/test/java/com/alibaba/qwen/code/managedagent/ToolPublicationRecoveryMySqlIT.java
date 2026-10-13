@@ -62,6 +62,11 @@ class ToolPublicationRecoveryMySqlIT {
         fixture.expiredPrefixRemainsExpiredAndFencedPublicationCannotRecover();
     }
 
+    @Test
+    void activePhaseWithExpiredDeadlinePreventsReserveRenewAndDispatch() {
+        fixture.activePhaseWithExpiredDeadlinePreventsReserveRenewAndDispatch();
+    }
+
     @AfterEach
     void removeTestSchema() {
         if (admin != null && schema != null) {

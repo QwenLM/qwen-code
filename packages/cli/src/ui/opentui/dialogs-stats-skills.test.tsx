@@ -135,15 +135,22 @@ describe('OpenTuiStatsDialog scrolling', () => {
     mocks.state.scroller.scrollTo.mockClear();
   });
 
-  it('budgets the body from the terminal rows minus app and dialog chrome', () => {
-    expect(computeStatsBodyRows(40)).toBe(21);
-    expect(computeStatsBodyRows(24)).toBe(5);
-    expect(computeStatsBodyRows(10)).toBe(3);
+  it('budgets the body from the popup region minus the dialog chrome', () => {
+    // An 80x24 terminal leaves a 19-row region; a 40-row one leaves 35.
+    expect(computeStatsBodyRows(35)).toBe(27);
+    expect(computeStatsBodyRows(19)).toBe(11);
+    // The frame is unshrinkable, so a tiny region leaves the body nothing
+    // rather than pushing the border past the region's clip.
+    expect(computeStatsBodyRows(5)).toBe(0);
   });
 
-  it('wraps the body in a scrollbox of the given height', () => {
+  it('wraps the body in a scrollbox sized from the region budget', () => {
     const { getByTestId, getByText } = render(
-      <OpenTuiStatsDialog config={CONFIG} onClose={() => {}} bodyRows={7} />,
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
     );
     const box = getByTestId('scrollbox');
     expect(box.getAttribute('data-height')).toBe('7');
@@ -158,7 +165,11 @@ describe('OpenTuiStatsDialog scrolling', () => {
   it('is content-sized and hides the scroll hint when the body fits', () => {
     mocks.state.contentRows = 20;
     const { getByTestId, getByText, queryByText } = render(
-      <OpenTuiStatsDialog config={CONFIG} onClose={() => {}} bodyRows={40} />,
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={48}
+      />,
     );
     // Not padded out to the 40-row budget.
     expect(getByTestId('scrollbox').getAttribute('data-height')).toBe('20');
@@ -169,7 +180,11 @@ describe('OpenTuiStatsDialog scrolling', () => {
   it('caps at the budget and shows the hint when the body overflows', () => {
     mocks.state.contentRows = 30;
     const { getByTestId, getByText } = render(
-      <OpenTuiStatsDialog config={CONFIG} onClose={() => {}} bodyRows={7} />,
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
     );
     expect(getByTestId('scrollbox').getAttribute('data-height')).toBe('7');
     expect(getByText('tab · ↑↓ scroll · esc')).toBeTruthy();
@@ -177,7 +192,11 @@ describe('OpenTuiStatsDialog scrolling', () => {
 
   it('scrolls the body with up/down/pageup/pagedown', () => {
     render(
-      <OpenTuiStatsDialog config={CONFIG} onClose={() => {}} bodyRows={7} />,
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
     );
     send('down');
     send('up');
@@ -193,7 +212,11 @@ describe('OpenTuiStatsDialog scrolling', () => {
 
   it('returns to the top when the tab changes', () => {
     const { getByTestId } = render(
-      <OpenTuiStatsDialog config={CONFIG} onClose={() => {}} bodyRows={7} />,
+      <OpenTuiStatsDialog
+        config={CONFIG}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
     );
     send('pagedown');
     send('tab');

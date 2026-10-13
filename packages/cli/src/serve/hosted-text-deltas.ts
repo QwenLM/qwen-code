@@ -20,22 +20,148 @@ const DELTA_MAX_BYTES = 3072;
 export class HostedTextDeltaStream {
   private messageId: string | undefined;
   private ordinal = 0;
+  private firstSequence: number | undefined;
 
   constructor(
     private readonly session: ManagedSession,
     private readonly turnId: string,
   ) {}
 
-  /** Whether the current model message already published durable text. */
-  published(): boolean {
-    return this.messageId !== undefined;
+  bindMessageId(messageId: string): void {
+    if (this.firstSequence !== undefined)
+      throw new Error('Stream message still owns published deltas.');
+    this.messageId = messageId;
+    this.ordinal = 0;
+  }
+
+  async retractOriginal(
+    messageId: string,
+    source: {
+      sourceBootId: string;
+      sourceEventEpoch: string;
+      sourceActivation: ManagedSession['activation'];
+    },
+  ): Promise<void> {
+    const authority = this.session.authority;
+    const events = authority.eventsInSequenceRange(
+      1,
+      authority.committedSequence,
+    );
+    if (
+      events.some(
+        (event) =>
+          event.kind === 'message.retracted' &&
+          event.payload['messageId'] === messageId,
+      )
+    )
+      return;
+    const deltas = events.filter(
+      (event) =>
+        event.kind === 'message.delta' &&
+        event.payload['messageId'] === messageId &&
+        event.payload['turnId'] === this.turnId,
+    );
+    if (!deltas.length) return;
+    if (
+      deltas.some(
+        (event) =>
+          event.subject?.type !== 'activation' ||
+          event.subject.activationId !== source.sourceActivation.activationId ||
+          event.subject.epoch !== source.sourceActivation.epoch,
+      )
+    )
+      throw new Error('Original stream owner conflicts.');
+    const fromSequence = deltas[0].sequence;
+    const throughSequence = deltas.at(-1)!.sequence;
+    const activation = this.session.activation;
+    const commandId = `assistant-retract:${this.turnId}:${messageId}`;
+    await authority.appendExecutionEvent(
+      {
+        operation: 'assistantRetract',
+        commandId,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: createHash('sha256')
+          .update(`${messageId}:${fromSequence}:${throughSequence}`)
+          .digest('hex'),
+      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: commandId,
+        sessionKey: authority.sessionHeader.sessionKey,
+        kind: 'message.retracted',
+        occurredAt: Date.now(),
+        subject: {
+          type: 'activation',
+          scopeId: activation.activationId,
+          ...activation,
+        },
+        payload: {
+          messageId,
+          turnId: this.turnId,
+          fromSequence,
+          throughSequence,
+          sourceBootId: source.sourceBootId,
+          sourceEventEpoch: source.sourceEventEpoch,
+        },
+      }),
+      { class: 'harness', activation },
+    );
   }
 
   /** The messageId the in-flight assistant message must commit under. */
   takeMessageId(): string | undefined {
     const id = this.messageId;
     this.messageId = undefined;
+    this.firstSequence = undefined;
     return id;
+  }
+
+  /**
+   * Journal the retraction of the current message's published deltas
+   * (#13319): a restarted model attempt replays the request and publishes a
+   * fresh answer, and the server blanks every delta at or after
+   * `fromSequence` on the durable public feed. The stream resets so the
+   * replay publishes under a fresh message identity.
+   */
+  async retract(): Promise<void> {
+    const messageId = this.messageId;
+    const fromSequence = this.firstSequence;
+    this.messageId = undefined;
+    this.ordinal = 0;
+    this.firstSequence = undefined;
+    if (messageId === undefined || fromSequence === undefined) return;
+    const authority = this.session.authority;
+    const activation = this.session.activation;
+    await authority.appendExecutionEvent(
+      {
+        operation: 'assistantRetract',
+        commandId: `assistant-retract:${this.turnId}:${messageId}`,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: createHash('sha256')
+          .update(`${messageId}:${fromSequence}`)
+          .digest('hex'),
+      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: `assistant-retract:${this.turnId}:${messageId}`,
+        sessionKey: authority.sessionHeader.sessionKey,
+        kind: 'message.retracted',
+        occurredAt: Date.now(),
+        subject: {
+          type: 'activation',
+          scopeId: activation.activationId,
+          ...activation,
+        },
+        payload: {
+          messageId,
+          turnId: this.turnId,
+          fromSequence,
+        },
+      }),
+      { class: 'harness', activation },
+    );
   }
 
   async delta(text: string): Promise<void> {
@@ -78,7 +204,7 @@ export class HostedTextDeltaStream {
     const activation = this.session.activation;
     const ordinal = this.ordinal;
     this.ordinal += 1;
-    await authority.appendExecutionEvent(
+    const receipt = await authority.appendExecutionEvent(
       {
         operation: 'assistantDelta',
         commandId: `assistant-delta:${this.turnId}:${messageId}:${ordinal}`,
@@ -106,5 +232,8 @@ export class HostedTextDeltaStream {
       }),
       { class: 'harness', activation },
     );
+    // The first delta's journal sequence keys the retraction range a later
+    // restarted attempt publishes through `retract()`.
+    this.firstSequence ??= receipt.firstSequence;
   }
 }

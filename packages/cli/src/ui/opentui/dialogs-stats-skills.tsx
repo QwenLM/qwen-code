@@ -35,8 +35,8 @@ import {
 import { fmtTokens, getSeriesColors } from '../components/stats-helpers.js';
 import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { C } from './theme.js';
-import { HELP_LAYOUT_RESERVED_ROWS } from './help-content.js';
 
 /** Close the dialog on a raw Escape, like the other dialog hosts. */
 function useEscToClose(onClose: () => void, enabled: boolean) {
@@ -105,22 +105,18 @@ const TABS: Array<{ name: StatsTabName; label: string }> = [
 ];
 
 /**
- * The Stats dialog's own chrome around the scrolled body: top margin (1),
- * borders (2), vertical padding (2), tab bar (1), spacer (1) and the footer
- * hint with its margin (2).
+ * The Stats frame's rows outside the scrolled body: borders (2), vertical
+ * padding (2), tab bar (1), spacer (1) and the footer hint with its margin (2).
  */
-export const STATS_FIXED_ROWS = 9;
-const STATS_MIN_BODY_ROWS = 3;
+export const STATS_FIXED_ROWS = 8;
 
 /**
- * Body rows that fit a standalone /stats dialog on a terminal of the given
- * height, after the surrounding app chrome and the dialog's own chrome.
+ * Body rows that fit a standalone /stats dialog in a popup region of the
+ * given height. The frame is unshrinkable and the region's clip cannot cut
+ * its border, so a region too short for the chrome leaves the body nothing.
  */
-export function computeStatsBodyRows(terminalHeight: number): number {
-  return Math.max(
-    STATS_MIN_BODY_ROWS,
-    terminalHeight - HELP_LAYOUT_RESERVED_ROWS - STATS_FIXED_ROWS,
-  );
+export function computeStatsBodyRows(regionHeight: number): number {
+  return Math.max(0, regionHeight - STATS_FIXED_ROWS);
 }
 
 export function OpenTuiStatsDialog(props: {
@@ -129,13 +125,17 @@ export function OpenTuiStatsDialog(props: {
   /** Embedded hosts pass false while their own focus zone owns the keys. */
   isFocused?: boolean;
   /**
-   * Row budget for the tab body. When set, the body scrolls inside it with
-   * up/down/pageup/pagedown; embedded hosts leave it unset because they use
-   * the up key to return to their own tab bar.
+   * The popup region's row budget. When set, the tab body scrolls inside
+   * what the region leaves after the frame, with up/down/pageup/pagedown;
+   * embedded hosts leave it unset because they use the up key to return to
+   * their own tab bar.
    */
-  bodyRows?: number;
+  availableTerminalHeight?: number;
 }) {
-  const { config, onClose, isFocused = true, bodyRows } = props;
+  const { config, onClose, isFocused = true } = props;
+  const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  const bodyRows =
+    regionHeight === undefined ? undefined : computeStatsBodyRows(regionHeight);
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   // Rows the body wants, reported by layout; 0 until the first layout pass.
   const [contentRows, setContentRows] = useState(0);
@@ -413,7 +413,13 @@ export function OpenTuiStatsDialog(props: {
       paddingRight={2}
       paddingTop={1}
       paddingBottom={1}
-      marginTop={1}
+      // A shrinkable frame lets a short region squeeze its text rows to zero
+      // and paint them over each other; staying natural height keeps the rows
+      // contiguous for the region's clip to cut at the tail, as ink does for
+      // /stats. The clip cuts child text but not the frame's own border
+      // strokes, so a frame taller than the region still paints its border
+      // past it, and a body with an explicit height windows itself from the
+      // region budget instead of relying on the clip (Decision 71).
       flexShrink={0}
     >
       {/* Tab bar */}
@@ -470,6 +476,13 @@ export function OpenTuiStatsDialog(props: {
   );
 }
 
+/** The port's own body cap; ink windows its list at
+ * Math.min(15, Math.max(1, residual)) (SkillsManagerDialog). */
+const SKILLS_BODY_ROWS = 12;
+
+/** The skills frame's rows outside the scrollbox: border 2, padding 2, title 1, body margin 1. */
+const SKILLS_FRAME_CHROME_ROWS = 6;
+
 interface SkillRow {
   name: string;
   description: string;
@@ -478,11 +491,25 @@ interface SkillRow {
 export function OpenTuiSkillsDialog(props: {
   config: Config | null | undefined;
   onClose: () => void;
+  /** The popup region's row budget; the scrollbox windows its height from it. */
+  availableTerminalHeight?: number;
 }) {
   const { config, onClose } = props;
   const [rows, setRows] = useState<SkillRow[]>([]);
   const [loading, setLoading] = useState(true);
   useEscToClose(onClose, true);
+  // The frame is unshrinkable and the region's clip cannot cut the border,
+  // so the body's explicit height windows itself from what the region leaves
+  // after the frame's chrome: border and padding 4, the title row 1, the
+  // body's margin row 1. Without a budget the body keeps its twelve rows.
+  const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  const bodyRows =
+    regionHeight === undefined
+      ? SKILLS_BODY_ROWS
+      : Math.max(
+          0,
+          Math.min(SKILLS_BODY_ROWS, regionHeight - SKILLS_FRAME_CHROME_ROWS),
+        );
   useEffect(() => {
     let alive = true;
     const mgr = config?.getSkillManager?.();
@@ -518,7 +545,13 @@ export function OpenTuiSkillsDialog(props: {
       paddingRight={2}
       paddingTop={1}
       paddingBottom={1}
-      marginTop={1}
+      // A shrinkable frame lets a short region squeeze its text rows to zero
+      // and paint them over each other; staying natural height keeps the rows
+      // contiguous for the region's clip to cut at the tail, as ink does for
+      // /stats. The clip cuts child text but not the frame's own border
+      // strokes, so a frame taller than the region still paints its border
+      // past it, and a body with an explicit height windows itself from the
+      // region budget instead of relying on the clip (Decision 71).
       flexShrink={0}
     >
       <box flexDirection="row" justifyContent="space-between">
@@ -527,7 +560,7 @@ export function OpenTuiSkillsDialog(props: {
         </text>
         <text fg={C.dim}>{'esc to close'}</text>
       </box>
-      <scrollbox height={12} marginTop={1} stickyScroll={false}>
+      <scrollbox height={bodyRows} marginTop={1} stickyScroll={false}>
         {loading ? (
           <text fg={C.dim}>{'loading skills…'}</text>
         ) : rows.length === 0 ? (

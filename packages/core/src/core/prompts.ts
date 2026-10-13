@@ -270,19 +270,23 @@ export function getCustomSystemPrompt(
  */
 export interface PromptToolSurface {
   declaredTools?: ReadonlySet<string>;
+  agentReachable?: boolean;
   executionSandboxFilesystem?: 'read-only' | 'workspace-write';
   executionSandboxBackend?: 'bwrap' | 'landlock';
+  executionSandboxNetwork?: 'open' | 'closed';
 }
 
 /**
  * Which tools each gated line of `## Using Your Tools` talks about. A line
- * survives only when every tool it names is declared: a line that named a
- * missing tool would send the model after something it cannot call, which is
- * the defect this gating exists to fix. A deferred tool is reachable but not
- * declared, so its line drops too; its selection rule travels in the first
- * description line the deferred-tool reminder shows instead (#12702). Lines
- * absent from this table are policy that holds regardless of the tool surface
- * (tool fallback, parallel calls, respecting denials) and are never dropped.
+ * survives only when every tool it names is one the session can call: declared,
+ * or — for Agent alone — reachable through the deferred-tool bridge (see
+ * `gateToolGuidance`). A line that named an uncallable tool would send the
+ * model after something it cannot call, which is the defect this gating exists
+ * to fix. Any other deferred tool is reachable but not declared, so its line
+ * drops; its selection rule travels in the first description line the
+ * deferred-tool reminder shows instead (#12702). Lines absent from this table
+ * are policy that holds regardless of the tool surface (tool fallback, parallel
+ * calls, respecting denials) and are never dropped.
  */
 const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
   prefix: string;
@@ -313,7 +317,16 @@ const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
 const PREFER_DEDICATED_TOOLS_PREFIX = '- **Prefer Dedicated Tools:**';
 
 /**
- * Drops the tool-guidance lines whose tools this session did not declare.
+ * Drops tool-guidance lines whose tools the session cannot call. Agent policy
+ * also survives when Agent is reachable through the deferred-tool bridge.
+ *
+ * Agent is deliberately the only tool with that exception: the delegation and
+ * codebase-search bullets are the policy that sends the model to the bridge to
+ * discover Agent, so dropping them whenever Agent is deferred would turn
+ * deferral into silent removal. Every other deferred tool's line (monitor
+ * included) is still dropped — discovery of those is the startup reminder's
+ * job, and their bullets are usage guidance rather than the policy that drives
+ * their own discovery.
  *
  * Implemented as a line filter rather than a rebuilt template on purpose: with
  * no snapshot the section returns unchanged, so the default prompt cannot drift
@@ -330,7 +343,14 @@ function gateToolGuidance(
     const gate = TOOL_GUIDANCE_LINE_GATES.find((entry) =>
       line.startsWith(entry.prefix),
     );
-    return !gate || gate.tools.every((tool) => declared.has(tool));
+    return (
+      !gate ||
+      gate.tools.every(
+        (tool) =>
+          declared.has(tool) ||
+          (tool === ToolNames.AGENT && surface?.agentReachable === true),
+      )
+    );
   });
   // The "prefer dedicated tools" bullet only introduces its sub-bullets, so it
   // goes when every tool it was going to recommend is gone.
@@ -536,6 +556,7 @@ ${coreIdentity}
 # Core Mandates
 
 - **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
+- **Answer From Context First:** For follow-up questions, reuse prior observations when they already answer the question and remain current. Re-check when facts may have changed, the user asks for current or post-change state, or history is insufficient, uncertain, or only a summary lacking the needed evidence. This saves redundant investigation, not verification before claiming a change works.
 - **Conventions:** Never assume file contents. Read relevant code, imports, tests, and configuration before making changes. Follow the project's formatting, naming, typing, structure, and architectural patterns.
 - **Libraries/Frameworks:** Verify a dependency's availability and established usage in project manifests, imports, or neighboring code before using it.
 - **Comments:** Default to none. Add one only when the _why_ cannot be conveyed through naming or code structure — a hidden constraint, a subtle invariant, or a workaround for a specific bug. Do not edit comments that are separate from the code you are changing.
@@ -595,13 +616,13 @@ ${(function () {
     if (surface?.executionSandboxBackend === 'landlock') {
       return `
 # Tool Execution Sandbox (Landlock, partial)
-Shell commands and file mutations run under Landlock filesystem restrictions. The workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'} for file content and directory changes; writes outside the admitted writable roots are denied. Enforcement is partial: metadata operations such as chmod, chown, extended attributes, and timestamps are not fully confined. Landlock does not create PID or network namespaces; host reads, process visibility, and reachable host services remain outside this boundary.
+Shell commands and file mutations run under Landlock filesystem restrictions. The workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'} for file content and directory changes; writes outside the admitted writable roots are denied. Enforcement is partial: metadata operations such as chmod, chown, extended attributes, and timestamps are not fully confined. Command network policy is ${surface.executionSandboxNetwork ?? 'open'}. Landlock does not create PID or network namespaces; host reads, process visibility, and reachable host services remain outside this boundary.
 A refused pathname write can fail with 'Permission denied' (EACCES), which can also come from ordinary file permissions. Treat EACCES as a possible sandbox refusal: report it to the user and name the refused path. Do NOT work around a refusal by writing somewhere else, escalating privileges, or retrying the same write.
 `;
     }
     return `
 # Tool Execution Sandbox (bwrap)
-Shell commands and file mutations are confined by a kernel-level sandbox. The host filesystem is mounted READ-ONLY outside the admitted workspace; the workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'}, and command network access follows the operator policy. A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions. Host reads and pathname Unix sockets remain accessible.
+Shell commands and file mutations are confined by a kernel-level sandbox. The host filesystem is mounted READ-ONLY outside the admitted workspace; the workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'}, and ${surface?.executionSandboxNetwork ? `command network policy is ${surface.executionSandboxNetwork}` : 'command network access follows the operator policy'}. ${surface?.executionSandboxNetwork === 'closed' ? 'Closed networking prevents new ordinary IP connections, not access through existing caller-provided standard streams. ' : ''}A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions. Host reads and pathname Unix sockets remain accessible.
 When a write fails with EROFS, report it to the user and name the refused path. Do NOT work around a refusal by writing somewhere else, escalating privileges, or retrying the same write.
 `;
   } else if (isSandboxExec) {
