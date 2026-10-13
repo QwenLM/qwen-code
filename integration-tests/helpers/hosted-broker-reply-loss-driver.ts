@@ -70,7 +70,7 @@ async function upstream(route: string, body?: Buffer) {
   // #13800: a recovery-blocked turn hands its Workspace mount back on the
   // release-mount row; only two refusals are legitimate — a transient 409
   // runtime_session_busy while this turn's own dying operation still reads
-  // active (the bounded handback retries settle it), and a 503
+  // active (the owed handback retries settle it), and a 503
   // runtime_reconciliation_required when the turn's full release already
   // evicted the Runtime Session (non-resident mount residue belongs to the
   // LOST family's own sweep). Anything else breaks the fixture's contract.
@@ -87,7 +87,7 @@ async function upstream(route: string, body?: Buffer) {
   } else {
     assert.equal(response.status, 200, `${route}: ${text}`);
   }
-  return { text, reply: JSON.parse(text) as Reply };
+  return { text, reply: JSON.parse(text) as Reply, status: response.status };
 }
 
 const proxy = createServer(async (req, res) => {
@@ -110,7 +110,7 @@ const proxy = createServer(async (req, res) => {
       res.destroy();
       return;
     }
-    const { text, reply } = await upstream(req.url!, body);
+    const { text, reply, status } = await upstream(req.url!, body);
     exchanges.push({ operation, executionCallId, fields, reply });
     if (fault === 'cancel' && operation === 'prepare')
       await json(`/session/${sessionId}/cancel`, {}, 204);
@@ -135,7 +135,12 @@ const proxy = createServer(async (req, res) => {
       res.destroy();
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    // A tolerated :release-mount refusal keeps its real status: flattened
+    // to 200 the daemon would mis-read the busy reply as a terminal failure
+    // and never retry the handback.
+    res.writeHead(route.pathname.endsWith(':release-mount') ? status : 200, {
+      'Content-Type': 'application/json',
+    });
     res.end(text);
   } catch (cause) {
     proxyFailure = cause;

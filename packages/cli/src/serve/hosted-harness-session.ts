@@ -11,7 +11,6 @@ import {
   publishHostedModelRequest,
   type HostedModelRequest,
 } from './hosted-model-recovery.js';
-import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import {
   findHostedApprovalContinuation,
   type RestoredHostedApprovalContinuation,
@@ -904,20 +903,6 @@ function isReleasedOrReleasingAdoptRefusal(cause: unknown): boolean {
     ['runtime_session_not_ready', 'runtime_session_not_acquirable'].includes(
       String(cause.code),
     )
-  );
-}
-
-/** Any of the three recovery-required families that parks a Session blocked. */
-function isHostedRecoveryRequiredError(
-  cause: unknown,
-): cause is
-  | HostedToolRecoveryRequiredError
-  | HostedMcpRecoveryRequiredError
-  | HostedHookRecoveryRequiredError {
-  return (
-    cause instanceof HostedToolRecoveryRequiredError ||
-    cause instanceof HostedMcpRecoveryRequiredError ||
-    cause instanceof HostedHookRecoveryRequiredError
   );
 }
 
@@ -3081,11 +3066,7 @@ async function executeHostedTurn(
             result.model,
           );
         } catch (cause) {
-          if (
-            isHostedRecoveryRequiredError(cause) ||
-            cause instanceof LlmRequestPreparationError
-          )
-            throw cause;
+          if (monitorWakeNeedsRecovery(cause)) throw cause;
           const outcome = settledTurnOutcome(abort);
           state = outcome.state;
           stopReason = outcome.stopReason;
@@ -3194,13 +3175,7 @@ async function executeHostedTurn(
     // on the same storage (#13800). finish() kept it for the uncertain
     // case; the block transition is exactly where the turn proves it will
     // never replay, so this is where the exclusion ends.
-    // Upstream parks LlmRequestPreparationError in the same blocked
-    // family (the route marks the Session blocked for it too), so it
-    // owes the same handback.
-    if (
-      isHostedRecoveryRequiredError(cause) ||
-      cause instanceof LlmRequestPreparationError
-    )
+    if (monitorWakeNeedsRecovery(cause))
       await toolTurn?.releaseForRecoveryBlock();
     throw cause;
   }
@@ -6062,10 +6037,7 @@ export function registerHostedHarnessSessionRoutes(
         );
         settled = true;
       } catch (cause) {
-        if (
-          isHostedRecoveryRequiredError(cause) ||
-          cause instanceof LlmRequestPreparationError
-        ) {
+        if (monitorWakeNeedsRecovery(cause)) {
           if (admitted) session.blocked = true;
           else if (!res.headersSent)
             error(res, 503, 'hosted_mcp_recovery_required');

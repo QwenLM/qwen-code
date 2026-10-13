@@ -128,7 +128,7 @@ const proxy = createServer(async (req, res) => {
     // #13800: a recovery-blocked turn hands its Workspace mount back on
     // this route; only two refusals are legitimate — a transient 409
     // runtime_session_busy while the turn's own dying operation still
-    // reads active (settled by the bounded handback retries), and a 503
+    // reads active (settled by the owed handback retries), and a 503
     // runtime_reconciliation_required when the turn's full release
     // already evicted the Runtime Session (non-resident mount residue
     // belongs to the LOST family's own sweep). Anything else breaks the
@@ -192,7 +192,13 @@ const proxy = createServer(async (req, res) => {
         statusHeld = true;
       });
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    // A tolerated :release-mount refusal keeps its real status: flattened
+    // to 200 the daemon would mis-read the busy reply as a terminal failure
+    // and never retry the handback.
+    res.writeHead(
+      url.pathname.endsWith(':release-mount') ? upstream.status : 200,
+      { 'Content-Type': 'application/json' },
+    );
     res.end(text);
   } catch (cause) {
     proxyFailure = cause;
