@@ -30,6 +30,7 @@ import {
   interactionMetaFields,
   resolvePermissionOutcome,
   toPermissionOptions,
+  type PermissionPersistencePolicy,
 } from './permissionUtils.js';
 
 const debugLogger = createDebugLogger('ACP_TEAM_SINK');
@@ -39,6 +40,7 @@ export interface TeamSinkDeps {
   readonly sessionId: string;
   /** Session lifetime. Aborting it cancels an in-flight teammate approval. */
   readonly signal: AbortSignal;
+  readonly permissionPersistencePolicy?: PermissionPersistencePolicy;
   /**
    * Hands a teammate's report to the leader. The implementation must feed a
    * queue that a model turn actually drains: attaching a sink makes
@@ -183,7 +185,11 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
       onConfirm: async () => {},
     } as unknown as ToolCallConfirmationDetails;
 
-    const options = toPermissionOptions(full, false);
+    const options = toPermissionOptions(
+      full,
+      false,
+      deps.permissionPersistencePolicy,
+    );
     if (options.length === 0) {
       respondCancel(
         event,

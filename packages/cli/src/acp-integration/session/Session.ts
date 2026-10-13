@@ -11207,6 +11207,9 @@ export class Session implements SessionContext {
       config: this.config,
       sessionId: this.sessionId,
       signal: this.teamSinkAbort.signal,
+      permissionPersistencePolicy: this.requiresManagedConversationBinding
+        ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
+        : undefined,
       injectLeaderMessage: (modelText, displayText, senders) =>
         this.#enqueueTeammateMessage(modelText, displayText, senders),
       reportRosterChange: (change) => this.#enqueueTeamRosterChange(change),
@@ -11328,8 +11331,8 @@ export class Session implements SessionContext {
         kind: 'peer',
         agent: {
           agentName: agentName(recipient),
-          depth: 1,
-          kind: 'teammate' as const,
+          depth: recipient === LEADER_NAME ? 0 : 1,
+          kind: recipient === LEADER_NAME ? 'root' : 'teammate',
         },
         structured: {
           ...(activity.kind === 'message' && activity.from

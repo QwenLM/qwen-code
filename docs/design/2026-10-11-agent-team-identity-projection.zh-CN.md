@@ -51,6 +51,8 @@ interface AgentIdentity {
 3. **Ephemeral 是文档化的，不是隐藏的** —— reload 后报告/花名册行保持归因；活动行消失。follow-up 清单记录了「按队友持久化活动摘要」为候选改进。
 4. **同一 manager 实例的重复通知是 no-op**：`Config.setTeamManager` 对同一对象也触发变更回调，重复注册五个监听器会导致审批翻倍且 detach 泄漏（review 发现，已修并加回归测试）。
 
+队员审批继承会话的权限持久化策略：standalone 会话不提供项目级持久化选项，选择未提供选项的响应会被取消。每次请求有独立 UUID。发给 leader 的消息使用 `/root`、depth 0 和 `kind: 'root'`，与发送方身份规则一致。
+
 ## 已知缺口（follow-up，不属本 PR）
 
 - CJK 队友名在 `sanitizeName` 中塌缩（main 既有行为）：`研究员` 清洗为空，模型改用 ASCII 重试。身份投射本身对非 ASCII 路径无碍（拼音名 + 中文消息内容已验证）。

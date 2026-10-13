@@ -55,6 +55,7 @@ import {
 import * as core from '@qwen-code/qwen-code-core';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
   getCurrentAgentId,
   runWithAgentContext,
@@ -1387,8 +1388,14 @@ describe('Session', () => {
         message: 'sky sentence',
         timestamp: 2,
       });
+      manager.emit('message_sent', {
+        from: 'checker',
+        to: 'leader',
+        message: 'checked',
+        timestamp: 3,
+      });
 
-      // Both events become client-visible frames attributed to the teammate…
+      // Events become client-visible frames with the acting or receiving agent.
       await vi.waitFor(() =>
         expect(
           vi
@@ -1399,7 +1406,7 @@ describe('Session', () => {
                 (update._meta?.['source'] as string | undefined) ===
                 'teammate_activity',
             ),
-        ).toHaveLength(2),
+        ).toHaveLength(3),
       );
       const activityFrames = vi
         .mocked(mockClient.sessionUpdate)
@@ -1446,6 +1453,15 @@ describe('Session', () => {
               depth: 1,
               kind: 'teammate',
             },
+          },
+        },
+      });
+
+      expect(activityFrames[2]).toMatchObject({
+        _meta: {
+          agent: { agentName: '/root', depth: 0, kind: 'root' },
+          backgroundTask: {
+            author: { agentName: '/root/checker', depth: 1, kind: 'teammate' },
           },
         },
       });
@@ -1511,6 +1527,55 @@ describe('Session', () => {
       await vi.waitFor(() => expect(respond).toHaveBeenCalled());
       expect(promptedTitle).toContain('security');
       expect(respond.mock.calls[0]![0]).toBe(offeredId);
+      session.dispose();
+    });
+
+    it('keeps standalone teammate approvals from persisting project permissions', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      let offered: string[] = [];
+      vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+        async (params) => {
+          offered = params.options.map(
+            (option: PermissionOption) => option.optionId,
+          );
+          return {
+            outcome: {
+              outcome: 'selected',
+              optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+            },
+          };
+        },
+      );
+      const respond = vi.fn(async (..._args: unknown[]) => {});
+      manager.emit('teammate_approval_request', {
+        teammateName: 'checker',
+        toolName: 'run_shell_command',
+        toolInput: { command: 'echo checked' },
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Confirm Shell Command',
+          command: 'echo checked',
+          rootCommand: 'echo',
+        },
+        timestamp: 1,
+        respond,
+      });
+      await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+      expect(offered).not.toContain(
+        ToolConfirmationOutcome.ProceedAlwaysProject,
+      );
+      expect(offered).toContain(ToolConfirmationOutcome.ProceedAlwaysUser);
+      expect(respond.mock.calls[0]![0]).toBe(ToolConfirmationOutcome.Cancel);
       session.dispose();
     });
 

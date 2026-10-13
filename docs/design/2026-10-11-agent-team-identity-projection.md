@@ -51,6 +51,8 @@ The shape mirrors OpenAI's Responses multi-agent contract (per-item `agent: { ag
 3. **Ephemerality is documented, not hidden** — reload keeps reports/roster rows attributed; activity rows vanish. The follow-up list records a persisted per-teammate summary as a candidate refinement.
 4. **Same-instance manager re-notification is a no-op** in the sink: `Config.setTeamManager` fires change callbacks even for the identical object, and re-registering the five listeners would double approvals and leak on detach (review finding, fixed with a regression test).
 
+Teammate approvals inherit the session's permission persistence policy: standalone sessions cannot offer project-wide persistence, and responses selecting an unoffered option are cancelled. Each request has its own UUID. Messages addressed to the leader carry `/root`, depth 0, and `kind: 'root'`, matching the sender identity rules.
+
 ## Known gaps (follow-ups, not this PR)
 
 - CJK teammate names collapse in `sanitizeName` (pre-existing main behavior): `研究员` sanitizes to empty and the model retries with ASCII. Identity projection itself handles non-ASCII paths fine (verified with pinyin names + Chinese message content).
