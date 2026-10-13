@@ -104,7 +104,10 @@ function call(
   } as ToolCallRequestInfo;
 }
 
-function createTurn(promptName = 'prompt'): HostedWorkspaceToolTurn {
+function createTurn(
+  promptName = 'prompt',
+  memberPlanMode = false,
+): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -138,6 +141,7 @@ function createTurn(promptName = 'prompt'): HostedWorkspaceToolTurn {
     undefined,
     {
       profile: 'hosted-workspace-shell/1',
+      ...(memberPlanMode ? { memberPlanMode: true } : {}),
       childAgents: {
         funnel: children,
         depth: 1,
@@ -1289,3 +1293,328 @@ it('folds the parked wait on a budget refusal, so the next call refuses the same
   ]);
   expect(texts(again)).toContain('budget_exhausted');
 }, 60_000);
+
+it('declares the widened send_message beside the member tools (b3c)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'sync with bob',
+  );
+  const tools = await createTurn().declarations(new AbortController().signal);
+  const sendMessage = tools.filter((tool) => tool.name === 'send_message');
+  expect(sendMessage).toHaveLength(1);
+  expect(sendMessage[0]!.parametersJsonSchema).toMatchObject({
+    type: 'object',
+    properties: {
+      to: {
+        type: 'string',
+        description:
+          'A member name, "*" for every other member, or "parent" for the team leader.',
+      },
+    },
+    required: ['to', 'message'],
+    additionalProperties: false,
+  });
+  // The address is free-form member addressing, never an enum (R1-5).
+  const schema = sendMessage[0]!.parametersJsonSchema as {
+    properties: { to: unknown };
+  };
+  expect(schema.properties.to).toEqual({
+    type: 'string',
+    description:
+      'A member name, "*" for every other member, or "parent" for the team leader.',
+  });
+});
+
+it('keeps the parent-only send_message of a plain child (b3c)', async () => {
+  await seedFirstInput('fix the fence');
+  const tools = await createTurn().declarations(new AbortController().signal);
+  const sendMessage = tools.filter((tool) => tool.name === 'send_message');
+  expect(sendMessage).toHaveLength(1);
+  expect(sendMessage[0]!.parametersJsonSchema).toMatchObject({
+    properties: { to: { enum: ['parent'] } },
+  });
+});
+
+it('rides a member message through the command channel (b3c)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'sync with bob',
+  );
+  const turn = createTurn();
+  const running = execute(turn, [
+    call({ to: 'bob', message: 'sync at noon' }, 'call-msg-1', 'send_message'),
+  ]);
+  const commandId = commandIdOf('call-msg-1');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  expect(commands.command(commandId)).toMatchObject({
+    kind: 'member_message',
+    direction: 'outbound',
+  });
+  // The checkpoint names it under its own tool identity, beside board calls.
+  const authority = await session.authority.harnessRunAuthorization();
+  if (authority.status !== 'runnable')
+    throw new Error(`expected runnable, got ${authority.status}`);
+  expect(
+    authority.checkpoint.commandWait?.runs.map((run) => ({
+      commandId: run.commandId,
+      toolName: run.toolName,
+      functionCallId: run.functionCallId,
+    })),
+  ).toEqual([
+    {
+      commandId,
+      toolName: 'send_message',
+      functionCallId: 'call-msg-1',
+    },
+  ]);
+  await commands.handover(commandId, PARENT);
+  await commands.answered(commandId, {
+    outcome: 'answered',
+    text: 'Message sent to bob.\n- bob: sent.',
+  });
+  const parts = await running;
+  expect(texts(parts)).toContain('Message sent to bob.');
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('consumed');
+});
+
+it('refuses the self-addressed, the leader and the empty addressee locally (b3c)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const parts = await execute(createTurn(), [
+    call({ to: 'alice', message: 'hi' }, 'call-self', 'send_message'),
+    call({ to: 'leader', message: 'hi' }, 'call-leader', 'send_message'),
+    call({ message: 'hi' }, 'call-no-to', 'send_message'),
+  ]);
+  const text = texts(parts);
+  expect(text).toContain(
+    'A member cannot send a message to itself (\\"alice\\").',
+  );
+  expect(text).toContain(
+    'A member messages its leader with send_message with to \\"parent\\", not \\"leader\\".',
+  );
+  expect(text).toContain(
+    'Hosted send_message requires \\"to\\": \\"parent\\" for the team leader, a member name, or \\"*\\" for every other member.',
+  );
+  // Nothing committed anything: no command outbox, no message outbox.
+  expect(
+    session.authority.extensionRecordsInDomain('session_command'),
+  ).toHaveLength(0);
+  expect(
+    session.authority.extensionRecordsInDomain('session_message'),
+  ).toHaveLength(0);
+});
+
+it('refuses a member message sharing its batch with Workspace work (b3c)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const parts = await execute(createTurn(), [
+    call({ to: 'bob', message: 'hi' }, 'call-msg-sb', 'send_message'),
+    call({ command: 'echo hi' }, 'call-shell', 'run_shell_command'),
+  ]);
+  expect(texts(parts)).toContain(
+    'Hosted send_message to a member cannot share a batch with Workspace or Runtime calls',
+  );
+  expect(commands.command(commandIdOf('call-msg-sb'))).toBeUndefined();
+});
+
+it('bounds a member message with the member-message wrapper budget (b3c)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const parts = await execute(createTurn(), [
+    call(
+      { to: 'bob', message: 'x'.repeat(33 * 1024) },
+      'call-big',
+      'send_message',
+    ),
+  ]);
+  expect(texts(parts)).toContain('too long for a member message');
+  expect(commands.command(commandIdOf('call-big'))).toBeUndefined();
+});
+
+it('refuses member messages in plan mode while the leader stays open (b3c)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }, true) + 'work',
+  );
+  const parts = await execute(createTurn('prompt', true), [
+    call({ to: 'bob', message: 'hi' }, 'call-plan-msg', 'send_message'),
+  ]);
+  expect(texts(parts)).toContain(
+    'in plan mode until the leader approves its plan',
+  );
+  expect(commands.command(commandIdOf('call-plan-msg'))).toBeUndefined();
+});
+
+it('keeps to "parent" on the plain message lane (b3c)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const parts = await execute(createTurn(), [
+    call(
+      { to: 'parent', message: 'which task is mine?' },
+      'call-parent',
+      'send_message',
+    ),
+  ]);
+  expect(texts(parts)).toContain('queued for delivery to the parent agent');
+  const messages =
+    session.authority.extensionRecordsInDomain('session_message');
+  expect(messages).toHaveLength(1);
+  expect(
+    session.authority.extensionRecordsInDomain('session_command'),
+  ).toHaveLength(0);
+});
+
+it('routes a capitalized "Parent" to the plain message lane (R1-2)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const parts = await execute(createTurn(), [
+    call(
+      { to: 'Parent', message: 'which task is mine?' },
+      'call-parent-fold',
+      'send_message',
+    ),
+  ]);
+  expect(texts(parts)).toContain('queued for delivery to the parent agent');
+  expect(
+    session.authority.extensionRecordsInDomain('session_message'),
+  ).toHaveLength(1);
+  expect(
+    session.authority.extensionRecordsInDomain('session_command'),
+  ).toHaveLength(0);
+});
+
+it('answers an unsupported key on the member send_message with its member form (R1-4)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const parts = await execute(createTurn(), [
+    call(
+      { to: 'bob', message: 'hi', task_id: 'task-1' },
+      'call-extra-key',
+      'send_message',
+    ),
+  ]);
+  const text = texts(parts);
+  expect(text).toContain('A member send_message takes only a member');
+  expect(text).not.toContain('messages only its parent');
+  expect(
+    session.authority.extensionRecordsInDomain('session_command'),
+  ).toHaveLength(0);
+  expect(
+    session.authority.extensionRecordsInDomain('session_message'),
+  ).toHaveLength(0);
+});
+
+it('shares a batch of board commands with a member send_message (R1-4)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const running = execute(createTurn(), [
+    call({ subject: 'x', description: 'y' }, 'call-c1', 'task_create'),
+    call({ to: 'bob', message: 'hi' }, 'call-m1', 'send_message'),
+  ]);
+  const createId = commandIdOf('call-c1');
+  const messageId = commandIdOf('call-m1');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(createId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  // The park named the whole batch before the first call ran; the
+  // sibling's own outbox lands when its turn comes.
+  const authority = await session.authority.harnessRunAuthorization();
+  if (authority.status !== 'runnable')
+    throw new Error(`expected runnable, got ${authority.status}`);
+  expect(
+    authority.checkpoint.commandWait?.runs.map((run) => run.toolName),
+  ).toEqual(['task_create', 'send_message']);
+  await commands.handover(createId, PARENT);
+  await commands.answered(createId, {
+    outcome: 'answered',
+    text: 'Task #1 created: "x".',
+  });
+  await vi.waitFor(
+    () => {
+      expect(commands.command(messageId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  expect(commands.command(messageId)?.kind).toBe('member_message');
+  await commands.handover(messageId, PARENT);
+  await commands.answered(messageId, {
+    outcome: 'answered',
+    text: 'Message sent to bob.\n- bob: sent.',
+  });
+  const text = texts(await running);
+  expect(text).not.toContain('cannot share a batch');
+  expect(text).toContain('Task #1 created');
+  expect(text).toContain('Message sent to bob.');
+});
+
+it('keeps to "parent" on the plain lane in plan mode (R1-5)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }, true) + 'work',
+  );
+  const parts = await execute(createTurn('prompt', true), [
+    call(
+      { to: 'parent', message: 'which task is mine?' },
+      'call-plan-parent',
+      'send_message',
+    ),
+  ]);
+  expect(texts(parts)).toContain('queued for delivery to the parent agent');
+  expect(
+    session.authority.extensionRecordsInDomain('session_message'),
+  ).toHaveLength(1);
+  expect(
+    session.authority.extensionRecordsInDomain('session_command'),
+  ).toHaveLength(0);
+});
+
+it('rides a broadcast address through the command channel (R1-5)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const running = execute(createTurn(), [
+    call({ to: '*', message: 'sync at noon' }, 'call-star', 'send_message'),
+  ]);
+  const commandId = commandIdOf('call-star');
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
+  expect(commands.command(commandId)?.kind).toBe('member_message');
+  expect(
+    session.authority.extensionRecordsInDomain('session_message'),
+  ).toHaveLength(0);
+  await commands.handover(commandId, PARENT);
+  await commands.answered(commandId, {
+    outcome: 'answered',
+    text: 'Message sent to every other member of team "review".\n- bob: sent.',
+  });
+  await running;
+  expect(commands.command(commandId)?.run.delivery?.state).toBe('consumed');
+});
+
+it('refuses a member message with an empty text locally (R1-5)', async () => {
+  await seedFirstInput(
+    teamMemberPreamble({ name: 'alice', teamName: 'review' }) + 'work',
+  );
+  const parts = await execute(createTurn(), [
+    call({ to: 'bob', message: '' }, 'call-empty', 'send_message'),
+  ]);
+  expect(texts(parts)).toContain(
+    'Hosted send_message requires a nonempty message.',
+  );
+  expect(commands.command(commandIdOf('call-empty'))).toBeUndefined();
+});
