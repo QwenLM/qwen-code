@@ -42,7 +42,9 @@ Issue #13745 提出了三项:E1(团队记录 domain)、E2(detach 到独立的持
 
    发给 `leader` 的消息以 lead Session 为目标。发给成员的消息以该成员 child run 所 attach 的 Session 为目标,因此发给一个其 run 尚未 attach 的成员的消息停留在 `planned`。
 
-7. **`team_plan` 是审批状态,不是其传输。** 计划请求以 `requestId` 为键,即请 leader 做决定的那个 D6 action 的 id(来源为 `team_plan`)。它写明成员、成员的 `planRevision` 与计划内容。其 run 以 `waiting` 开启,等待决定,并以 `settled` 结束,带 `decision: approved | rejected` 与可选的反馈。计划被撤回或被取代时,它以 `cancelled` 结束且没有决定:修改后的计划以更新的修订开启新请求,因此一个决定绝不会作用于它没有看过的计划。请求与决定分别以 `plan_approval_request` 与 `plan_approval_response` 消息传递,决定本身先经 D6 action(`resolveAction`)裁决,再由 H4e-b 提交到这里。计划请求只能来自要求 plan mode 的成员。
+   [H4e-b3 设计](2026-10-11-managed-agent-team-member-commands.zh-CN.md)让该 domain 及其 `task_assignment` kind 保留且不产出(其决策 11):lead 与成员之间的往来是 Session 消息与成员命令。
+
+7. **`team_plan` 是审批状态,不是其传输。** 计划请求以 `requestId` 为键,即请 leader 做决定的那个 D6 action 的 id(来源为 `team_plan`)。它写明成员、成员的 `planRevision` 与计划内容。其 run 以 `waiting` 开启,等待决定,并以 `settled` 结束,带 `decision: approved | rejected` 与可选的反馈。计划被撤回或被取代时,它以 `cancelled` 结束且没有决定:修改后的计划以更新的修订开启新请求,因此一个决定绝不会作用于它没有看过的计划。请求与决定分别以 `plan_approval_request` 与 `plan_approval_response` 消息传递,决定本身先经 D6 action(`resolveAction`)裁决,再由 H4e-b 提交到这里。计划请求只能来自要求 plan mode 的成员。[H4e-b3 设计](2026-10-11-managed-agent-team-member-commands.zh-CN.md)改变了传输方式与该键的含义:成员以命令递交计划,lead 的模型用 `team_plan_approval` 做决定,不产出计划消息,`requestId` 是递交命令的 command id,而不是 D6 action(其决策 9)。
 8. **提交时规则检查 lead journal 所持有的内容。** TypeScript authority 与 Java store 都检查:
 
    | 规则                                                                                            | Domain                                   |
@@ -125,16 +127,16 @@ Issue #13745 提出了三项:E1(团队记录 domain)、E2(detach 到独立的持
 
 链身份:`requestId`。
 
-| 键             | 规则                                                        |
-| -------------- | ----------------------------------------------------------- |
-| `teamId`       | id:团队                                                     |
-| `requestId`    | id:请 leader 做决定的那个 D6 action                         |
-| `member`       | 成员名:计划所属的成员                                       |
-| `planRevision` | 从 1 开始的整数                                             |
-| `planRef`      | 持久引用,最多 65536 字节                                    |
-| `decision`     | null、`approved` 或 `rejected`;恰在 run 为 `settled` 时设置 |
-| `feedbackRef`  | null 或最多 65536 字节的持久引用;只能与决定一起出现         |
-| `run`          | `waiting`,随后为 `settled` 或 `cancelled`                   |
+| 键             | 规则                                                                            |
+| -------------- | ------------------------------------------------------------------------------- |
+| `teamId`       | id:团队                                                                         |
+| `requestId`    | id:计划递交命令的 command id(H4e-b3;最初计划为请 leader 做决定的那个 D6 action) |
+| `member`       | 成员名:计划所属的成员                                                           |
+| `planRevision` | 从 1 开始的整数                                                                 |
+| `planRef`      | 持久引用,最多 65536 字节                                                        |
+| `decision`     | null、`approved` 或 `rejected`;恰在 run 为 `settled` 时设置                     |
+| `feedbackRef`  | null 或最多 65536 字节的持久引用;只能与决定一起出现                             |
+| `run`          | `waiting`,随后为 `settled` 或 `cancelled`                                       |
 
 - **开启。** run 为 `waiting`,没有决定,也没有反馈。
 - **后继。** `teamId`、`requestId`、`member`、`planRevision` 与 `planRef` 永不改变。run 只结束一次,这同时固定了决定与反馈。
@@ -184,7 +186,7 @@ Issue #13745 提出了三项:E1(团队记录 domain)、E2(detach 到独立的持
 
 ## 后续工作
 
-| 切片   | 范围                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H4e-b  | managed 路径上的七个团队工具;managed Agent 工具的 `name` 与 teammate 路由(H4b 决策 11);mailbox 中继与成员一侧的投递(开放问题 1 与 2);经由 D6 action 的计划裁决;`requestMemberShutdown`;团队成员关系上的关闭级联(#13745 E3,开放问题 3);旧团队导入;经过与 H3 相同的实机验收(#13532)后启用。已拆为 H4e-b1(lead 一侧的团队与 E3,见 [H4e-b1 设计](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md))、H4e-b2(mailbox,在 H4d-b 之后;见 [H4e-b2 设计](2026-10-11-managed-agent-team-mailbox.zh-CN.md))与 H4e-b3(计划审批、关停与旧团队导入)。 |
-| Detach | 把显式 detach 的 child 跨父关闭迁移到独立的持久所有者(#13745 E2),以及 [H4 设计](2026-10-04-managed-child-agents.zh-CN.md) 留下的所有者问题。                                                                                                                                                                                                                                                                                                                                                                                              |
+| 切片   | 范围                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H4e-b  | managed 路径上的七个团队工具;managed Agent 工具的 `name` 与 teammate 路由(H4b 决策 11);mailbox 中继与成员一侧的投递(开放问题 1 与 2);经由 D6 action 的计划裁决;`requestMemberShutdown`;团队成员关系上的关闭级联(#13745 E3,开放问题 3);旧团队导入;经过与 H3 相同的实机验收(#13532)后启用。已拆为 H4e-b1(lead 一侧的团队与 E3,见 [H4e-b1 设计](2026-10-10-managed-agent-team-lead-runtime.zh-CN.md))、H4e-b2(mailbox,在 H4d-b 之后;见 [H4e-b2 设计](2026-10-11-managed-agent-team-mailbox.zh-CN.md))与 H4e-b3(计划审批、关停与旧团队导入;见 [H4e-b3 设计](2026-10-11-managed-agent-team-member-commands.zh-CN.md),其中计划由 lead 的 `team_plan_approval` 决定而非经由 D6 action,停止成员而非征询成员,并且不做旧团队导入)。 |
+| Detach | 把显式 detach 的 child 跨父关闭迁移到独立的持久所有者(#13745 E2),以及 [H4 设计](2026-10-04-managed-child-agents.zh-CN.md) 留下的所有者问题。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |

@@ -135,15 +135,24 @@ class HostedTeamLeadMySqlIT {
         assertThat(team(lead).path("lifecycle").asText()).isEqualTo("deleted");
 
         for (String member : List.of("alice", "bob")) {
-            assertThat(toolNames(requestsOf("H4EB1_MEMBER_" + member + "_WAIT").get(0))).contains("read_file")
-                    .doesNotContain("agent").doesNotContainAnyElementsOf(TEAM_TOOLS);
+            List<String> tools = toolNames(requestsOf(
+                    "H4EB1_MEMBER_" + member + "_WAIT").get(0));
+            // H4e-b3: members now read and write the same board the lead
+            // does; the three board verbs ride the lineage lane, while
+            // the team-level creational names stay lead-only.
+            assertThat(tools).contains("read_file")
+                    .containsAll(List.of("task_create", "task_list",
+                            "task_update"))
+                    .doesNotContain("agent")
+                    .doesNotContainAnyElementsOf(
+                            List.of("team_create", "team_delete"));
         }
         assertThat(toolAnswer("lead-alice")).contains("It joined team \"review\" as \"alice\"");
         assertThat(toolAnswer("lead-list-running")).contains("#1 [in_progress] @alice — Audit A")
                 .contains("#2 [pending] — Audit B").contains("alice: running").contains("bob: running");
         assertThat(toolAnswer("lead-delete-running")).contains("Team \"review\" still has running members:")
                 .contains("alice").contains("bob");
-        assertThat(toolAnswer("lead-own-bob-open")).contains("has finished, so it can own only a completed task");
+        assertThat(toolAnswer("lead-own-bob-open")).contains("Member \"bob\" has finished. If it already did this task's work");
         assertThat(toolAnswer("lead-list-final")).contains("#1 [completed] @alice — Audit A")
                 .contains("#2 [completed] @bob — Audit B").contains("alice: completed").contains("bob: completed");
         assertThat(toolAnswer("lead-delete-final")).contains("Team \"review\" deleted.");
@@ -204,16 +213,27 @@ class HostedTeamLeadMySqlIT {
         long stateRevision = revision(lead, "team_state");
         int leadRequests = requestsOf("H4EB1_LEAD_CLOSE").size();
 
-        String operation = request("POST", "/v1/agents/sessions/" + lead + "/close", null, "close-lead", 202)
-                .path("id").asText();
+        String operation = null;
+        try {
+            operation = request("POST", "/v1/agents/sessions/" + lead + "/close", null, "close-lead", 202)
+                    .path("id").asText();
+        } catch (AssertionError failure) {
+            // Without workspace execution no close operation can bind, and
+            // the cascade this case watches lives behind it — abort there.
+            org.junit.jupiter.api.Assumptions.assumeTrue(
+                    !String.valueOf(failure.getMessage()).contains("workspace_unavailable"),
+                    "workspace execution unavailable under the runtime broker's opt-out");
+            throw failure;
+        }
+        String closeOperation = operation;
         waiting().atMost(Duration.ofSeconds(15)).pollInterval(Duration.ofMillis(200)).untilAsserted(() ->
                 assertThat(body(rows(lead, "child_run").get(0)).path("stopRequested").asBoolean()).isTrue());
         // The stop is recorded, but for as long as the member's Turn runs the
         // close stays owed: the cascade's retries (1, 2 and 4 s apart) are
         // refused, and nothing interrupts that Turn or closes its Session.
         waiting().atMost(Duration.ofSeconds(25)).pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
-            assertCloseOwed(lead, operation, child);
-            assertThat(closeAttempts(operation)).isGreaterThanOrEqualTo(4);
+            assertCloseOwed(lead, closeOperation, child);
+            assertThat(closeAttempts(closeOperation)).isGreaterThanOrEqualTo(4);
         });
 
         releases.get("carol").countDown();
@@ -221,7 +241,7 @@ class HostedTeamLeadMySqlIT {
         // the relay misses it, the attempt after waits out a 16 s backoff.
         waiting().atMost(Duration.ofSeconds(45)).pollInterval(Duration.ofMillis(500)).untilAsserted(() -> {
             assertNoModelFailure();
-            String status = operationStatus(lead, operation);
+            String status = operationStatus(lead, closeOperation);
             if (List.of("failed", "recovery_blocked").contains(status))
                 throw new IllegalStateException("The lead's close ended " + status);
             assertThat(status).isEqualTo("completed");
@@ -396,7 +416,8 @@ class HostedTeamLeadMySqlIT {
                             plan.add(Step.calls(call("lead-done-alice", "task_update",
                                     Map.of("taskId", "1", "status", "completed"))));
                         } else {
-                            // A member that finished may own its task only as completed.
+                            // A member that finished, and was given no work in this
+                            // turn, may own its task only as completed (H4e-b2).
                             plan.add(Step.calls(call("lead-own-bob-open", "task_update",
                                     Map.of("taskId", "2", "owner", "bob", "status", "in_progress"))));
                             plan.add(Step.calls(call("lead-own-bob-done", "task_update",
@@ -637,15 +658,9 @@ class HostedTeamLeadMySqlIT {
     private String createLead(String marker) throws Exception {
         TransactionTemplate transaction = new TransactionTemplate(spring.getBean(PlatformTransactionManager.class));
         ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
-        String session = transaction.execute(status -> {
-            var created = store.insertWorkspaceSessionCommand(tenant, "actor", "create-" + marker, DIGEST,
-                    "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace-0", "child"));
-            // No public route creates a Shell-laned Session: set the profile
-            // before anything can read the row.
-            jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-shell/1'"
-                    + " WHERE tenant_id = ? AND session_id = ?", tenant, created.sessionId());
-            return created.sessionId();
-        });
+        String session = transaction.execute(status -> store.insertInternalTeamLeadSessionCommand(
+                tenant, "actor", "create-" + marker, DIGEST, null,
+                new WorkspaceSelection("workspace-0", "child")).sessionId());
         leadSession = session;
         waiting().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofSeconds(1)).ignoreExceptions().untilAsserted(() ->
                 request("POST", "/v1/agents/sessions/" + session + "/events", Map.of("type",
@@ -669,12 +684,25 @@ class HostedTeamLeadMySqlIT {
      * Closes the lead and waits until the tenant owes no operation and no
      * child result: the relay and the operation recovery scan every tenant,
      * so work left behind would be picked up by the next Spring context.
+     * A workspace Session's close operation needs the runtime broker's
+     * workspace execution, unavailable under this fixture's opt-out —
+     * tolerate the 202 only when it binds an operation to wait on.
      */
     private void closeAndSettle(String lead) throws Exception {
-        String operation = request("POST", "/v1/agents/sessions/" + lead + "/close", null, "close-" + lead, 202)
-                .path("id").asText();
-        waiting().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
-                assertThat(operationStatus(lead, operation)).isEqualTo("completed"));
+        String operation = null;
+        try {
+            operation = request("POST", "/v1/agents/sessions/" + lead + "/close", null, "close-" + lead, 202)
+                    .path("id").asText();
+        } catch (AssertionError failure) {
+            if (!String.valueOf(failure.getMessage()).contains("workspace_unavailable")) {
+                throw failure;
+            }
+        }
+        if (operation != null) {
+            String op = operation;
+            waiting().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
+                    assertThat(operationStatus(lead, op)).isEqualTo("completed"));
+        }
         awaitTenantSettled();
     }
 
@@ -683,7 +711,8 @@ class HostedTeamLeadMySqlIT {
             assertThat(jdbc.queryForList("SELECT operation_kind, state, delivery_state FROM managed_agent_operation"
                     + " WHERE tenant_id = ? AND delivery_state IN ('PENDING', 'LEASED', 'BLOCKED')", tenant)).isEmpty();
             assertThat(jdbc.queryForList("SELECT child_run_id, state FROM qwen_managed_child_result_relay"
-                    + " WHERE tenant_id = ? AND state NOT IN ('done', 'orphaned', 'unknown')", tenant)).isEmpty();
+                    + " WHERE tenant_id = ? AND state NOT IN ('done', 'orphaned', 'unknown', 'close_debt')",
+                    tenant)).isEmpty();
             // A child run the relay has not yet picked up has no ledger row.
             assertThat(jdbc.queryForList("SELECT r.record_id FROM qwen_managed_session_extension_record r"
                     + " LEFT JOIN qwen_managed_child_result_relay l ON l.parent_session_id = r.session_id"
@@ -760,11 +789,16 @@ class HostedTeamLeadMySqlIT {
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
-                "--qwen.managed-agent.runtime-broker.cli-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage-0",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace));
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
+        // The broker's durable local-process mode only exists on Linux;
+        // elsewhere it must be opted out, which starts the broker without
+        // workspace execution (workspace closes then keep answering the
+        // tolerated 409). Linux CI keeps the mode and its workspace.
+        if (!System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("linux"))
+            arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=false");
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
                 .initializers(context -> context.getBeanFactory().registerSingleton("h4eb1Authentication",
                         authentication()))

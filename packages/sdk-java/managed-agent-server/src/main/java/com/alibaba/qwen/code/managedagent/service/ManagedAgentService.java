@@ -26,6 +26,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
@@ -89,6 +90,10 @@ public class ManagedAgentService {
     // "text" is the spelling that clients used before the contract.
     private static final Set<String> INPUT_TYPES = Set.of("input_text",
             "text");
+    // The per-block cap (1M chars) times the per-list cap (100) would
+    // otherwise admit ~100M characters in a single command.
+    private static final int MAX_AGGREGATE_INPUT_CHARS = 4 * 1000 * 1000;
+    private static final int MAX_BLOCK_INPUT_CHARS = 1000 * 1000;
     private final AgentStateStore store;
     private final ManagedWorkspaceRegistry workspaces;
     private final RequestDigests digests;
@@ -110,7 +115,8 @@ public class ManagedAgentService {
     }
 
     private boolean supportsClose(SessionRecord session) {
-        return session.workspace() == null || store.workspaceFilesEnabled()
+        return session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
+                && store.workspaceFilesEnabled()
                 && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
                 && harness.supportsLifecycle();
     }
@@ -517,8 +523,16 @@ public class ManagedAgentService {
                             status == null ? HttpStatus.CONFLICT : status,
                             refusal.getCode(), refusal.getMessage());
                 }
-                throw dependencyUnavailable("hosted_harness_unavailable",
-                        "The Hosted Harness could not persist the Session title.");
+                // Chain and log the root cause: a plain 503 leaves on-call
+                // unable to tell a network fault from a daemon bug. The
+                // catch wraps the store calls too, so the WARN names the
+                // operation rather than a subsystem the fault may not be in.
+                LOG.warn("Managed Agent rename failed tenant={} session={}",
+                        tenantId, sessionId, error);
+                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
+                        "hosted_harness_unavailable",
+                        "The Hosted Harness could not persist the Session title.",
+                        error);
             }
         }
         return new SessionMutationResult<>(getPublicSession(tenantId,
@@ -776,7 +790,8 @@ public class ManagedAgentService {
     private static boolean retention(SessionRecord session,
             Set<String> closed) {
         return session.workspace() == null
-                || closed.contains(session.sessionId());
+                || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
+                        && closed.contains(session.sessionId());
     }
 
     private PublicSession publicSession(SessionRecord session) {
@@ -810,7 +825,8 @@ public class ManagedAgentService {
                         true,
                         session.workspace() == null,
                         true,
-                        hasActions(session), supportsClose(session), retention, retention, supportsDelete(session, retention)),
+                        hasActions(session), supportsClose(session), retention, retention, supportsDelete(session, retention),
+                        foregroundShell(session)),
                 publicWorkspace(session));
     }
 
@@ -906,12 +922,21 @@ public class ManagedAgentService {
                 new WebShellSessionCapabilities(true, hasArtifacts(session),
                         hasActions(session), maySubmit, supportsClose(session),
                         retention, retention, supportsDelete(session, retention),
-                        mayChangeCwd));
+                        mayChangeCwd, foregroundShell(session)));
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
-        return retention || session.workspace() != null && store.workspaceFilesEnabled()
+        return retention || session.workspace() != null && !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
+                && store.workspaceFilesEnabled()
                 && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
+    }
+
+    private Boolean foregroundShell(SessionRecord session) {
+        if (session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
+            return null;
+        }
+        return store.workspaceFilesEnabled() && store.workspaceShellEnabled()
+                && WorkspaceToolProfiles.requiresApproval(session.approvalMode());
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -968,7 +993,7 @@ public class ManagedAgentService {
     private static WebShellTurn webShellTurn(TurnSummary turn) {
         return new WebShellTurn(turn.turnId(), turn.sessionId(),
                 turn.status().toLowerCase(), turn.createdAt(),
-                turn.completedAt(), turn.errorCode(), null);
+                turn.completedAt(), turn.errorCode());
     }
 
     PublicEvent publicEvent(EventRecord event) {
@@ -1297,12 +1322,30 @@ public class ManagedAgentService {
             return List.of();
         }
         List<Map<String, Object>> result = new ArrayList<>();
+        long totalChars = 0;
         for (InputBlock block : blocks) {
             if (block == null || !INPUT_TYPES.contains(block.type())
                     || block.text() == null || block.text().isEmpty()) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
                         "unsupported_input",
                         "Phase 1 accepts non-empty text input only.");
+            }
+            // Code points, matching the published schema's maxLength; a
+            // String.length() count would disagree on astral-plane text.
+            int blockChars = block.text().codePointCount(0,
+                    block.text().length());
+            if (blockChars > MAX_BLOCK_INPUT_CHARS) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "invalid_input",
+                        "Input block exceeds the " + MAX_BLOCK_INPUT_CHARS
+                                + " character per-block limit.");
+            }
+            totalChars += blockChars;
+            if (totalChars > MAX_AGGREGATE_INPUT_CHARS) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "invalid_input",
+                        "Input exceeds the " + MAX_AGGREGATE_INPUT_CHARS
+                                + " character aggregate limit.");
             }
             result.add(Map.of("type", "text", "text", block.text()));
         }

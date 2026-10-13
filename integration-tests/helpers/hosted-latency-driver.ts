@@ -338,6 +338,17 @@ try {
     }
     sample.storeRequests = turnStoreRequests;
     samples.push(structuredClone(sample));
+    await waitUntil(async () => {
+      const response = await cli.request(
+        `/session/${session.sessionId}/status`,
+        {
+          headers: cli.headers(clientId),
+        },
+      );
+      const text = await response.text();
+      assert.equal(response.status, 200, text);
+      return JSON.parse(text).hasActivePrompt === false;
+    });
     await json(`/session/${session.sessionId}/detach`, {}, 204);
   }
   assert.deepEqual(proxyFailures, []);

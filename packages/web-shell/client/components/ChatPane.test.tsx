@@ -1567,6 +1567,7 @@ describe('ChatPane', () => {
     pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
     render();
     expect(testid('pane-approval')).not.toBeNull();
+    expect(latestToolApprovalProps?.showBrowserNotifications).toBe(true);
     // The streaming status and the editor share the approval-hidden wrapper,
     // so neither lingers below the dialog.
     expect(testid('pane-streaming')?.parentElement?.className).toContain(

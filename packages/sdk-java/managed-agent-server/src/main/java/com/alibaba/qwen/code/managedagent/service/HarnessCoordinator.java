@@ -133,6 +133,17 @@ public class HarnessCoordinator {
             throw new IllegalStateException(
                     "Managed dispatch retry limits are invalid");
         }
+        // The scheduler receives toMillis(): a renew interval that is
+        // positive but below a millisecond still dies on the worker thread,
+        // and one without margin against the lease loses the lease to the
+        // first late renewal, surfacing later as hosted_harness_unavailable.
+        if (renewInterval.toMillis() <= 0
+                || renewInterval.toMillis() > leaseDuration.toMillis() / 2) {
+            throw new IllegalStateException(
+                    "Managed dispatch lease limits are invalid: renew"
+                            + " interval must be at least one millisecond and"
+                            + " at most half the lease duration");
+        }
     }
 
     public void dispatch(String tenantId, String sessionId, String turnId) {
@@ -702,10 +713,22 @@ public class HarnessCoordinator {
                     flush(turn, stream.eventEpoch(), batch, leaseLost);
                     batchBytes = 0;
                     flushAt = 0;
-                    store.retractHarnessTurnOutput(turn.tenantId(),
-                            turn.sessionId(), turn.turnId(), owner,
-                            stream.eventEpoch(), retractionFromSequence(source),
-                            source.id());
+                    Map<?, ?> retraction = source.data() instanceof Map<?, ?> data ? data : Map.of();
+                    if (retraction.containsKey("throughSequence")) {
+                        Object through = retraction.get("throughSequence");
+                        Object sourceBoot = retraction.get("sourceBootId");
+                        Object sourceEpoch = retraction.get("sourceEventEpoch");
+                        if (!(through instanceof Number) || !(sourceBoot instanceof String) || !(sourceEpoch instanceof String)) {
+                            throw new IllegalStateException("Invalid bounded Hosted retraction source");
+                        }
+                        store.retractHarnessTurnOutput(turn.tenantId(), turn.sessionId(), turn.turnId(), owner,
+                                stream.eventEpoch(), retractionFromSequence(source), source.id(),
+                                (String) sourceBoot, (String) sourceEpoch, ((Number) through).longValue());
+                    } else {
+                        store.retractHarnessTurnOutput(turn.tenantId(), turn.sessionId(), turn.turnId(), owner,
+                                stream.eventEpoch(), retractionFromSequence(source), source.id());
+                    }
+
                     // The replay's first chunk is the new first visible text:
                     // the transcript it replaces was just blanked.
                     flushFirstVisibleText = true;
