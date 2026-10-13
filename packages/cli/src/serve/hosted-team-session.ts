@@ -1499,6 +1499,13 @@ export class HostedTeamSession {
             continue;
           }
           const current = this.task(target.taskId);
+          const nextBlocks = new Set([...current.blockedBy, selfTask.taskId]);
+          if (nextBlocks.size > MANAGED_TEAM_LIMITS.maxBlockers) {
+            notCommitted.push(
+              `#${targetNumber} would exceed ${MANAGED_TEAM_LIMITS.maxBlockers} blockers`,
+            );
+            continue;
+          }
           try {
             await this.commit(
               'team_task',

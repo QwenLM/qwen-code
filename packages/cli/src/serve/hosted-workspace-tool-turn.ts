@@ -5,6 +5,11 @@
  */
 
 import {
+  oweHostedTurnCleanup,
+  reconcileHostedTurnCleanup,
+} from './hosted-turn-cleanup.js';
+
+import {
   readHostedFileHistory,
   commitHostedFileHistory,
   assertHostedFileHistoryCapacity,
@@ -57,9 +62,10 @@ import {
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import type {
-  HarnessAgentWaitRun,
-  HarnessCommandWaitRun,
+import {
+  harnessCommandLocked,
+  type HarnessAgentWaitRun,
+  type HarnessCommandWaitRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
@@ -67,6 +73,10 @@ import {
   ManagedSessionStoreTransportError,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import type {
+  HostedApprovalContinuation,
+  RestoredHostedApprovalContinuation,
+} from './hosted-approval-continuation.js';
 import {
   InvalidWorkspaceRelativePathError,
   normalizeWorkspaceRelativePath,
@@ -74,6 +84,7 @@ import {
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
+  hostedRuntimeSessionId,
   HostedWorkspaceBrokerRejection,
   isHostedFileHistoryRefusal,
   type HostedWorkspaceBrokerOptions,
@@ -259,11 +270,13 @@ function isMessageRefusal(cause: unknown): cause is ManagedSessionRecordError {
   );
 }
 
-// H3: background admissions exist only while the child_run domain is
-// enabled for commits; otherwise the turn keeps its foreground refusals.
+// H3: background admissions exist only while the child_run domain's shell
+// kind is enabled for commits; otherwise the turn keeps its foreground
+// refusals. The domain itself never joins the plain enabled list — its
+// admission is per kind — so this reads the kind gate (#13856).
 function childRunAdmissionsEnabled(): boolean {
   try {
-    assertManagedSessionDomainEnabled('child_run');
+    assertManagedSessionChildRunKindEnabled('shell');
     return true;
   } catch {
     return false;
@@ -412,13 +425,14 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   {
     name: 'run_shell_command',
     description:
-      'Run a foreground command in the saved Workspace working directory. Complete stdout and stderr are retained; the model receives a bounded preview. Background jobs are unavailable. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
+      'Run a command in the saved Workspace working directory. Complete stdout and stderr are retained; the model receives a bounded preview. With is_background the command runs detached: the call returns a durable handle at once, the process outlives the turn and holds its Runtime until it exits, and its output lands as a task Artifact. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
         command: { type: 'string' },
         timeout: { type: 'integer', minimum: 1, maximum: 600000 },
         description: { type: 'string' },
+        is_background: { type: 'boolean' },
       },
       required: ['command'],
       additionalProperties: false,
@@ -1119,20 +1133,7 @@ function physicalToolStatus(
   return response?.['error'] ? 'error' : 'success';
 }
 
-/**
- * The Broker admits only path-safe Runtime Session ids, while a wake
- * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
- * such an id is mapped to a stable path-safe digest instead of being
- * refused at acquire. The mapped form is path-safe itself, so layering
- * this over an id that was already mapped stays idempotent.
- */
-export function hostedRuntimeSessionId(promptId: string): string {
-  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
-    promptId !== '.' &&
-    !promptId.includes('..')
-    ? promptId
-    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
-}
+export { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
@@ -1261,11 +1262,46 @@ export function fitChildResultInline(
   throw new Error('Child agent result cannot be recorded inline.');
 }
 
+interface HostedPreparedRequest {
+  call: ToolCallRequestInfo;
+  validationError?: string;
+  input: Record<string, unknown>;
+  isShell: boolean;
+  inputDigest?: string;
+  mcp: boolean;
+  payloadJson: string;
+  inputBytes: Buffer;
+  digest: string;
+  argsDigest: string;
+  publicationId: string | null;
+  runtimeCallId: string;
+  background: boolean;
+  monitoring: boolean;
+  agent: boolean;
+  agentBackground: boolean;
+  team: boolean;
+  message: boolean;
+  command: boolean;
+}
+
 export class HostedWorkspaceToolTurn {
+  private logicalRound = 0;
+  private nativeBatch?: {
+    messageId: string;
+    model: string;
+    parts: Part[];
+    requests: HostedPreparedRequest[];
+    refusals: Array<string | undefined>;
+    inputRefs: Map<number, ManagedSessionDurableRef>;
+    definitionRefs: Map<number, ManagedSessionDurableRef>;
+    actionIds: Map<number, string>;
+    uncaptured?: boolean;
+  };
   hookStopReason?: string;
   private readonly broker: HostedWorkspaceBroker;
   private readonly warmed: Promise<void>;
   private acquired = false;
+  private cleanupOwed = false;
   private uncertain = false;
   // Agent calls never write a `tool.intent` (the Broker pipeline they
   // bypass owns that marker), so completeHookResults needs the admitted
@@ -1477,9 +1513,7 @@ export class HostedWorkspaceToolTurn {
             ]
           : []),
       // H4d-b: the same Sessions message along their lineage — a parent
-      // to the child tasks it launched, a child to its own parent. b3c: a
-      // member's send_message also names another member or "*", riding
-      // the command channel (decision 8).
+      // to the child tasks it launched, a child to its own parent.
       ...(this.sendMessageRole() === 'parent'
         ? [
             this.teamsAdmitted()
@@ -1736,6 +1770,15 @@ export class HostedWorkspaceToolTurn {
                 originalId,
               );
         await original.warm();
+        if (
+          original === this.broker &&
+          !this.hooks &&
+          !this.mcp &&
+          !isHostedWorkspaceShellProfile(this.profile)
+        ) {
+          await oweHostedTurnCleanup(this.session, this.promptId, original);
+          this.cleanupOwed = original.runtime !== undefined;
+        }
         await original.acquire();
         const state = await original.fileHistory({
           kind: 'raw-file-history',
@@ -1778,7 +1821,26 @@ export class HostedWorkspaceToolTurn {
       for (;;) {
         try {
           if (this.hooks && !this.mcp) await this.hooks.acquire();
-          else await this.broker.acquire();
+          else {
+            if (
+              !this.cleanupOwed &&
+              !this.mcp &&
+              !isHostedWorkspaceShellProfile(this.profile)
+            )
+              await oweHostedTurnCleanup(
+                this.session,
+                this.promptId,
+                this.broker,
+              );
+            if (
+              !this.mcp &&
+              !this.hooks &&
+              !isHostedWorkspaceShellProfile(this.profile) &&
+              this.broker.runtime
+            )
+              this.cleanupOwed = true;
+            await this.broker.acquire();
+          }
           break;
         } catch (cause) {
           // A definite busy refusal before claiming storage means another
@@ -2140,11 +2202,255 @@ export class HostedWorkspaceToolTurn {
     this.promptHookRunner = runner;
   }
 
+  setModelRound(round: number): void {
+    this.logicalRound = round;
+  }
+
+  async resumeSavedNativeBatch(
+    saved: RestoredHostedApprovalContinuation,
+    nextApprovalOrdinal: number,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    const plan = saved.plan;
+    this.unanswered = plan.calls.some(
+      (item) =>
+        item.actionId &&
+        this.session.authority.action(item.actionId)?.state === 'expired',
+    );
+    if (
+      this.hooks ||
+      this.mcp ||
+      this.promptId !== plan.promptId ||
+      this.broker.runtimeSessionId !== plan.runtime.runtimeSessionId
+    )
+      throw new HostedToolRecoveryRequiredError(
+        'Unsupported saved batch owner.',
+      );
+    this.uncertain = true;
+    try {
+      await waitForTurn(this.warmed, signal);
+      this.broker.runtime = {
+        bindingId: plan.runtime.bindingId,
+        generation: plan.runtime.generation,
+        workspaceGeneration: plan.runtime.workspaceGeneration,
+      };
+      await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
+      this.cleanupOwed = true;
+      await this.broker.acquire({
+        runtimeBindingId: plan.runtime.bindingId,
+        generation: plan.runtime.generation,
+      });
+      this.acquired = true;
+      if (
+        !this.broker.runtime ||
+        this.broker.runtime.workspaceGeneration !==
+          plan.runtime.workspaceGeneration
+      )
+        throw new Error('Original Workspace generation changed.');
+      if (this.context?.read() === undefined)
+        await this.fetchWorkspaceContext(signal);
+      const declarations = await this.declarations(signal);
+      const requests: HostedPreparedRequest[] = [];
+      for (const [ordinal, item] of plan.calls.entries()) {
+        const definition = JSON.parse(
+          (await this.session.resources.read(item.definitionRef)).toString(
+            'utf8',
+          ),
+        ) as unknown;
+        if (
+          !isDeepStrictEqual(
+            definition,
+            declarations.find((tool) => tool.name === item.call.name),
+          )
+        )
+          throw new Error('Original native tool definition changed.');
+        const input = saved.inputs[ordinal];
+        if (item.argsDigest !== `sha256:${managedToolDigest(input.input)}`)
+          throw new Error('Original native arguments changed.');
+        requests.push({
+          call: item.call,
+          input: input.input,
+          runtimeCallId: item.runtimeCallId,
+          payloadJson: input.payloadJson,
+          inputBytes: input.bytes,
+          digest: item.requestDigest,
+          argsDigest: item.argsDigest,
+          isShell: false,
+          mcp: false,
+          publicationId: null,
+          background: false,
+          monitoring: false,
+          agent: false,
+          agentBackground: true,
+          team: false,
+          message: false,
+          command: false,
+        });
+      }
+      this.logicalRound = plan.round;
+      return await this.executeNative(
+        plan.calls.map((item) => item.call),
+        saved.parts,
+        plan.model,
+        signal,
+        { saved, requests, nextApprovalOrdinal },
+      );
+    } catch (cause) {
+      throw new HostedToolRecoveryRequiredError(cause);
+    }
+  }
+
+  private async captureNativeBatch(
+    stage: 'approval' | 'final',
+    actionId: string | null,
+    approvalOrdinal: number,
+  ): Promise<ManagedSessionDurableRef | undefined> {
+    const batch = this.nativeBatch;
+    const runtime = this.broker.runtime;
+    if (
+      !batch ||
+      batch.uncaptured ||
+      !runtime ||
+      isHostedWorkspaceShellProfile(this.profile) ||
+      this.hooks ||
+      this.mcp ||
+      batch.requests.some(
+        (request) =>
+          !['read_file', 'write_file', 'edit', 'glob'].includes(
+            request.call.name,
+          ),
+      )
+    )
+      return undefined;
+    const authority = this.session.authority;
+    const header = authority.sessionHeader;
+    const assistant = authority
+      .eventsInSequenceRange(1, authority.committedSequence)
+      .find(
+        (event) =>
+          event.kind === 'message.committed' &&
+          event.payload['messageId'] === batch.messageId,
+      );
+    if (!assistant) throw new Error('Original assistant batch is not durable.');
+    const calls = [];
+    for (const [ordinal, request] of batch.requests.entries()) {
+      let inputRef = batch.inputRefs.get(ordinal);
+      if (!inputRef) {
+        inputRef = await this.session.resources.publish(
+          'managed-tool-input',
+          request.inputBytes,
+        );
+        batch.inputRefs.set(ordinal, inputRef);
+      }
+      let definitionRef = batch.definitionRefs.get(ordinal);
+      if (!definitionRef) {
+        definitionRef = await this.session.resources.publish(
+          'managed-tool-definition',
+          Buffer.from(
+            JSON.stringify(
+              this.advertised!.find((tool) => tool.name === request.call.name),
+            ),
+          ),
+        );
+        batch.definitionRefs.set(ordinal, definitionRef);
+      }
+      calls.push({
+        call: request.call,
+        runtimeCallId: request.runtimeCallId,
+        inputRef,
+        definitionRef,
+        requestDigest: request.digest,
+        argsDigest: request.argsDigest,
+        prepareKey: `${this.broker.runtimeSessionId}:${request.runtimeCallId}`,
+        prepareReference: {
+          sessionId: this.broker.runtimeSessionId,
+          promptId: this.promptId,
+          callId: request.runtimeCallId,
+          argsDigest: request.digest,
+        },
+        partIndex: batch.parts.findIndex(
+          (part) => part.functionCall?.id === request.call.callId,
+        ),
+        refusal: batch.refusals[ordinal] ?? null,
+        actionId: batch.actionIds.get(ordinal) ?? null,
+      });
+    }
+    const plan: HostedApprovalContinuation = {
+      v: 1,
+      sessionKey: header.sessionKey,
+      promptId: this.promptId,
+      definitionRef: header.definitionRef,
+      rootSnapshotRef: header.rootSnapshotRef,
+      sourceActivation: this.session.activation,
+      runtime: { runtimeSessionId: this.broker.runtimeSessionId, ...runtime },
+      batchId: batch.messageId,
+      assistantRef: assistant.payload[
+        'contentRef'
+      ] as unknown as ManagedSessionDurableRef,
+      model: batch.model,
+      round: this.logicalRound,
+      stage,
+      approvalOrdinal,
+      actionId,
+      calls,
+    };
+    const planBytes = Buffer.from(JSON.stringify(plan));
+    if (
+      planBytes.byteLength >
+      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+    )
+      return undefined;
+    const planRef = await this.session.resources.publish(
+      'hosted-approval-continuation',
+      planBytes,
+    );
+    if (stage === 'final') {
+      const activation = this.session.activation;
+      const planRevision =
+        authority
+          .eventsInSequenceRange(1, authority.committedSequence)
+          .filter(
+            (event) =>
+              event.kind === 'hosted.batch.planned' &&
+              event.payload['batchId'] === batch.messageId,
+          ).length + 1;
+      await authority.appendExecutionEvent(
+        {
+          operation: 'hostedBatchPlan',
+          commandId: `hosted-batch:${batch.messageId}:${planRevision}`,
+          sessionKey: header.sessionKey,
+          contentDigest: planRef.digest,
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `hosted-batch:${batch.messageId}:${planRevision}`,
+          sessionKey: header.sessionKey,
+          kind: 'hosted.batch.planned',
+          occurredAt: Date.now(),
+          subject: {
+            type: 'activation',
+            scopeId: activation.activationId,
+            ...activation,
+          },
+          payload: { batchId: batch.messageId, planRevision, planRef },
+        }),
+        { class: 'harness', activation },
+      );
+    }
+    return planRef;
+  }
+
   private async executeNative(
     calls: ToolCallRequestInfo[],
     parts: Part[],
     model: string,
     signal: AbortSignal,
+    restored?: {
+      saved: RestoredHostedApprovalContinuation;
+      requests: HostedPreparedRequest[];
+      nextApprovalOrdinal: number;
+    },
   ): Promise<Part[]> {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.warmed, signal);
@@ -2192,7 +2498,9 @@ export class HostedWorkspaceToolTurn {
         }),
       );
     }
-    const prepareRequests = (source: ToolCallRequestInfo[]) => {
+    const prepareRequests = (
+      source: ToolCallRequestInfo[],
+    ): HostedPreparedRequest[] => {
       const ids = new Set<string>();
       return source.map((call) => {
         const runtimeCallId = randomUUID();
@@ -2681,7 +2989,7 @@ export class HostedWorkspaceToolTurn {
         };
       });
     };
-    let requests = prepareRequests(calls);
+    let requests = restored?.requests ?? prepareRequests(calls);
     if (!this.messageFitsInline('assistant', parts, model))
       throw new Error(
         'Hosted assistant record exceeds the inline Session Store limit.',
@@ -2777,7 +3085,18 @@ export class HostedWorkspaceToolTurn {
     let renewGrants: (() => Promise<void>) | undefined;
     let messageId: string;
     let refusals: Array<string | undefined>;
-    const inputRefs = new Map<number, ManagedSessionDurableRef>();
+    const inputRefs = new Map<number, ManagedSessionDurableRef>(
+      restored?.saved.plan.calls.map((item, ordinal) => [
+        ordinal,
+        item.inputRef,
+      ]),
+    );
+    const definitionRefs = new Map<number, ManagedSessionDurableRef>(
+      restored?.saved.plan.calls.map((item, ordinal) => [
+        ordinal,
+        item.definitionRef,
+      ]),
+    );
     try {
       this.uncertain = true;
       if (
@@ -2818,8 +3137,39 @@ export class HostedWorkspaceToolTurn {
           await this.publisher.start(),
         );
       }
-      messageId = await this.commit('assistant', parts, model);
-      refusals = await this.approve(requests, messageId, inputRefs, signal);
+      messageId =
+        restored?.saved.plan.batchId ??
+        (await this.commit('assistant', parts, model));
+      this.nativeBatch = {
+        messageId,
+        model,
+        parts,
+        requests,
+        refusals:
+          restored?.saved.plan.calls.map((item) => item.refusal ?? undefined) ??
+          requests.map((request) =>
+            this.hookPermission.get(request.call.callId) === 'deny'
+              ? 'PermissionRequest Hook denied the call.'
+              : undefined,
+          ),
+        inputRefs,
+        definitionRefs,
+        actionIds: new Map(
+          restored?.saved.plan.calls.flatMap((item, index) =>
+            item.actionId ? [[index, item.actionId] as const] : [],
+          ),
+        ),
+      };
+      refusals =
+        restored?.saved.plan.stage === 'final'
+          ? this.nativeBatch.refusals
+          : await this.approve(
+              requests,
+              messageId,
+              inputRefs,
+              signal,
+              restored?.nextApprovalOrdinal ?? 0,
+            );
       if (this.hooks) {
         const updated = requests.map((request) => request.call);
         const askAgain = new Set<number>();
@@ -2918,6 +3268,14 @@ export class HostedWorkspaceToolTurn {
           }
         }
       }
+      this.nativeBatch.requests = requests;
+      this.nativeBatch.refusals = refusals;
+      if (restored?.saved.plan.stage !== 'final')
+        await this.captureNativeBatch(
+          'final',
+          null,
+          Math.max(0, requests.length - 1),
+        );
     } catch (cause) {
       throw new HostedToolRecoveryRequiredError(cause);
     }
@@ -3066,14 +3424,16 @@ export class HostedWorkspaceToolTurn {
           continue;
         }
         reserved.set(ordinal, executionCallId);
-        const toolDefinitionRef = await this.session.resources.publish(
-          'managed-tool-definition',
-          Buffer.from(
-            JSON.stringify(
-              declarations.find((tool) => tool.name === request.call.name),
+        const toolDefinitionRef =
+          definitionRefs.get(ordinal) ??
+          (await this.session.resources.publish(
+            'managed-tool-definition',
+            Buffer.from(
+              JSON.stringify(
+                declarations.find((tool) => tool.name === request.call.name),
+              ),
             ),
-          ),
-        );
+          ));
         const authority = this.session.authority;
         const activation = this.session.activation;
         const argsRef =
@@ -3083,36 +3443,58 @@ export class HostedWorkspaceToolTurn {
                 Buffer.from(JSON.stringify(request.input)),
               )
             : routeRef;
-        const intent = await authority.appendExecutionEvent(
-          {
-            operation: 'toolIntent',
-            commandId: `tool-intent:${executionCallId}`,
-            sessionKey: authority.sessionHeader.sessionKey,
-            contentDigest: routeRef.digest,
-          },
-          (sequence) => ({
-            v: 1,
-            sequence,
-            eventId: `tool-intent:${executionCallId}`,
-            sessionKey: authority.sessionHeader.sessionKey,
-            kind: 'tool.intent',
-            occurredAt: Date.now(),
-            subject: {
-              type: 'activation',
-              scopeId: activation.activationId,
-              ...activation,
-            },
-            payload: {
-              executionCallId,
-              batchId: messageId,
-              ordinal,
+        const existingIntent =
+          restored &&
+          authority
+            .eventsInSequenceRange(1, authority.committedSequence)
+            .find(
+              (event) =>
+                event.kind === 'tool.intent' &&
+                event.payload['executionCallId'] === executionCallId,
+            );
+        if (
+          existingIntent &&
+          (existingIntent.payload['batchId'] !== messageId ||
+            existingIntent.payload['ordinal'] !== ordinal ||
+            !isDeepStrictEqual(existingIntent.payload['argsRef'], argsRef) ||
+            !isDeepStrictEqual(
+              existingIntent.payload['toolDefinitionRef'],
               toolDefinitionRef,
-              argsRef,
-              outcomeSource: 'runtime',
-            },
-          }),
-          { class: 'harness', activation },
-        );
+            ))
+        )
+          throw new Error('Original prepared intent conflicts.');
+        const intent = existingIntent
+          ? { lastSequence: existingIntent.sequence }
+          : await authority.appendExecutionEvent(
+              {
+                operation: 'toolIntent',
+                commandId: `tool-intent:${executionCallId}`,
+                sessionKey: authority.sessionHeader.sessionKey,
+                contentDigest: routeRef.digest,
+              },
+              (sequence) => ({
+                v: 1,
+                sequence,
+                eventId: `tool-intent:${executionCallId}`,
+                sessionKey: authority.sessionHeader.sessionKey,
+                kind: 'tool.intent',
+                occurredAt: Date.now(),
+                subject: {
+                  type: 'activation',
+                  scopeId: activation.activationId,
+                  ...activation,
+                },
+                payload: {
+                  executionCallId,
+                  batchId: messageId,
+                  ordinal,
+                  toolDefinitionRef,
+                  argsRef,
+                  outcomeSource: 'runtime',
+                },
+              }),
+              { class: 'harness', activation },
+            );
         if (prepared) {
           shellBindings.set(executionCallId, {
             publicationId: request.publicationId!,
@@ -3823,7 +4205,15 @@ export class HostedWorkspaceToolTurn {
     // fresh accept starts it, and a replay after a restart — whose
     // journal already carries the receipt — must resume it, or the
     // watch's lines, terminal conditions and settle never arrive.
-    if (this.monitors!.record(executionCallId)?.stopReason === null) {
+    const monitorRecord = this.monitors!.record(executionCallId);
+    // A parked watch has stopReason null like a live one, but its quota or
+    // idle window already ended it as unproven — resuming it would commit a
+    // post-quota observation the record refuses, silently. Only a live
+    // record is resumed (#13856 R1-55).
+    if (
+      monitorRecord?.stopReason === null &&
+      monitorRecord.run.state !== 'recovery_blocked'
+    ) {
       await this.resumeMonitorWatch(executionCallId);
     }
     let ref: ManagedSessionDurableRef;
@@ -4633,17 +5023,18 @@ export class HostedWorkspaceToolTurn {
    * Turn; once one call of the Turn timed out, every later command call
    * of it refuses at once.
    */
-  /** Decision 4's lock is the wait group's own durable state, not just
-   * Turn memory: a replacement owner of the same Turn re-arms from the
-   * carried group, so a timed-out leader stays unanswering for every
-   * later command, across restarts as across seconds. */
+  /** Decision 4's lock is the Turn's durable state, not just Turn
+   * memory: every checkpoint of the Turn carries it, so a replacement
+   * owner re-arms from whichever one it resumes, and a timed-out leader
+   * stays unanswering for every later command, across restarts as across
+   * seconds. */
   private async syncCommandTimedOutFromDurable(): Promise<void> {
     if (this.commandTimedOut) return;
     const authorization =
       await this.session.authority.harnessRunAuthorization();
     if (
       authorization.status === 'runnable' &&
-      authorization.checkpoint.commandWait?.timedOut === true
+      harnessCommandLocked(authorization.checkpoint, this.promptId)
     )
       this.commandTimedOut = true;
   }
@@ -4702,11 +5093,20 @@ export class HostedWorkspaceToolTurn {
       return parts;
     };
     if (this.commandTimedOut) {
-      const parts = await answer(SESSION_COMMAND_LEADER_UNANSWERING_TEXT, true);
+      // The lock refuses only a call that sent nothing. A call whose
+      // outbound already exists is the one whose own wait timed out,
+      // named again by a re-driven batch: its journal answers it.
+      const parts =
+        commands.command(commandId) === undefined
+          ? await answer(SESSION_COMMAND_LEADER_UNANSWERING_TEXT, true)
+          : await this.answerCommandByJournal(
+              commands,
+              request,
+              commandId,
+              model,
+            );
       // The locked run still folds, or the Turn's wait never completes —
-      // its answer rides the batch the same as a call that ran. The fold
-      // re-stamps the fresh group's lock, so the refusal outlives this
-      // owner too.
+      // its answer rides the batch the same as a call that ran.
       await this.harness.resolveAwaitCommand(commandId, { timedOut: true });
       return parts;
     }
@@ -4781,14 +5181,18 @@ export class HostedWorkspaceToolTurn {
       }
       if (Date.now() >= deadline) {
         this.commandTimedOut = true;
+        // The lock is stamped at detection time — before this Turn's next
+        // commit, so a crash in the settle/tool_result window between the
+        // accepting-to-unknown write and its answer can never un-lock it.
+        await this.harness.markCommandWaitTimeout();
         const parts = await this.answerCommandByJournal(
           commands,
           request,
           commandId,
           model,
         );
-        // Decision 4's lock rides the fold: a replacement owner of this
-        // Turn re-arms from the group and refuses the next command too.
+        // The fold restates the Turn's lock: a replacement owner of this
+        // Turn re-arms from it and refuses the next command too.
         await this.harness.resolveAwaitCommand(commandId, {
           timedOut: true,
         });
@@ -4816,7 +5220,20 @@ export class HostedWorkspaceToolTurn {
     const { name, callId } = request.call;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const record = commands.command(commandId);
-      const state = record?.run.delivery?.state ?? 'planned';
+      if (record === undefined) {
+        // 未发送：没有记录要结算，直接给了计划态的答案，不再走
+        // settle（那只会抛 "has no record to revise"）。
+        const unsent = convertToFunctionErrorResponse(
+          name,
+          callId,
+          [],
+          sessionCommandEvidenceText('planned'),
+        );
+        if (!journaled?.has(callId))
+          await this.commit('tool_result', unsent, model);
+        return unsent;
+      }
+      const state = record.run.delivery?.state;
       if (state === 'accepted' || state === 'consumed') {
         const reply = await commands.readReply(commandId);
         if (reply !== null) {
@@ -4827,7 +5244,10 @@ export class HostedWorkspaceToolTurn {
             model,
             journaled,
           );
-          await commands.commitConsumed(commandId);
+          // A call consumes only the reply it commits now: one already
+          // answered may have read the not-sent or unknown evidence before
+          // the relay's reply landed, and never read this one.
+          if (!journaled?.has(callId)) await commands.commitConsumed(commandId);
           return parts;
         }
         continue;
@@ -4896,9 +5316,9 @@ export class HostedWorkspaceToolTurn {
    * checkpoint still owes, with what is left of the bound measured from
    * the entry's own commit. A restart lost the Turn's in-memory mount,
    * so the lease the checkpoint's flag names comes back first, and the
-   * journaled set keeps a replayed fold silent — the consume and the
-   * resolve are themselves replay-safe and must still run so the wait
-   * leaves its consumed marker.
+   * journaled set keeps a replayed fold silent — the resolve still runs
+   * so the wait advances. A call already answered never consumes: what
+   * it read is the journaled answer, which may predate the reply.
    */
   async resumeCommandWaitRuns(
     runs: readonly HarnessCommandWaitRun[],
@@ -4922,18 +5342,58 @@ export class HostedWorkspaceToolTurn {
       const anchor = commands.outboundCommittedAt(run.commandId) ?? Date.now();
       const deadline = anchor + COMMAND_WAIT_MS;
       for (;;) {
+        const record = commands.command(run.commandId);
         if (this.commandTimedOut) {
-          const locked = convertToFunctionErrorResponse(
-            run.toolName,
-            run.functionCallId,
-            [],
-            SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
-          );
-          if (!journaled.has(run.functionCallId))
-            await this.commit('tool_result', locked, model);
+          if (record === undefined) {
+            // A call the lock refused before it sent anything: the same
+            // fixed answer the live arm gives every later call.
+            const locked = convertToFunctionErrorResponse(
+              run.toolName,
+              run.functionCallId,
+              [],
+              SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
+            );
+            if (!journaled.has(run.functionCallId))
+              await this.commit('tool_result', locked, model);
+          } else if (!journaled.has(run.functionCallId)) {
+            // The call whose own wait timed out: the dead owner stamped
+            // the lock at detection and may have died before settling
+            // it. Its journal answers it — a planned entry cancelled as
+            // not sent, a handed-over one unknown — never the later
+            // calls' refusal, or the entry stays live for the relay to
+            // deliver after the wait has ended. A call already answered
+            // was settled first (the timeout arm settles, then answers),
+            // so a reply the relay copied in since is not what it read
+            // and is never consumed: it only folds.
+            await this.answerCommandByJournal(
+              commands,
+              request,
+              run.commandId,
+              model,
+              journaled,
+            );
+          }
           await this.harness.resolveAwaitCommand(run.commandId, {
             timedOut: true,
           });
+          break;
+        }
+        if (record === undefined) {
+          // The checkpoint names a call whose outbound was never
+          // committed — the dead owner exited between the two steps,
+          // and no process will ever commit it now. This answer holds
+          // under any signal: a cancelled recovery must not fall into
+          // arm that would try (and fail) to settle a record that does
+          // not exist.
+          const unsent = convertToFunctionErrorResponse(
+            run.toolName,
+            run.functionCallId,
+            [],
+            sessionCommandEvidenceText('planned'),
+          );
+          if (!journaled.has(run.functionCallId))
+            await this.commit('tool_result', unsent, model);
+          await this.harness.resolveAwaitCommand(run.commandId);
           break;
         }
         if (signal.aborted) {
@@ -4944,24 +5404,6 @@ export class HostedWorkspaceToolTurn {
             model,
             journaled,
           );
-          await this.harness.resolveAwaitCommand(run.commandId);
-          break;
-        }
-        const record = commands.command(run.commandId);
-        if (record === undefined) {
-          // The checkpoint names a call whose outbound was never
-          // committed — the dead owner exited between the two steps,
-          // and no process will ever commit it now. End the wait with
-          // the same not-sent answer the live arm gives; settling a
-          // record that does not exist only throws.
-          const unsent = convertToFunctionErrorResponse(
-            run.toolName,
-            run.functionCallId,
-            [],
-            sessionCommandEvidenceText('planned'),
-          );
-          if (!journaled.has(run.functionCallId))
-            await this.commit('tool_result', unsent, model);
           await this.harness.resolveAwaitCommand(run.commandId);
           break;
         }
@@ -4976,7 +5418,10 @@ export class HostedWorkspaceToolTurn {
               model,
               journaled,
             );
-            await commands.commitConsumed(run.commandId);
+            // The same rule as the journal arm: only the reply committed
+            // now is the one the call read.
+            if (!journaled.has(run.functionCallId))
+              await commands.commitConsumed(run.commandId);
             await this.harness.resolveAwaitCommand(run.commandId);
             break;
           }
@@ -4998,6 +5443,10 @@ export class HostedWorkspaceToolTurn {
         }
         if (Date.now() >= deadline) {
           this.commandTimedOut = true;
+          // The lock is stamped at detection time — before the journal
+          // arm's next commit, so a crash between the settle and the
+          // tool_result write can never un-lock it.
+          await this.harness.markCommandWaitTimeout();
           await this.answerCommandByJournal(
             commands,
             request,
@@ -5622,7 +6071,7 @@ export class HostedWorkspaceToolTurn {
           ref = (await owner.request(
             `/publications/${publicationId}/admissions/prepare`,
             outcome,
-          )) as ManagedSessionDurableRef;
+          )) as unknown as ManagedSessionDurableRef;
           break;
         } catch (error) {
           const uncertain =
@@ -5703,17 +6152,22 @@ export class HostedWorkspaceToolTurn {
     messageId: string,
     inputRefs: Map<number, ManagedSessionDurableRef>,
     signal: AbortSignal,
+    nextOrdinal = 0,
   ): Promise<Array<string | undefined>> {
-    const refusals: Array<string | undefined> = requests.map((request) =>
-      this.hookPermission.get(request.call.callId) === 'deny'
-        ? 'PermissionRequest Hook denied the call.'
-        : undefined,
-    );
+    const refusals: Array<string | undefined> =
+      this.nativeBatch?.refusals ??
+      requests.map((request) =>
+        this.hookPermission.get(request.call.callId) === 'deny'
+          ? 'PermissionRequest Hook denied the call.'
+          : undefined,
+      );
+    if (this.nativeBatch) this.nativeBatch.refusals = refusals;
     const approval = this.approval;
     if (!approval) return refusals;
     const searchProfile = this.searchProfile;
     let asked = false;
     for (const [index, request] of requests.entries()) {
+      if (index < nextOrdinal) continue;
       if (
         refusals[index] ||
         this.hookPermission.get(request.call.callId) === 'allow' ||
@@ -5754,10 +6208,28 @@ export class HostedWorkspaceToolTurn {
     const authority = this.session.authority;
     const requestId = `tool_approval_${randomBytes(16).toString('hex')}`;
     const createdAt = Date.now();
+    const ordinal =
+      this.nativeBatch?.requests.findIndex(
+        (request) => request.call.callId === call.callId,
+      ) ?? -1;
+    if (ordinal >= 0) this.nativeBatch!.actionIds.set(ordinal, requestId);
+    const continuationRef =
+      ordinal < 0
+        ? undefined
+        : await this.captureNativeBatch('approval', requestId, ordinal);
+    if (ordinal >= 0 && !continuationRef) this.nativeBatch!.uncaptured = true;
     const options: HostedActionOptions = {
-      ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-        ? { v: 2 as const, inputRef }
-        : { v: 1 as const }),
+      ...(continuationRef
+        ? {
+            v: 3 as const,
+            continuationRef,
+            ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
+              ? { inputRef }
+              : {}),
+          }
+        : HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
+          ? { v: 2 as const, inputRef }
+          : { v: 1 as const }),
       requestId,
       turnId: this.promptId,
       functionCallId: call.callId,
@@ -5820,6 +6292,17 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
+  // #13856: the broker refused the release because a live background run
+  // provably holds the Runtime — the designed hold, not a wedge. The turn
+  // settles clean and the Runtime Session stays owed to the close, which
+  // drains it; the busy path keeps the honesty contract untouched.
+  private held = false;
+
+  /** The turn ended with its Runtime Session held by a live run. */
+  get runtimeHeld(): boolean {
+    return this.held;
+  }
+
   async finish(): Promise<void> {
     if (this.uncertain)
       throw new HostedToolRecoveryRequiredError('Tool outcome is unknown.');
@@ -5828,9 +6311,20 @@ export class HostedWorkspaceToolTurn {
       if (this.hookStopReason)
         await this.harness.settleHookStoppedRuntimeContinuation();
       else await this.harness.settleConsumedRuntimeContinuation();
-      if (!this.mcp && !this.hooks) await this.broker.release();
-      this.acquired = false;
+      // Physical release follows the durable Turn terminal on the G3 stack.
+      if (!this.mcp && !this.hooks && !this.cleanupOwed)
+        await this.broker.release();
+      if (this.mcp || this.hooks || !this.cleanupOwed) this.acquired = false;
     } catch (cause) {
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 409 &&
+        cause.code === 'runtime_session_held'
+      ) {
+        this.held = true;
+        this.acquired = false;
+        return;
+      }
       this.uncertain = true;
       throw new HostedToolRecoveryRequiredError(cause);
     }
@@ -5840,6 +6334,18 @@ export class HostedWorkspaceToolTurn {
   // deliberately does not touch it: the Session's ordered close (H3's
   // fifth slice) drains the stores, and background traffic keeps its
   // endpoint until then.
+  async cleanup(): Promise<void> {
+    if (this.hooks || this.mcp) return;
+    if (this.cleanupOwed)
+      await reconcileHostedTurnCleanup(
+        this.session,
+        this.options,
+        this.promptId,
+      );
+    else if (this.acquired) await this.broker.release();
+    this.acquired = false;
+  }
+
   async close(): Promise<void> {}
 }
 

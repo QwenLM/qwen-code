@@ -22,6 +22,8 @@ import {
   HARNESS_DURABLE_WAIT_BOUNDARY,
   HARNESS_MODEL_START_PHASES,
   HARNESS_TURN_COMPLETE_BOUNDARY,
+  harnessCommandLocked,
+  harnessCommandLockOf,
   type HarnessActionSource,
   type HarnessAgentWaitRun,
   type HarnessCheckpointV1,
@@ -202,6 +204,11 @@ export interface ManagedHarnessHandle {
    * `model_output_committed`. No-op when the handle is not waiting.
    */
   resolveDurableWait(): Promise<HarnessCheckpointV1 | null>;
+  /** Rebinds a proven saved native pre-dispatch plan to the current owner. */
+  adoptPreparedContinuation(
+    promptId: string,
+    settledResults?: boolean,
+  ): Promise<void>;
   /**
    * Commits the agent-wait safety point: admitted foreground child runs as
    * `await_agent` with `durable_wait`. Agent calls bypass the Broker
@@ -259,14 +266,26 @@ export interface ManagedHarnessHandle {
    * the continuation advances to `model_output_committed`. Returns null
    * when no durable wait is in progress; rejects when the open durable
    * wait is not the command wait; restating an already-folded call
-   * answers the same checkpoint. `options.timedOut` is decision 4's
-   * durable lock: a fold carrying it stamps the group, so a replacement
-   * owner of the same Turn refuses the next command at once.
+   * answers the same checkpoint. `options.timedOut` stamps decision 4's
+   * durable lock on the Turn, so a replacement owner of the same Turn
+   * refuses the next command at once.
    */
   resolveAwaitCommand(
     commandId: string,
     options?: { readonly timedOut?: boolean },
   ): Promise<HarnessCheckpointV1 | null>;
+  /**
+   * Stamps decision 4's durable lock on the parked command wait's Turn at
+   * detection time — before the timed-out call settles or answers. The
+   * lock is the Turn's, never the wait group's: every later checkpoint of
+   * the Turn carries it, through later command batches and Runtime work
+   * alike, so a replacement owner refuses the Turn's next command; the
+   * evidence of that refusal is structural, never a scan of journaled
+   * text. No-op where the open durable wait is not a command wait, and
+   * never folds any run. Restating it on an already-locked Turn is a
+   * silent replay.
+   */
+  markCommandWaitTimeout(): Promise<HarnessCheckpointV1 | null>;
   /**
    * Commits safety point C: an admitted Runtime tool as `await_runtime` with
    * `durable_wait`. The original executionCallId is dispatched at most once.
@@ -533,25 +552,6 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
             },
           }
         : runnable;
-      if (request.source === 'tool_call') {
-        await this.authority.requestToolAction(
-          {
-            operation: 'requestToolAction',
-            commandId: `requestToolAction:${request.requestId}`,
-            sessionKey: this.authority.sessionHeader.sessionKey,
-            contentDigest: createHash('sha256')
-              .update(request.optionsRef.digest)
-              .digest('hex'),
-          },
-          {
-            requestId: request.requestId,
-            kind: request.kind,
-            inputRevision: 1,
-            optionsRef: request.optionsRef,
-          },
-          { class: 'harness', activation: this.activation },
-        );
-      }
       const identity = this.nextCheckpointIdentity();
       const checkpoint = createAwaitActionHarnessCheckpoint({
         previous,
@@ -581,6 +581,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         `harness:await_action:${this.activation.activationId}:${request.requestId}:${identity.coveredSequence}`,
         checkpoint,
         HARNESS_DURABLE_WAIT_BOUNDARY,
+        request.source === 'tool_call' ? request : undefined,
       );
       const committed = this.authority.latestCheckpoint;
       if (committed === undefined) {
@@ -622,7 +623,13 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       }
       const identity = this.nextCheckpointIdentity();
       const checkpoint = createModelOutputCommittedHarnessCheckpoint({
-        previous,
+        previous: {
+          ...previous,
+          identity: {
+            ...previous.identity,
+            activationId: this.activation.activationId,
+          },
+        },
         ...identity,
       });
       await this.commitHarnessCheckpoint(
@@ -916,7 +923,6 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         commandWait: {
           runs,
           holdsWorkspaceMount: options.holdsWorkspaceMount,
-          timedOut: false,
         },
       });
       await this.commitHarnessCheckpoint(
@@ -1129,6 +1135,109 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         advanced ? null : HARNESS_DURABLE_WAIT_BOUNDARY,
       );
       return checkpoint;
+    });
+  }
+
+  async markCommandWaitTimeout(): Promise<HarnessCheckpointV1 | null> {
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const latest = this.authority.latestCheckpoint;
+      if (latest?.boundary !== HARNESS_DURABLE_WAIT_BOUNDARY) {
+        return null;
+      }
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      if (previous.continuation.phase !== 'await_command') {
+        return null;
+      }
+      if (
+        previous.identity.turnId !== null &&
+        harnessCommandLocked(previous, previous.identity.turnId)
+      ) {
+        return previous;
+      }
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint: HarnessCheckpointV1 = {
+        ...previous,
+        commandLock: harnessCommandLockOf(previous),
+        identity: {
+          ...previous.identity,
+          checkpointId: identity.checkpointId,
+          coveredSequence: identity.coveredSequence,
+          previousCheckpointId: identity.previousCheckpointId,
+        },
+        resume: {
+          ...previous.resume,
+          throughSequence: identity.coveredSequence,
+        },
+      };
+      await this.commitHarnessCheckpoint(
+        `harness:await_command:${this.activation.activationId}:timedout:${identity.coveredSequence}`,
+        checkpoint,
+        HARNESS_DURABLE_WAIT_BOUNDARY,
+      );
+      return checkpoint;
+    });
+  }
+
+  async adoptPreparedContinuation(
+    promptId: string,
+    settledResults?: boolean,
+  ): Promise<void> {
+    await this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      const startsNewTurn =
+        previous.continuation.phase === 'turn_settled' &&
+        (previous.tools?.items ?? []).every(
+          (item) => item.state === 'settled' && item.consumed,
+        ) &&
+        this.authority
+          .eventsInSequenceRange(1, this.authority.committedSequence)
+          .some(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === previous.identity.turnId,
+          );
+      if (
+        ![
+          'before_model',
+          'model_output_committed',
+          ...(settledResults ? ['results_ready', 'turn_settled'] : []),
+          ...(startsNewTurn ? ['turn_settled'] : []),
+        ].includes(previous.continuation.phase) ||
+        (previous.continuation.phase !== 'before_model' &&
+          !startsNewTurn &&
+          previous.identity.promptId !== promptId) ||
+        !(previous.tools?.items ?? []).every(
+          (item) =>
+            item.state === 'settled' && (settledResults || item.consumed),
+        )
+      )
+        throw new ManagedSessionConflictError(
+          'A saved native plan cannot adopt unpaid Runtime work.',
+        );
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = {
+        ...previous,
+        resume: {
+          ...previous.resume,
+          throughSequence: identity.coveredSequence,
+        },
+        identity: {
+          ...previous.identity,
+          ...identity,
+          activationId: this.activation.activationId,
+          turnId: promptId,
+          promptId,
+        },
+      };
+      await this.commitHarnessCheckpoint(
+        `harness:prepared_adopt:${this.activation.activationId}:${promptId}:${checkpoint.identity.coveredSequence}`,
+        checkpoint,
+        null,
+      );
     });
   }
 
@@ -1572,6 +1681,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     commandId: string,
     checkpoint: HarnessCheckpointV1,
     boundary: string | null,
+    action?: ManagedDurableWaitCommit,
   ): Promise<void> {
     const header = this.authority.sessionHeader;
     const state = encodeHarnessCheckpointV1(checkpoint);
@@ -1582,7 +1692,20 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         sessionKey: header.sessionKey,
         contentDigest: createHash('sha256').update(state).digest('hex'),
       },
-      { state, boundary },
+      {
+        state,
+        boundary,
+        ...(action
+          ? {
+              toolAction: {
+                requestId: action.requestId,
+                kind: action.kind,
+                inputRevision: 1,
+                optionsRef: action.optionsRef,
+              },
+            }
+          : {}),
+      },
       { class: 'harness', activation: this.activation },
     );
   }
