@@ -43,6 +43,63 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it.each(['.', 'assets'])(
+    'ships the spreadsheet worker in a lazy chunk in dist/%s',
+    (directory) => {
+      const chunkDir = resolve(DIST_DIR, directory);
+      const files = readdirSync(chunkDir).filter((name) =>
+        name.endsWith('.js'),
+      );
+      const previewName = files.find((name) =>
+        /^SpreadsheetPreview-.*\.js$/.test(name),
+      );
+      expect(previewName).toBeDefined();
+      const preview = readFileSync(resolve(chunkDir, previewName!), 'utf8');
+      expect(preview).toContain('data-web-shell-excel-preview');
+      expect(preview).toContain('new Worker(');
+      expect(preview).toContain('createObjectURL');
+      const otherChunks = files
+        .filter((name) => name !== previewName)
+        .map((name) => readFileSync(resolve(chunkDir, name), 'utf8'))
+        .join('\n');
+      expect(otherChunks.includes(`import("./${previewName}")`)).toBe(true);
+      expect(
+        /(?:from|import)\s*["']\.\/SpreadsheetPreview-[^"']+\.js["']/.test(
+          otherChunks,
+        ),
+      ).toBe(false);
+      expect(otherChunks.includes('data-web-shell-excel-preview')).toBe(false);
+      const workerCode = preview.match(/["']([A-Za-z0-9+/=]{1000,})["']/)?.[1];
+      expect(workerCode).toBeDefined();
+      const decodedWorker = Buffer.from(workerCode!, 'base64').toString();
+      // Parser code must stay inside the worker, even if the UI remains lazy.
+      for (const marker of [
+        'Worksheet index is outside the preview range.',
+        'Cannot merge already merged cells',
+      ]) {
+        expect(
+          decodedWorker.includes(marker),
+          `Worker contains ${marker}`,
+        ).toBe(true);
+        expect(
+          preview.includes(marker),
+          `Parser leaked into preview: ${marker}`,
+        ).toBe(false);
+        expect(
+          otherChunks.includes(marker),
+          `Parser leaked outside worker: ${marker}`,
+        ).toBe(false);
+      }
+      expect(otherChunks.includes(workerCode!)).toBe(false);
+      // Embedded hosts must not resolve external ExcelJS/SSF packages themselves.
+      expect(
+        /(?:from|import)\s*["'](?:exceljs|ssf)["']/.test(
+          `${preview}\n${otherChunks}\n${decodedWorker}`,
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('does not depend on @qwen-code/webui', () => {
     const bundle = readPackageJavascript();
     expect(bundle).not.toContain('@qwen-code/webui');
@@ -415,12 +472,18 @@ describe('build artifact — transcript entry (#11031)', () => {
     // the 1,325,251 measurement was taken, so the entry was already past the
     // 1,326,500 ceiling at that re-measure's own merge commit (#13964); the
     // Managed task panel's copy (#13936) stays stubbed out of this entry.
-    // At 008c0de7 the remainder measures 1,327,531. The ceiling leaves a
-    // small margin around that intentional UI; re-measure and lower it if
-    // the entry gets leaner. This branch additionally ships compact diff notices
-    // and visible control-character decorations: merging main at 14cc19b4
-    // measures 1,331,703 UTF-16 units. The 1,336,000 ceiling retains about
-    // 4.3k units of growth margin; re-measure if this graph gets leaner.
+    // At 008c0de7 the remainder measures 1,327,531. The read-only Excel
+    // preview puts its ten excel.* strings into that same shared table in
+    // both locales; its parser, worker and markup stay inside the lazily
+    // imported SpreadsheetPreview chunk, so only the copy enters this graph.
+    // That is the +2,000 this branch carried over the 1,325,000 budget, so
+    // the merged ceiling is the two budgets added — 1,331,500 — rather than a
+    // fresh measurement of a merged build. The ceiling leaves a small margin
+    // around that intentional UI; re-measure and lower it if the entry gets
+    // leaner. This PR also includes compact diff notices and visible control-character
+    // decorations. After merging main 6373fc4e, the remainder measures 1,332,856
+    // UTF-16 units; the existing PR ceiling of 1,336,000 retains 3,144 units
+    // of margin. Re-measure if this graph gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
