@@ -2,7 +2,7 @@
 
 Qwen Code's first-run `/auth` menu has four top-level options. Pick the one that matches how you want to run the CLI:
 
-- **千问AI平台 / QwenCloud**: official recommended setup. Opens a sub-menu with **Token Plan** (subscription with a monthly Credit quota · dedicated endpoint, Personal and Team editions) or **Standard API Key** (pay-as-you-go). You then pick the platform explicitly — **China — 千问AI平台** or **International — QwenCloud** — so the UI language never decides your endpoint. Both access methods also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup.
+- **QwenCloud**: official recommended setup. Opens a sub-menu with **Token Plan** (subscription with a monthly Credit quota · dedicated endpoint, Personal and Team editions) or **Standard API Key** (pay-as-you-go). You then pick the platform explicitly — **China — 千问AI平台** or **International — QwenCloud** — so the UI language never decides your endpoint. Both access methods also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup.
 - **Alibaba ModelStudio**: opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup. Saved ModelStudio credentials, endpoints and models keep working unchanged.
 - **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty).
 - **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
@@ -11,7 +11,7 @@ Qwen Code's first-run `/auth` menu has four top-level options. Pick the one that
 >
 > **Qwen OAuth** is no longer a selectable dialog entry — its free tier was discontinued on 2026-04-15. It remains documented below as a hard-coded, discontinued provider only.
 
-## ☁️ Option 1: 千问AI平台 / QwenCloud
+## ☁️ Option 1: QwenCloud
 
 The official platform entry. Choose it when your API key comes from 千问AI平台 (China) or QwenCloud (International).
 
@@ -29,7 +29,7 @@ The official platform entry. Choose it when your API key comes from 千问AI平�
 
 ### Interactive setup
 
-Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **千问AI平台 / QwenCloud**, and choose **Token Plan** or **Standard API Key** from the sub-menu. Choose the platform (**China — 千问AI平台** or **International — QwenCloud**), then enter your API key.
+Enter `qwen` in the terminal to launch Qwen Code, then run the `/auth` command, select **QwenCloud**, and choose **Token Plan** or **Standard API Key** from the sub-menu. Choose the platform (**China — 千问AI平台** or **International — QwenCloud**), then enter your API key.
 
 ### Headless or scripted setup
 
@@ -53,7 +53,7 @@ As with the other provider-specific keys, `QWENCLOUD_API_KEY` and `QWENCLOUD_TOK
 
 > [!note]
 >
-> 千问AI平台 / QwenCloud and Alibaba ModelStudio are separate entries with separate env keys and endpoints. Choosing QwenCloud does not rewrite or delete saved ModelStudio credentials, endpoints, or model selections.
+> QwenCloud and Alibaba ModelStudio are separate entries with separate env keys and endpoints. Choosing QwenCloud does not rewrite or delete saved ModelStudio credentials, endpoints, or model selections.
 
 ## Option 2: Qwen OAuth (Discontinued)
 
@@ -72,7 +72,7 @@ Start the CLI and follow the browser flow:
 qwen
 ```
 
-Qwen OAuth is no longer offered as a selectable entry in the `/auth` dialog; run `/auth` and choose one of the current options (千问AI平台 / QwenCloud, Alibaba ModelStudio, Third-party Providers, or Custom Provider) instead.
+Qwen OAuth is no longer offered as a selectable entry in the `/auth` dialog; run `/auth` and choose one of the current options (QwenCloud, Alibaba ModelStudio, Third-party Providers, or Custom Provider) instead.
 
 > [!note]
 >

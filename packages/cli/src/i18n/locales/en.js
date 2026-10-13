@@ -2406,9 +2406,8 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
-  '千问AI平台 / QwenCloud': '千问AI平台 / QwenCloud',
-  '千问AI平台 / QwenCloud · Access Method':
-    '千问AI平台 / QwenCloud · Access Method',
+  QwenCloud: 'QwenCloud',
+  'QwenCloud · Access Method': 'QwenCloud · Access Method',
   'Official recommended setup: Token Plan or Standard API Key':
     'Official recommended setup: Token Plan or Standard API Key',
   'Pay-as-you-go · Connect with an existing platform API key':

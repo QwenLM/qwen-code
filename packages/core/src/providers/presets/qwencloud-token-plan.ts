@@ -79,7 +79,7 @@ export const qwencloudTokenPlanProvider: ProviderConfig = {
   webSearch: { backend: 'dashscope' },
   uiGroup: 'qwencloud',
   uiLabels: {
-    flowTitle: '千问AI平台 / QwenCloud',
+    flowTitle: 'QwenCloud',
     baseUrlStepTitle: 'Platform',
   },
 };

@@ -123,7 +123,7 @@ interface RadioItem {
 const MAIN_ITEMS: RadioItem[] = [
   {
     key: 'QWENCLOUD',
-    label: t('千问AI平台 / QwenCloud'),
+    label: t('QwenCloud'),
     description: t(
       'Official recommended setup: Token Plan or Standard API Key',
     ),
@@ -176,7 +176,7 @@ const PROTOCOL_ITEMS: RadioItem[] = [
 
 const VIEW_TITLES: Record<string, string> = {
   main: t('Connect a Provider'),
-  'qwencloud-select': t('千问AI平台 / QwenCloud · Access Method'),
+  'qwencloud-select': t('QwenCloud · Access Method'),
   'alibaba-select': t('Alibaba ModelStudio · Access Method'),
   'thirdparty-select': t('Third-party Providers · Provider'),
 };
@@ -1518,7 +1518,7 @@ function AuthDialogFlow({
     }
     const p = setupFlow.state.provider;
     if (!p) return t('Provider Setup');
-    const flowTitle = p.uiLabels?.flowTitle ?? p.label;
+    const flowTitle = t(p.uiLabels?.flowTitle ?? p.label);
     const { stepIndex, totalSteps, step } = setupFlow.state;
     return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
       flowTitle,

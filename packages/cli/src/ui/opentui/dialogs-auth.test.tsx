@@ -329,7 +329,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
   it('renders the main menu with the four top-level options', () => {
     renderDialog();
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
-    expect(screen.getByText('千问AI平台 / QwenCloud')).toBeTruthy();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
     expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
     expect(screen.getByText('Third-party Providers')).toBeTruthy();
     expect(screen.getByText('Custom Provider')).toBeTruthy();
@@ -419,9 +419,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('down');
     await press('down');
     await press('return');
-    expect(
-      screen.getByText('千问AI平台 / QwenCloud · Access Method'),
-    ).toBeTruthy();
+    expect(screen.getByText('QwenCloud · Access Method')).toBeTruthy();
   });
 
   it('keeps authentication open when only service models were saved', async () => {
@@ -1414,11 +1412,11 @@ describe('the wizard frame keeps its natural height', () => {
     // wizard stays usable.
     const { rerenderAt } = renderDialog({ availableTerminalHeight: 13 });
     expect(screen.getByText(/Terms of Services/)).toBeTruthy();
-    expect(screen.getByText('千问AI平台 / QwenCloud')).toBeTruthy();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
 
     rerenderAt(12);
     expect(screen.queryByText(/Terms of Services/)).toBeNull();
-    expect(screen.getByText('千问AI平台 / QwenCloud')).toBeTruthy();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
     expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
 
     await press('down');
@@ -1435,13 +1433,11 @@ describe('the wizard frame keeps its natural height', () => {
     // the painted row.
     const { onClose } = renderDialog({ availableTerminalHeight: 7 });
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
-    expect(screen.getByText('千问AI平台 / QwenCloud')).toBeTruthy();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
     expect(screen.queryByText('Alibaba ModelStudio')).toBeNull();
 
     await press('return');
-    expect(
-      screen.getByText('千问AI平台 / QwenCloud · Access Method'),
-    ).toBeTruthy();
+    expect(screen.getByText('QwenCloud · Access Method')).toBeTruthy();
 
     await pressEsc(); // a sub-view's Esc is goBack, unchanged
     expect(screen.getByText('Connect a Provider')).toBeTruthy();

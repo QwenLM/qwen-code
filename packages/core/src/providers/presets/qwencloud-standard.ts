@@ -157,7 +157,7 @@ export const qwencloudStandardProvider: ProviderConfig = {
       model.baseUrl === QWENCLOUD_GLOBAL_BASE_URL),
   uiGroup: 'qwencloud',
   uiLabels: {
-    flowTitle: '千问AI平台 / QwenCloud',
+    flowTitle: 'QwenCloud',
     baseUrlStepTitle: 'Platform',
   },
 };

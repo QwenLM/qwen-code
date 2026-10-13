@@ -194,7 +194,7 @@ const moveDownAndWaitForSelection = async (
   await waitForSelectedOption(lastFrame, label);
 };
 
-const QWENCLOUD_MAIN_LABEL = '千问AI平台 / QwenCloud';
+const QWENCLOUD_MAIN_LABEL = 'QwenCloud';
 
 // \u5343\u95eeAI\u5e73\u53f0 / QwenCloud is the first top-level entry; Alibaba
 // ModelStudio now sits one step below it.
@@ -525,7 +525,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // QWEN OAuth no longer has a UI entry; the dialog falls back to the
-      // default first option, 千问AI平台 / QwenCloud.
+      // default first option, QwenCloud.
       expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
@@ -566,7 +566,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is 千问AI平台 / QwenCloud (first option).
+      // Default is QwenCloud (first option).
       expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
@@ -610,7 +610,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
-      // it will just show the default first option, 千问AI平台 / QwenCloud.
+      // it will just show the default first option, QwenCloud.
       expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });

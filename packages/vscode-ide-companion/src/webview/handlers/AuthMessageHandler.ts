@@ -196,7 +196,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
         }
       };
 
-      addGroup('千问AI平台 / QwenCloud', QWENCLOUD_PROVIDERS);
+      addGroup('QwenCloud', QWENCLOUD_PROVIDERS);
       addGroup('Alibaba Cloud', ALIBABA_PROVIDERS);
       addGroup('Third Party', THIRD_PARTY_PROVIDERS);
 
