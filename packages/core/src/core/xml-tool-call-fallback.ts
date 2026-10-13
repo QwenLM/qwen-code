@@ -11,6 +11,8 @@ const TOOL_CALL_PATTERN =
   /<invoke\s+name=["']([^"']+)["']>([\s\S]*?)<\/invoke>|<function=([^\s<>]+)>([\s\S]*?)<\/function>/g;
 const PARAMETER_PATTERN =
   /<parameter(?:\s+name=["']([^"']+)["']|=([^\s<>]+))>([\s\S]*?)<\/parameter>/g;
+const PARAMETER_OPEN_TAG_PATTERN =
+  /<parameter(?:\s+name=(["'])[^"']+\1|=[^\s<>"']+)>/y;
 
 // marked's inline lexer is quadratic on unterminated emphasis runs and
 // nothing upstream bounds a model turn's length: measured on this build, a
@@ -190,8 +192,9 @@ function computeExampleRanges(
   parameterRanges: Array<[number, number]>,
   tagPositions: Set<number> | null,
   quotedValueRanges: Array<[number, number]>,
-): Array<[number, number]> {
+): Array<[number, number]> | null {
   const ranges: Array<[number, number]> = [];
+  let ambiguous = false;
   const tags = /<\/?example(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
   let depth = 0;
   let start = 0;
@@ -203,6 +206,12 @@ function computeExampleRanges(
       const span = quotedValueRanges[quotedIndex];
       if (span[0] > index) break;
       if (depth > 0 || positionInsideFence(text, span[0], parameterRanges)) {
+        if (
+          depth > 0 &&
+          /<\/?example(?=[\s/>])/.test(text.slice(span[0], span[1]))
+        ) {
+          ambiguous = true;
+        }
         parameterRanges.push(span);
       }
       quotedIndex++;
@@ -232,18 +241,15 @@ function computeExampleRanges(
   }
   maskValuesBefore(text.length);
   if (depth > 0) ranges.push([start, text.length]);
-  return ranges;
+  return ambiguous ? null : ranges;
 }
 
 /**
  * Returns the offset just past the end of the open tag at the start of a
  * matched block, or -1 when the block holds no unquoted `>`.
  *
- * The invoke branch of TOOL_CALL_PATTERN admits `>` inside the quoted name, so
- * deriving the tag end with `indexOf('>')` can land in the middle of the open
- * tag. A rescan from there matches a complete call embedded in that name
- * attribute and dispatches it out of a block the guard has just rejected.
- * Tracking quote runs makes the tag end the first `>` outside a quoted run.
+ * Quote pairs determine the actual boundary. Compare it with the flat
+ * matcher's boundary before trusting a matched call's attributes.
  */
 function openTagEnd(block: string): number {
   let quote: string | null = null;
@@ -277,9 +283,8 @@ const PARAMETER_TAG_PATTERN =
  * swallowed" from "a call a value quotes" — the two have the same text shape
  * and differ only in whether a value owns the region.
  *
- * An open tag that is never closed stays on the stack and owns nothing, so a
- * value merely mentioning the tag shape does not make the region behind it
- * unrescannable.
+ * An unmatched opener remains on the stack. Calls behind it have ambiguous
+ * ownership and make recovery decline the whole turn.
  */
 function parameterOwnership(text: string): {
   closed: Array<[number, number]>;
@@ -327,11 +332,19 @@ function hasBalancedQuotedCalls(value: string): boolean {
  */
 function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
   const blocks: ToolCallBlock[] = [];
+  for (const opening of text.matchAll(/<parameter(?=[\s=>])/gi)) {
+    PARAMETER_OPEN_TAG_PATTERN.lastIndex = opening.index;
+    if (!PARAMETER_OPEN_TAG_PATTERN.test(text)) return [];
+  }
   // Parameter spans are a property of the raw text, not of which blocks the
   // guard accepts: they mask parameter data out of the prose handed to the
   // markdown lexer and out of fence tracking. Deriving them from accepted
   // blocks only left a rejected block's data unmasked, where a literal example
   // tag in it could swallow a later valid call.
+  const ownership = parameterOwnership(text);
+  const valueSpans = ownership.closed.sort(
+    ([startA, endA], [startB, endB]) => startA - startB || endB - endA,
+  );
   const parameterRanges: Array<[number, number]> = [];
   PARAMETER_PATTERN.lastIndex = 0;
   let rangeMatch: RegExpExecArray | null;
@@ -352,26 +365,15 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
   // still recovered, with that value intact. Skipping the match whole also
   // keeps the rejected-block rescan below out of the value it belongs to. See
   // #13492.
-  const ownership = parameterOwnership(text);
-  const valueSpans = ownership.closed.sort(
-    ([startA, endA], [startB, endB]) => startA - startB || endB - endA,
-  );
   const quotedValueRanges: Array<[number, number]> = [];
   let outerEnd = 0;
   for (const [start, end] of valueSpans) {
     if (start < outerEnd) continue;
     outerEnd = end;
     const element = text.slice(start, end);
-    // Classifying on a scan-derived offset is only sound when the open tag is
-    // the same well-formed element the flat matcher consumes. A name whose two
-    // quotes do not pair — which the name group admits, its delimiters being
-    // independent classes — sends `openTagEnd` out of quote mode inside the
-    // value, so the element would be classified from behind its own leading
-    // text and a truncated argument dispatched. Fall back to the flat match
-    // instead, which leaves the block rejected. See #13492.
-    if (!/^<parameter(?:\s+name=(["'])[^"']+\1|=[^\s<>"']+)>/.test(element)) {
-      continue;
-    }
+    // Only well-formed parameters can extend their complete value masks.
+    PARAMETER_OPEN_TAG_PATTERN.lastIndex = 0;
+    if (!PARAMETER_OPEN_TAG_PATTERN.test(element)) continue;
     const valueStart = openTagEnd(element);
     if (
       valueStart !== -1 &&
@@ -388,6 +390,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     tagPositions,
     quotedValueRanges,
   );
+  if (exampleRanges === null) return [];
 
   TOOL_CALL_PATTERN.lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -398,12 +401,8 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     ) {
       continue;
     }
+    if (ownership.unclosed.some((start) => start < matchStart)) return [];
     const toolName = match[1] ?? match[3];
-    // A rejected block may have swallowed a complete later block, so rescan
-    // from just after this block's open tag instead of its borrowed close.
-    const tagEnd = openTagEnd(match[0]);
-    const resumeAt =
-      tagEnd === -1 ? match.index + match[0].length : match.index + tagEnd;
     const closeTag = match[1] !== undefined ? '</invoke>' : '</function>';
     let closeStart = match.index + match[0].length - closeTag.length;
     // Where this match's own closer sat before the advance below moved it.
@@ -425,8 +424,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       if (closeStart === -1) break;
     }
     if (closeStart === -1) {
-      TOOL_CALL_PATTERN.lastIndex = resumeAt;
-      continue;
+      return [];
     }
     // `match[0]` is exactly openTag + body + closeTag, so the body length is
     // what separates this block's open tag from its parameters. Deriving the
@@ -435,6 +433,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     // with the other — the name group's delimiters are independent classes —
     // which silently drops every parameter before that offset.
     const paramsStart = lazyCloseStart - (match[2] ?? match[4]).length;
+    if (openTagEnd(match[0]) !== paramsStart - matchStart) return [];
     const paramsBlock = text.slice(paramsStart, closeStart);
     const blockEnd = closeStart + closeTag.length;
     TOOL_CALL_PATTERN.lastIndex = blockEnd;
@@ -493,13 +492,6 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     // visible turn. What the advance swallowed must therefore be nothing but
     // the block's own parameter elements and the quoted values inside them.
     if (closeStart > lazyCloseStart) {
-      // Extending a call from inside an unclosed outer value would promote
-      // that value's documentation into executable syntax. Flat recovery of
-      // a separate call remains unchanged when no advance is needed.
-      if (ownership.unclosed.some((start) => start < matchStart)) {
-        TOOL_CALL_PATTERN.lastIndex = resumeAt;
-        continue;
-      }
       const covered: Array<[number, number]> = [];
       for (const span of parameterSpans.concat(quotedValueRanges)) {
         const coveredStart = Math.max(span[0], lazyCloseStart);
@@ -517,8 +509,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       }
       borrowed += text.slice(borrowedCursor, closeStart);
       if (borrowed.trim() !== '') {
-        TOOL_CALL_PATTERN.lastIndex = resumeAt;
-        continue;
+        return [];
       }
     }
     // A missing close must not borrow a later block's parameters or recover
@@ -533,8 +524,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       /<\/?(?:function|invoke|parameter)(?:[\s=>]|$)/.test(outsideParameters) ||
       /^ {0,3}(?:`{3,}|~{3,})/m.test(outsideParameters)
     ) {
-      TOOL_CALL_PATTERN.lastIndex = resumeAt;
-      continue;
+      return [];
     }
 
     if (toolName && Object.keys(args).length > 0) {
@@ -560,7 +550,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
         end - 1,
         parameterRanges.concat(parameterSpans),
       ) &&
-      !exampleRanges.some(
+      !exampleRanges!.some(
         ([exampleStart, exampleEnd]) =>
           (start >= exampleStart && start < exampleEnd) ||
           (end - 1 >= exampleStart &&
@@ -592,18 +582,11 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
   // An eligible outer call owns its complete parameter values, including the
   // tail after a quoted call. That tail must not open prose documentation for
   // a following sibling. Establish eligibility before extending these masks.
-  let recoveryEnd = text.length;
   for (const block of eligibleBlocks) {
-    const { start, parameterSpans } = block;
-    // Documentation-owned values cannot certify a following call as outside
-    // a fence. Stop the ambiguous suffix; earlier eligible calls can still
-    // shield their own complete values in both views.
-    if (!passesFenceGuard(block)) {
-      recoveryEnd = start;
-      break;
-    }
+    const { parameterSpans } = block;
+    // Ownership disagreement declines the whole batch, preserving its text.
+    if (!passesFenceGuard(block)) return [];
     for (const [start, end] of parameterSpans) {
-      fenceGuardRanges.push([start, end]);
       if (!parameterRanges.some(([from, to]) => start >= from && end <= to)) {
         parameterRanges.push([start, end]);
         extendedMasks = true;
@@ -636,19 +619,18 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       exampleTagPositions(text, parameterRanges),
       [],
     );
-    return blocks.filter((block) => {
-      if (block.start >= recoveryEnd || !isEligibleBlock(block)) return false;
-      if (!passesFenceGuard(block)) {
-        recoveryEnd = block.start;
-        return false;
-      }
-      if (!eligibleBlocks.includes(block)) {
-        fenceGuardRanges.push(...block.parameterSpans);
-      }
-      return true;
-    });
+    if (exampleRanges === null) return [];
+    const refreshedBlocks = blocks.filter(isEligibleBlock);
+    if (
+      refreshedBlocks.length !== eligibleBlocks.length ||
+      refreshedBlocks.some((block, index) => block !== eligibleBlocks[index]) ||
+      refreshedBlocks.some((block) => !passesFenceGuard(block))
+    ) {
+      return [];
+    }
+    return refreshedBlocks;
   }
-  return eligibleBlocks.filter(({ start }) => start < recoveryEnd);
+  return eligibleBlocks;
 }
 
 export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
