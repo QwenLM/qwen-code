@@ -141,6 +141,23 @@ H4b 交付该流水线的 child-agent 部分:
 
 1. **G3 的重置标记只是证据中性,永不构成反证。** 应答丢失后 `withdrawSubmissionAttempted` 的 Turn 呈 `CANCELLED`、既无派发标记也无 epoch——与真实 pre-admission 失败字段形态完全相同——而历史 binding 仍在,所以 `FAILED|CANCELLED && !dispatched()` 这一终态形态凭自身仍不能证明 never-started。intent 调和现按证据排序:尚有未了局面的 Turn(存活、既未派发也非 pre-admission 终态)一律有界延迟;派发对或历史 binding 行以同一身份重放 dispatch 修复;只有两者皆缺且落在 pre-admission 终态失败上,才结算指名的 never-started 配对。终态身份永远不把一次重置升格为证据。
 
+## 冷控制面的 child 挂接（#13838）
+
+child-result relay 与生命周期/任务取消动词写入已有 child-run 记录，
+不准入新的父方输入。connector 缓存为空、但 Session 已记录此前的 Harness
+挂接时，先以被动恢复重新加载原 Session，再发送 child 操作。不设置
+`driveRuntimeRecovery` 或取消接管；停泊的父 Turn 继续归其 coordinator。
+
+复用现有被动加载路径，保留 Workspace/profile 授权、审批模式确认、固定的
+AgentDefinition 与 generation 校验。先解析挂接再读取当前 client，后续
+child 操作复用已确认的挂接。加载被拒绝或操作结果不明时，继续走已有 relay
+调和；不编造成功或 child 终态来掩盖失败。
+
+connector 回归台架模拟控制面重启后驻留 Harness 拒绝普通冷加载，要求对
+同一 Session 进行被动且不驱动恢复的加载，随后 child 操作成功且不重复加载。
+这是受控 connector 证据；物理重启与持久 relay 结算仍需独立的隔离 Hosted
+故障验收。
+
 ## 后续工作
 
 | 切片   | 范围                                                                                                                                                                                                                                                                                                                                                                 |
