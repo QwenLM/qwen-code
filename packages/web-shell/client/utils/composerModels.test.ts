@@ -6,26 +6,27 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  HIDDEN_COMPOSER_MODEL_IDS,
   isDiscontinuedSettingsModel,
   isStandaloneModelPickerUnavailable,
 } from './composerModels';
 
 describe('isDiscontinuedSettingsModel', () => {
   const oauth = { authType: 'qwen-oauth' };
-  const registryRow = { baseModelId: 'coder-model', isRuntime: false };
+  const registryRow = { baseModelId: 'coder-model', isCurrent: false };
 
   it('hides the registry entry of the discontinued built-in OAuth model', () => {
     expect(isDiscontinuedSettingsModel(oauth, registryRow)).toBe(true);
   });
 
-  it('keeps a runtime snapshot of the same entry', () => {
-    // A session already authenticated on the model must still see the one it
-    // is running, which is the carve-out `isDiscontinuedModel` makes in the
-    // VS Code webview.
+  it('keeps the row the session is currently running', () => {
+    // The daemon's provider list skips runtime rows and hardcodes
+    // `isRuntime: false`, so `isCurrent` is the only signal that a live
+    // qwen-oauth session still needs its own model listed.
     expect(
       isDiscontinuedSettingsModel(oauth, {
         baseModelId: 'coder-model',
-        isRuntime: true,
+        isCurrent: true,
       }),
     ).toBe(false);
   });
@@ -36,11 +37,26 @@ describe('isDiscontinuedSettingsModel', () => {
     ).toBe(false);
   });
 
+  it('derives the hidden ids from HIDDEN_COMPOSER_MODEL_IDS', () => {
+    // The composer hides `coder-model(qwen-oauth)`; Settings must reach the
+    // same verdict for every id on that shared list instead of hardcoding one.
+    for (const id of HIDDEN_COMPOSER_MODEL_IDS) {
+      const parsed = /^(.*)\(([^)]+)\)$/.exec(id);
+      expect(parsed).not.toBeNull();
+      expect(
+        isDiscontinuedSettingsModel(
+          { authType: parsed[2] },
+          { baseModelId: parsed[1], isCurrent: false },
+        ),
+      ).toBe(true);
+    }
+  });
+
   it('keeps another model on the OAuth auth type', () => {
     expect(
       isDiscontinuedSettingsModel(oauth, {
         baseModelId: 'qwen3-coder-plus',
-        isRuntime: false,
+        isCurrent: false,
       }),
     ).toBe(false);
   });
