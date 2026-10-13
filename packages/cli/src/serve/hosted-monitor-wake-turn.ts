@@ -13,6 +13,7 @@ import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 
 /**
  * The Session's one wake-recovery classification, shared by its wiring
@@ -24,7 +25,8 @@ export function monitorWakeNeedsRecovery(cause: unknown): boolean {
   return (
     cause instanceof HostedToolRecoveryRequiredError ||
     cause instanceof HostedMcpRecoveryRequiredError ||
-    cause instanceof HostedHookRecoveryRequiredError
+    cause instanceof HostedHookRecoveryRequiredError ||
+    cause instanceof LlmRequestPreparationError
   );
 }
 
@@ -59,9 +61,12 @@ export function createMonitorWakeRunTurn(params: {
     abort: AbortController,
   ) => Promise<unknown>;
   readonly busy: () => boolean;
+  /** A turn its source no longer runs (H4d-b: a stopped run's message),
+   * re-read with the busy verdict right before the turn starts. */
+  readonly held?: (turn: HostedMonitorWakeTurn) => boolean;
   /**
-   * The recovery-required classification. It is injected because the three
-   * RecoveryRequiredError classes must be matched by type — their
+   * The recovery-required classification. It is injected because these
+   * error classes must be matched by type — their
    * constructors never assign `name`, so every instance reads `name ===
    * 'Error'` and a name comparison silently reclassifies a recovery
    * exception as an ordinary failure, settling its unconsumed input.
@@ -145,7 +150,7 @@ export function createMonitorWakeRunTurn(params: {
     // The busy verdict must be re-read after every journal read: a prompt
     // route's own claim in this window would otherwise be cleared here,
     // losing its turn instead of queuing this one.
-    if (params.busy() || session.blocked) return 'busy';
+    if (params.busy() || session.blocked || params.held?.(turn)) return 'busy';
     const abort = new AbortController();
     session.active = { promptId: turn.turnId, digest: '', abort };
     let turnResult: { systemPayload?: Record<string, unknown> } | null;

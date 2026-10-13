@@ -677,7 +677,93 @@ class ManagedExtensionRecordStoreTest {
     }
 
     /** Commits a child agent through its settled result. */
-    private static void settleChildAgentChain(String sessionId,
+    // H4f: a child task's cancel is advertised from its projection, its
+    // committed stop request is what the cancel delivery reads back, and
+    // every view change — the stop request's draining included — rides the
+    // same bounded per-task journal H3 built (#13746 F2).
+    @Test
+    void aChildAgentTaskCarriesItsCancelAndItsEventsThroughTheStop()
+            throws Exception {
+        CommitResource inputResource = hookResource("input-stop",
+                "managed-input",
+                "{\"prompt\":\"audit\"}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                + " session_id, agent_id, status, created_at, updated_at)"
+                + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1)", TENANT,
+                sessionId);
+        ExtensionRecordJournal journal = journal(sessionId);
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "child_run",
+                        "run-x"));
+        commitDomain(journal, "stop-1", "child_run", childAgent(sessionId,
+                "sent", "admitted", "intent", null, inputResource),
+                List.of(inputResource));
+        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+                .actionCapabilities()).containsExactly("cancel");
+        ObjectNode attached = childAgent(sessionId, "sent", "running",
+                "running_attached", "binding-1", inputResource);
+        attached.withObject("/run").put("dispatchId", "dispatch-1");
+        attached.put("childSessionId", "session-child");
+        ObjectNode dispatching = attached.deepCopy();
+        dispatching.withObject("/run").put("execution", "dispatch_started");
+        dispatching.putNull("childSessionId");
+        commitDomain(journal, "stop-2", "child_run", dispatching, List.of());
+        commitDomain(journal, "stop-3", "child_run", attached, List.of());
+        ObjectNode stopping = attached.deepCopy();
+        stopping.put("stopRequested", true);
+        commitDomain(journal, "stop-4", "child_run", stopping, List.of());
+        var stopped = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        assertThat(stopped.state()).isEqualTo("running");
+        assertThat(stopped.runtimeState()).isEqualTo("draining");
+        // Requests coalesce: a stop already recorded still takes a cancel.
+        assertThat(stopped.actionCapabilities()).containsExactly("cancel");
+        // A Session that is not active admits no new cancel, so its live
+        // tasks advertise none, on both surfaces.
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING'"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT,
+                sessionId);
+        assertThat(tasks.getPublicTask(TENANT, TENANT, sessionId, taskId)
+                .actionCapabilities()).isEmpty();
+        assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
+                10).data().getFirst().actionCapabilities()).isEmpty();
+        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT,
+                sessionId);
+        assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
+                10).data().getFirst().actionCapabilities())
+                .containsExactly("cancel");
+        var target = records.findTaskTarget(TENANT, sessionId, taskId)
+                .orElseThrow();
+        assertThat(target.domain()).isEqualTo("child_run");
+        assertThat(target.recordId()).isEqualTo("run-x");
+        assertThat(target.kind()).isEqualTo("child_agent");
+        assertThat(target.body().path("stopRequested").booleanValue())
+                .isTrue();
+        assertThat(records.findTaskTarget(TENANT, sessionId,
+                "task_missing")).isEmpty();
+        ObjectNode cancelled = stopping.deepCopy();
+        cancelled.put("stopReason", "stop_requested");
+        cancelled.withObject("/run").put("state", "cancelled")
+                .put("execution", "settled");
+        cancelled.withObject("/run/delivery").put("state", "cancelled");
+        commitDomain(journal, "stop-5", "child_run", cancelled, List.of());
+        var settled = tasks.getPublicTask(TENANT, TENANT, sessionId, taskId);
+        assertThat(settled.state()).isEqualTo("cancelled");
+        assertThat(settled.actionCapabilities()).isEmpty();
+        var events = tasks.listPublicTaskEvents(TENANT, TENANT, sessionId,
+                taskId, null, 20);
+        assertThat(events.data())
+                .extracting(event -> event.state() + "/"
+                        + event.runtimeState())
+                .containsExactly("pending/unbound", "running/provisioning",
+                        "running/ready", "running/draining",
+                        "cancelled/null");
+        assertThat(settled.outputCursor()).isEqualTo(
+                events.data().get(events.data().size() - 1).cursor());
+    }
+
+    static void settleChildAgentChain(String sessionId,
             String completion, ExtensionRecordJournal journal,
             CommitResource inputResource, CommitResource resultResource,
             CommitResource receiptResource) {
@@ -688,7 +774,7 @@ class ManagedExtensionRecordStoreTest {
 
     /** Commits a child Session run through its settled result, each body
      * shaped into its kind by {@code shape}. */
-    private static void settleChildSessionChain(String sessionId,
+    static void settleChildSessionChain(String sessionId,
             String completion, ExtensionRecordJournal journal,
             CommitResource inputResource, CommitResource resultResource,
             CommitResource receiptResource,
@@ -745,7 +831,7 @@ class ManagedExtensionRecordStoreTest {
         return body;
     }
 
-    private static ObjectNode childAgent(String sessionId, String completion,
+    static ObjectNode childAgent(String sessionId, String completion,
             String state, String execution, String runtimeBinding,
             CommitResource inputResource) {
         ObjectNode body = JsonNodeFactory.instance.objectNode();
@@ -914,7 +1000,7 @@ class ManagedExtensionRecordStoreTest {
                 hookRef(seg2));
         return delivery;
     }
-    private static ObjectNode childRun(String state, String execution,
+    static ObjectNode childRun(String state, String execution,
             String runtimeBinding, CommitResource argsResource) {
         ObjectNode body = JsonNodeFactory.instance.objectNode();
         body.put("kind", "shell");
@@ -1719,7 +1805,7 @@ class ManagedExtensionRecordStoreTest {
                 Base64.getEncoder().encodeToString(bytes));
     }
 
-    private static void commitDomain(ExtensionRecordJournal journal, String commandId,
+    static void commitDomain(ExtensionRecordJournal journal, String commandId,
             String domain, JsonNode record, List<CommitResource> resources) {
         CommitTransactionRequest request = journal.requestDomain(commandId, domain, record, resources, 1000);
         journal.commit(request);
@@ -1806,12 +1892,12 @@ class ManagedExtensionRecordStoreTest {
                 "extension-writer-token-0123456789").bytes()).isEqualTo("[]".getBytes(StandardCharsets.UTF_8));
     }
 
-    private static CommitResource hookResource(String id, String kind, byte[] bytes) {
+    static CommitResource hookResource(String id, String kind, byte[] bytes) {
         return new CommitResource(id, kind, 1, bytes.length, ExtensionRecordJournal.sha256(bytes),
                 Base64.getEncoder().encodeToString(bytes));
     }
 
-    private static ObjectNode hookRef(CommitResource resource) {
+    static ObjectNode hookRef(CommitResource resource) {
         return JsonNodeFactory.instance.objectNode().put("resourceId", resource.resourceId()).put("kind", resource.kind())
                 .put("schemaVersion", resource.schemaVersion()).put("byteLength", resource.byteLength()).put("digest", resource.digest());
     }

@@ -271,6 +271,33 @@ describe('StreamJsonOutputAdapter', () => {
         ]);
       });
 
+      it('retains the delivered result when a continuation discards tool calls and emits no replacement text', () => {
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: 'delivered prose',
+        });
+        adapter.restartAttempt(true, [
+          {
+            callId: 'discarded-call',
+            name: 'read_file',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'anonymous-prompt',
+          },
+        ]);
+        adapter.emitResult({
+          isError: false,
+          durationMs: 1,
+          apiDurationMs: 1,
+          numTurns: 1,
+        });
+        const result = stdoutWriteSpy.mock.calls
+          .map((call: unknown[]) => JSON.parse(call[0] as string))
+          .find((message: { type: string }) => message.type === 'result');
+        expect(result.result).toBe('delivered prose');
+        expect(result.is_error).toBe(false);
+      });
+
       it('keeps the current stream message across continuation retry', () => {
         adapter.processEvent({
           type: LlmEventType.Content,

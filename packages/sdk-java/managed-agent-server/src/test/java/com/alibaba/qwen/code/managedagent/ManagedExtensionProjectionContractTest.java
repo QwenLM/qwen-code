@@ -66,7 +66,7 @@ class ManagedExtensionProjectionContractTest {
         });
         Map<String, Object> expected = new TreeMap<>(JSON.convertValue(
                 fixtures.required("recordBodies"), TreeMap.class));
-        // The bodies H6 added to the projection contract after H4.
+        // The bodies H6 and H4d added to the projection contract after H4.
         expected.putAll(JSON.convertValue(
                 fixtures.required("additionalRecordBodies"), TreeMap.class));
         assertEquals(JSON.convertValue(expected, TreeMap.class),
