@@ -466,7 +466,8 @@ public final class ChildWorktreeGit {
      * content the working tree alone holds (a child that untracks it, for
      * one: the snapshot the child started from committed it as its own,
      * so removing it there is no statement about the parent's copy):
-     * writing the deletion would erase the only copy.
+     * the only other copy sits under the row's base pin, which is swept
+     * when the row retires, so writing the deletion would leave none.
      */
     private List<String> unwritable(Path root, Repository repository, String parentTree, String mergedTree) {
         Map<String, Change> changes = diffTree(root, repository, parentTree, mergedTree);
