@@ -2208,6 +2208,9 @@ export async function loadCliConfig(
   // that branch does not run at all, and next to `--allowed-mcp-server-names`
   // the first branch wins and leaves the set undefined. Precedence is
   // allow-then-deny — a server named by both flags ends up disabled.
+  // Boot-time only: the settings-watcher and ACP reload paths rebuild the
+  // exclude set from settings alone, so a later settings.json edit drops these
+  // entries. Durable fix tracked in #14009.
   if (argv.disableMcpServer) {
     excludedMcpServers = new Set([
       ...(excludedMcpServers ?? []),
