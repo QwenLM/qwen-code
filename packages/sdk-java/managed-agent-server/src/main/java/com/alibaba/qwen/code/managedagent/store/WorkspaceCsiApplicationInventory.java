@@ -111,7 +111,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "workspace_policy_ref:VARCHAR,agent_revision:VARCHAR,replay_floor_sequence:BIGINT,"
                     + "approval_mode:VARCHAR,tool_profile:VARCHAR,creator_actor_key:VARBINARY,owner_actor_key:VARBINARY,"
                     + "parent_session_id:VARCHAR,root_session_id:VARCHAR,parent_child_run_id:VARCHAR,child_depth:INT,"
-                    + "runtime_request_key:VARCHAR,csi_guard:BOOLEAN"),
+                    + "runtime_request_key:VARCHAR,agent_definition_digest:VARCHAR,csi_guard:BOOLEAN"),
             declaration("managed_agent_snapshot", "tenant_id,session_id",
                     "tenant_id:VARCHAR,session_id:VARCHAR,snapshot_version:BIGINT,covered_sequence:BIGINT,"
                     + "items_json:LONGTEXT,created_at:BIGINT,updated_at:BIGINT"),
@@ -339,7 +339,9 @@ final class WorkspaceCsiApplicationInventory {
             declaration("qwen_tool_publication_operation", "scope_key,publication_id,operation_id",
                     "scope_key:CHAR,publication_id:VARCHAR,operation_id:VARCHAR,request_digest:CHAR,slot_key:VARCHAR,"
                     + "state:VARCHAR,claim_owner:VARCHAR,claim_epoch:BIGINT,claim_until:DATETIME,deadline:DATETIME,"
-                    + "receipt_json:MEDIUMTEXT,created_at:DATETIME,recovery_deadline:DATETIME"),
+                    + "receipt_json:MEDIUMTEXT,created_at:DATETIME,recovery_deadline:DATETIME,"
+                    + "execution_mode:VARCHAR,verification_request_json:MEDIUMTEXT,verification_ready:BOOLEAN,"
+                    + "verification_next_at:DATETIME,failure_status:INT,failure_code:VARCHAR"),
             declaration("qwen_tool_publication_seal", "scope_key,publication_id,stream_id",
                     "scope_key:CHAR,publication_id:VARCHAR,stream_id:VARCHAR,segment_count:INT,byte_length:BIGINT,"
                     + "sha256:CHAR,operation_id:VARCHAR"),

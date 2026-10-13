@@ -189,12 +189,15 @@ class WorkspaceCsiNodeSourceStoreTest {
     void lateValidNodeRechecksTheOriginalAdmissionBeforeOpeningTheGate(String boundary) throws Exception {
         store.saveArm(binding, registration, reservation, configuration, arm);
         var api = mock(KubernetesRuntimeClient.class);
+        var node = configureNodeEvidencePeers(api);
         var source = mock(CsiNodeSourceClient.class);
         var gateway = mock(CsiNodeSourceClient.class);
         var nodeReply = new CompletableFuture<Map<String, Object>>();
         var nodeEntered = new CountDownLatch(1);
         var expired = new AtomicBoolean();
+        var nodeReads = new AtomicInteger();
         when(api.getCluster("nodes", configuration.node().name())).thenAnswer(call -> {
+            if (nodeReads.incrementAndGet() == 1) { return CompletableFuture.completedFuture(node); }
             nodeEntered.countDown();
             return nodeReply;
         });
@@ -207,7 +210,8 @@ class WorkspaceCsiNodeSourceStoreTest {
         try (var evidence = new WorkspaceCsiNodeEvidence(store, configuration.node(), registration, api, source, gateway,
                 "registry.example/worker@sha256:" + configuration.imageDigest());
                 var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            var spec = Map.<String, Object>of("affinity", evidence.affinity(), "schedulingGates",
+            var spec = Map.<String, Object>of("runtimeClassName", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS,
+                    "affinity", evidence.affinity(), "schedulingGates",
                     List.of(Map.of("name", KubernetesHttpRuntimeClient.CSI_SOURCE_GATE)));
             var metadata = Map.<String, Object>of("namespace", registration.namespace(), "name",
                     WorkspaceCsiRuntimeIdentity.name(binding.getProvisionSeed()), "uid", podUid, "resourceVersion", "opaque:1");
@@ -235,9 +239,7 @@ class WorkspaceCsiNodeSourceStoreTest {
                     var replacement = bindings.claimOperation(binding.getBindingId(), boundary, Duration.ofSeconds(120));
                     assertThat(replacement.getOperationGeneration()).isEqualTo(binding.getOperationGeneration() + 1);
                 }
-                nodeReply.complete(Map.of("metadata", Map.of("name", configuration.node().name(), "uid", configuration.node().identity().nodeUid()),
-                        "status", Map.of("nodeInfo", Map.of("bootID", configuration.node().identity().bootId()),
-                                "conditions", List.of(Map.of("type", "Ready", "status", "True")))));
+                nodeReply.complete(node);
                 if ("renewal".equals(boundary)) {
                     assertThat(result.get(3, TimeUnit.SECONDS).get("spec")).isEqualTo(openedSpec);
                     verify(api).releaseCsiSchedulingGate(registration.namespace(), configuration.scope().podName(), podUid, "opaque:1", spec);
@@ -257,6 +259,7 @@ class WorkspaceCsiNodeSourceStoreTest {
     @ValueSource(strings = {"deadline", "reclaim"})
     void originalProviderStopsAfterLateNodeWithProtocolSourceFixtures(String boundary) throws Exception {
         var api = mock(KubernetesRuntimeClient.class);
+        var node = configureNodeEvidencePeers(api);
         var source = mock(CsiNodeSourceClient.class);
         var gateway = mock(CsiNodeSourceClient.class);
         var guard = mock(WorkspaceCsiResourceGuard.class);
@@ -282,15 +285,12 @@ class WorkspaceCsiNodeSourceStoreTest {
             objects.put(resource, value);
             return CompletableFuture.completedFuture(value);
         });
-        var node = Map.<String, Object>of("metadata", Map.of("name", configuration.node().name(), "uid", uid),
-                "status", Map.of("nodeInfo", Map.of("bootID", configuration.node().identity().bootId()),
-                        "conditions", List.of(Map.of("type", "Ready", "status", "True"))));
         var nodeReply = new CompletableFuture<Map<String, Object>>();
         var entered = new CountDownLatch(1);
         var closed = new CountDownLatch(1);
         var nodeReads = new AtomicInteger();
         when(api.getCluster("nodes", configuration.node().name())).thenAnswer(call -> {
-            if (nodeReads.incrementAndGet() == 1) { return CompletableFuture.completedFuture(node); }
+            if (nodeReads.incrementAndGet() <= 2) { return CompletableFuture.completedFuture(node); }
             entered.countDown();
             return nodeReply;
         });
@@ -580,6 +580,17 @@ class WorkspaceCsiNodeSourceStoreTest {
                 "apiVersion", "v1", "kind", "Node", "metadata", Map.of("name", configuration.node().name(), "uid", configuration.node().identity().nodeUid()),
                 "status", Map.of("nodeInfo", Map.of("bootID", configuration.node().identity().bootId()),
                         "conditions", List.of(Map.of("type", "Ready", "status", "True"))))));
+    }
+
+    private Map<String, Object> configureNodeEvidencePeers(KubernetesRuntimeClient api) {
+        var node = Map.<String, Object>of("metadata", Map.of("name", configuration.node().name(), "uid", configuration.node().identity().nodeUid()),
+                "status", Map.of("nodeInfo", Map.of("bootID", configuration.node().identity().bootId()),
+                        "conditions", List.of(Map.of("type", "Ready", "status", "True"))));
+        when(api.getCluster("nodes", configuration.node().name())).thenReturn(CompletableFuture.completedFuture(node));
+        when(api.getCluster("runtimeclasses", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS)).thenReturn(CompletableFuture.completedFuture(Map.of(
+                "apiVersion", "node.k8s.io/v1", "kind", "RuntimeClass", "handler", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS,
+                "metadata", Map.of("name", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS, "uid", podUid))));
+        return node;
     }
 
     @Test
@@ -898,11 +909,13 @@ class WorkspaceCsiNodeSourceStoreTest {
     void mismatchedAdmittedBindCannotPersistOrOpenTheGate(String changed) throws Exception {
         store.saveArm(binding, registration, reservation, configuration, arm);
         var api = mock(KubernetesRuntimeClient.class);
+        configureNodeEvidencePeers(api);
         var source = mock(CsiNodeSourceClient.class);
         var gateway = mock(CsiNodeSourceClient.class);
         try (var evidence = new WorkspaceCsiNodeEvidence(store, configuration.node(), registration, api, source, gateway,
                 "registry.example/worker@sha256:" + configuration.imageDigest())) {
-            var spec = Map.<String, Object>of("affinity", evidence.affinity(), "schedulingGates",
+            var spec = Map.<String, Object>of("runtimeClassName", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS,
+                    "affinity", evidence.affinity(), "schedulingGates",
                     List.of(Map.of("name", KubernetesHttpRuntimeClient.CSI_SOURCE_GATE)));
             var supplied = admittedBound("spec".equals(changed) ? "f".repeat(64) : WorkspaceCsiRuntimeIdentity.digest(spec),
                     "rv".equals(changed) ? "opaque:wrong" : "opaque:1");
@@ -914,6 +927,7 @@ class WorkspaceCsiNodeSourceStoreTest {
                     .isInstanceOf(RuntimeBrokerException.class);
             assertThat(store.inspect(binding.getBindingId()).phase()).isEqualTo("ARMED");
             assertThat(store.inspect(binding.getBindingId()).bound()).isNull();
+            verify(source).bind(anyString(), anyString(), anyString(), anyString(), anyString());
             verify(api, never()).releaseCsiSchedulingGate(any(), any(), any(), any(), any());
         }
     }

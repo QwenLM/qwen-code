@@ -54,7 +54,6 @@ import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
                 + "${java.io.tmpdir}${file.separator}qwen-rb-default-on-state",
         "qwen.managed-agent.runtime-broker.node-executable=node",
         "qwen.managed-agent.runtime-broker.worker-entry=worker.js",
-        "qwen.managed-agent.runtime-broker.cli-entry=cli.js"
 })
 @ContextConfiguration(initializers = RuntimeBrokerDefaultOnTest.ScrubRuntimeEnv.class)
 @EnabledOnOs(OS.LINUX)

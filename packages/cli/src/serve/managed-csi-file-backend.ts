@@ -394,6 +394,14 @@ export class ManagedCsiFileBackend
           Object.assign(new Error('File not found.'), { code: 'ENOENT' }),
         );
       return operation(source);
+    }).catch((error: unknown) => {
+      const code =
+        error instanceof Error
+          ? (error as NodeJS.ErrnoException).code
+          : undefined;
+      if (['EISDIR', 'ENOTDIR', 'ELOOP', 'EACCES'].includes(code ?? ''))
+        throw new FileReadOpenError(error);
+      throw error;
     });
   }
 
@@ -501,9 +509,21 @@ export class ManagedCsiFileBackend
       params._meta,
     );
     signal.throwIfAborted();
+    let original: Buffer | undefined;
+    let changed = false;
+    const originalName = working.missing.at(-1);
     try {
-      if (working.leaf) await this.verifyEntry(working.leaf, true);
-      else {
+      if (working.leaf) {
+        await this.verifyEntry(working.leaf, true);
+        original = await readFileHandleBytes(
+          working.leaf.handle,
+          Number(working.leaf.stats.size),
+          signal,
+        );
+        if (BigInt(original.length) !== working.leaf.stats.size)
+          throw new Error(UNAVAILABLE);
+        await this.verifyEntry(working.leaf, true);
+      } else {
         if (await this.lstat(addressOf(working.parent, working.missing[0])))
           throw new Error('CSI target appeared before mutation.');
         while (working.missing.length > 1) {
@@ -536,9 +556,11 @@ export class ManagedCsiFileBackend
         this.requireFile(stats, working.receipt.rootDevice);
         working.leaf = { handle, address, stats };
         working.missing = [];
+        changed = true;
       }
       const leaf = working.leaf;
       await this.checkAlias(leaf.stats);
+      changed = true;
       await this.writeBytes(leaf.handle, bytes, 0, signal);
       await leaf.handle.truncate(bytes.length);
       await leaf.handle.sync();
@@ -554,6 +576,42 @@ export class ManagedCsiFileBackend
       await this.verifyEntry(leaf, true);
       return (await this.source(leaf)).stats;
     } catch (error) {
+      if (changed && working.leaf) {
+        try {
+          const leaf = working.leaf;
+          const named = await fs.lstat(leaf.address, { bigint: true });
+          const opened = await leaf.handle.stat({ bigint: true });
+          if (
+            !named.isFile() ||
+            !sameInode(leaf.stats, named) ||
+            !sameInode(leaf.stats, opened) ||
+            named.mode !== leaf.stats.mode ||
+            opened.mode !== leaf.stats.mode
+          )
+            throw new Error(UNAVAILABLE);
+          await this.checkAlias(opened);
+          if (original) {
+            await this.writeBytes(leaf.handle, original, 0);
+            await leaf.handle.truncate(original.length);
+            await leaf.handle.sync();
+            leaf.stats = await leaf.handle.stat({ bigint: true });
+            await this.verifyEntry(leaf, true);
+          } else {
+            await fs.unlink(leaf.address);
+            working.leaf = undefined;
+            working.missing = [originalName!];
+          }
+          await working.parent.sync();
+        } catch (rollbackError) {
+          throw this.fault(
+            new AggregateError(
+              [error, rollbackError],
+              'CSI write rollback failed.',
+            ),
+          );
+        }
+      }
+      if (signal.aborted && error === signal.reason) throw error;
       throw this.fault(error);
     }
   }
@@ -611,6 +669,7 @@ export class ManagedCsiFileBackend
       complete = resolve;
     });
     this.#pending.add(pending);
+    let operationFailed = false;
     try {
       return await this.mount.withVerifiedRoot(async (root, receipt) => {
         this.#binding ??= this.bind(root, receipt);
@@ -618,12 +677,26 @@ export class ManagedCsiFileBackend
         await this.verifyStorage();
         try {
           return await operation(root, receipt);
+        } catch (error) {
+          operationFailed = true;
+          throw error;
         } finally {
           await this.verifyStorage();
         }
       });
     } catch (error) {
-      this.fault(error);
+      const code =
+        error instanceof Error
+          ? (error as NodeJS.ErrnoException).code
+          : undefined;
+      if (
+        !operationFailed ||
+        this.mount.isAvailable === false ||
+        ['EIO', 'ENOSPC', 'EDQUOT', 'ENODEV', 'ESTALE', 'EBADF'].includes(
+          code ?? '',
+        )
+      )
+        this.fault(error);
       throw error;
     } finally {
       this.#pending.delete(pending);
@@ -718,6 +791,7 @@ export class ManagedCsiFileBackend
       owned: [],
       missing: components,
     };
+    let observed = false;
     try {
       for (let index = 0; index < components.length - 1; index++) {
         const address = addressOf(working.parent, components[index]);
@@ -759,10 +833,14 @@ export class ManagedCsiFileBackend
           working.missing = [];
         }
       }
+      observed = true;
       return await operation(working);
     } finally {
       try {
-        await this.verifyWorking(working);
+        if (observed) await this.verifyWorking(working);
+        else
+          for (const parent of working.parents)
+            await this.verifyEntry(parent, false);
       } finally {
         await this.closeEphemeral(working.owned.reverse());
       }
@@ -786,7 +864,11 @@ export class ManagedCsiFileBackend
     owned: FileHandle[],
   ): Promise<Entry> {
     const before = await fs.lstat(address, { bigint: true });
-    if (!before.isDirectory() || before.dev.toString() !== device)
+    if (!before.isDirectory())
+      throw Object.assign(new Error('CSI path parent is not a directory.'), {
+        code: before.isSymbolicLink() ? 'ELOOP' : 'ENOTDIR',
+      });
+    if (before.dev.toString() !== device)
       throw this.fault(new Error(UNAVAILABLE));
     const handle = await fs.open(address, DIR_FLAGS);
     owned.push(handle);
@@ -891,8 +973,11 @@ export class ManagedCsiFileBackend
   }
 
   private requireFile(stats: BigIntStats, device: string): void {
+    if (!stats.isFile())
+      throw Object.assign(new Error('CSI tools require an ordinary file.'), {
+        code: stats.isDirectory() ? 'EISDIR' : 'ELOOP',
+      });
     if (
-      !stats.isFile() ||
       stats.dev.toString() !== device ||
       stats.size < 0n ||
       stats.size > BigInt(Number.MAX_SAFE_INTEGER)

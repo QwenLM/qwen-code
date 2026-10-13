@@ -38,6 +38,14 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
+    'packages/cli/src/serve/hosted-harness-contract.ts',
+    {
+      reason:
+        'The Hosted lifecycle v2 profile advertisement is a process-scoped deployment gate fixed when the daemon contract is created.',
+      accesses: { 'computed:HOSTED_LIFECYCLE_V2_PROFILES_ENV': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/workspace-recovery-worker.ts',
     {
       reason:

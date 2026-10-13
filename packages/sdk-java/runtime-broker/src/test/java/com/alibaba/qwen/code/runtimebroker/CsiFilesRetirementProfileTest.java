@@ -16,6 +16,8 @@ class CsiFilesRetirementProfileTest {
     void pinsTheReservedWorkerCapabilityDigest() {
         assertEquals("sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
                 CsiFilesRetirementProfile.CAPABILITY_DIGEST);
+        assertEquals("sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+                CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
     }
 
     @Test
@@ -27,12 +29,12 @@ class CsiFilesRetirementProfileTest {
         assertEquals("3", request.getScope().getWorkspaceGeneration());
         assertEquals("storage", request.getStorageId());
         assertEquals("kubernetes-workspace", request.getProvisionerKind());
-        assertEquals(JdbcRepositorySupport.requestKey(request), request.requestKey());
+        assertEquals(CsiFilesRetirementProfile.CAPABILITY_DIGEST, request.getScope().getCapabilityDigest());
         assertNotEquals(WorkspaceExecutionProfile.CAPABILITY_DIGEST, request.getScope().getCapabilityDigest());
-        assertNotEquals(request.requestKey(), CsiFilesRetirementProfile.request(workspace,
-                "/workspace", UUID.randomUUID().toString()).requestKey());
-        assertNotEquals(request.requestKey(), CsiFilesRetirementProfile.request(workspace,
-                "/another", id).requestKey());
+        assertNotEquals(JdbcRepositorySupport.requestKey(request), JdbcRepositorySupport.requestKey(CsiFilesRetirementProfile.request(workspace,
+                "/workspace", UUID.randomUUID().toString())));
+        assertNotEquals(JdbcRepositorySupport.requestKey(request), JdbcRepositorySupport.requestKey(CsiFilesRetirementProfile.request(workspace,
+                "/another", id)));
     }
 
     @Test
@@ -42,6 +44,10 @@ class CsiFilesRetirementProfileTest {
                 "storage", "subdir", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1);
         assertThrows(IllegalArgumentException.class,
                 () -> CsiFilesRetirementProfile.request(subdirectory, "/workspace", id));
+        var foreign = new ContextBinding("tenant", "workspace", 3,
+                "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        assertThrows(IllegalArgumentException.class,
+                () -> CsiFilesRetirementProfile.request(foreign, "/workspace", id));
         for (String path : new String[] {"/", "workspace", "/workspace/", "/a/../b", "/a//b", "/a/./b", "/a\\b"}) {
             assertThrows(IllegalArgumentException.class, () -> CsiFilesRetirementProfile.request(workspace, path, id));
         }

@@ -14,6 +14,20 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsLifecycle() { return false; }
 
+    default boolean supportsLifecycle(String profile) {
+        return com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
+    }
+
+    default void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
+    }
+
+    default void settleLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
+    }
+
+    default boolean supportsFencedTitles() { return false; }
+
     default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
@@ -107,6 +121,23 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     /**
+     * H4d-b: one session message operation onto the Session's journal,
+     * from the control plane's message relay (handover, receive, accepted,
+     * consumed, cancelled, rejected, unknown, consume), and the child
+     * result relay's stop of a stopped run's message turns (stop). The
+     * Hosted side settles it before answering. A receive or consume starts
+     * work in the Session, so it takes the same Workspace admission as a
+     * submit. H4e-b3's command operations ride the same route when the body
+     * names a command id, and a settled {@code execute} answers with the
+     * reply the relay copies back.
+     */
+    default Map<String, Object> runMessageOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
+        throw new UnsupportedOperationException(
+                "Message operations are unavailable");
+    }
+
+    /**
      * H5b/H5c: one channel operation onto the Session's journal, from the
      * control plane's channel service (submit_input, claim_delivery,
      * segment_receipt, settle_delivery, cancel_delivery, resend_delivery).
@@ -120,6 +151,10 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     void rename(String tenantId, String sessionId, String title);
+
+    default void rename(String tenantId, String sessionId, String title, long revision) {
+        throw new UnsupportedOperationException("Fenced Session titles are unavailable");
+    }
 
     /**
      * Closes the Session and returns the boot ID of the Harness that

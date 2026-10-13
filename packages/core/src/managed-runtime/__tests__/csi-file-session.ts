@@ -280,6 +280,16 @@ export async function csiFileSession(
         content: {
           schemaVersion: 1,
           state,
+          record: {
+            uuid: randomUUID(),
+            parentUuid: null,
+            sessionId: key.sessionId,
+            timestamp: new Date().toISOString(),
+            type: 'system',
+            subtype: 'file_history_snapshot',
+            ...session.authority.recordEnvelope,
+            systemPayload: { snapshots: state.snapshots },
+          },
           pendingTurn: null,
           pendingUndo:
             damage === 'pending-history' ? { operationId: 'pending' } : null,

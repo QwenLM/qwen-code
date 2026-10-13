@@ -43,6 +43,7 @@ import {
 import type {
   LineEnding,
   TextFileMutation,
+  TextFileObservation,
 } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
@@ -181,9 +182,19 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     let originalContent = '';
-    const observation = await this.config
-      .getFileSystemService()
-      .textFileIo?.inspect(this.params.file_path, _abortSignal);
+    let observation: TextFileObservation | undefined;
+    try {
+      observation = await this.config
+        .getFileSystemService()
+        .textFileIo?.inspect(this.params.file_path, _abortSignal);
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'EISDIR')
+        throw new StructuredToolError(
+          `Path is a directory, not a file: ${this.params.file_path}`,
+          ToolErrorType.TARGET_IS_DIRECTORY,
+        );
+      throw error;
+    }
     let fileExists = observation
       ? observation.kind === 'file'
       : await isFilefileExists(this.params.file_path);
@@ -312,16 +323,16 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 
   async execute(abortSignal: AbortSignal): Promise<ToolResult> {
+    const io = this.config.getFileSystemService().textFileIo;
+    if (!io) return this.executeObserved(abortSignal);
     try {
-      const io = this.config.getFileSystemService().textFileIo;
-      return io
-        ? await io.withMutation(
-            this.params.file_path,
-            abortSignal,
-            (mutation) => this.executeObserved(abortSignal, mutation),
-          )
-        : await this.executeObserved(abortSignal);
+      return await io.withMutation(
+        this.params.file_path,
+        abortSignal,
+        (mutation) => this.executeObserved(abortSignal, mutation),
+      );
     } catch (error) {
+      if (abortSignal.aborted) throw error;
       return this.writeFailure(error);
     }
   }

@@ -98,7 +98,7 @@ CUT 后 finalize 在 DB lock 外接收相同持久 cut。Readback 用不可变 c
 
 保存的 canonical SETTLING 库存按固定 catalogue 和完整 typed key 解码。后续每个预期像从它与明确的 progress、三个 terminal row、七个 head cell 和两个逻辑 Session cell 差异重建；当前行不充当预期差异。Final receipt 额外限制为 64 KiB，freeze 在推进不可变持久阶段前，为 terminal row、cut 和 receipt 预留行数与字节容量。应用事务按剩余十秒预算限制 raw prepared query timeout，在执行下一条查询前和提交前拒绝过期。
 
-受影响组件包括 Hosted CSI owner/authority/HTTP store；既有 reservation、新 application store/controller 与 V67 progress；显式 Broker native progress/terminal-history/logical-completion consumer；RuntimeAccess、binding/execution continuation gate；file worker/executor/composer/backend 与新 boot/finalize envelope；双语 handoff 引用；collocated focused tests 和独立 E2E plan。
+受影响组件包括 Hosted CSI owner/authority/HTTP store；既有 reservation、新 application store/controller 与 V72 progress；显式 Broker native progress/terminal-history/logical-completion consumer；RuntimeAccess、binding/execution continuation gate；file worker/executor/composer/backend 与新 boot/finalize envelope；双语 handoff 引用；collocated focused tests 和独立 E2E plan。
 
 实现前，用实际构建 Hosted/Main/Broker/worker、专属 MySQL 独立复现缺 owner barrier、续约吞错、native DRAINING writer/control version、terminal live 拒绝、fixed BLOCKED worker drain、完整 current inventory 缺口。确认 global CLI 无 private selector并注明有界 Java/Node fallback。保留原失败、exact loaded inputs、全表值、实际等待和独立资源清理。
 

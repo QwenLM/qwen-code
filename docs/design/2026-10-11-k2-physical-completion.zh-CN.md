@@ -18,7 +18,7 @@ Physical store 在同一 transaction-bound Connection 上从 application store �
 
 ## 不可变计划与显式物理目录
 
-V69 增加独立六列 physical record：retirement_id、binding_id、physical_key、record_version、record_bytes、record_sha256。当前 closed JSON format 为 `qwen-csi-physical-progress/1`，精确包含 format、retirementId、bindingId、physicalKey、stage、planBase64、planSha256、intent、attempts、observations。阶段为 PLANNED、INTENT、STOPPED、UNPUBLISHED；本版本没有 qualification 或 RELEASED 字段。每个 payload pair 必须同时缺失或同时存在；所有原字段和此前 attempt 不可变，仅允许将一次未知 reply 填入实际结果。
+V74 增加独立六列 physical record：retirement_id、binding_id、physical_key、record_version、record_bytes、record_sha256。当前 closed JSON format 为 `qwen-csi-physical-progress/1`，精确包含 format、retirementId、bindingId、physicalKey、stage、planBase64、planSha256、intent、attempts、observations。阶段为 PLANNED、INTENT、STOPPED、UNPUBLISHED；本版本没有 qualification 或 RELEASED 字段。每个 payload pair 必须同时缺失或同时存在；所有原字段和此前 attempt 不可变，仅允许将一次未知 reply 填入实际结果。
 
 Record 上限 16 MiB，plan 64 KiB，每个 journal prefix 与 HTTP reply 1 MiB，attempts 八次、observations 两次。Checked version 从一开始，每次保存 intent、attempt、actual reply 或 stage observation 递增。同一 Pod resourceVersion 返回已保存 attempt，不再发送，包括未知或拒绝的 outcome。实际 source 已 STOPPED 时，仍可能需要正常删除 Pod，才能触发 CSI unpublication。
 

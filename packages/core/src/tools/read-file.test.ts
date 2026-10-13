@@ -378,6 +378,36 @@ describe('ReadFileTool', () => {
       },
     );
 
+    it.skipIf(!['linux', 'darwin'].includes(process.platform))(
+      'keeps a prior full read when a later read fails before recording',
+      async () => {
+        const filePath = path.join(tempRootDir, 'prior-read.txt');
+        await fsp.writeFile(filePath, 'line1\nline2\n');
+        const service = new StandardFileSystemService();
+        const boundTool = new ReadFileTool(
+          makeConfig({ getFileSystemService: () => service }),
+        );
+        await boundTool
+          .build({ file_path: filePath, ...nullPagination })
+          .execute(abortSignal);
+        const recorded = fileReadCache.check(await fsp.stat(filePath));
+        expect(recorded.state).toBe('fresh');
+        service.withReadFile = async () => {
+          throw new Error('cancelled before record');
+        };
+        await expect(
+          boundTool
+            .build({ file_path: filePath, offset: 1, limit: 1 })
+            .execute(abortSignal),
+        ).rejects.toThrow('cancelled before record');
+        const after = fileReadCache.check(await fsp.stat(filePath));
+        expect(after.state).toBe('fresh');
+        if (after.state === 'fresh') {
+          expect(after.entry.lastReadWasFull).toBe(true);
+        }
+      },
+    );
+
     it('advertises audio and video support to the model', () => {
       expect(tool.description).toContain('audio, video');
       expect(tool.description).toContain(
@@ -700,6 +730,44 @@ describe('ReadFileTool', () => {
       await expect(read(filePath, tool, controller.signal)).rejects.toThrow(
         /abort/i,
       );
+    });
+
+    it('does not cache a delegated read that returns after cancellation', async () => {
+      const filePath = path.join(tempRootDir, 'delegated-late-read.txt');
+      await fsp.writeFile(filePath, 'content', 'utf-8');
+      let release!: (result: { content: string }) => void;
+      const response = new Promise<{ content: string }>((resolve) => {
+        release = resolve;
+      });
+      const service = Object.assign(new StandardFileSystemService(), {
+        withReadFile: undefined,
+      });
+      const read = vi
+        .spyOn(service, 'readTextFile')
+        .mockReturnValueOnce(response);
+      const recordRead = vi.spyOn(fileReadCache, 'recordRead');
+      const controller = new AbortController();
+      const delegatedTool = new ReadFileTool(
+        makeConfig({ getFileSystemService: () => service }),
+      );
+      const running = delegatedTool
+        .build({ file_path: filePath, offset: 0, limit: 20 })
+        .execute(controller.signal)
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+      try {
+        await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+        controller.abort();
+        release({ content: 'late content' });
+        expect(await running).toEqual({ error: controller.signal.reason });
+        expect(recordRead).not.toHaveBeenCalled();
+      } finally {
+        release({ content: 'late content' });
+        await running;
+        read.mockRestore();
+      }
     });
 
     it.skipIf(!['linux', 'darwin'].includes(process.platform))(

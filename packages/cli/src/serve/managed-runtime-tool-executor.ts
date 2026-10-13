@@ -188,6 +188,7 @@ export class ManagedToolConflictError extends Error {
     readonly code:
       | 'managed_runtime_identity_conflict'
       | 'managed_runtime_provider_operation_failed'
+      | 'managed_runtime_owner_hold_pending'
       | 'managed_tool_result_conflict' = 'managed_runtime_identity_conflict',
   ) {
     super(message);
@@ -301,7 +302,14 @@ export interface ManagedWorkerDrainObservation {
 export type ManagedShellCaptureSink = Pick<
   LocalShellResultCapture,
   keyof LocalShellResultCapture
->;
+> & {
+  /**
+   * Marks the capture's end as a platform-requested stop (#13856 A8): the
+   * finalize then carries `stopRequested`, and the record projects
+   * `cancelled`/`stop_requested` instead of a bare exit.
+   */
+  setStopRequested(): void;
+};
 
 export interface ManagedShellCapturePublisher {
   readonly hasInstalledPublication?: boolean;
@@ -655,6 +663,10 @@ export class ManagedToolExecutor {
         );
       const existingHistory = this.fileHistories.get(sessionId);
       let history = tools.fileHistory ?? existingHistory;
+      if (tools.retainedFileHistory && !tools.fileHistory)
+        throw new ManagedToolConflictError(
+          'Retained file history requires its original composition.',
+        );
       if (
         tools.fileHistory &&
         (tools.fileHistory.ownerSessionId !== ownerSessionId ||
@@ -925,8 +937,12 @@ export class ManagedToolExecutor {
 
   closeSessionAdmission(sessionId: string): void {
     if (this.hasActiveSession(sessionId)) {
+      // The dedicated code names the one condition a Hook release may absorb
+      // as a fence — this Session still owns unfinished work of any kind;
+      // both class defaults stay catch-alls other refusals share.
       throw new ManagedToolConflictError(
         'Managed Runtime Session still owns unfinished work.',
+        'managed_runtime_owner_hold_pending',
       );
     }
     this.closedSessions.add(sessionId);
@@ -2114,10 +2130,14 @@ export class ManagedToolExecutor {
         // does not exist yet, so resolve the deepest ancestor that does —
         // a genuinely absent path stays lexical and keeps the tool's own
         // not-found answer rather than a traversal accusation.
-        const realTarget = await realpathDeepestExisting(
-          params['file_path'] as string,
-        );
-        const realDirectory = await realpathDeepestExisting(directory);
+        // Retained storage owns no-follow admission through the original
+        // root descriptor; ambient realpaths cannot authenticate that root.
+        const realTarget = tools.retainedFileHistory
+          ? (params['file_path'] as string)
+          : await realpathDeepestExisting(params['file_path'] as string);
+        const realDirectory = tools.retainedFileHistory
+          ? directory
+          : await realpathDeepestExisting(directory);
         const relative = path.relative(realDirectory, realTarget);
         let outOfBoundary = false;
         if (
@@ -2131,6 +2151,7 @@ export class ManagedToolExecutor {
           // reachable, the behavior /1 Sessions had before containment.
           const workspaceRoot = tools.workspaceRoot;
           outOfBoundary =
+            tools.retainedFileHistory !== undefined ||
             workspaceRoot === undefined ||
             escapesSession(
               path.relative(

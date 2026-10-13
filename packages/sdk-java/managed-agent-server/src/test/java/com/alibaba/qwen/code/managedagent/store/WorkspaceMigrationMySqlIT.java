@@ -91,9 +91,10 @@ class WorkspaceMigrationMySqlIT {
                 String.class, lastRank);
         if ("47".equals(baseline)) {
             assertThat(added).containsExactly("48", "49", "50", "51", "52", "53", "54", "55", "56", "57",
-                    "60", "62", "63", "64", "65", "66");
+                    "60", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74");
         } else {
-            assertThat(added).containsExactly("63", "64", "65", "66");
+            assertThat(added).containsExactly("63", "64", "65", "66", "67", "68", "69", "70", "71", "72",
+                    "73", "74");
             legacy.forEach((table, rows) -> {
                 String columns = "`" + String.join("`,`", rows.getFirst().keySet()) + "`";
                 assertThat(jdbc.queryForList("SELECT " + columns + " FROM " + table))
@@ -110,6 +111,15 @@ class WorkspaceMigrationMySqlIT {
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isZero();
+    }
+
+    @Test
+    void upgradedSchemaAppliesStreamCaptureCollectionAfterPublishedHead() {
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("64").load().migrate();
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.TABLES"
+                + " WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'qwen_managed_session_resource_collection'",
+                Integer.class, schema)).isEqualTo(1);
     }
 
     @Test
@@ -377,6 +387,20 @@ class WorkspaceMigrationMySqlIT {
                 }
             });
         }
+    }
+
+    @Test
+    void upgradesMain56WithoutChangingAppliedMigrations() {
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").target("56").load().migrate();
+        var applied = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
+        int lastRank = jdbc.queryForObject("SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
+        Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
+        assertThat(jdbc.queryForList("SELECT * FROM flyway_schema_history"
+                + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
+        assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
+                + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
+                String.class, lastRank)).containsExactly("57", "60", "62", "63", "64", "65", "66",
+                "67", "68", "69", "70", "71", "72", "73", "74");
     }
 
     private void seed(String tenant, String session, String state) {

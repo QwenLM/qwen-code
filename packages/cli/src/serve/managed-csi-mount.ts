@@ -7,9 +7,12 @@
 import { constants, promises as fs, type BigIntStats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import { normalizeWorkspaceRelativePath } from '@qwen-code/qwen-code-core/managed-runtime/managed-workspace-relative-path.js';
+import { normalizeWorkspaceRelativePath } from './managed-workspace-binding.js';
 import { ManagedContextMount } from './managed-context-worker.js';
-import { ManagedCsiRootDirectory } from './managed-csi-root-directory.js';
+import {
+  ManagedCsiRootDirectory,
+  ManagedCsiRootDirectoryCleanupError,
+} from './managed-csi-root-directory.js';
 import {
   linuxDeviceNumber,
   type ManagedCsiMountReceipt,
@@ -176,10 +179,19 @@ export class ManagedCsiMount extends ManagedContextMount {
     this.#closed = true;
     this.#closing ??= (async () => {
       await Promise.all(this.#observations);
-      await this.#directory?.then(
-        (directory) => directory.close(),
-        () => {},
-      );
+      try {
+        await this.#directory?.then(
+          (directory) => directory.close(),
+          (error: unknown) => {
+            if (error instanceof ManagedCsiRootDirectoryCleanupError)
+              throw error;
+          },
+        );
+      } catch (error) {
+        if (this.#closeFailure)
+          throw new AggregateError([this.#closeFailure, error], UNAVAILABLE);
+        throw error;
+      }
       if (this.#closeFailure) throw this.#closeFailure;
     })();
     return this.#closing;

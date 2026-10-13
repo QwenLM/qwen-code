@@ -135,7 +135,10 @@ class LocalManagedHookModelScope {
     if (shared.snapshot) budget.beginTurn(shared.snapshot);
   }
 
-  async beginMainAttempt(model: string): Promise<ManagedMainModelAttempt> {
+  async beginMainAttempt(
+    model: string,
+    recoveryRef?: ManagedSessionDurableRef,
+  ): Promise<ManagedMainModelAttempt> {
     this.assertOwner();
     if (this.operation)
       throw new ManagedSessionConflictError(
@@ -143,10 +146,15 @@ class LocalManagedHookModelScope {
       );
     const attemptId = `${this.turnId}:main:${randomUUID()}`;
     return Object.assign(
-      await this.beginAttempt(attemptId, 'hosted', {
-        turnId: this.turnId,
-        model,
-      }),
+      await this.beginAttempt(
+        attemptId,
+        'hosted',
+        {
+          turnId: this.turnId,
+          model,
+        },
+        recoveryRef,
+      ),
       { attemptId },
     );
   }
@@ -155,6 +163,7 @@ class LocalManagedHookModelScope {
     attemptId: string,
     kind: 'hook' | 'hosted',
     route: object,
+    recoveryRef?: ManagedSessionDurableRef,
   ): Promise<
     (
       success: boolean,
@@ -194,7 +203,14 @@ class LocalManagedHookModelScope {
             scopeId: activation.activationId,
             ...activation,
           },
-          payload: { attemptId, routeRef, inputCheckpointRef, state, usageRef },
+          payload: {
+            attemptId,
+            routeRef,
+            inputCheckpointRef,
+            state,
+            usageRef,
+            ...(recoveryRef ? { recoveryRef } : {}),
+          },
         }),
         { class: 'harness', activation },
       );

@@ -17,6 +17,13 @@ public interface RuntimeBindingRepository {
                 "Runtime repository does not support atomic Session admission checks", false);
     }
 
+    /** Creates a RELEASED receipt under the same generation lock as admission. */
+    default RuntimeSessionRecord createSessionTombstone(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord candidate) {
+        throw new RuntimeBrokerException(501, "runtime_session_tombstone_unavailable",
+                "Runtime repository does not support atomic Session retirement", false);
+    }
+
     /** Existing idempotency receipts remain readable after admission closes. */
     ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate);
@@ -47,6 +54,13 @@ public interface RuntimeBindingRepository {
     RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
             RuntimeSessionRecord expected);
 
+    /** Atomically releases one original Session and its holder under a live drain claim and persisted stop receipt. */
+    default RuntimeSessionRecord completeStoppedSessionRelease(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeSessionRecord expected, RuntimeBindingRecord claim) {
+        throw new RuntimeBrokerException(501, "runtime_stopped_release_unavailable",
+                "Runtime repository does not support stopped Session release", false);
+    }
+
     /**
      * Moves the Session to RELEASING in one decision with the no-active-
      * execution check, under the same Session row lock admission takes, so
@@ -75,9 +89,27 @@ public interface RuntimeBindingRepository {
         }
     }
 
+    default boolean requireHarnessRecovery(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        if (authority != null) {
+            requireHarnessCleanup(scope, harnessSessionId, authority);
+        }
+        return authority != null;
+    }
+
+    default void requireHarnessCleanup(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        throw new RuntimeBrokerException(409, "runtime_admission_closed", "Lifecycle cleanup is unavailable", false);
+    }
+
     default void requireHookAdmission(RuntimeScope scope, String harnessSessionId,
             RuntimeLifecycleAuthority authority) {
         requireHarnessAdmission(scope, harnessSessionId, authority);
+    }
+
+    default List<RuntimeBindingRecord> verifyHarnessResources(java.sql.Connection connection,
+            String tenantId, String harnessSessionId) throws java.sql.SQLException {
+        throw new RuntimeBrokerException(409, "workspace_close_identity_unverified", "Resource verification is unavailable", false);
     }
 
     default void verifyHarnessStopped(java.sql.Connection connection, String tenantId, String harnessSessionId)

@@ -17,6 +17,7 @@ import {
   assertManagedSessionKey,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  managedSessionEventRefs,
   managedSessionKeysEqual,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
@@ -27,7 +28,16 @@ import {
 } from './managed-session-records.js';
 import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
+import {
+  HOSTED_RECOVERY_RESOURCE_KINDS,
+  hostedRecoveryReferences,
+  parseHostedRecoveryResource,
+} from './hosted-recovery-records.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
+import {
+  MANAGED_TOOL_RESULT_KINDS,
+  parseToolResultManifestBytes,
+} from './managed-tool-result.js';
 import {
   MANAGED_MESSAGE_CHUNKS_KIND,
   managedMessageChunkParts,
@@ -203,7 +213,7 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    head.storageVersion !== 1 ||
+    ![1, 2].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -506,7 +516,9 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     return this.client.readResource(validated);
   }
 
-  commitResources(refs: readonly ManagedSessionDurableRef[]): CommitResource[] {
+  async commitResources(
+    refs: readonly ManagedSessionDurableRef[],
+  ): Promise<CommitResource[]> {
     const closure = new Map<string, ManagedSessionDurableRef>();
     const pending = [...refs];
     while (pending.length > 0) {
@@ -529,6 +541,8 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
         pending.push(...collectNestedResourceRefs(ref, staged.bytes));
+      } else if (isReferenceContainer(ref.kind)) {
+        pending.push(...collectNestedResourceRefs(ref, await this.read(ref)));
       }
     }
     return [...closure.values()].map((ref) => {
@@ -557,6 +571,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 }
 
 interface WriterGrant {
+  readonly supportedStorageVersion: number;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
   readonly journalRevision: number;
@@ -802,6 +817,7 @@ class ManagedSessionStoreHttpClient {
       throw corrupt('journal bytes do not match the durable head.');
     }
     this.grant = {
+      ...this.requireGrant(),
       writerGeneration: head.writerGeneration,
       leaseUntil: this.requireGrant().leaseUntil,
       journalRevision: head.journalRevision,
@@ -815,14 +831,25 @@ class ManagedSessionStoreHttpClient {
   async appendTransaction(records: readonly unknown[]): Promise<void> {
     await this.ensureWriter();
     const grant = this.requireGrant();
-    const { descriptor, commitResources, publicationId, commitBody } =
-      this.commitBody(records, grant);
+    const {
+      descriptor,
+      commitResources,
+      publicationId,
+      commitBody,
+      needsVersionTwo,
+    } = await this.commitBody(records, grant);
     let committed: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         committed =
           publicationId === undefined
-            ? await this.json('/transactions:commit', 'POST', commitBody)
+            ? await this.json(
+                needsVersionTwo
+                  ? '/transactions:commit-v2'
+                  : '/transactions:commit',
+                'POST',
+                commitBody,
+              )
             : await this.publicationRequest(
                 `/publications/${encodeURIComponent(publicationId)}/receipts/commit`,
                 commitBody,
@@ -901,7 +928,7 @@ class ManagedSessionStoreHttpClient {
       this.publicationAdmissions.delete(ref.resourceId);
   }
 
-  private commitBody(records: readonly unknown[], grant: WriterGrant) {
+  private async commitBody(records: readonly unknown[], grant: WriterGrant) {
     const recordBytes = encodeRecords(records);
     const descriptor = describeTransaction(
       records,
@@ -914,7 +941,37 @@ class ManagedSessionStoreHttpClient {
         'the transaction does not extend the HTTP journal head.',
       );
     }
-    const commitResources = this.resources.commitResources(descriptor.refs);
+    const commitResources = await this.resources.commitResources(
+      descriptor.refs,
+    );
+    const needsVersionTwo =
+      commitResources.some(
+        (resource) =>
+          HOSTED_RECOVERY_RESOURCE_KINDS.has(resource.kind) ||
+          (resource.kind === 'managed-action-options' &&
+            resource.bytesBase64 &&
+            JSON.parse(
+              Buffer.from(resource.bytesBase64, 'base64').toString('utf8'),
+            ).v === 3),
+      ) ||
+      records.some((record) => {
+        const event = (
+          record as {
+            managedSession?: {
+              kind?: string;
+              payload?: Record<string, unknown>;
+            };
+          }
+        ).managedSession;
+        return (
+          event?.kind === 'message.retracted' &&
+          event.payload?.['sourceBootId'] !== undefined
+        );
+      });
+    if (needsVersionTwo && grant.supportedStorageVersion < 2)
+      throw new ManagedSessionRecordError(
+        'Managed Session Store does not support Hosted recovery storage version 2.',
+      );
     const publicationIds = new Set(
       descriptor.refs.flatMap((ref) => {
         const id = this.publicationAdmissions.get(ref.resourceId);
@@ -950,7 +1007,13 @@ class ManagedSessionStoreHttpClient {
       recordDigest: sha256(recordBytes),
       resources: commitResources,
     };
-    return { descriptor, commitResources, publicationId, commitBody };
+    return {
+      descriptor,
+      commitResources,
+      publicationId,
+      commitBody,
+      needsVersionTwo,
+    };
   }
 
   joinOriginalCsiWriter(): Promise<void> {
@@ -986,7 +1049,7 @@ class ManagedSessionStoreHttpClient {
       return { commitBodyBase64, preparedCommitSha256 };
     }
     const { descriptor, commitResources, publicationId, commitBody } =
-      this.commitBody(records, this.requireGrant());
+      await this.commitBody(records, this.requireGrant());
     if (
       descriptor.operation !== 'releaseActivation' ||
       descriptor.eventCount !== 1 ||
@@ -1171,6 +1234,7 @@ class ManagedSessionStoreHttpClient {
       method: readOnly ? 'GET' : 'POST',
       headers: {
         Accept: 'application/json',
+        'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
         ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
         [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
           this.sessionKey.tenantId,
@@ -1413,7 +1477,11 @@ class ManagedSessionStoreHttpClient {
       if (renewed.writerGeneration !== grant.writerGeneration) {
         throw corrupt('writer generation changed during renewal.');
       }
-      this.grant = { ...this.requireGrant(), leaseUntil: renewed.leaseUntil };
+      this.grant = {
+        ...this.requireGrant(),
+        leaseUntil: renewed.leaseUntil,
+        supportedStorageVersion: renewed.supportedStorageVersion,
+      };
       this.scheduleRenewal();
     })();
     this.renewPromise = renewal
@@ -1458,12 +1526,23 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      head.storageVersion !== 1 ||
+      ![1, 2].includes(head.storageVersion) ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
       head.compactedThroughRevision !== 0
     ) {
-      throw corrupt('restore head is not readable by this v1 writer.');
+      throw corrupt('restore head is not readable by this writer.');
+    }
+    // A head below this writer's committed position is a server-side
+    // regression; re-baselining onto it would silently forget our own
+    // commits, so only an equal-or-ahead head may replace the grant.
+    if (
+      head.journalRevision < grant.journalRevision ||
+      head.committedSequence < grant.committedSequence
+    ) {
+      throw corrupt(
+        `restore head regressed below this writer's committed position (head ${head.journalRevision}/${head.committedSequence} < grant ${grant.journalRevision}/${grant.committedSequence}).`,
+      );
     }
   }
 
@@ -1586,6 +1665,7 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
+          'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -1671,7 +1751,13 @@ export function describeTransaction(
       commitDigest: null,
       activationEpoch: currentActivationEpoch,
       latestCheckpointResourceId: null,
-      refs: collectRefs(records),
+      refs: dedupeRefs([
+        header.definitionRef,
+        header.rootSnapshotRef,
+        ...(header.baseTranscriptProof === undefined
+          ? []
+          : [header.baseTranscriptProof]),
+      ]),
     };
   }
   if (records.length < 2) {
@@ -1743,8 +1829,22 @@ export function describeTransaction(
     ),
     activationEpoch,
     latestCheckpointResourceId,
-    refs: collectRefs(records),
+    refs: dedupeRefs(
+      eventRecords.flatMap((event) => managedSessionEventRefs(event)),
+    ),
   };
+}
+
+function dedupeRefs(
+  found: Iterable<ManagedSessionDurableRef>,
+): ManagedSessionDurableRef[] {
+  const refs = new Map<string, ManagedSessionDurableRef>();
+  for (const ref of found) {
+    const existing = refs.get(ref.resourceId);
+    if (existing !== undefined) requireSameRef(existing, ref);
+    else refs.set(ref.resourceId, ref);
+  }
+  return [...refs.values()];
 }
 
 function collectRefs(records: readonly unknown[]): ManagedSessionDurableRef[] {
@@ -1891,6 +1991,13 @@ export function requireStoredTransactionMatches(
 function parseWriterGrant(value: unknown): WriterGrant {
   const record = asRecord(value, 'writer grant');
   return {
+    supportedStorageVersion:
+      record['supportedStorageVersion'] === undefined
+        ? 1
+        : safeCounter(
+            record['supportedStorageVersion'],
+            'supportedStorageVersion',
+          ),
     writerGeneration: safeCounter(
       record['writerGeneration'],
       'writerGeneration',
@@ -1983,8 +2090,12 @@ export function collectNestedResourceRefs(
       throw corrupt('CSI history preparation is invalid.');
     return collectRefs([preparation['invocations'], preparation['intentRef']]);
   }
+  if (HOSTED_RECOVERY_RESOURCE_KINDS.has(ref.kind)) {
+    return hostedRecoveryReferences(parseHostedRecoveryResource(bytes));
+  }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
@@ -1998,6 +2109,18 @@ export function collectNestedResourceRefs(
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
     return collectRefs([record]);
+  }
+  // A result manifest names its page envelopes: they are Session resources
+  // too, staged exactly like the manifest, and a commit that closes over
+  // the manifest but not its pages would leave the Artifact's read chain
+  // 404ing on the page hop (#13856). A body this parse cannot represent
+  // has no pages to close over, exactly like the input branch below.
+  if (ref.kind === MANAGED_TOOL_RESULT_KINDS.manifest) {
+    try {
+      return collectRefs([parseToolResultManifestBytes(bytes)]);
+    } catch {
+      return [];
+    }
   }
   // An input's envelope embeds what it admits — a channel attachment's ref
   // among them. The commit closes over those bytes exactly like an
@@ -2017,6 +2140,20 @@ export function collectNestedResourceRefs(
     }
   }
   return [];
+}
+
+function isReferenceContainer(kind: string): boolean {
+  return (
+    EXTENSION_RECORD_KINDS.has(kind) ||
+    HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
+    [
+      'managed-checkpoint',
+      'managed-action-options',
+      'managed-hook-plan',
+      'managed-hook-message-chunks',
+      MANAGED_MESSAGE_CHUNKS_KIND,
+    ].includes(kind)
+  );
 }
 
 function requireSameRef(
