@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
+import { CHILD_NOTIFICATION_SOURCES } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 
 // H3 of #12827: the embedded scheduler that makes a Monitor wake
@@ -269,13 +270,13 @@ export async function settlePendingMonitorInputs(params: {
   readonly sink: ManagedSessionRecordSink;
   readonly sessionId: string;
   readonly cwd: string;
-  /** The notification sources to settle; H5 adds `channel` and H6 adds
-   * `automation` to the monitor family. */
+  /** The notification sources to settle; H5 adds `channel`, H6 adds
+   * `automation`, and #13803 adds `workflow` to the monitor family. */
   readonly sources?: readonly string[];
   /** Why the inputs never ran; a close by default. */
   readonly stopReason?: string;
 }): Promise<number> {
-  const sources = params.sources ?? ['monitor', 'child_agent'];
+  const sources = params.sources ?? ['monitor', ...CHILD_NOTIFICATION_SOURCES];
   // The whole committed prefix, not a bounded page: a notification input
   // lands late in the log, and `readEvents()` alone would stop at the
   // default page and leave the Session's owed inputs unsettled — which is
