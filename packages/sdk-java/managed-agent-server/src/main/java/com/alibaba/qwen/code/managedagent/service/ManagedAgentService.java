@@ -1734,7 +1734,8 @@ public class ManagedAgentService {
         for (Map.Entry<String, Object> entry : metadata.entrySet()) {
             if (!(entry.getValue() instanceof String)
                     || entry.getKey().length() > 64
-                    || ((String) entry.getValue()).length() > 512) {
+                    || (!"title".equals(entry.getKey())
+                            && ((String) entry.getValue()).length() > 512)) {
                 throw new ApiException(HttpStatus.BAD_REQUEST,
                         "invalid_metadata", "Metadata limits were exceeded.");
             }

@@ -290,6 +290,24 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void metadataTitleLongerThan256AnswersInvalidTitle() throws Exception {
+        // The metadata-wide 512 value cap must not preempt the unified
+        // title policy: an over-long title entry answers the title code.
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, "tenant-meta-long-title")
+                        .header("Authorization", "Bearer ignored-by-design")
+                        .header("Idempotency-Key", "create-key-meta-long-title")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\","
+                                + "\"metadata\":{\"title\":\"" + "a".repeat(513)
+                                + "\"}}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"))
+                .andExpect(jsonPath("$.error.message")
+                        .value("Title must not exceed 256 characters."));
+    }
+
+    @Test
     void createsReplaysAndStreamsATenantScopedTurn() throws Exception {
         String tenant = "tenant-create";
         String body = """
