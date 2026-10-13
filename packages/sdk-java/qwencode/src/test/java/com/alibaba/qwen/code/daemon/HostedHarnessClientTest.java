@@ -267,7 +267,9 @@ class HostedHarnessClientTest {
                     "authority", Map.of("operationId", "close-2", "claimGeneration", 3));
             assertEquals("close-2", client.settleLifecycle(session, request).get("operationId"));
             wrongPhase.set(true);
-            assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, request));
+            // The Harness answered 200 with a mismatched receipt: a
+            // post-answer failure, not a pre-send protocol refusal.
+            assertThrows(HostedHarnessSettleAnsweredException.class, () -> client.settleLifecycle(session, request));
             var unsupported = new java.util.LinkedHashMap<>(request);
             unsupported.put("toolProfile", "hosted-workspace-shell/2");
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
