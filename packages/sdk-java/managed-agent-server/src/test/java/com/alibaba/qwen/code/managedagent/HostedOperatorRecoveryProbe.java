@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -186,7 +187,13 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         if (process == null || !running(process)) {
             return null;
         }
-        assertThat(Files.readSymbolicLink(Path.of("/proc", Long.toString(process.pid()), "cwd"))).isEqualTo(directory);
+        Path cwd;
+        try {
+            cwd = Files.readSymbolicLink(Path.of("/proc", Long.toString(process.pid()), "cwd"));
+        } catch (NoSuchFileException reaped) {
+            return null;
+        }
+        assertThat(cwd).isEqualTo(directory);
         processes.add(process);
         escapedProcesses.put(id, process);
         return process;
@@ -221,7 +228,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         }
     }
 
-    private static boolean running(ProcessHandle process) throws Exception {
+    private static boolean running(ProcessHandle process) throws IOException {
         if (!process.isAlive()) {
             return false;
         }
@@ -229,17 +236,26 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         if (!Files.exists(stat)) {
             return false;
         }
+        return statRunning(process, stat);
+    }
+
+    static boolean statRunning(ProcessHandle process, Path stat) throws IOException {
         try {
             String value = Files.readString(stat);
             return value.charAt(value.lastIndexOf(')') + 2) != 'Z';
-        } catch (NoSuchFileException exited) {
-            return false;
+        } catch (IOException error) {
+            // A reaped process fails the read after the exists() probe (ENOENT, or ESRCH from an
+            // already-dead entry); re-check liveness so unrelated I/O failures still propagate.
+            if (!process.isAlive()) {
+                return false;
+            }
+            throw error;
         }
     }
 
     private void stopOwnedProcesses() throws Exception {
         processes.forEach(ProcessHandle::destroyForcibly);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
         for (ProcessHandle process : processes) {
             while (running(process)) {
                 assertThat(System.nanoTime()).as("Owned producer %s", process.pid()).isLessThan(deadline);

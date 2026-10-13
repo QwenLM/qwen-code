@@ -1227,12 +1227,12 @@ describe('package asset scripts', () => {
     ).toThrow(/Prepared package unpacked size \d+ bytes exceeds 50000 bytes/);
   });
 
-  it('enforces a 128 MiB default unpacked size budget', () => {
+  it('enforces a 160 MiB default unpacked size budget', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
     writeFile(rootDir, 'dist/chunks/large.bin', '');
     const largeFile = path.join(rootDir, 'dist', 'chunks', 'large.bin');
-    truncateSync(largeFile, 127 * 1024 * 1024);
+    truncateSync(largeFile, 159 * 1024 * 1024);
     stubConsole();
 
     expect(() =>
@@ -1242,7 +1242,7 @@ describe('package asset scripts', () => {
       }),
     ).not.toThrow();
 
-    truncateSync(largeFile, 128 * 1024 * 1024);
+    truncateSync(largeFile, 160 * 1024 * 1024);
 
     expect(() =>
       preparePackage({
@@ -1250,7 +1250,7 @@ describe('package asset scripts', () => {
         requireNativeAudioCapture: false,
       }),
     ).toThrow(
-      /Prepared package unpacked size \d+ bytes exceeds 134217728 bytes/,
+      /Prepared package unpacked size \d+ bytes exceeds 167772160 bytes/,
     );
   });
 

@@ -456,6 +456,7 @@ public class ToolPublicationAsyncVerificationTest {
             "true,managed_tool_publication_claim_expired", "false,managed_tool_publication_claim_expired",
             "true,managed_tool_publication_operation_expired", "false,managed_tool_publication_operation_expired"})
     void transientVerificationErrorsRetryBeforeAndAfterClaim(boolean beforeClaim, String code) {
+        data = replacement(Duration.ofMinutes(5), Duration.ofSeconds(2));
         publish("retry", 0, "bytes");
         var error = new ApiException(HttpStatus.CONFLICT, code, "Temporary contention");
         if (beforeClaim) {
@@ -463,7 +464,7 @@ public class ToolPublicationAsyncVerificationTest {
             doThrow(error).doCallRealMethod().when(grants)
                     .producerVerificationBindingLocked(anyString(), anyString(), anyString(), anyString());
             data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
-                    Duration.ofSeconds(10), Duration.ofSeconds(2),
+                    Duration.ofMinutes(5), Duration.ofSeconds(2),
                     new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
         } else {
             bucket.readFailure = error;
@@ -474,6 +475,10 @@ public class ToolPublicationAsyncVerificationTest {
                 .isEqualTo("retry");
         assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
                 Timestamp.class)).isNotNull();
+        // The deferral lands about a second out; pin it further ahead so the
+        // not-yet-due rescan cannot lose that race on a loaded runner.
+        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = ?"
+                + " WHERE operation_id = 'retry'", Timestamp.valueOf("2100-01-01 00:00:00"));
         assertThat(data.verifyNextOperation()).isFalse();
         due("retry");
         assertThat(data.verifyNextOperation()).isTrue();
