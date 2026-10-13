@@ -10,7 +10,6 @@ import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.
 import { parseSessionCommand } from './managed-session-command-record.js';
 import {
   inboundCommandBody,
-  isUnfinishedCommand,
   outboundCommandBody,
   sessionCommandId,
 } from './managed-session-command-operations.js';
@@ -209,7 +208,7 @@ describe('managed-session-command-record/1 shared contract', () => {
         executionCallId: 'call-1',
       }),
     );
-    expect(isUnfinishedCommand(outbound)).toBe(true);
+    expect(outbound.run.delivery?.state).toBe('planned');
     const inbound = parseSessionCommand(
       inboundCommandBody({
         commandId: one,
@@ -236,6 +235,5 @@ describe('managed-session-command-record/1 shared contract', () => {
       }),
     );
     expect(inbound.run.delivery?.state).toBe('consumed');
-    expect(isUnfinishedCommand(inbound)).toBe(false);
   });
 });
