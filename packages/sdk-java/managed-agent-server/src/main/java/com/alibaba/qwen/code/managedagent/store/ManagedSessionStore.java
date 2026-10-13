@@ -42,6 +42,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.http.HttpStatus;
@@ -191,10 +192,14 @@ public class ManagedSessionStore {
         // taking the two tenant-wide rows here would let any long holder of
         // them wedge every Session of the tenant (#13800). The v2 probe also
         // fences L4 Sessions: an ordinary write without a lifecycle claim
-        // reaches requireClaim below and is refused, never skipped.
-        boolean v2 = !jdbc.queryForList("SELECT o.operation_id FROM managed_agent_operation o JOIN qwen_runtime_harness_drain f"
-                + " ON o.tenant_id = f.tenant_id AND o.session_id = f.harness_session_id AND o.operation_id = f.operation_id"
-                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.lifecycle_protocol_version = 2", tenantId, sessionId).isEmpty();
+        // reaches requireClaim below and is refused, never skipped. It runs
+        // on its own connection (R5 P1): through the jdbc handle inside this
+        // transaction a consistent read pins the REPEATABLE READ snapshot
+        // before the guard waits below, so a retry that waited for the winner
+        // misses the winner's commit; a locking read instead row-locks the
+        // Session's own operation row ahead of the guard order and deadlocks
+        // against the claim below.
+        boolean v2 = hasLifecycleV2Operation(tenantId, sessionId);
         if (authority == null && !v2) {
             return;
         }
@@ -203,6 +208,33 @@ public class ManagedSessionStore {
         lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenantId,
                 GUARD_ACQUIRE_TIMEOUT_SECONDS));
         WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
+    }
+
+    // The v2 probe is the one read in the guard-order chain that must see
+    // committed state without pinning the caller's snapshot: an ordinary
+    // write decides from it whether the tenant guard rows are touched, so
+    // it can neither share the transaction's snapshot (pinned before the
+    // guard waits) nor row-lock the Session's own operation ahead of the
+    // guard order. A dedicated connection answers both; the flag's content
+    // is committed-state correct because it only moves under a lifecycle
+    // admission the drain/claim chain already serializes.
+    private boolean hasLifecycleV2Operation(String tenantId, String sessionId) {
+        javax.sql.DataSource source = Objects.requireNonNull(
+                jdbc.getDataSource(), "ManagedSessionStore DataSource");
+        try (java.sql.Connection probe = source.getConnection();
+                java.sql.PreparedStatement statement = probe.prepareStatement(
+                        "SELECT o.operation_id FROM managed_agent_operation o JOIN qwen_runtime_harness_drain f"
+                                + " ON o.tenant_id = f.tenant_id AND o.session_id = f.harness_session_id AND o.operation_id = f.operation_id"
+                                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.lifecycle_protocol_version = 2")) {
+            statement.setString(1, tenantId);
+            statement.setString(2, sessionId);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next();
+            }
+        } catch (SQLException error) {
+            throw new DataAccessResourceFailureException(
+                    "managed_agent_operation v2 probe failed", error);
+        }
     }
 
     private static ApiException guardContended() {
