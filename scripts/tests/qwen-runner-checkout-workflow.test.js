@@ -14,6 +14,7 @@ import { parse } from 'yaml';
 import { expect, it } from 'vitest';
 
 const jobs = [
+  ...['triage', 'tmux-testing', 'verify'].map((name) => ['qwen-triage', name]),
   ...['test', 'lint_and_static', 'integration_no_ak', 'integration_cli'].map(
     (name) => ['ci', name],
   ),
