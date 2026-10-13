@@ -89,6 +89,7 @@ function hasMessage(err: unknown): err is { message: string } {
  */
 function findImports(
   content: string,
+  transformPath?: (content: string) => string,
 ): Array<{ start: number; _end: number; path: string }> {
   const imports: Array<{ start: number; _end: number; path: string }> = [];
   let i = 0;
@@ -117,7 +118,8 @@ function findImports(
     }
 
     // Extract the path (everything after @)
-    const importPath = content.slice(i + 1, j);
+    const rawPath = content.slice(i + 1, j);
+    const importPath = transformPath?.(rawPath) ?? rawPath;
 
     // Basic validation (starts with ./ or / or letter)
     if (
@@ -219,7 +221,9 @@ export async function processImports(
   importFormat: 'flat' | 'tree' = 'tree',
   options: ProcessImportsOptions = {},
 ): Promise<ProcessImportsResult> {
-  content = options.transformContent?.(content) ?? content;
+  // Scan the original tokens before substitution introduces whitespace.
+  const transformContent = (text: string) =>
+    options.transformContent?.(text) ?? text;
   if (!projectRoot) {
     // Preserve the previous local helper's contract: if no `.git`
     // ancestor exists, fall back to the absolute basePath so
@@ -232,7 +236,7 @@ export async function processImports(
       `Maximum import depth (${importState.maxDepth}) reached. Stopping import processing.`,
     );
     return {
-      content,
+      content: transformContent(content),
       importTree: { path: importState.currentFile || 'unknown' },
     };
   }
@@ -269,7 +273,10 @@ export async function processImports(
 
       // Add this file to the flat list, once, however many routes reach it.
       if (seenAt === undefined) {
-        flatFiles.push({ path: normalizedPath, content: fileContent });
+        flatFiles.push({
+          path: normalizedPath,
+          content: transformContent(fileContent),
+        });
       }
 
       // Record before recursing to prevent infinite recursion.
@@ -287,7 +294,7 @@ export async function processImports(
 
       // Find imports in this file
       const codeRegions = findCodeRegions(fileContent);
-      const imports = findImports(fileContent);
+      const imports = findImports(fileContent, options.transformContent);
 
       // Process imports in reverse order to handle indices correctly
       for (let i = imports.length - 1; i >= 0; i--) {
@@ -320,9 +327,7 @@ export async function processImports(
 
         try {
           await fs.access(fullPath);
-          const rawContent = await fs.readFile(fullPath, 'utf-8');
-          const importedContent =
-            options.transformContent?.(rawContent) ?? rawContent;
+          const importedContent = await fs.readFile(fullPath, 'utf-8');
 
           // Process the imported file
           await processFlat(
@@ -388,11 +393,11 @@ export async function processImports(
   let result = '';
   let lastIndex = 0;
   const imports: MemoryFile[] = [];
-  const importsList = findImports(content);
+  const importsList = findImports(content, options.transformContent);
 
   for (const { start, _end, path: importPath } of importsList) {
     // Add content before this import
-    result += content.substring(lastIndex, start);
+    result += transformContent(content.substring(lastIndex, start));
     lastIndex = _end;
 
     // Skip if inside a code region
@@ -453,7 +458,7 @@ export async function processImports(
     }
   }
   // Add any remaining content after the last match
-  result += content.substring(lastIndex);
+  result += transformContent(content.substring(lastIndex));
 
   return {
     content: result,

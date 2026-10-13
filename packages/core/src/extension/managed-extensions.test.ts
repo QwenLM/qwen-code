@@ -1004,15 +1004,42 @@ describe('managed extensions', () => {
     const after = await manager().uninstallExtensionById(managedId, false);
     expect(after.extensions[managedId]).toBeUndefined();
     expect(after.generation).toBeGreaterThan(before.generation);
-    // Releasing is idempotent: a second uninstall changes nothing further.
-    const repeated = await manager({
-      managedExtensionsDir: undefined,
-    }).uninstallExtensionById(managedId, false);
-    expect(repeated).toEqual(after);
+    // Runtime settlement has restored an installed user identity. The old
+    // managed id must report that identity change without touching it.
+    const userBefore = inventory(userPath);
+    const statePath = path.join(store.storeDir, 'state.json');
+    const stateBefore = fs.readFileSync(statePath);
+    await expect(
+      manager({ managedExtensionsDir: undefined }).uninstallExtensionById(
+        managedId,
+        false,
+      ),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(inventory(userPath)).toEqual(userBefore);
+    expect(fs.readFileSync(statePath)).toEqual(stateBefore);
     expect(fs.existsSync(path.join(userPath, EXTENSIONS_CONFIG_FILENAME))).toBe(
       true,
     );
     expect(await subject.getExtensionStoreSnapshot()).toEqual(after);
+  });
+
+  it('keeps repeated release idempotent when no replacement user owns the name', async () => {
+    const extensionPath = writeExtension(managed, 'portable');
+    const deployed = manager();
+    await deployed.refreshCache();
+    const managedId = deployed.getLoadedExtensions()[0].id;
+    fs.rmSync(extensionPath, { recursive: true });
+    const released = await manager().uninstallExtensionById(managedId, false);
+    expect(released.extensions[managedId]).toBeUndefined();
+    const statePath = path.join(store.storeDir, 'state.json');
+    const stateBefore = fs.readFileSync(statePath);
+    await expect(
+      manager({ managedExtensionsDir: undefined }).uninstallExtensionById(
+        managedId,
+        false,
+      ),
+    ).resolves.toEqual(released);
+    expect(fs.readFileSync(statePath)).toEqual(stateBefore);
   });
 
   it.each(['withdrawn', 'unavailable', 'manifestless', 'unconfigured'])(

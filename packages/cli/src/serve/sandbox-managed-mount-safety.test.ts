@@ -10,6 +10,11 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type Config, FatalSandboxError } from '@qwen-code/qwen-code-core';
+import {
+  loadEnvironment,
+  resetEnvironmentTrackingForTesting,
+} from '../config/environment.js';
+import type { Settings } from '../config/settingsSchema.js';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const execSyncMock = vi.hoisted(() => vi.fn());
@@ -218,6 +223,39 @@ describe.skipIf(process.platform === 'win32')(
         false,
       );
     }
+
+    it('does not pass a project env writable managed alias to the container', async () => {
+      const managed = path.join(root, 'managed');
+      fs.mkdirSync(managed);
+      const alias = `${managed}:/tmp/alias`;
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        `SANDBOX_FLAGS=--volume ${alias}\n`,
+      );
+      resetEnvironmentTrackingForTesting();
+      try {
+        loadEnvironment({} as Settings, workspace);
+        await launch(managed);
+        expect(runArgs()).not.toContain(alias);
+        expect(unprotectedAliases(volumes(runArgs()), managed)).toEqual([]);
+      } finally {
+        resetEnvironmentTrackingForTesting();
+      }
+    });
+
+    it('retains an advanced operator flags override outside generated mount protection', async () => {
+      const managed = path.join(root, 'managed');
+      fs.mkdirSync(managed);
+      const alias = `${managed}:/tmp/operator-alias`;
+      vi.stubEnv('SANDBOX_FLAGS', `--volume ${alias}`);
+      await launch(managed);
+      expect(runArgs()).toContain(alias);
+      expect(volumes(runArgs())).toContainEqual({
+        source: managed,
+        destination: '/tmp/operator-alias',
+        readOnly: false,
+      });
+    });
 
     it('requires a missing pinned managed source instead of using an auto-creating Docker volume', async () => {
       const managed = path.join(root, 'managed');

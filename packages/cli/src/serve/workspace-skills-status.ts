@@ -173,9 +173,10 @@ async function buildWorkspaceSkillsStatus(
         // — which also keeps working when the home cannot be written at all.
         const extensionStore = new ExtensionStore();
         const entry = await lstatOrUndefined(extensionStore.extensionsDir);
-        const storeEntry = entry
-          ? undefined
-          : await lstatOrUndefined(extensionStore.storeDir);
+        const storeEntry =
+          entry || !managedExtensionsDir
+            ? undefined
+            : await lstatOrUndefined(extensionStore.storeDir);
         if (entry || storeEntry || managedExtensionsDir) {
           const extensionManager = new ExtensionManager({
             managedExtensionsDir,
@@ -236,7 +237,7 @@ async function buildWorkspaceSkillsStatus(
             extensions = extensionManager.getLoadedExtensions();
             applySnapshotOverrides(snapshot);
             storeRead = true;
-          } else if (storeEntry) {
+          } else if (storeEntry && managedExtensionsDir) {
             // A store without an extensions dir can hold managed activation
             // state, but no user packages. Read the snapshot without the
             // store lock: acquiring it materializes the store directories, a

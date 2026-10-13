@@ -4051,7 +4051,7 @@ export class ExtensionManager {
           );
         }
         const cleanup = await this.clearPendingManagedSecrets(releaseSnapshot);
-        const released = cleanup.snapshot;
+        let released = cleanup.snapshot;
         const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> =
           cleanup.failures.map(({ error }) => ({
             code: 'extension_secrets_cleanup_failed',
@@ -4108,6 +4108,33 @@ export class ExtensionManager {
                 `Managed extension "${name}" was released, but preference cleanup failed: ${getErrorMessage(error)}`,
               );
             }
+          }
+        }
+        if (!isUpdate) {
+          try {
+            // Reload the returning user copy without handing back unrelated
+            // retained managed policies or deleting their credentials.
+            await this.refreshCache({ allowManagedHandBack: false });
+            released = await this.extensionStore.readSnapshot();
+            await this.refreshTools();
+          } catch (error) {
+            debugLogger.warn(
+              `Managed extension "${policy.name}" was released, but runtime refresh failed: ${getErrorMessage(error)}`,
+            );
+            warnings.push({
+              code: 'extension_runtime_refresh_failed',
+              error: getErrorMessage(error),
+            });
+          }
+          try {
+            logExtensionUninstall(
+              this.getTelemetryConfig(cwd ?? this.workspaceDir),
+              new ExtensionUninstallEvent(policy.name, 'success'),
+            );
+          } catch (error) {
+            debugLogger.warn(
+              `Managed extension "${policy.name}" was released, but uninstall telemetry failed: ${getErrorMessage(error)}`,
+            );
           }
         }
         return warnings.length > 0 ? { ...released, warnings } : released;

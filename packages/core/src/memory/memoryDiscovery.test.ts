@@ -515,15 +515,22 @@ describe('loadServerHierarchicalMemory', () => {
     },
   );
 
-  it.each(['flat', 'tree'] as const)(
-    'hydrates managed context outside the Git root and nested imports in %s format without rewriting files',
-    async (format) => {
+  it.each(
+    ['flat', 'tree'].flatMap((format) =>
+      ['managed', 'managed dir'].map((directory) => ({
+        format: format as 'flat' | 'tree',
+        directory,
+      })),
+    ),
+  )(
+    'hydrates managed context outside the Git root and nested imports in $format format under $directory without rewriting files',
+    async ({ format, directory }) => {
       await createEmptyDir(path.join(projectRoot, '.git'));
       await createTestFile(
         path.join(testRootDir, DEFAULT_CONTEXT_FILENAME),
         'PARENT_OUTSIDE_GIT_CONTEXT',
       );
-      const root = path.join(testRootDir, 'managed');
+      const root = path.join(testRootDir, directory);
       const original = 'Root ${CLAUDE_PLUGIN_ROOT} @./included.md';
       const context = await createTestFile(
         path.join(root, 'QWEN.md'),
@@ -550,6 +557,7 @@ describe('loadServerHierarchicalMemory', () => {
       expect(result.memoryContent).toContain(`Root ${root}`);
       expect(result.memoryContent).toContain(`Included ${root}`);
       expect(result.memoryContent).toContain('NESTED_MANAGED_CONTENT');
+      expect(result.memoryContent).not.toContain('Import failed');
       expect(result.memoryContent).not.toContain('PARENT_OUTSIDE_GIT_CONTEXT');
       expect(result.memoryContent).not.toContain('${CLAUDE_PLUGIN_ROOT}');
       expect(await fsPromises.readFile(context, 'utf8')).toBe(original);

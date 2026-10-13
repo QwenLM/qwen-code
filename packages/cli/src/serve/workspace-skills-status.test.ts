@@ -10,6 +10,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, lstat: vi.fn(actual.lstat) };
+});
+
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
@@ -55,6 +60,67 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(review?.modelInvocable).toBe(true);
     expect(review?.argumentHint).toBeTruthy();
   });
+
+  it.each(['corrupt snapshot', 'previous snapshot', 'committed transaction'])(
+    'keeps bundled skills without a managed root despite a store-only %s',
+    async (state) => {
+      const storeDir = path.join(qwenHome, 'extension-store');
+      await fsp.mkdir(storeDir);
+      if (state === 'corrupt snapshot')
+        await fsp.writeFile(path.join(storeDir, 'state.json'), '{broken');
+      else if (state === 'previous snapshot')
+        await fsp.writeFile(path.join(storeDir, 'state.previous.json'), '{}');
+      else {
+        await fsp.mkdir(path.join(storeDir, 'transactions'));
+        await fsp.writeFile(
+          path.join(storeDir, 'transactions', 'pending.json'),
+          JSON.stringify({ phase: 'state_committed' }),
+        );
+      }
+      const before = await storeFingerprint(storeDir);
+      const status = await createWorkspaceSkillsStatusProvider()(qwenHome);
+      expect(status.initialized).toBe(true);
+      expect(status.errors).toBeUndefined();
+      expect(status.skills).toContainEqual(
+        expect.objectContaining({ name: 'review', level: 'bundled' }),
+      );
+      expect(await storeFingerprint(storeDir)).toBe(before);
+      await expect(
+        fsp.stat(path.join(qwenHome, 'extensions')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
+  it.each([false, true])(
+    'handles an unreadable store entry according to managed configuration: %s',
+    async (configured) => {
+      const storeDir = path.join(qwenHome, 'extension-store');
+      const managedExtensionsDir = path.join(qwenHome, 'deployment');
+      await fsp.mkdir(managedExtensionsDir);
+      const { lstat } =
+        await vi.importActual<typeof import('node:fs/promises')>(
+          'node:fs/promises',
+        );
+      vi.spyOn(fsp, 'lstat').mockImplementation((async (target, options) => {
+        if (String(target) === storeDir)
+          throw Object.assign(new Error('test-only store entry denied'), {
+            code: 'EACCES',
+          });
+        return lstat(target, options);
+      }) as typeof fsp.lstat);
+      const status = await createWorkspaceSkillsStatusProvider(
+        configured ? { managedExtensionsDir } : {},
+      )(qwenHome);
+      expect(status.initialized).toBe(!configured);
+      if (configured) expect(status.skills).toEqual([]);
+      else {
+        expect(status.errors).toBeUndefined();
+        expect(status.skills).toContainEqual(
+          expect.objectContaining({ name: 'review', level: 'bundled' }),
+        );
+      }
+    },
+  );
 
   it('reports the queried workspace path', async () => {
     const provider = createWorkspaceSkillsStatusProvider();
