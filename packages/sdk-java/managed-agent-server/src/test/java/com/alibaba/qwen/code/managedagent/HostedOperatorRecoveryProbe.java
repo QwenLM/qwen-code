@@ -250,18 +250,21 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        for (var session : sessions) {
-            escaped(session);
-        }
-        var owned = (Map<?, ?>) ReflectionTestUtils.getField(local, "owned");
-        for (var value : owned.values()) {
-            ProcessHandle process = registeredProcess(value);
-            if (process == null) {
-                continue;
+        try {
+            var owned = (Map<?, ?>) ReflectionTestUtils.getField(local, "owned");
+            for (var value : owned.values()) {
+                ProcessHandle process = registeredProcess(value);
+                if (process == null) {
+                    continue;
+                }
+                processes.addAll(process.descendants().toList());
+                processes.add(process);
             }
-            processes.addAll(process.descendants().toList());
-            processes.add(process);
+            for (var session : sessions) {
+                escaped(session);
+            }
+        } finally {
+            stopOwnedProcesses();
         }
-        stopOwnedProcesses();
     }
 }

@@ -530,6 +530,11 @@ jobs:
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1017,6 +1022,11 @@ jobs:
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -2047,6 +2057,11 @@ jobs:
                 done || true
           fi
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -2277,6 +2292,11 @@ jobs:
                   fi
                 done || true
           fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
