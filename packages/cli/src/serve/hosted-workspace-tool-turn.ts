@@ -3246,6 +3246,12 @@ export class HostedWorkspaceToolTurn {
               validationError =
                 'Hosted send_message requires a nonempty message.';
             } else if (
+              !memberMessageCommand &&
+              Buffer.byteLength(text, 'utf8') >
+                MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes
+            ) {
+              validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
+            } else if (
               memberMessageCommand &&
               Buffer.byteLength(
                 memberMessageContent(
@@ -3340,8 +3346,8 @@ export class HostedWorkspaceToolTurn {
         }
         // The inline Session Store limit keeps rejecting exactly as main
         // does for the ordinary tools. A call that already carries its own
-        // refusal never reads its encoding, and a workflow launch is this
-        // profile's own surface: for either the limit becomes the call's
+        // refusal never reads its encoding. Workflow launches and messages
+        // are this profile's own surfaces: the limit becomes the call's
         // refusal, never a failure of the whole Turn (review D1/R2-12).
         let encoded: HostedEncodedToolInput;
         try {
@@ -3351,10 +3357,15 @@ export class HostedWorkspaceToolTurn {
         } catch (cause) {
           if (
             !(cause instanceof HostedToolInputInlineLimitError) ||
-            (validationError === undefined && call.name !== 'workflow')
+            (validationError === undefined &&
+              call.name !== 'workflow' &&
+              call.name !== 'send_message')
           )
             throw cause;
-          validationError ??= `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`;
+          validationError ??=
+            call.name === 'send_message'
+              ? `Hosted send_message exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten the message and retry.`
+              : `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`;
           encoded = UNENCODED_TOOL_INPUT;
         }
         // H3: the publication evidence chain pins the canonical input

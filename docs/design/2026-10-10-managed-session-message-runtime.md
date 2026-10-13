@@ -67,6 +67,17 @@ A child's message to its parent runs the same steps with the journals swapped; i
 
 ## Bounds
 
+Hosted `send_message` must also fit the 64 KiB inline Session Store request
+after encoding. Escaping and the request envelope can exceed this bound even
+when the raw message fits its content or member-envelope bound. If the assistant
+record itself fits its separate transcript bound, this is a
+`byte_limit` tool refusal with advice to shorten and retry, not a failure of the
+sender's Turn. No message or member command is committed for the refused call.
+The 64 KiB raw parent-message bound applies to team members as well as plain
+children; existing argument refusals retain their more specific explanations.
+An assistant record that exceeds its own inline limit still fails before any
+tool answer is committed. This change does not truncate or rewrite that record.
+
 | Bound                         | Value                                                                 | Refusal                                   |
 | ----------------------------- | --------------------------------------------------------------------- | ----------------------------------------- |
 | Message to a child task       | fits the task's continuation envelope (≤ 32 KiB)                      | tool error, `byte_limit`                  |

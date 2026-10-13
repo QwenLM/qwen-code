@@ -17,6 +17,7 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
+import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { HarnessCommandWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
@@ -30,6 +31,7 @@ import {
 } from './hosted-session-command-session.js';
 import {
   HostedSessionMessageSession,
+  memberMessageContent,
   type HostedSessionLineage,
 } from './hosted-session-message-session.js';
 import { hostedPromptKey, teamMemberPreamble } from './hosted-member-chain.js';
@@ -109,6 +111,26 @@ const lineage: HostedSessionLineage = {
 const messageFitsInline = vi.fn<
   ConstructorParameters<typeof HostedWorkspaceToolTurn>[5]
 >(() => true);
+
+function useTranscriptBudget() {
+  messageFitsInline.mockImplementation(
+    (type, parts, model) =>
+      Buffer.byteLength(
+        JSON.stringify({
+          uuid: randomUUID(),
+          parentUuid: randomUUID(),
+          sessionId: sessionKey.sessionId,
+          timestamp: new Date().toISOString(),
+          type,
+          cwd: rootDir,
+          version: 'hosted-harness/1',
+          daemonPromptId: 'prompt',
+          model,
+          message: { role: type === 'assistant' ? 'model' : 'user', parts },
+        }),
+      ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+  );
+}
 
 function call(
   args: Record<string, unknown>,
@@ -1580,6 +1602,124 @@ it('bounds a member message with the member-message wrapper budget (b3c)', async
   ]);
   expect(texts(parts)).toContain('too long for a member message');
   expect(commands.command(commandIdOf('call-big'))).toBeUndefined();
+});
+
+it.each([
+  { sender: 'member', to: 'bob' },
+  { sender: 'member', to: 'parent' },
+  { sender: 'plain child', to: 'parent' },
+])(
+  '#14062: refuses encoded overflow from $sender to $to and accepts a shortened retry',
+  async ({ sender, to }) => {
+    useTranscriptBudget();
+    await seedFirstInput(
+      (sender === 'member'
+        ? teamMemberPreamble({ name: 'alice', teamName: 'review' })
+        : '') + 'work',
+    );
+    const message = JSON.stringify(Array.from({ length: 6500 }, () => 'ab'));
+    expect(Buffer.byteLength(message, 'utf8')).toBeLessThan(65_536);
+    if (to === 'bob') {
+      expect(Buffer.byteLength(message, 'utf8')).toBe(32_501);
+      expect(
+        Buffer.byteLength(memberMessageContent('alice', message), 'utf8'),
+      ).toBeLessThanOrEqual(32_768);
+    }
+    const turn = createTurn();
+    const refused = await execute(turn, [
+      call({ to, message }, 'call-overflow', 'send_message'),
+    ]);
+    expect(refused).toEqual([
+      expect.objectContaining({
+        functionResponse: expect.objectContaining({
+          id: 'call-overflow',
+          name: 'send_message',
+          response: expect.objectContaining({
+            error: expect.stringContaining('byte_limit'),
+          }),
+        }),
+      }),
+    ]);
+    expect(texts(refused)).toContain('byte_limit');
+    expect(texts(refused)).toMatch(/shorten.*retry/i);
+    expect(
+      session.authority.extensionRecordsInDomain('session_command'),
+    ).toHaveLength(0);
+    expect(
+      session.authority.extensionRecordsInDomain('session_message'),
+    ).toHaveLength(0);
+
+    const retry = execute(turn, [
+      call({ to, message: 'short update' }, 'call-shortened', 'send_message'),
+    ]);
+    if (to === 'bob') {
+      const commandId = commandIdOf('call-shortened');
+      await vi.waitFor(
+        () => {
+          expect(commands.command(commandId)).toBeDefined();
+        },
+        { timeout: 10_000 },
+      );
+      await commands.handover(commandId, PARENT);
+      await commands.answered(commandId, {
+        outcome: 'answered',
+        text: 'Message sent to bob.\n- bob: sent.',
+      });
+      expect(texts(await retry)).toContain('Message sent to bob.');
+      expect(commands.command(commandId)?.run.delivery?.state).toBe('consumed');
+    } else {
+      expect(texts(await retry)).toContain('queued for delivery to the parent');
+      expect(
+        session.authority.extensionRecordsInDomain('session_message'),
+      ).toHaveLength(1);
+    }
+  },
+);
+
+it.each(['member', 'plain child'])(
+  '#14062: validates the parent content bound for a %s independently of the transcript bound',
+  async (sender) => {
+    await seedFirstInput(
+      (sender === 'member'
+        ? teamMemberPreamble({ name: 'alice', teamName: 'review' })
+        : '') + 'work',
+    );
+    const refused = await execute(createTurn(), [
+      call(
+        { to: 'parent', message: 'x'.repeat(100_000) },
+        'call-over-content-bound',
+        'send_message',
+      ),
+    ]);
+    expect(texts(refused)).toContain(
+      'Hosted send_message message exceeds 65536 bytes.',
+    );
+    expect(
+      session.authority.extensionRecordsInDomain('session_command'),
+    ).toHaveLength(0);
+    expect(
+      session.authority.extensionRecordsInDomain('session_message'),
+    ).toHaveLength(0);
+  },
+);
+
+it('#14062: retains the separate assistant-record bound for oversized plain text', async () => {
+  useTranscriptBudget();
+  await seedFirstInput('work');
+  await expect(
+    execute(createTurn(), [
+      call(
+        { to: 'parent', message: 'x'.repeat(65_400) },
+        'call-over-transcript-bound',
+        'send_message',
+      ),
+    ]),
+  ).rejects.toThrow(
+    'Hosted assistant record exceeds the inline Session Store limit.',
+  );
+  expect(
+    session.authority.extensionRecordsInDomain('session_message'),
+  ).toHaveLength(0);
 });
 
 it('refuses member messages in plan mode while the leader stays open (b3c)', async () => {
