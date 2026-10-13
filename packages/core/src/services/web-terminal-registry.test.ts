@@ -589,6 +589,77 @@ describe('WebTerminalRegistry', () => {
     ).toBeUndefined();
   });
 
+  it('survives an EventEmitter-shaped error subscription on release', async () => {
+    // The real Bun backend is an EventEmitter: `on('error')` returns the
+    // emitter itself, not a Disposable. Storing it made release() call
+    // `.dispose()` on the emitter and crash the host (real `qwen serve` under
+    // Bun exited 1 with the WS closing 1006). Detach must go through `off`.
+    const emitter = {
+      on: vi.fn(function (this: unknown, _event: string) {
+        return this;
+      }),
+      off: vi.fn(() => undefined),
+    };
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      ...emitter,
+    });
+    const registry = await start('terminal:emitter-release');
+
+    expect(() => registry.release('terminal:emitter-release')).not.toThrow();
+    expect(emitter.on).toHaveBeenCalledWith('error', expect.any(Function));
+    expect(emitter.off).toHaveBeenCalledWith('error', expect.any(Function));
+  });
+
+  it('detaches the error subscription through removeListener on release', async () => {
+    // node-pty's Terminal: `on('error')` proxies to the master socket and
+    // returns undefined, and only `removeListener` detaches.
+    const registered: Array<(err: Error) => void> = [];
+    const removed: Array<[string, (err: Error) => void]> = [];
+    spawn.mockReturnValueOnce({
+      pid: 42,
+      write,
+      resize,
+      kill,
+      onData: vi.fn((listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: disposeData };
+      }),
+      onExit: vi.fn(
+        (listener: (e: { exitCode: number; signal?: number }) => void) => {
+          onExit = listener;
+          return { dispose: disposeExit };
+        },
+      ),
+      on: vi.fn((event: string, listener: (err: Error) => void) => {
+        if (event === 'error') registered.push(listener);
+        return undefined;
+      }),
+      removeListener: vi.fn((event: string, listener: (err: Error) => void) => {
+        removed.push([event, listener]);
+      }),
+    });
+    const registry = await start('terminal:remove-listener-release');
+
+    expect(() =>
+      registry.release('terminal:remove-listener-release'),
+    ).not.toThrow();
+    expect(removed).toEqual([['error', registered[0]]]);
+  });
+
   it('frees a bundled-shape session once across kill and exit-time release', async () => {
     // Bundled ConPTY shape: the host reference was released at spawn, so the
     // native close is only reachable through kill(); the noted release must
