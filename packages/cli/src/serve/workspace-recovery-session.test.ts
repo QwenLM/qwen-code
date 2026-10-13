@@ -1020,7 +1020,9 @@ describe('verifyRecoverySession', () => {
     };
     const f = fixture(definition);
     f.resources.set(instructionsRef.resourceId, bytes);
-    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow();
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'The encoded data was not valid for encoding utf-8',
+    );
   });
 
   it.each([

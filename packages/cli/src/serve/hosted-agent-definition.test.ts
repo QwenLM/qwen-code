@@ -76,13 +76,13 @@ it('checks instruction bytes and UTF-8 before returning the pinned section', asy
       ...identity,
       instructionsRef: { ...ref, kind: 'managed-tool-result-content' },
     }),
-  ).toThrow();
+  ).toThrow('Invalid agent instructions reference.');
   expect(() =>
     parseHostedAgentDefinition({
       ...identity,
       instructionsRef: { ...ref, schemaVersion: 2 },
     }),
-  ).toThrow();
+  ).toThrow('Invalid agent instructions reference.');
   expect(() =>
     parseHostedAgentDefinition({
       ...identity,
