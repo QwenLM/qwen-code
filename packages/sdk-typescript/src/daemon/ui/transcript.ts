@@ -451,13 +451,18 @@ function applyDaemonTranscriptEvent(
       // compare first, so the per-entry scan stays cheap and full
       // serialization runs only for a same-uri same-content candidate.
       const incomingText = event.resource.resource.text;
+      // Fingerprint on divergence, not on a length gate: the cascade can
+      // rewrite the stored text past the real-byte ceiling the code-unit
+      // gate never sees (including emptying it), and a length-gated
+      // fingerprint then compares the emptied stored text against the
+      // full echo and retains every copy.
       const incomingFingerprint =
-        incomingText.length > MAX_TEXT_BLOCK_LENGTH
+        retained.resource.text !== incomingText
           ? fingerprintResourceText(incomingText)
           : undefined;
       const incomingUri = event.resource.resource.uri;
       const incomingUriFingerprint =
-        incomingUri.length > MAX_TEXT_BLOCK_LENGTH
+        retained.resource.uri !== incomingUri
           ? fingerprintResourceText(incomingUri)
           : undefined;
       const fingerprints = block.embeddedResourceFingerprints;
@@ -495,9 +500,25 @@ function applyDaemonTranscriptEvent(
         const aggregateBytes =
           resources.reduce((sum, entry) => sum + realJsonBytesOf(entry), 0) +
           realJsonBytesOf(retained);
+        // The byte unit cannot see the live objects a resource pins, so
+        // bound the block in the per-resource gate's estimate unit too
+        // (the text arm excluded, as there): without it a batch of
+        // in-bounds scalar floods folds into one newest block — which
+        // trimming never evicts — at several times its charged bytes.
+        const aggregateEstimate =
+          resources.reduce(
+            (sum, entry) =>
+              sum +
+              estimateRetainedBytes(entry) -
+              entry.resource.text.length * 2,
+            0,
+          ) +
+          estimateRetainedBytes(retained) -
+          retained.resource.text.length * 2;
         if (
           !Number.isFinite(next.maxRetainedBytes) ||
-          aggregateBytes <= MAX_EMBEDDED_RESOURCE_BYTES
+          (aggregateBytes <= MAX_EMBEDDED_RESOURCE_BYTES &&
+            aggregateEstimate <= MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE)
         ) {
           block.embeddedResources = [...resources, cloneJsonLike(retained)];
           if (incomingFingerprint !== undefined || fingerprints !== undefined) {
@@ -2537,6 +2558,73 @@ function truncateTextAtLimit(text: string): string {
   return `${detachString(text.slice(0, keepLength))}${TEXT_TRUNCATED_SUFFIX}`;
 }
 
+/**
+ * Escaped JSON byte length of the truncation suffix's content — the two
+ * surrounding quotes are counted with the serialized value, not here.
+ */
+const TRUNCATED_SUFFIX_ESCAPED_BYTES =
+  jsonByteEncoder.encode(JSON.stringify(TEXT_TRUNCATED_SUFFIX)).length - 2;
+
+/**
+ * Cut `text` so the retained string — kept prefix plus the truncation
+ * suffix — serializes within `byteBudget` real JSON bytes, the ceiling's
+ * own unit. The walk bills each code unit its worst-case escaped UTF-8
+ * width (a control character or unpaired surrogate costs a full \uXXXX
+ * escape, and each half of a surrogate pair is billed 6 against the pair's
+ * real 4 bytes), so the measured result never exceeds the budget. Ends in
+ * TEXT_TRUNCATED_SUFFIX like truncateTextAtLimit.
+ */
+function truncateTextToJsonByteBudget(
+  text: string,
+  byteBudget: number,
+): string {
+  const budget = byteBudget - 2 - TRUNCATED_SUFFIX_ESCAPED_BYTES;
+  let counted = 0;
+  let end = 0;
+  while (end < text.length) {
+    const code = text.charCodeAt(end);
+    const width =
+      code === 0x22 || code === 0x5c
+        ? 2
+        : code < 0x20
+          ? 6
+          : code < 0x80
+            ? 1
+            : code < 0x800
+              ? 2
+              : code >= 0xd800 && code <= 0xdfff
+                ? 6
+                : 3;
+    if (counted + width > budget) break;
+    counted += width;
+    end += 1;
+  }
+  return `${detachString(text.slice(0, end))}${TEXT_TRUNCATED_SUFFIX}`;
+}
+
+/**
+ * Byte-driven last resort of the skeleton cascade: shrink one retained
+ * string field so the skeleton's real JSON bytes fit the ceiling. The cut
+ * is sized from the skeleton's exact current measure, so it converges in
+ * one pass unless another field alone still overflows — the caller then
+ * cuts that field too.
+ */
+function cutSkeletonFieldToByteBudget(
+  skeleton: DaemonEmbeddedResource,
+  field: 'uri' | 'mimeType',
+): boolean {
+  const value = skeleton.resource[field];
+  if (typeof value !== 'string' || value === '') return false;
+  const excess = realJsonBytesOf(skeleton) - MAX_EMBEDDED_RESOURCE_BYTES;
+  if (excess <= 0) return false;
+  const contribution = jsonByteEncoder.encode(JSON.stringify(value)).length;
+  skeleton.resource[field] = truncateTextToJsonByteBudget(
+    value,
+    contribution - excess,
+  );
+  return true;
+}
+
 function truncateText(
   state: DaemonTranscriptState,
   blockId: string,
@@ -2728,14 +2816,33 @@ function boundEmbeddedResource(
         clipped = true;
       }
     }
-    // The text cut is what makes the cascade converge: it is bounded in
-    // UTF-16 code units (MAX_TEXT_BLOCK_LENGTH), but the ceiling is real
-    // UTF-8 bytes, so 100k three-byte characters pass the text cut and still
-    // overflow the ceiling. Emptying the text is the last resort — the
-    // uri/mimeType display identity survives.
+    // Emptying the text is the last resort for a text-driven overflow —
+    // the uri/mimeType display identity survives. It does not converge the
+    // cascade alone: the uri/mimeType gates above are UTF-16 code-unit
+    // bounds, but the ceiling is real UTF-8 bytes, so a long non-ASCII
+    // field survives every cut and the per-block aggregate cap would drop
+    // the entry whole — losing the display skeleton this cascade exists to
+    // retain.
     if (overEmbeddedResourceBounds(skeleton) && skeleton.resource.text !== '') {
       skeleton.resource.text = '';
       clipped = true;
+    }
+    // Cut the field holding the overflow (the larger one) to the byte
+    // budget the rest of the skeleton leaves it, so the skeleton always
+    // converges in the ceiling's own unit. Only an overflowing field is
+    // shrunk: a legitimate small uri is never cut for a text-driven
+    // breach, which the text arm above owns.
+    if (overEmbeddedResourceBounds(skeleton)) {
+      const mimeTypeValue = skeleton.resource.mimeType;
+      const fields: ['uri', 'mimeType'] | ['mimeType', 'uri'] =
+        typeof mimeTypeValue === 'string' &&
+        mimeTypeValue.length > skeleton.resource.uri.length
+          ? ['mimeType', 'uri']
+          : ['uri', 'mimeType'];
+      clipped = cutSkeletonFieldToByteBudget(skeleton, fields[0]) || clipped;
+      if (overEmbeddedResourceBounds(skeleton)) {
+        clipped = cutSkeletonFieldToByteBudget(skeleton, fields[1]) || clipped;
+      }
     }
   }
   if (clipped) {
