@@ -6,7 +6,10 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { canUseRipgrep } from '@qwen-code/qwen-code-core/utils/ripgrepUtils.js';
+
+const debugLogger = createDebugLogger('STARTUP_WARNINGS');
 
 type WarningCheckOptions = {
   workspaceRoot: string;
@@ -47,9 +50,10 @@ const rootDirectoryCheck: WarningCheck = {
  * bundled binary that cannot run on the host prints its loader/allocator
  * diagnostics (`<jemalloc>: Unsupported system page size`, `memory allocation of
  * 160 bytes failed`, …), which in a terminal reads like Qwen Code itself ran out
- * of memory right before the user starts debugging (#13704). The raw reason is
- * still kept by `resolveHealthyRipgrep` in the debug log, and `qwen doctor`
- * reports the ripgrep state with the install hint, so nothing is lost.
+ * of memory right before the user starts debugging (#13704). Nothing is lost by
+ * keeping the banner to one line: `ripgrepAvailabilityCheck` writes the reason
+ * to the debug log, and `/doctor` reports the ripgrep state with the install
+ * hint.
  */
 const RIPGREP_UNAVAILABLE_WARNING =
   'Ripgrep not available: falling back to built-in grep, which is slower on large codebases. Install ripgrep for faster file content search.';
@@ -64,9 +68,14 @@ const ripgrepAvailabilityCheck: WarningCheck = {
     try {
       const isAvailable = await canUseRipgrep(options.useBuiltinRipgrep);
       return isAvailable ? null : RIPGREP_UNAVAILABLE_WARNING;
-    } catch {
+    } catch (error) {
       // A probe that threw and a probe that answered "no" leave the user in the
-      // same place — built-in grep — so both get the same quiet notice.
+      // same place — built-in grep — so both get the same quiet notice. The
+      // banner stays one line, but the reason has to survive somewhere, and on
+      // this path nothing else records it: `resolveHealthyRipgrep` re-throws a
+      // *system* rg failure before reaching its own `debugLogger.warn`, so an
+      // empty `catch` would drop the only copy.
+      debugLogger.warn(`Ripgrep probe failed: ${error}`);
       return RIPGREP_UNAVAILABLE_WARNING;
     }
   },

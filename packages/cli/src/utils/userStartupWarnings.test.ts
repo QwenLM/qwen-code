@@ -15,6 +15,21 @@ vi.mock('@qwen-code/qwen-code-core/utils/ripgrepUtils.js', () => ({
   canUseRipgrep: vi.fn(),
 }));
 
+const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
+
+// The banner is deliberately a single line, so a probe failure only survives in
+// the debug log. Spy on the logger to pin that it is actually written rather
+// than dropped by the `catch` (review R1-1).
+vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    isEnabled: () => false,
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warnSpy,
+    error: vi.fn(),
+  }),
+}));
+
 describe('getUserStartupWarnings', () => {
   let testRootDir: string;
   let startupOptions: {
@@ -32,6 +47,7 @@ describe('getUserStartupWarnings', () => {
     };
     vi.mocked(canUseRipgrep).mockReset();
     vi.mocked(canUseRipgrep).mockResolvedValue(true);
+    warnSpy.mockClear();
   });
 
   afterEach(async () => {
@@ -126,6 +142,43 @@ describe('getUserStartupWarnings', () => {
       });
       expect(canUseRipgrep).not.toHaveBeenCalled();
       expect(ripgrepWarning(warnings)).toBeUndefined();
+    });
+
+    it('forwards the configured builtin-ripgrep setting to the probe', async () => {
+      // `canUseRipgrep` defaults its own parameter to `true`, so a dropped
+      // argument would silently probe the bundled binary even when the user
+      // asked for system rg only. Pin both directions (review R1-3).
+      await getUserStartupWarnings({
+        ...startupOptions,
+        useBuiltinRipgrep: true,
+      });
+      expect(canUseRipgrep).toHaveBeenCalledWith(true);
+
+      vi.mocked(canUseRipgrep).mockClear();
+      await getUserStartupWarnings({
+        ...startupOptions,
+        useBuiltinRipgrep: false,
+      });
+      expect(canUseRipgrep).toHaveBeenCalledWith(false);
+    });
+
+    it('keeps a probe failure in the debug log instead of dropping it', async () => {
+      // The quiet banner is only defensible if the reason is recoverable
+      // somewhere. On the throw path nothing else records it —
+      // `resolveHealthyRipgrep` re-throws a system-rg failure before reaching
+      // its own `debugLogger.warn` — so an empty `catch` would lose it entirely
+      // (review R1-1).
+      vi.mocked(canUseRipgrep).mockRejectedValue(
+        new Error('rg: permission denied'),
+      );
+      const warnings = await getUserStartupWarnings(startupOptions);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('rg: permission denied'),
+      );
+      // Logging must not leak the reason back into the banner.
+      const warning = ripgrepWarning(warnings);
+      expect(warning).toBeDefined();
+      expect(warning).not.toContain('permission denied');
     });
   });
 });
