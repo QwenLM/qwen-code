@@ -71,10 +71,11 @@
 
 - `isBunRuntime(): boolean` —— 唯一的运行时检测点。
 - `getJsInterpreterCommand(importMetaUrl): { command, runtime }` —— 解析任意 JS 子进程使用的解释器：
-  1. 从调用方 bundle 目录（`resolveBundleDir`）向上找到 standalone `manifest.json`，且其 `interpreter`（相对包根）或标准位置 `bun/bin/bun` / `node/bin/node` 在磁盘上存在 → 使用该解释器；
-  2. 否则 `process.execPath` —— 运行当前进程的解释器（宿主 Node、内置 Node，或 standalone Bun 形态的私有内置 Bun）。
+  1. 唯一可信位置是 **standalone 包根**：调用方 bundle 目录（`resolveBundleDir`）的父目录，必须同时存在 `manifest.json` 与 standalone 入口标记 `lib/cli-entry.js`。**不做向上遍历** —— 无关祖先清单（例如 npm 宿主工程的构建 manifest）永远不会被读取，npm、源码与 SDK 布局因此始终使用 `process.execPath`。
+  2. 在该可信包根内，所有声明先校验后使用：`runtime` 必须恰为 `'bun'` 或 `'node'`；解释器 —— `interpreter` 字段相对包根解析，否则取标准位置 `bun/bin/bun` / `node/bin/node` —— 必须是已存在的可执行普通文件（目录与不可执行文件均拒绝）。
+  3. 任何无效或缺失的声明 —— 非对象清单、未知 `runtime`、非字符串 `interpreter`、二进制缺失、目录、不可执行文件、入口标记缺失 —— 一律回退 `process.execPath`（运行当前进程的解释器：宿主 Node、内置 Node，或 standalone Bun 形态的私有内置 Bun）。解析绝不猜测其他二进制，也绝不抛出异常。
 - 结果按进程记忆；`resetJsInterpreterCacheForTests()` 清除。
-- 不变量：**绝不返回应用二进制**。编译形态下 manifest 必须携带解释器路径（S4 打包变更）；无法识别的 `runtime` 值或缺失的解释器回退到 `process.execPath`，不做猜测。
+- 不变量：**绝不返回应用二进制**。编译形态下 manifest 必须携带解释器路径（S4 打包变更）。
 
 迁移规则：任何新增的、以子进程方式运行 JS 文件或 `-e` 片段的代码必须走 `getJsInterpreterCommand`；再唤起应用的位置走 `QWEN_CODE_CLI` / 入口回退。
 

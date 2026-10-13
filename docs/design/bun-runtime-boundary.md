@@ -95,17 +95,28 @@ source installs do not have.
 - `isBunRuntime(): boolean` — single runtime-detection point.
 - `getJsInterpreterCommand(importMetaUrl): { command, runtime }` — resolves
   the interpreter for arbitrary-JS children:
-  1. a standalone `manifest.json` found walking up from the caller's bundle
-     directory (`resolveBundleDir`), with `interpreter` (relative to the
-     package root) or the standard `bun/bin/bun` / `node/bin/node` location
-     present on disk → that interpreter;
-  2. otherwise `process.execPath` — the interpreter running this process
-     (host Node, bundled Node, or the private bundled Bun).
+  1. The only trusted location is the **standalone package root**: the
+     parent of the caller's bundle directory (`resolveBundleDir`), which
+     must hold BOTH a `manifest.json` and the standalone entry marker
+     `lib/cli-entry.js`. There is **no upward traversal** — an unrelated
+     ancestor manifest (an npm host project's build manifest) can never be
+     picked up, so npm, source and SDK layouts always keep
+     `process.execPath`.
+  2. Within that trusted root every declaration is validated before use:
+     `runtime` must be exactly `'bun'` or `'node'`, and the interpreter —
+     the `interpreter` field resolved against the package root, else the
+     standard `bun/bin/bun` / `node/bin/node` location — must be an existing
+     executable regular file (directories and non-executable files reject).
+  3. Any invalid or missing declaration — non-object manifest, unknown
+     `runtime`, non-string `interpreter`, missing binary, directory,
+     non-executable file, missing entry marker — falls back to
+     `process.execPath`, the interpreter running this process (host Node,
+     bundled Node, or the private bundled Bun). The resolution never
+     guesses at a different binary and never throws.
 - Result memoized per process; `resetJsInterpreterCacheForTests()` clears it.
 - Invariant: **never returns the application binary**. Under a compiled
   flavor the manifest must carry the interpreter path (packaging change in
-  S4); an unrecognized `runtime` value or a missing interpreter falls back to
-  `process.execPath` rather than guessing.
+  S4).
 
 Migration rule: any new code that spawns a JS file or `-e` snippet as a child
 goes through `getJsInterpreterCommand`; sites that re-invoke the app go

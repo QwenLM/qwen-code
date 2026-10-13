@@ -57,16 +57,67 @@ export function isBunRuntime(): boolean {
   return typeof process.versions['bun'] === 'string';
 }
 
+const STANDALONE_ENTRY_MARKER = 'lib/cli-entry.js';
+
 interface StandaloneManifest {
-  runtime?: string;
-  interpreter?: string;
-  [key: string]: unknown;
+  runtime?: unknown;
+  interpreter?: unknown;
+}
+
+/**
+ * A manifest counts as a standalone runtime manifest only when it is a JSON
+ * object whose `runtime` is exactly `'bun'` or `'node'`. Anything else —
+ * arrays, primitives, objects with a different or missing `runtime` — is not
+ * ours, and the caller falls back to `process.execPath` instead of guessing.
+ */
+function parseStandaloneManifest(
+  manifestPath: string,
+): { runtime: JsRuntime; interpreter?: string } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const manifest = parsed as StandaloneManifest;
+  if (manifest.runtime !== 'bun' && manifest.runtime !== 'node') {
+    return undefined;
+  }
+  if (
+    manifest.interpreter !== undefined &&
+    typeof manifest.interpreter !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    runtime: manifest.runtime,
+    interpreter: manifest.interpreter as string | undefined,
+  };
+}
+
+/**
+ * Executable regular file: a directory (or anything non-file) and a missing
+ * executable bit on POSIX both reject, so a broken declaration can never
+ * reach spawn as EACCES.
+ */
+function isExecutableFile(candidate: string): boolean {
+  try {
+    if (!fs.statSync(candidate).isFile()) return false;
+    if (process.platform === 'win32') return true;
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function interpreterPathForRuntime(
   packageRoot: string,
-  runtime: string,
-): string | undefined {
+  runtime: JsRuntime,
+): string {
   // Layout of the standalone archives (see scripts/create-standalone-package.js):
   // `<root>/manifest.json`, `<root>/bun/bin/bun` or `<root>/node/bin/node`,
   // `<root>/lib/cli-entry.js`.
@@ -74,34 +125,7 @@ function interpreterPathForRuntime(
     process.platform === 'win32'
       ? { bun: ['bun', 'bun.exe'], node: ['node', 'node.exe'] }
       : { bun: ['bun', 'bin', 'bun'], node: ['node', 'bin', 'node'] };
-  const relative =
-    runtime === 'bun' ? segments.bun : runtime === 'node' ? segments.node : undefined;
-  if (!relative) return undefined;
-  const candidate = path.join(packageRoot, ...relative);
-  return fs.existsSync(candidate) ? candidate : undefined;
-}
-
-function readStandaloneManifest(
-  startDir: string,
-): { packageRoot: string; manifest: StandaloneManifest } | undefined {
-  let dir = startDir;
-  for (let depth = 0; depth < 6; depth++) {
-    const manifestPath = path.join(dir, 'manifest.json');
-    try {
-      const parsed = JSON.parse(
-        fs.readFileSync(manifestPath, 'utf8'),
-      ) as StandaloneManifest;
-      if (parsed && typeof parsed === 'object') {
-        return { packageRoot: dir, manifest: parsed };
-      }
-    } catch {
-      // Not a manifest here (missing or invalid); keep walking up.
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return undefined;
+  return path.join(packageRoot, ...segments[runtime]);
 }
 
 let cachedInterpreter: JsInterpreterCommand | undefined;
@@ -110,34 +134,40 @@ let cachedInterpreter: JsInterpreterCommand | undefined;
  * Resolves how to spawn an arbitrary-JS child with the runtime this build
  * ships with.
  *
- * Resolution order:
- *  1. A standalone `manifest.json` found by walking up from the caller's
- *     bundle directory, when it names a `runtime` whose interpreter exists in
- *     the package layout (`interpreter` field relative to the package root,
- *     else the standard `bun/bin/bun` / `node/bin/node` location). This keeps
- *     workers on the packaged interpreter even when the app itself is a
- *     compiled binary whose `process.execPath` cannot run JS files.
- *  2. `process.execPath` — the interpreter running this process (host Node,
- *     bundled Node, or the private bundled Bun in the standalone Bun flavor).
+ * Resolution is anchored to the caller's own installation: the only trusted
+ * location is the standalone package root — the parent of the caller's
+ * bundle directory, holding BOTH a valid `manifest.json` and the standalone
+ * entry marker `lib/cli-entry.js`. There is no upward traversal, so an
+ * unrelated ancestor `manifest.json` (an npm host project's build manifest,
+ * for example) can never be picked up; npm, source and SDK layouts always
+ * keep `process.execPath`.
  *
- * The walk and the result are memoized per process; pass the caller's
- * `import.meta.url` so chunked bundle layouts resolve like sibling assets.
+ * Within that trusted root, every declaration is validated before use:
+ * `runtime` must be exactly `'bun'` or `'node'`, and the interpreter — the
+ * `interpreter` field resolved against the package root, else the standard
+ * `bun/bin/bun` / `node/bin/node` location — must be an existing executable
+ * regular file. Any invalid or missing declaration falls back to
+ * `process.execPath` rather than guessing at another binary.
+ *
+ * The result is memoized per process; pass the caller's `import.meta.url`
+ * so chunked bundle layouts resolve like sibling assets.
  */
 export function getJsInterpreterCommand(
   importMetaUrl: string,
 ): JsInterpreterCommand {
   if (cachedInterpreter) return cachedInterpreter;
-  const found = readStandaloneManifest(resolveBundleDir(importMetaUrl));
-  if (found) {
-    const declared = found.manifest.interpreter;
-    const explicit = declared
-      ? path.resolve(found.packageRoot, declared)
-      : interpreterPathForRuntime(found.packageRoot, found.manifest.runtime ?? '');
-    if (explicit && fs.existsSync(explicit)) {
-      cachedInterpreter = {
-        command: explicit,
-        runtime: found.manifest.runtime === 'bun' ? 'bun' : 'node',
-      };
+  const packageRoot = path.dirname(resolveBundleDir(importMetaUrl));
+  const manifestPath = path.join(packageRoot, 'manifest.json');
+  const manifest = parseStandaloneManifest(manifestPath);
+  if (
+    manifest &&
+    fs.existsSync(path.join(packageRoot, ...STANDALONE_ENTRY_MARKER.split('/')))
+  ) {
+    const candidate = manifest.interpreter
+      ? path.resolve(packageRoot, manifest.interpreter)
+      : interpreterPathForRuntime(packageRoot, manifest.runtime);
+    if (isExecutableFile(candidate)) {
+      cachedInterpreter = { command: candidate, runtime: manifest.runtime };
       return cachedInterpreter;
     }
   }
