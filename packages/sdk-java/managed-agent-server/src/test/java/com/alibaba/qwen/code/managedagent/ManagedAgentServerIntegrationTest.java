@@ -1823,8 +1823,9 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.findEvents(tenant, session.sessionId(), 0, 100))
                 .filteredOn(event -> "turn.completed".equals(event.type()) && turn.turnId().equals(event.turnId())).hasSize(1);
         store.materializeNextBatch(tenant, session.sessionId(), 100);
-        assertThat(store.findSnapshot(tenant, session.sessionId())).get().satisfies(snapshot ->
-                assertThat(snapshot.coveredSequence()).isEqualTo(store.requireSession(tenant, session.sessionId()).lastSequence()));
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(store.findSnapshot(tenant, session.sessionId())).get().satisfies(snapshot ->
+                        assertThat(snapshot.coveredSequence()).isEqualTo(store.requireSession(tenant, session.sessionId()).lastSequence())));
         assertEventsNameTheSnapshot(tenant, session.sessionId());
     }
 
