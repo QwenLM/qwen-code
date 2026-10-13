@@ -65,16 +65,34 @@ function write(fixture, name, contents) {
 const files = ['dist/*.js', 'dist/types'];
 
 function declarePackage(fixture, exports, packageFiles = files) {
+  write(fixture, 'NOTICES.txt', 'Bundled dependency licenses');
   write(fixture, 'package.json', {
     name: 'fixture-web-shell',
     version: '0.0.0',
     type: 'module',
-    files: packageFiles,
+    files: ['NOTICES.txt', ...packageFiles],
     exports,
   });
 }
 
 describe('web-shell publish artifact verifier', () => {
+  it('refuses bundled dependency notices excluded from the npm package', () => {
+    const result = runVerifier((fixture) => {
+      write(fixture, 'NOTICES.txt', 'Bundled dependency licenses');
+      write(fixture, 'dist/index.js', 'export {};');
+      write(fixture, 'package.json', {
+        name: 'fixture-web-shell',
+        version: '0.0.0',
+        type: 'module',
+        files,
+        exports: { '.': './dist/index.js' },
+      });
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      'NOTICES.txt is missing from the npm package',
+    );
+  });
   it('refuses an export target that exists on disk but is left out of the tarball', () => {
     const result = runVerifier((fixture) => {
       declarePackage(fixture, {
