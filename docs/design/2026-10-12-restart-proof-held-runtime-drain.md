@@ -52,13 +52,15 @@ This dodges three specific faults:
 ### Broker (Java, `runtime-broker`)
 
 - A read-only service method `listActiveHoldRuntimeSessionIds(harnessSessionId)`:
-  the runtime Session ids of this Harness Session that a
-  live hold row still pins. The hold rows are execution records with a
-  `background_v3_*` dispatch mode; the answer is the distinct
-  `runtimeSessionId` of each non-terminal one.
-- One repository query `findActiveHoldsByHarnessSession` on
+  the runtime Session ids of this Harness Session still owed the close's
+  drain. The hold rows are execution records with a `background_v3_*`
+  dispatch mode; a row counts while its Runtime Session's release is not
+  durably recorded — a terminal hold row (the run exited, the watch
+  stopped) discharges nothing on its own (#13986 review).
+- One repository query `findHoldRowsByHarnessSession` on
   `ToolExecutionRepository` (InMemory + Jdbc + a `JdbcRepositoryContract`
-  parity pin), since the rows carry `harnessSessionId` directly.
+  parity pin), since the rows carry `harnessSessionId` directly; the
+  release-state filter lives in the service, over `RuntimeSessionRecord`.
 - One read-only route. It answers from durable rows, so it works after a
   Broker restart too.
 

@@ -517,7 +517,7 @@ public final class JdbcToolExecutionRepository
     }
 
     @Override
-    public List<ToolExecutionRecord> findActiveHoldsByHarnessSession(
+    public List<ToolExecutionRecord> findHoldRowsByHarnessSession(
             String harnessSessionId, String afterExecutionCallId, int limit) {
         if (harnessSessionId == null || limit < 1 || limit > 100) {
             throw new IllegalArgumentException(
@@ -529,12 +529,13 @@ public final class JdbcToolExecutionRepository
             List<ToolExecutionRecord> matches = new ArrayList<>();
             String cursor = after;
             // Same windowing as findBackgroundProcesses, but scoped by the
-            // harness session instead of one Runtime Session: the held
-            // obligation outlives the process that named the turn (#13930).
+            // harness session instead of one Runtime Session, and WITHOUT the
+            // terminal-state filter: a hold row's settle discharges nothing —
+            // only the Runtime Session's recorded release does, and that
+            // filter is the caller's (#13930 R1-2 review).
             for (;;) {
                 String sql = "SELECT " + EXECUTION_COLUMNS + " FROM qwen_tool_execution "
                         + "WHERE harness_session_id = ? AND execution_call_id_hash > ? "
-                        + "AND execution_state NOT IN ('SETTLED', 'ABANDONED') "
                         + "ORDER BY execution_call_id_hash LIMIT ?";
                 List<ToolExecutionRecord> batch = new ArrayList<>();
                 try (PreparedStatement statement = connection.prepareStatement(sql)) {

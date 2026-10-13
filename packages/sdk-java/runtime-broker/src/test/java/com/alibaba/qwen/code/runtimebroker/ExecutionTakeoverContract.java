@@ -75,13 +75,16 @@ final class ExecutionTakeoverContract {
         assertFalse(repository.findUnsettled(session, null, 100).stream()
                 .anyMatch(record -> record.getExecutionCallId().equals(settled.getExecutionCallId())));
 
-        verifyActiveHolds(repository, prefix + "-holds");
+        verifyHoldRowsByHarnessSession(repository, prefix + "-holds");
     }
 
-    /** The restart-recovery read (#13930 R1-2): the live hold rows of one
-     * Harness Session across all of its Runtime Sessions, and nothing else —
-     * terminal holds, plain executions and other Harness Sessions stay out. */
-    static void verifyActiveHolds(ToolExecutionRepository repository, String prefix) {
+    /** The restart-recovery read (#13930 R1-2): the hold rows of one Harness
+     * Session across all of its Runtime Sessions, in ANY execution state —
+     * plain executions and other Harness Sessions stay out, and a terminal
+     * hold row still counts: the row's settle is not the Runtime Session's
+     * release (the release-state filter lives in the service, tested there —
+     * a settled hold whose Session was never released is still owed). */
+    static void verifyHoldRowsByHarnessSession(ToolExecutionRepository repository, String prefix) {
         RuntimeScope scope = new RuntimeScope("tenant", "workspace", "generation",
                 "/workspace", "capability", "session");
         String harness = prefix + "-harness";
@@ -112,38 +115,43 @@ final class ExecutionTakeoverContract {
         repository.findOrCreate(hold(foreign, prefix + "-foreign", ManagedHoldFamily.SHELL));
 
         assertThrows(IllegalArgumentException.class,
-                () -> repository.findActiveHoldsByHarnessSession(harness, null, 0));
+                () -> repository.findHoldRowsByHarnessSession(harness, null, 0));
         assertThrows(IllegalArgumentException.class,
-                () -> repository.findActiveHoldsByHarnessSession(harness, null, 101));
+                () -> repository.findHoldRowsByHarnessSession(harness, null, 101));
         assertThrows(IllegalArgumentException.class,
-                () -> repository.findActiveHoldsByHarnessSession(null, null, 100));
+                () -> repository.findHoldRowsByHarnessSession(null, null, 100));
 
         List<ToolExecutionRecord> holds =
-                repository.findActiveHoldsByHarnessSession(harness, null, 100);
-        assertEquals(Set.of(shell.getExecutionCallId(), monitor.getExecutionCallId()),
+                repository.findHoldRowsByHarnessSession(harness, null, 100);
+        assertEquals(Set.of(shell.getExecutionCallId(), monitor.getExecutionCallId(),
+                        exited.getExecutionCallId()),
                 holds.stream().map(ToolExecutionRecord::getExecutionCallId)
                         .collect(Collectors.toSet()));
         assertEquals(Set.of(first.getRuntimeSessionId(), second.getRuntimeSessionId()),
                 holds.stream().map(ToolExecutionRecord::getRuntimeSessionId)
                         .collect(Collectors.toSet()));
         assertEquals(List.of(prefix + "-foreign"),
-                repository.findActiveHoldsByHarnessSession(
+                repository.findHoldRowsByHarnessSession(
                         foreign.getSession().getHarnessSessionId(), null, 100)
                         .stream().map(ToolExecutionRecord::getExecutionCallId)
                         .toList());
-        assertTrue(repository.findActiveHoldsByHarnessSession(
+        assertTrue(repository.findHoldRowsByHarnessSession(
                 prefix + "-unknown", null, 100).isEmpty());
 
         List<ToolExecutionRecord> pageOne =
-                repository.findActiveHoldsByHarnessSession(harness, null, 1);
+                repository.findHoldRowsByHarnessSession(harness, null, 1);
         assertEquals(1, pageOne.size());
-        List<ToolExecutionRecord> pageTwo = repository.findActiveHoldsByHarnessSession(
+        List<ToolExecutionRecord> pageTwo = repository.findHoldRowsByHarnessSession(
                 harness, pageOne.get(0).getExecutionCallId(), 1);
         assertEquals(1, pageTwo.size());
-        assertFalse(pageOne.get(0).getExecutionCallId()
-                .equals(pageTwo.get(0).getExecutionCallId()));
-        assertTrue(repository.findActiveHoldsByHarnessSession(
-                harness, pageTwo.get(0).getExecutionCallId(), 1).isEmpty());
+        List<ToolExecutionRecord> pageThree = repository.findHoldRowsByHarnessSession(
+                harness, pageTwo.get(0).getExecutionCallId(), 1);
+        assertEquals(1, pageThree.size());
+        assertEquals(3, Set.of(pageOne.get(0).getExecutionCallId(),
+                pageTwo.get(0).getExecutionCallId(),
+                pageThree.get(0).getExecutionCallId()).size());
+        assertTrue(repository.findHoldRowsByHarnessSession(
+                harness, pageThree.get(0).getExecutionCallId(), 1).isEmpty());
     }
 
     private static ToolExecutionRecord executing(ToolExecutionRepository repository,

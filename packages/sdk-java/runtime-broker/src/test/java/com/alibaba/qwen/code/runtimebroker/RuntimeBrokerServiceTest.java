@@ -2265,9 +2265,11 @@ class RuntimeBrokerServiceTest {
     void listActiveHoldRuntimeSessionIdsSpansEveryRuntimeOfTheHarness()
             throws Exception {
         // #13930 R1-2: a reloaded Harness restores the close's drain
-        // obligation from this read — the live hold rows across every
-        // Runtime Session the Harness ever opened, with terminal holds,
-        // plain executions and foreign Harness Sessions left out.
+        // obligation from this read — the hold rows across every Runtime
+        // Session the Harness ever opened, INCLUDING a settled hold whose
+        // Session was never released (the row's terminal state is not the
+        // discharge; the Session's RELEASED record is), with discharged
+        // holds, plain executions and foreign Harness Sessions left out.
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             admitHold(fixture, "harness", "runtime-a", "call-a",
                     "background_v3_process");
@@ -2277,9 +2279,15 @@ class RuntimeBrokerServiceTest {
             exited.put("state", "exited");
             exited.put("executionStatus", "success");
             fixture.executionRepository.settlePrepared(
-                    admitHold(fixture, "harness", "runtime-a", "call-exited",
-                            "background_v3_process"),
+                    admitHold(fixture, "harness", "runtime-exited",
+                            "call-exited", "background_v3_process"),
                     exited, java.time.Instant.now());
+            fixture.executionRepository.settlePrepared(
+                    admitHold(fixture, "harness", "runtime-drained",
+                            "call-drained", "background_v3_process"),
+                    exited, java.time.Instant.now());
+            assertTrue(join(fixture.service.release("harness",
+                    "runtime-drained")));
             RuntimeSessionRecord plain = join(fixture.service.acquire(
                     "harness", "runtime-plain", "bootstrap"));
             String digest = "sha256:" + "a".repeat(64);
@@ -2292,7 +2300,7 @@ class RuntimeBrokerServiceTest {
             admitHold(fixture, "foreign-harness", "runtime-x", "call-x",
                     "background_v3_process");
 
-            assertEquals(Set.of("runtime-a", "runtime-b"),
+            assertEquals(Set.of("runtime-a", "runtime-b", "runtime-exited"),
                     Set.copyOf(join(fixture.service
                             .listActiveHoldRuntimeSessionIds("harness"))));
             assertTrue(join(fixture.service
@@ -2317,6 +2325,33 @@ class RuntimeBrokerServiceTest {
             }
             assertEquals(expected, Set.copyOf(join(fixture.service
                     .listActiveHoldRuntimeSessionIds("harness"))));
+        }
+    }
+
+    @Test
+    void activeHoldsSurviveTheHoldSettlingUntilTheSessionIsReleased()
+            throws Exception {
+        // #13986 review (doudouOUC): a terminal hold row is not proof the
+        // Runtime Session was released — the routine release was refused
+        // `runtime_session_held` while the run was live, the run's exit
+        // settles the row, and the restart inventory must still owe the
+        // drain until the Session's RELEASED record lands.
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            ToolExecutionRecord hold = admitHold(fixture, "harness",
+                    "runtime-held", "call-h", "background_v3_process");
+            assertEquals("runtime_session_held", failure(fixture.service
+                    .release("harness", "runtime-held")).getCode());
+            Map<String, Object> exited = new LinkedHashMap<>();
+            exited.put("state", "exited");
+            exited.put("executionStatus", "success");
+            fixture.executionRepository.settlePrepared(hold, exited,
+                    Instant.now());
+            assertEquals(List.of("runtime-held"), join(fixture.service
+                    .listActiveHoldRuntimeSessionIds("harness")));
+            assertTrue(join(fixture.service.release("harness", "runtime-held",
+                    true)));
+            assertTrue(join(fixture.service
+                    .listActiveHoldRuntimeSessionIds("harness")).isEmpty());
         }
     }
 
@@ -6758,10 +6793,10 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
-        public List<ToolExecutionRecord> findActiveHoldsByHarnessSession(
+        public List<ToolExecutionRecord> findHoldRowsByHarnessSession(
                 String harnessSessionId, String afterExecutionCallId,
                 int limit) {
-            return delegate.findActiveHoldsByHarnessSession(harnessSessionId,
+            return delegate.findHoldRowsByHarnessSession(harnessSessionId,
                     afterExecutionCallId, limit);
         }
 
@@ -6921,10 +6956,10 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
-        public List<ToolExecutionRecord> findActiveHoldsByHarnessSession(
+        public List<ToolExecutionRecord> findHoldRowsByHarnessSession(
                 String harnessSessionId, String afterExecutionCallId,
                 int limit) {
-            return delegate.findActiveHoldsByHarnessSession(harnessSessionId,
+            return delegate.findHoldRowsByHarnessSession(harnessSessionId,
                     afterExecutionCallId, limit);
         }
 

@@ -28,8 +28,8 @@ Broker 才是"什么仍被持有"的真相源：每个存活的后台 run 都有
 
 ### Broker（Java，`runtime-broker`）
 
-- 一个只读的 service 方法 `listActiveHoldRuntimeSessionIds(harnessSessionId)`：这个 Harness Session 名下仍被存活 hold 行钉住的 Runtime Session id。hold 行是带 `background_v3_*` dispatchMode 的执行记录；答案就是每个非终态行的 `runtimeSessionId` 去重。
-- 一个仓储查询 `findActiveHoldsByHarnessSession`（InMemory + Jdbc + `JdbcRepositoryContract` 对等钉），因为行上直接带 `harnessSessionId`。
+- 一个只读的 service 方法 `listActiveHoldRuntimeSessionIds(harnessSessionId)`：这个 Harness Session 名下仍欠 close 排空的 Runtime Session id。hold 行是带 `background_v3_*` dispatchMode 的执行记录；只要其 Runtime Session 的释放没有持久落账，该行就算数——hold 行进入终态（run 退出、watch 停止）本身并不清偿（#13986 评审）。
+- 一个仓储查询 `findHoldRowsByHarnessSession`（InMemory + Jdbc + `JdbcRepositoryContract` 对等钉），因为行上直接带 `harnessSessionId`；释放状态过滤在 service 层、按 `RuntimeSessionRecord` 判定。
 - 一条只读路由。它读持久行，所以 Broker 重启后也能答。
 
 ### Harness（CLI，`hosted-harness-session.ts`）
