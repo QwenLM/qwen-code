@@ -114,6 +114,8 @@ interface FakeConfigState {
   gating: { excluded?: string[]; allowed?: string[]; pending?: string[] };
   /** Startup `--allowed-mcp-server-names` upper bound (K); default undefined. */
   bootAllowed?: string[];
+  /** Startup `--disable-mcp-server` names; default undefined. */
+  bootExcluded?: string[];
   approvalMode?: ApprovalMode;
   bareMode?: boolean;
   safeMode?: boolean;
@@ -144,6 +146,7 @@ function makeFakeConfig(cwd: string, state: FakeConfigState) {
     // Default: no startup --allowed-mcp-server-names flag (settings fully win).
     // Individual tests override via state.bootAllowed.
     getCliAllowedMcpServerNames: () => state.bootAllowed,
+    getCliExcludedMcpServerNames: () => state.bootExcluded,
     setExcludedMcpServers,
     setAllowedMcpServers,
     setPendingMcpServers,
@@ -405,6 +408,64 @@ describe('registerMcpHotReload', () => {
 
     expect(fc.setAllowedMcpServers).toHaveBeenCalledWith(['x']);
   });
+
+  // ── startup --disable-mcp-server survives a settings reload ──────────
+  it('a settings reload keeps the startup --disable-mcp-server exclusions, unioned with mcp.excluded', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { a: { command: 'a' }, b: { command: 'b' } },
+      gating: { excluded: ['a'] },
+      bootExcluded: ['a'],
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = {
+      a: { command: 'a' },
+      b: { command: 'b' },
+      c: { command: 'c' },
+    };
+    merged.mcp = { excluded: ['b'] };
+    await listener([]);
+
+    const [[excluded]] = fc.setExcludedMcpServers.mock.calls;
+    expect([...excluded].sort()).toEqual(['a', 'b']);
+  });
+
+  it('a settings reload that drops mcp.excluded does NOT re-enable a --disable-mcp-server server', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { a: { command: 'a' } },
+      gating: { excluded: ['a', 'b'] },
+      bootExcluded: ['a'],
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = { a: { command: 'a' } };
+    merged.mcp = {};
+    await listener([]);
+
+    expect(fc.setExcludedMcpServers).toHaveBeenCalledWith(['a']);
+  });
+
+  it.each([
+    ['safe', { safeMode: true }],
+    ['bare', { bareMode: true }],
+  ])(
+    '%s mode: a settings reload keeps the startup --disable-mcp-server exclusions',
+    async (_mode, modeState) => {
+      const fc = makeFakeConfig(cwd, {
+        settingsMcp: { stale: { command: 'stale' } },
+        gating: {},
+        bootExcluded: ['probe'],
+        ...modeState,
+      });
+      const topTier = { probe: { command: 'probe' } };
+      registerMcpHotReload(watcher, settings, fc.config, topTier);
+
+      merged.mcp = { excluded: ['ignored-in-this-mode'] };
+      await listener([]);
+
+      expect(fc.setExcludedMcpServers).toHaveBeenCalledWith(['probe']);
+    },
+  );
 
   it('does NOT reconcile when neither servers nor admission lists changed', async () => {
     const fc = makeFakeConfig(cwd, {

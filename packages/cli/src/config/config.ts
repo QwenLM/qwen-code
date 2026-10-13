@@ -189,6 +189,7 @@ export interface CliArgs {
   telemetryLogPrompts: boolean | undefined;
   telemetryOutfile: string | undefined;
   allowedMcpServerNames: string[] | undefined;
+  disableMcpServer: string[] | undefined;
   mcpConfig: string | undefined;
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
@@ -673,6 +674,18 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('allowed-mcp-server-names', {
           ...DEFAULT_COMMAND_OPTIONS['allowed-mcp-server-names'],
           string: true,
+          coerce: (mcpServerNames: string[]) =>
+            // Handle comma-separated values
+            mcpServerNames.flatMap((mcpServerName) =>
+              mcpServerName.split(',').map((m) => m.trim()),
+            ),
+        })
+        .option('disable-mcp-server', {
+          ...DEFAULT_COMMAND_OPTIONS['disable-mcp-server'],
+          string: true,
+          // One name per occurrence, so a trailing positional prompt is not
+          // swallowed as another server name.
+          nargs: 1,
           coerce: (mcpServerNames: string[]) =>
             // Handle comma-separated values
             mcpServerNames.flatMap((mcpServerName) =>
@@ -2191,6 +2204,15 @@ export async function loadCliConfig(
       ? new Set(settings.mcp.excluded.filter(Boolean))
       : undefined;
   }
+  // Like `--allowed-mcp-server-names`, an explicit per-invocation argument:
+  // applies in every mode, on top of either branch above.
+  const cliExcludedMcpServerNames = argv.disableMcpServer?.filter(Boolean);
+  if (cliExcludedMcpServerNames?.length) {
+    excludedMcpServers = new Set([
+      ...(excludedMcpServers ?? []),
+      ...cliExcludedMcpServerNames,
+    ]);
+  }
 
   const selectedAuthType =
     (argv.authType as AuthType | undefined) ||
@@ -2611,6 +2633,10 @@ export async function loadCliConfig(
     // bound. Undefined when `--allowed-mcp-server-names` was not passed.
     cliAllowedMcpServerNames: argv.allowedMcpServerNames
       ? argv.allowedMcpServerNames.filter(Boolean)
+      : undefined,
+    // The flag ONLY (not the settings-derived list); see ConfigParameters.
+    cliExcludedMcpServerNames: cliExcludedMcpServerNames?.length
+      ? cliExcludedMcpServerNames
       : undefined,
     excludedMcpServers: excludedMcpServers
       ? Array.from(excludedMcpServers)

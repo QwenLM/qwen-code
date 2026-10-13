@@ -279,6 +279,11 @@ export const DEFAULT_COMMAND_OPTIONS = {
     type: 'array' as const,
     description: 'Allowed MCP server names',
   },
+  'disable-mcp-server': {
+    type: 'array' as const,
+    description:
+      'Disable a specific MCP server for this run (can be used multiple times)',
+  },
   'mcp-config': {
     type: 'string' as const,
     description:

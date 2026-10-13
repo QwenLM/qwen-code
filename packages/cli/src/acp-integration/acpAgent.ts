@@ -4534,13 +4534,18 @@ class QwenAgent implements Agent {
                 config.getTopTierMcpServers(),
               );
           const bootAllowed = config.getCliAllowedMcpServerNames();
+          const bootExcluded = config.getCliExcludedMcpServerNames();
           const gating = isBareOrSafe
-            ? { allowed: bootAllowed ? [...bootAllowed] : undefined }
+            ? {
+                allowed: bootAllowed ? [...bootAllowed] : undefined,
+                excluded: bootExcluded ? [...bootExcluded] : undefined,
+              }
             : recomputeMcpGating(
                 settings,
                 mcpServers,
                 cwd,
                 bootAllowed,
+                bootExcluded,
                 config.getApprovalMode() === ApprovalMode.YOLO,
               );
           config.setExcludedMcpServers(gating.excluded ?? []);

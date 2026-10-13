@@ -4983,6 +4983,146 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
   });
 });
 
+describe('loadCliConfig with disable-mcp-server', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  const baseSettings: Settings = {
+    mcpServers: {
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
+      server3: { url: 'http://localhost:8082' },
+    },
+  };
+
+  it('changes nothing when the flag is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    expect(argv.disableMcpServer).toBeUndefined();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.getExcludedMcpServers()).toBeUndefined();
+    expect(config.getCliExcludedMcpServerNames()).toBeUndefined();
+  });
+
+  it('disables exactly the named server and leaves the rest enabled', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server1'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.getMcpServers()).toEqual(baseSettings.mcpServers);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(false);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+    expect(config.getCliExcludedMcpServerNames()).toEqual(['server1']);
+  });
+
+  it('accepts repeated and comma-separated values', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--disable-mcp-server',
+      'server1',
+      '--disable-mcp-server',
+      'server2, server3',
+    ];
+    const argv = await parseArguments();
+    expect(argv.disableMcpServer).toEqual(['server1', 'server2', 'server3']);
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(true);
+  });
+
+  it('takes one name per occurrence and leaves a trailing prompt positional', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--disable-mcp-server',
+      'server1',
+      'hello world',
+    ];
+    const argv = await parseArguments();
+    expect(argv.disableMcpServer).toEqual(['server1']);
+    expect(argv.query).toBe('hello world');
+  });
+
+  it('unions with settings mcp.excluded', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server1'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      ...baseSettings,
+      mcp: { excluded: ['server2'] },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(false);
+  });
+
+  it('applies after --allowed-mcp-server-names (allow, then deny)', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--allowed-mcp-server-names',
+      'server1,server2',
+      '--disable-mcp-server',
+      'server2',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.getMcpServers()).toEqual({
+      server1: { url: 'http://localhost:8080' },
+      server2: { url: 'http://localhost:8081' },
+    });
+    expect(config.isMcpServerDisabled('server1')).toBe(false);
+    expect(config.isMcpServerDisabled('server2')).toBe(true);
+  });
+
+  it.each(['--safe-mode', '--bare'])(
+    'still applies under %s to caller-supplied servers',
+    async (modeFlag) => {
+      process.argv = [
+        'node',
+        'script.js',
+        modeFlag,
+        '--disable-mcp-server',
+        'bridge',
+      ];
+      const argv = await parseArguments();
+      const sessionMcpServers = {
+        bridge: new ServerConfig.MCPServerConfig('bridge-cmd'),
+        other: new ServerConfig.MCPServerConfig('other-cmd'),
+      };
+      const config = await loadCliConfig(
+        { mcp: { excluded: ['other'] } },
+        argv,
+        process.cwd(),
+        undefined,
+        undefined,
+        undefined,
+        sessionMcpServers,
+      );
+      expect(Object.keys(config.getMcpServers() ?? {}).sort()).toEqual([
+        'bridge',
+        'other',
+      ]);
+      expect(config.isMcpServerDisabled('bridge')).toBe(true);
+      // Settings-sourced mcp.excluded is still ignored in this mode.
+      expect(config.isMcpServerDisabled('other')).toBe(false);
+    },
+  );
+});
+
 describe('loadCliConfig with --mcp-config', () => {
   const baseSettings: Settings = {
     mcpServers: {
