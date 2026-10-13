@@ -8,7 +8,9 @@ import {
   type ReactNode,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { createPortal } from 'react-dom';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
+const editorAddTags = vi.hoisted(() => vi.fn());
 import type {
   ContextUsageControls,
   RegisterContextUsageControls,
@@ -797,6 +799,7 @@ const {
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
       } | null,
+      artifactPanelExtra: null as ReactNode,
       captureArtifactPanelOnly: false,
       latestArtifactPanelProps: null as React.ComponentProps<
         typeof ArtifactPanel
@@ -897,7 +900,10 @@ vi.mock('./components/artifacts/ArtifactPanel', async (importOriginal) => {
     ArtifactPanel: (props: React.ComponentProps<typeof ArtifactPanel>) => {
       testState.latestArtifactPanelProps = props;
       return testState.captureArtifactPanelOnly ? null : (
-        <actual.ArtifactPanel {...props} />
+        <>
+          <actual.ArtifactPanel {...props} />
+          {testState.artifactPanelExtra}
+        </>
       );
     },
   };
@@ -1159,6 +1165,7 @@ vi.mock('./components/ChatEditor', async () => {
         props: ChatEditorTestProps,
         ref: React.ForwardedRef<{
           clear: () => void;
+          addTags: (tags: unknown, options?: unknown) => void;
           hasAttachments: () => boolean;
           hasInput: () => boolean;
           insertText: (text: string) => void;
@@ -1209,6 +1216,7 @@ vi.mock('./components/ChatEditor', async () => {
                 testState.inputAnnotations?.length,
             ),
           hasInput: () => testState.prompt.trim().length > 0,
+          addTags: editorAddTags,
           insertText: editorInsertText,
           getText: () => testState.prompt,
           setText: (text) => {
@@ -9861,6 +9869,36 @@ describe('artifact panel fullscreen', () => {
       await Promise.resolve();
     });
     expect(document.activeElement).toBe(last);
+
+    const treeHost = document.createElement('div');
+    const treeShadow = treeHost.attachShadow({ mode: 'open' });
+    const treeRow = document.createElement('button');
+    treeShadow.appendChild(treeRow);
+    surface!.appendChild(treeHost);
+    first.focus();
+    await act(async () => {
+      first.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(treeShadow.activeElement).toBe(treeRow);
+    await act(async () => {
+      treeRow.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(document.activeElement).toBe(first);
+    treeHost.remove();
   });
 
   it('pulls focus back into the docked fullscreen surface when it escapes', async () => {
@@ -9895,6 +9933,16 @@ describe('artifact panel fullscreen', () => {
     expect(exitFullscreen).not.toBeNull();
     exitFullscreen!.focus();
     expect(document.activeElement).toBe(exitFullscreen);
+
+    const treeHost = document.createElement('div');
+    const treeShadow = treeHost.attachShadow({ mode: 'open' });
+    const treeRow = document.createElement('button');
+    treeRow.setAttribute('role', 'treeitem');
+    treeShadow.appendChild(treeRow);
+    surface!.appendChild(treeHost);
+    treeRow.focus({ preventScroll: true });
+    expect(treeShadow.activeElement).toBe(treeRow);
+    treeHost.remove();
 
     // A Tab past the preview's last focusable lands focus natively outside
     // the surface: the keydown that moved it never reached the surface's
@@ -9937,6 +9985,110 @@ describe('artifact panel fullscreen', () => {
     expect(
       document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
+  });
+
+  it('tabs into and out of shadow-root rows in the floating panel', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    testState.artifactPanelExtra = createPortal(
+      <div role="dialog">
+        <button data-testid="portalled-dialog-button">Dialog control</button>
+      </div>,
+      document.body,
+    );
+    const { container } = renderApp();
+    await flush();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+    await flush();
+    const surface = document.querySelector<HTMLElement>(
+      '[data-slot="drawer-content"] aside[aria-label="Right panel"]',
+    )!;
+    expect(surface).not.toBeNull();
+    const input = document.createElement('input');
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    const row = document.createElement('button');
+    row.setAttribute('role', 'treeitem');
+    shadow.appendChild(row);
+    const trailing = document.createElement('button');
+    trailing.textContent = 'after shadow';
+    surface.append(input, host, trailing);
+    const tab = async (target: HTMLElement, shiftKey = false) => {
+      await act(async () => {
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Tab',
+            shiftKey,
+            bubbles: true,
+            composed: true,
+            cancelable: true,
+          }),
+        );
+      });
+    };
+    input.focus();
+    await tab(input);
+    expect(shadow.activeElement).toBe(row);
+    await tab(row, true);
+    expect(document.activeElement).toBe(input);
+    row.focus();
+    await tab(row);
+    expect(document.activeElement).toBe(trailing);
+    const prevented = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    input.focus();
+    prevented.preventDefault();
+    await act(async () => {
+      input.dispatchEvent(prevented);
+    });
+    expect(document.activeElement).toBe(input);
+    const portalEvent = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      document
+        .querySelector('[data-testid="portalled-dialog-button"]')!
+        .dispatchEvent(portalEvent);
+    });
+    expect(portalEvent.defaultPrevented).toBe(false);
+    const reversePortalEvent = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      document
+        .querySelector('[data-testid="portalled-dialog-button"]')!
+        .dispatchEvent(reversePortalEvent);
+    });
+    expect(reversePortalEvent.defaultPrevented).toBe(false);
+    trailing.focus();
+    await tab(trailing);
+    expect(document.activeElement).toBe(
+      surface.querySelector('button:not([disabled])'),
+    );
+    host.remove();
+    input.remove();
+    trailing.remove();
   });
 
   it('keeps the docked fullscreen surface keyboard-operable in shadow-DOM portal mode', async () => {
@@ -11685,6 +11837,7 @@ beforeEach(() => {
   testState.latestWorkflowRunsProps = null;
   testState.latestSplitViewProps = null;
   testState.latestArtifactPanelProps = null;
+  testState.artifactPanelExtra = null;
   testState.captureArtifactPanelOnly = false;
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
@@ -16753,6 +16906,262 @@ describe('App session callbacks', () => {
     );
     expect(header?.parentElement?.contains(artifactDock ?? null)).toBe(false);
   });
+
+  it.each([true, false])(
+    'keeps Files ownership distinct across workspace switches (advertised=%s)',
+    async (advertised) => {
+      const workspaces = [
+        { id: 'first', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'second', cwd: '/tmp/second', primary: false, trusted: true },
+      ];
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        ...(advertised ? { workspaces } : {}),
+      } as typeof mockWorkspace.capabilities;
+      testState.captureArtifactPanelOnly = true;
+      const { container, rerender } = renderApp({
+        rightPanel: { items: ['files'] },
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      const firstId = testState.latestArtifactPanelProps?.activeTabId;
+      mockConnection.workspaceCwd = '/tmp/second';
+      if (!advertised)
+        mockWorkspace.capabilities = {
+          workspaceCwd: '/tmp/second',
+        } as typeof mockWorkspace.capabilities;
+      rerender();
+      await flush();
+      act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+      expect(testState.latestArtifactPanelProps?.activeTabId).not.toBe(firstId);
+      expect(testState.latestArtifactPanelProps?.tabs).toContainEqual(
+        expect.objectContaining({
+          kind: 'files',
+          workspaceCwd: '/tmp/second',
+          id: advertised ? 'files:second' : 'files:/tmp/second',
+        }),
+      );
+    },
+  );
+
+  it('references a file inline and exits docked fullscreen without closing Files', async () => {
+    editorAddTags.mockClear();
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'owner', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    testState.captureArtifactPanelOnly = true;
+    const { container } = renderApp({ rightPanel: { items: ['files'] } });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+    act(() => testState.latestArtifactPanelProps?.onToggleFullscreen?.());
+    expect(testState.latestArtifactPanelProps?.fullscreen).toBe(true);
+    expect(testState.latestArtifactPanelProps?.onReferenceFile).toBeDefined();
+    act(() =>
+      testState.latestArtifactPanelProps?.onReferenceFile?.('src/app.ts'),
+    );
+    expect(testState.latestArtifactPanelProps?.fullscreen).toBe(false);
+    expect(testState.latestArtifactPanelProps?.tabs).toContainEqual(
+      expect.objectContaining({ kind: 'files' }),
+    );
+    expect(editorAddTags).toHaveBeenCalledWith(
+      [expect.objectContaining({ serialized: '@src/app.ts' })],
+      { placement: 'inline', position: 'end' },
+    );
+    act(() => testState.latestChatEditorProps?.onSubmit('/model'));
+    await flush();
+    expect(
+      container.querySelector('[data-testid="model-select"]'),
+    ).not.toBeNull();
+    expect(testState.latestArtifactPanelProps?.onReferenceFile).toBeUndefined();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-select"]')
+        ?.click(),
+    );
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click(),
+    );
+    await act(async () =>
+      testState.latestSessionOverviewProps?.onOpenSplit?.([
+        'session-1',
+        'session-2',
+      ]),
+    );
+    await flush();
+    expect(testState.latestSplitViewProps).not.toBeNull();
+    expect(testState.latestArtifactPanelProps?.onReferenceFile).toBeUndefined();
+  });
+
+  it('opens one files tab per workspace when configured', () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'project-workspace',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    testState.captureArtifactPanelOnly = true;
+    const { container } = renderApp({ rightPanel: { items: ['files'] } });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click(),
+    );
+    expect(testState.latestArtifactPanelProps?.onOpenFiles).toBeDefined();
+    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+    act(() => testState.latestArtifactPanelProps?.onOpenFiles?.());
+    expect(testState.latestArtifactPanelProps?.tabs).toEqual([
+      expect.objectContaining({
+        kind: 'files',
+        workspaceCwd: '/tmp/project',
+        title: 'Files',
+      }),
+    ]);
+    expect(testState.latestArtifactPanelProps?.activeTabId).toBe(
+      testState.latestArtifactPanelProps?.tabs[0]?.id,
+    );
+    act(() =>
+      testState.latestArtifactPanelProps?.onOpenFilePreview(
+        'README.md',
+        '/tmp/project',
+        'project-workspace',
+      ),
+    );
+    expect(testState.latestArtifactPanelProps?.tabs).toEqual([
+      expect.objectContaining({ kind: 'files' }),
+      expect.objectContaining({
+        kind: 'file',
+        workspacePath: 'README.md',
+        workspaceCwd: '/tmp/project',
+        workspaceId: 'project-workspace',
+      }),
+    ]);
+    expect(testState.latestArtifactPanelProps?.tabs[1]).not.toHaveProperty(
+      'previewContent',
+    );
+  });
+
+  it.each(['disabled', 'untrusted', 'unknown'] as const)(
+    'does not expose files for an unavailable workspace (%s)',
+    async (reason) => {
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        workspaces:
+          reason === 'unknown'
+            ? []
+            : [
+                {
+                  id: 'owner',
+                  cwd: '/tmp/project',
+                  primary: true,
+                  trusted: reason !== 'untrusted',
+                },
+              ],
+      } as typeof mockWorkspace.capabilities;
+      window.localStorage.setItem(
+        'qwen-code-web-shell-right-panel-state',
+        JSON.stringify({
+          v: 1,
+          ['/tmp/project\0session-1']: {
+            open: true,
+            activeTabId: 'files:stored',
+            tabs: [
+              {
+                id: 'files:stored',
+                kind: 'files',
+                title: 'Files',
+                workspaceCwd: '/tmp/project',
+                workspaceId: 'owner',
+              },
+            ],
+          },
+        }),
+      );
+      testState.captureArtifactPanelOnly = true;
+      const { container } = renderApp({
+        rightPanel: { items: reason === 'disabled' ? ['review'] : ['files'] },
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      await flush();
+      await flush();
+      expect(
+        testState.latestArtifactPanelProps?.tabs.some(
+          (tab) => tab.kind === 'files',
+        ),
+      ).toBe(false);
+      expect(testState.latestArtifactPanelProps).toBeDefined();
+      expect(testState.latestArtifactPanelProps?.onOpenFiles).toBeUndefined();
+    },
+  );
+
+  it.each(['/tmp/project', '', 42, null])(
+    'round trips valid persisted files tabs and rejects malformed cwd (%s)',
+    async (workspaceCwd) => {
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'owner', cwd: '/tmp/project', primary: true, trusted: true },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      testState.captureArtifactPanelOnly = true;
+      const tab = {
+        id: 'files:stored',
+        kind: 'files',
+        title: 'Files',
+        workspaceCwd,
+        workspaceId: 'owner',
+      };
+      const key = 'qwen-code-web-shell-right-panel-state';
+      const sessionKey = '/tmp/project\0session-1';
+      window.localStorage.setItem(
+        key,
+        JSON.stringify({
+          v: 1,
+          [sessionKey]: { open: true, activeTabId: tab.id, tabs: [tab] },
+        }),
+      );
+      renderApp({ rightPanel: { items: ['files'] } });
+      await flush();
+      await flush();
+      const expected = workspaceCwd === '/tmp/project' ? [tab] : [];
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual(expected);
+      expect(
+        JSON.parse(window.localStorage.getItem(key) ?? '{}')[sessionKey]?.tabs,
+      ).toEqual(expected);
+    },
+  );
 
   it('shows the manual terminal action when configured and advertised', () => {
     mockConnection.capabilities.features = ['web_terminal'];

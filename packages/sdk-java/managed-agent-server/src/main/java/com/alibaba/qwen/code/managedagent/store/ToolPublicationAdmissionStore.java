@@ -306,6 +306,11 @@ public final class ToolPublicationAdmissionStore {
 
     public JsonNode commitReceipt(JsonNode key, String publicationId, String writerToken,
             CommitTransactionRequest request) {
+        return commitReceipt(key, publicationId, writerToken, request, null);
+    }
+
+    public JsonNode commitReceipt(JsonNode key, String publicationId, String writerToken,
+            CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         data.requireStagedCall(key, publicationId);
         require(request != null && text(key, "workspaceId").equals(request.workspaceId()),
                 "Receipt Workspace conflicts");
@@ -381,7 +386,7 @@ public final class ToolPublicationAdmissionStore {
                     "Admission resource changed");
             if ("REFERENCED".equals(publication.get("producer_phase"))) {
                 var committed = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
-                        writerToken, request);
+                        writerToken, request, authority);
                 require(committed.journalRevision() == ((Number) publication.get("receipt_revision")).longValue()
                         && committed.lastSequence() == ((Number) publication.get("receipt_sequence")).longValue(),
                         "Receipt replay conflicts with original transaction");
@@ -395,7 +400,7 @@ public final class ToolPublicationAdmissionStore {
                 installManifestResource(key, request, manifestRef, manifestBytes);
             }
             var receipt = sessions.commit(text(key, "tenantId"), text(key, "sessionId"),
-                    writerToken, request);
+                    writerToken, request, authority);
             jdbc.update("UPDATE qwen_tool_publication SET producer_phase = 'REFERENCED',"
                             + " admission_held_bytes = admission_used_bytes, receipt_sequence = ?,"
                             + " receipt_revision = ?, accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
