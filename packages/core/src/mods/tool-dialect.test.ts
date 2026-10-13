@@ -5,6 +5,12 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { makeFakeConfig } from '../test-utils/config.js';
+import { EditTool } from '../tools/edit.js';
+import { ShellTool } from '../tools/shell.js';
+import { DiscoveredTool, ToolRegistry } from '../tools/tool-registry.js';
+import type { AnyDeclarativeTool } from '../tools/tools.js';
+import { WriteFileTool } from '../tools/write-file.js';
 import { ModRuntime } from './runtime.js';
 import type { ModToolCallInput, ModToolNext } from './tool-events.js';
 
@@ -14,8 +20,18 @@ const source = (body: string) => `export function register(on) { ${body} }`;
 describe('Claude tool input views through the real Mod worker', () => {
   const runtimes: ModRuntime[] = [];
   const logs: string[] = [];
+  const config = makeFakeConfig({ chatRecording: false });
+  const builtins = [
+    new ShellTool(config),
+    new EditTool(config),
+    new WriteFileTool(config),
+  ];
   async function create(
     plugins: Array<{ source: string; toolDialect?: 'native' | 'claude' }>,
+    resolveTool: (
+      name: string,
+    ) => Promise<AnyDeclarativeTool | undefined> = async (name) =>
+      builtins.find((tool) => tool.name === name),
   ) {
     const runtime = await ModRuntime.createGroup(
       plugins.map((plugin, index) => ({
@@ -32,6 +48,7 @@ describe('Claude tool input views through the real Mod worker', () => {
       '/workspace',
       (entry) => logs.push(entry.text),
       signal(),
+      resolveTool,
     );
     runtimes.push(runtime);
     return runtime;
@@ -246,6 +263,68 @@ describe('Claude tool input views through the real Mod worker', () => {
         result: { decision: 'allow' },
       });
       expect(logs).toEqual([tool]);
+    },
+  );
+
+  it.each(
+    ['run_shell_command', 'edit', 'write_file'].flatMap((tool) =>
+      [false, true].map((reversed) => ({ tool, reversed })),
+    ),
+  )(
+    'bypasses a discovered $tool replacing a builtin in either order (reversed: $reversed)',
+    async ({ tool, reversed }) => {
+      const registry = new ToolRegistry(config);
+      registry.registerFactory(
+        tool,
+        async () => builtins.find((builtin) => builtin.name === tool)!,
+      );
+      const claude = {
+        toolDialect: 'claude' as const,
+        source: source(`
+          on('tool.call', () => ({deny:'builtin guard'}));
+          on('tool.check', () => ({decision:'deny'}));
+        `),
+      };
+      const native = {
+        source: source(`
+          on('tool.call', ($, e, next) => { $.ui.log(JSON.stringify(e)); return next(e); });
+          on('tool.check', ($, e, next) => { $.ui.log(JSON.stringify(e)); return next(e); });
+        `),
+      };
+      const runtime = await create(
+        reversed ? [claude, native] : [native, claude],
+        (name) => registry.ensureTool(name),
+      );
+      const next = vi.fn<ModToolNext>(async (e, active, check) => ({
+        result: await check(
+          { tool: e.tool, input: { payload: e['payload'] } },
+          { decision: 'allow' },
+          active,
+        ),
+      }));
+      await expect(runtime.runTool({ tool }, next, signal())).resolves.toEqual({
+        deny: 'builtin guard',
+      });
+      expect(next).not.toHaveBeenCalled();
+      logs.length = 0;
+
+      registry.registerTool(
+        new DiscoveredTool(config, tool, 'Custom payload tool', {
+          type: 'object',
+          properties: { payload: { type: 'string' } },
+          required: ['payload'],
+        }),
+      );
+      const input = { tool, payload: 'custom', builtinTool: tool };
+      await expect(runtime.runTool(input, next, signal())).resolves.toEqual({
+        result: { decision: 'allow' },
+      });
+      expect(next).toHaveBeenCalledOnce();
+      expect(next.mock.calls[0][0]).toEqual(input);
+      expect(logs.map((entry) => JSON.parse(entry))).toEqual([
+        input,
+        { tool, input: { payload: 'custom' } },
+      ]);
     },
   );
 

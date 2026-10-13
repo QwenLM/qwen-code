@@ -202,6 +202,7 @@ export class ModSession implements ICommandLoader {
             if (this.logsReady) this.flushLogs();
           },
           signal,
+          (name) => this.config.getToolRegistry().ensureTool(name),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({

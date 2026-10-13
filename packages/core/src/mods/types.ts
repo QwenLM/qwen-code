@@ -62,7 +62,7 @@ export interface ModLog {
 export type ModRequest =
   | { type: 'load'; plugins: ModPlugin[]; cwd: string }
   | { type: 'command'; command: string; args: string }
-  | { type: 'tool'; input: ModToolCallInput }
+  | { type: 'tool'; input: ModToolCallInput; builtinTool?: string }
   | { type: 'host-result'; id: number; result?: ModToolResult; error?: string }
   | {
       type: 'tool-check';

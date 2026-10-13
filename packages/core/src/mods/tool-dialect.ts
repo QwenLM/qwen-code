@@ -29,13 +29,18 @@ export function modToolInputView(
   event: ModEvent,
   input: ModInput,
   dialect?: ModToolDialect,
+  builtinTool?: string,
 ):
   | { input: ModInput; toNativeInput: (value: ModInput) => ModInput }
   | undefined {
   if (dialect !== 'claude' || (event !== 'tool.call' && event !== 'tool.check'))
     return { input, toNativeInput: (value) => value };
   const tool = input['tool'];
-  if (typeof tool !== 'string' || !Object.hasOwn(contracts, tool))
+  if (
+    typeof tool !== 'string' ||
+    tool !== builtinTool ||
+    !Object.hasOwn(contracts, tool)
+  )
     return undefined;
   const contract = contracts[tool];
   if (event === 'tool.check') {

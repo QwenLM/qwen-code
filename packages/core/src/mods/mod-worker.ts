@@ -61,6 +61,7 @@ let busy = false;
 let logChars = 0;
 let operations = 0;
 let pumping = false;
+let builtinTool: string | undefined;
 const send = (reply: ModReply) => port.postMessage(reply);
 const abandoned = () =>
   Atomics.load(cancelled, 0) !== 0 || Date.now() >= deadline;
@@ -348,7 +349,12 @@ async function dispatch(
     dispatch(event, e, origin, nested, bottom, index + 1, owner);
   if (!realm.patterns.some((pattern) => patternMatches(pattern, event)))
     return next(input, frames);
-  const view = modToolInputView(event, input, realm.plugin.toolDialect);
+  const view = modToolInputView(
+    event,
+    input,
+    realm.plugin.toolDialect,
+    builtinTool,
+  );
   if (!view) return next(input, frames);
   const active = frames.filter((frame) => frame.plugin === index);
   const lastFrame = frames.at(-1);
@@ -604,6 +610,7 @@ port.on('message', async (request: ModRequest) => {
     return;
   }
   busy = true;
+  builtinTool = request.type === 'tool' ? request.builtinTool : undefined;
   epoch++;
   logChars = 0;
   operations = 0;
@@ -700,6 +707,7 @@ port.on('message', async (request: ModRequest) => {
     }
     hostOperations.clear();
     starting = false;
+    builtinTool = undefined;
     deadline = Infinity;
     busy = false;
   }
