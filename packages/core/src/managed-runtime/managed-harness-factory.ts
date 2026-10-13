@@ -703,7 +703,23 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           'the durable wait in progress must resolve before the journal wait.',
         );
       }
-      const runnable = await this.ensureRunnableUnlocked();
+      let authorization = await this.authority.harnessRunAuthorization();
+      if (authorization.status === 'initial') {
+        await this.commitInitialBeforeModel();
+        authorization = await this.authority.harnessRunAuthorization();
+      }
+      // The batch's assistant record committed first, so the session carries
+      // a continuation with no checkpoint yet: the wait is this turn's own
+      // first checkpoint, not a recovery of a missing one.
+      if (
+        authorization.status === 'blocked' &&
+        authorization.reason === 'missing_checkpoint' &&
+        this.authority.latestCheckpoint === undefined
+      ) {
+        await this.commitInitialBeforeModel();
+        authorization = await this.authority.harnessRunAuthorization();
+      }
+      const runnable = this.requireModelStart(authorization);
       const startsTurn =
         runnable.continuation.phase === 'before_model' ||
         runnable.continuation.phase === 'turn_settled';

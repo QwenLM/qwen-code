@@ -4978,13 +4978,47 @@ export function registerHostedHarnessSessionRoutes(
         // nothing there, and gating on them re-wedged every cancelled
         // Turn after the first (R9).
         let cancellationSettled = false;
+        // A journal wait parks no Runtime work: the cancel route's own
+        // settlement (answer the round, resolve the wait) is the faithful
+        // cancellation, not the runtime stop below.
+        const cancellationJournalWait =
+          toolProfile !== undefined &&
+          brokerOptions &&
+          (await managed.authority.harnessRunAuthorization().then(
+            (verdict) =>
+              verdict.status === 'runnable' &&
+              harnessCheckpointIsJournalWait(verdict.checkpoint),
+            () => false,
+          ));
         if (
           body?.['cancellationTakeover'] === true &&
           (toolProfile === undefined ||
             !brokerOptions ||
+            cancellationJournalWait ||
             (await parkNeedsNoRuntimeSettlement(managed)))
         ) {
           try {
+            if (cancellationJournalWait) {
+              // Answer the interrupted round and resolve the wait exactly
+              // as the managed-runtime cancel route does, before the
+              // cancelled terminal lands.
+              await answerResumedTurnCalls({
+                session: managed,
+                sessionId,
+                cwd,
+                promptId: unsettled,
+                children: session.childAgents,
+                teams: session.teams,
+                messages: session.messages,
+                commands: session.commands,
+              });
+              const resolved =
+                await createManagedHarnessHandle(managed).resolveAwaitJournal();
+              if (resolved === null)
+                throw new Error(
+                  'Cancelled journal wait did not advance the checkpoint.',
+                );
+            }
             await settleCancelledHarnessTurn(
               managed,
               session,
@@ -7482,6 +7516,21 @@ export function registerHostedHarnessSessionRoutes(
         'recovery_unsupported',
       );
     }
+    // A Hooks Session answers these routes only for its journal wait; the
+    // hook refusal must precede the identity fence, or a foreign-epoch
+    // request reads as an identity mismatch instead of the hook contract.
+    if (session.hooks) {
+      const hookVerdict = await session.managed.authority
+        .harnessRunAuthorization()
+        .catch(() => undefined);
+      if (
+        hookVerdict?.status !== 'runnable' ||
+        !harnessCheckpointIsJournalWait(hookVerdict.checkpoint)
+      ) {
+        releaseRecoveredRuntime(session);
+        return error(res, 409, 'hosted_hook_recovery_required');
+      }
+    }
     if (!matchesRecovery(session, promptId, checkpointId, activationId)) {
       if (settledReplay(session, promptId, res)) {
         releaseRecoveredRuntime(session);
@@ -8035,6 +8084,20 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (session.active) return error(res, 409, 'hosted_turn_active');
+    // A Hooks Session answers these routes only for its journal wait; the
+    // hook refusal must precede the identity fence, or a foreign-epoch
+    // request reads as an identity mismatch instead of the hook contract.
+    if (session.hooks) {
+      const hookVerdict = await session.managed.authority
+        .harnessRunAuthorization()
+        .catch(() => undefined);
+      if (
+        hookVerdict?.status !== 'runnable' ||
+        !harnessCheckpointIsJournalWait(hookVerdict.checkpoint)
+      ) {
+        return error(res, 409, 'hosted_hook_recovery_required');
+      }
+    }
     // A redriven cancellation carries its load-time identity, but the
     // checkpoint may legitimately have advanced underneath: an earlier
     // attempt settled the executions and then failed before the terminal
