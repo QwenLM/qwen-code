@@ -6087,15 +6087,20 @@ describe('Hosted Harness no-tool session', () => {
     await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
       .send({ prompt, promptId: PROMPT_ID, payloadDigest })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await authorize(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).expect(200);
-      expect(status.body).toMatchObject({
-        hasActivePrompt: false,
-        recoveryBlocked: true,
-      });
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).expect(200);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: true,
+        });
+      },
+      // #14101: the parked chain crosses fsync-backed journal commits; the
+      // default 1s waitFor window flaked on a loaded ubuntu-latest runner.
+      { timeout: 10_000 },
+    );
     const journal = await LocalJsonlManagedSessionJournalStore.read(
       path.join(state.root, `${SESSION_ID}.jsonl`),
       { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
@@ -6135,13 +6140,18 @@ describe('Hosted Harness no-tool session', () => {
         path.join(state.root, `${SESSION_ID}.jsonl`),
         { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
       );
-    await vi.waitFor(async () => {
-      expect(release).toHaveBeenCalledTimes(1);
-      const status = await authorize(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).expect(200);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    await vi.waitFor(
+      async () => {
+        expect(release).toHaveBeenCalledTimes(1);
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).expect(200);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      // #14101: the debt settle crosses fsync-backed journal commits; the
+      // default 1s waitFor window flaked on a loaded ubuntu-latest runner.
+      { timeout: 10_000 },
+    );
     const parked = await readJournal();
     const terminals = parked.events.filter(
       (event) => event.kind === 'turn.settled',
