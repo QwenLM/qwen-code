@@ -107,7 +107,10 @@ import {
   childRunEndedText,
   childWorkspaceAnswerSuffix,
 } from './hosted-child-agent-session.js';
-import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import {
+  memberMessageContent,
+  type HostedSessionMessageSession,
+} from './hosted-session-message-session.js';
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import { MANAGED_SESSION_MESSAGE_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { sanitizeName } from '@qwen-code/qwen-code-core/agents/team/teamHelpers.js';
@@ -147,8 +150,10 @@ import {
   broadcastRunId,
   firstInputOpensWithMemberPreamble,
   hostedCallKey,
+  hostedFirstInputText,
   hostedPromptKey,
   hostedRouteDetails,
+  memberPreambleIdentity,
   neverStartedClause,
   neverStartedPhrase,
   teamMemberPreamble,
@@ -1008,6 +1013,32 @@ export const HOSTED_SEND_MESSAGE_TO_PARENT_TOOL: FunctionDeclaration = {
 };
 
 /**
+ * H4e-b3 decision 8 (b3c): a member's send_message names `"parent"`,
+ * another member, or `"*"`; member-addressed sends are commands to the
+ * leader, and only the leader takes the plain message. Declared beside
+ * the board commands, on the same gate (a lineage Session whose run's
+ * first input carries the member preamble).
+ */
+export const HOSTED_MEMBER_SEND_MESSAGE_TOOL: FunctionDeclaration = {
+  name: 'send_message',
+  description:
+    'Send a message to another member of your team by name, to every other member at once (to: "*"), or to the team leader (to: "parent"). Member messages travel through the leader, which answers with each recipient\'s outcome; a running member receives the message as its next input once its current turn ends, and a member that has finished, ended or is being stopped is not reached. There is no inline reply: the recipient answers you with send_message naming you, and the leader\'s reply arrives as your next instruction. A message is not a board change: record work with the task tools.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      to: {
+        type: 'string',
+        description:
+          'A member name, "*" for every other member, or "parent" for the team leader.',
+      },
+      message: SEND_MESSAGE_TEXT_SCHEMA,
+    },
+    required: ['to', 'message'],
+    additionalProperties: false,
+  },
+};
+
+/**
  * H4e-b3 decision 6: a member's board read, as a `board_read` command to
  * its leader. The schema mirrors the lead's `task_list` exactly.
  */
@@ -1574,6 +1605,9 @@ export class HostedWorkspaceToolTurn {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
     const search = isHostedWorkspaceSearchProfile(this.profile);
+    // b3c: a member's widened send_message rides the same gate as its
+    // board commands — resolved once, both declarations follow it.
+    const memberCommands = await this.memberCommandsDeclared();
     this.advertised = [
       ...(this.publication || this.shell
         ? search
@@ -1624,7 +1658,11 @@ export class HostedWorkspaceToolTurn {
               : HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
           ]
         : this.sendMessageRole() === 'child'
-          ? [HOSTED_SEND_MESSAGE_TO_PARENT_TOOL]
+          ? [
+              memberCommands
+                ? HOSTED_MEMBER_SEND_MESSAGE_TOOL
+                : HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
+            ]
           : []),
       // #13803: the Workflow tool joins under the exact gate shape of the
       // Agent tool, behind its own kind reader — a child Session neither
@@ -1641,7 +1679,7 @@ export class HostedWorkspaceToolTurn {
     // its member preamble (decision 5) — a convenience beside the lead's
     // own admission of every command.
     this.commandToolNames.clear();
-    if (await this.memberCommandsDeclared()) {
+    if (memberCommands) {
       this.advertised.push(...HOSTED_MEMBER_BOARD_TOOLS);
       for (const tool of HOSTED_MEMBER_BOARD_TOOLS)
         if (tool.name !== undefined) this.commandToolNames.add(tool.name);
@@ -1672,7 +1710,38 @@ export class HostedWorkspaceToolTurn {
     if (this.commands?.lineage === undefined) return false;
     if (!sessionCommandAdmissionsEnabled()) return false;
     this.memberPreamble ??= await this.firstInputHasMemberPreamble();
+    // b3c: the widened send_message needs the member's own name for its
+    // local refusals, read off the same preamble.
+    if (this.memberPreamble) await this.resolveMemberIdentity();
     return this.memberPreamble;
+  }
+
+  /** b3c/R1-10: the one read of the first input per Turn, cached. */
+  private firstInputTextCache?: string | null;
+
+  /**
+   * The text of this Session's first accepted input, if readable: the
+   * admission committers write the launch envelope as an OpenAI
+   * message-content array; a plain {text} envelope rides the same gate
+   * for the test-path fixtures. One read per Turn via the shared reader
+   * (decision 8); anything unreadable hides the tools — it never grants.
+   */
+  private async firstInputText(): Promise<string | undefined> {
+    if (this.firstInputTextCache !== undefined)
+      return this.firstInputTextCache === null
+        ? undefined
+        : this.firstInputTextCache;
+    let text: string | undefined;
+    try {
+      text = await hostedFirstInputText({
+        authority: this.session.authority,
+        resources: this.session.resources,
+      });
+    } catch {
+      text = undefined;
+    }
+    this.firstInputTextCache = text ?? null;
+    return text ?? undefined;
   }
 
   /**
@@ -1681,46 +1750,22 @@ export class HostedWorkspaceToolTurn {
    * unreadable hides the tools — it never grants them.
    */
   private async firstInputHasMemberPreamble(): Promise<boolean> {
-    const authority = this.session.authority;
-    const first = authority
-      .eventsInSequenceRange(1, authority.committedSequence)
-      .find((event) => event.kind === 'input.accepted');
-    const contentRef = first?.payload['contentRef'];
-    if (contentRef === undefined) return false;
-    const ref = assertManagedSessionDurableRef(
-      contentRef,
-      'member launch input',
-    );
-    if (ref.kind !== 'managed-input') return false;
-    try {
-      const parsed: unknown = JSON.parse(
-        (await this.session.resources.read(ref)).toString('utf8'),
-      );
-      // The admission committers write the launch envelope as an
-      // OpenAI message-content array; a plain {text} envelope rides
-      // the same gate for the test-path fixtures.
-      let text: string | undefined;
-      if (Array.isArray(parsed)) {
-        const part = parsed.find(
-          (each): each is { type: string; text: string } =>
-            typeof each === 'object' &&
-            each !== null &&
-            (each as Record<string, unknown>)['type'] === 'text' &&
-            typeof (each as Record<string, unknown>)['text'] === 'string',
-        );
-        text = part?.text;
-      } else if (
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        typeof (parsed as Record<string, unknown>)['text'] === 'string'
-      ) {
-        text = (parsed as Record<string, unknown>)['text'] as string;
-      }
-      if (text === undefined) return false;
-      return firstInputOpensWithMemberPreamble(text);
-    } catch {
-      return false;
+    const text = await this.firstInputText();
+    return text === undefined ? false : firstInputOpensWithMemberPreamble(text);
+  }
+
+  /** b3c: who this run's preamble says the Session's member is, cached. */
+  private memberIdentity?: { name: string; team: string } | null;
+  private async resolveMemberIdentity(): Promise<{
+    readonly name: string;
+    readonly team: string;
+  } | null> {
+    if (this.memberIdentity === undefined) {
+      const text = await this.firstInputText();
+      this.memberIdentity =
+        text === undefined ? null : (memberPreambleIdentity(text) ?? null);
     }
+    return this.memberIdentity;
   }
 
   /**
@@ -2624,8 +2669,18 @@ export class HostedWorkspaceToolTurn {
         // b3b: on a member Session the board vocabulary is its command
         // channel's, never the lead funnel's — the two never meet on one
         // profile, but a name collision must route to the command arm.
+        // b3c decision 8: a member's send_message naming a member or
+        // "*" is the same kind of command; only "parent" stays H4d-b's.
+        const memberMessageCommand =
+          mcpInput === undefined &&
+          call.name === 'send_message' &&
+          this.sendMessageRole() === 'child' &&
+          this.memberPreamble === true &&
+          typeof call.args['to'] === 'string' &&
+          sanitizeName(call.args['to']) !== 'parent';
         const command =
-          mcpInput === undefined && this.commandToolNames.has(call.name);
+          mcpInput === undefined &&
+          (this.commandToolNames.has(call.name) || memberMessageCommand);
         const team =
           !command &&
           mcpInput === undefined &&
@@ -2980,7 +3035,9 @@ export class HostedWorkspaceToolTurn {
         } else if (call.name === 'send_message') {
           const args = call.args;
           const role = this.sendMessageRole();
-          messageAdmitted = role !== undefined;
+          // b3c: a member message is a command to the leader, never
+          // H4d-b's plain message.
+          messageAdmitted = role !== undefined && !memberMessageCommand;
           // H4e-b2: beside the team tools, the lead also addresses a member
           // by name, or every member with "*".
           const teamForm = role === 'parent' && this.teamsAdmitted();
@@ -3000,13 +3057,68 @@ export class HostedWorkspaceToolTurn {
           } else if (unsupportedKey !== undefined) {
             validationError =
               role === 'child'
-                ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
+                ? this.memberPreamble === true
+                  ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A member send_message takes only a member's to: "parent", a member name, or "*" — pass to and message.`
+                  : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
                 : teamForm
                   ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. Pass to (a member name, or "*" for every member) or task_id, and message; other Sessions belong to the legacy tool.`
                   : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; teams and other Sessions belong to the legacy tool.`;
-          } else if (role === 'child' && args['to'] !== 'parent') {
+          } else if (
+            role === 'child' &&
+            this.memberPreamble !== true &&
+            args['to'] !== 'parent'
+          ) {
             validationError =
               'Hosted send_message from a child Session addresses only to "parent".';
+          } else if (role === 'child' && this.memberPreamble === true) {
+            // b3c decision 8: a member names "parent", another member, or
+            // "*". Member-addressed sends are commands to the leader; the
+            // local refusals answer before anything is sent.
+            const addressed =
+              typeof args['to'] === 'string' ? args['to'].trim() : '';
+            if (addressed === '') {
+              validationError =
+                'Hosted send_message requires "to": "parent" for the team leader, a member name, or "*" for every other member.';
+            } else if (memberMessageCommand && this.memberPlanMode) {
+              validationError = HOSTED_PLAN_MODE_REFUSAL;
+            } else if (
+              memberMessageCommand &&
+              this.memberIdentity?.name !== undefined &&
+              sanitizeName(addressed) === this.memberIdentity.name
+            ) {
+              validationError = `A member cannot send a message to itself ("${this.memberIdentity.name}").`;
+            } else if (
+              memberMessageCommand &&
+              sanitizeName(addressed) === MANAGED_TEAM_LEADER
+            ) {
+              validationError =
+                'A member messages its leader with send_message with to "parent", not "leader".';
+            } else if (typeof text !== 'string' || !text.trim()) {
+              validationError =
+                'Hosted send_message requires a nonempty message.';
+            } else if (
+              memberMessageCommand &&
+              Buffer.byteLength(
+                memberMessageContent(
+                  this.memberIdentity?.name ?? '',
+                  text as string,
+                ),
+                'utf8',
+              ) > MANAGED_CHILD_LIMITS.maxEnvelopeBytes
+            ) {
+              validationError = `Hosted send_message message is too long for a member message (byte_limit): with its wrapper it must fit ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes.`;
+            } else if (
+              memberMessageCommand &&
+              source.some(
+                (other) =>
+                  other !== call &&
+                  !this.commandToolNames.has(other.name) &&
+                  other.name !== 'send_message',
+              )
+            ) {
+              validationError =
+                'Hosted send_message to a member cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run it in its own batch or beside the member board commands.';
+            }
           } else if (
             teamForm &&
             (args['to'] === undefined) === (args['task_id'] === undefined)
@@ -3050,7 +3162,10 @@ export class HostedWorkspaceToolTurn {
           ) {
             validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
           }
-          input = teamForm ? hostedTeamMessageInput(args) : { ...args };
+          input =
+            teamForm || memberMessageCommand
+              ? hostedTeamMessageInput(args)
+              : { ...args };
         } else if (command) {
           validationError = this.commandArgumentError(call, source);
           input = { ...call.args };
@@ -3128,7 +3243,8 @@ export class HostedWorkspaceToolTurn {
           agent: mcpInput === undefined && agentAdmitted,
           workflow: mcpInput === undefined && workflowAdmitted,
           agentBackground,
-          message: mcpInput === undefined && messageAdmitted,
+          message:
+            mcpInput === undefined && messageAdmitted && !memberMessageCommand,
           team,
           command,
         };
@@ -4395,7 +4511,7 @@ export class HostedWorkspaceToolTurn {
       monitorRecord?.stopReason === null &&
       monitorRecord.run.state !== 'recovery_blocked'
     ) {
-      await this.resumeMonitorWatch(executionCallId);
+      await this.resumeMonitorWatch(executionCallId, saved.runtimeCallId);
     }
     let ref: ManagedSessionDurableRef;
     let converted: Part[];
@@ -5247,10 +5363,12 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
-   * H4e-b3 decision 4 and 6: one member board command's argument check,
-   * and the batch rule — a command call shares its batch only with other
-   * command calls and with the journal-only `send_message` to `"parent"`,
-   * since a command parks the Turn while the leader answers.
+   * H4e-b3 decision 4 and 6 (b3c's decision 8): one member board
+   * command's argument check, and the batch rule — a command call shares
+   * its batch only with other command calls and with `send_message`
+   * (whose member-addressed form is one, while to `"parent"` stays the
+   * journal-only plain lane), since a command parks the Turn while the
+   * leader answers.
    */
   private commandArgumentError(
     call: ToolCallRequestInfo,
@@ -5284,7 +5402,7 @@ export class HostedWorkspaceToolTurn {
           other.name !== 'send_message',
       )
     )
-      return `Hosted ${call.name} cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run board commands in their own batch or beside send_message to "parent".`;
+      return `Hosted ${call.name} cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run board commands in their own batch or beside send_message.`;
     if (call.name === 'task_create') {
       if (
         typeof call.args['subject'] !== 'string' ||
@@ -5350,7 +5468,11 @@ export class HostedWorkspaceToolTurn {
       throw new Error('A member command call has no command funnel.');
     await this.syncCommandTimedOutFromDurable();
     const kind: SessionCommandKind =
-      name === 'task_list' ? 'board_read' : 'board_write';
+      name === 'task_list'
+        ? 'board_read'
+        : name === 'send_message'
+          ? 'member_message'
+          : 'board_write';
     const key = this.session.authority.sessionHeader.sessionKey;
     const commandId = sessionCommandId({
       senderSessionId: key.sessionId,
@@ -5839,7 +5961,10 @@ export class HostedWorkspaceToolTurn {
    * once per Session lifetime: the loop resumes an already-attached
    * record and is fed lines through the Session publisher's fan-out.
    */
-  private async resumeMonitorWatch(executionCallId: string): Promise<void> {
+  private async resumeMonitorWatch(
+    executionCallId: string,
+    runtimeCallId: string,
+  ): Promise<void> {
     // The lane is Shell-mode or the publication lane, whichever this turn
     // owns — the detached family's loops park on it either way.
     const lane = this.shell ?? this.backgroundLane;
@@ -5851,7 +5976,14 @@ export class HostedWorkspaceToolTurn {
     const argsBody = JSON.parse(
       (await this.session.resources.read(record.commandRef)).toString('utf8'),
     ) as Record<string, unknown>;
-    const executor = new HostedMonitorRemoteExecutor(this.publisher);
+    // The watch runs on this turn's Runtime Session; its auto-stop asks
+    // the worker there, and that Session outlives the turn as a hold.
+    const executor = new HostedMonitorRemoteExecutor(this.publisher, {
+      broker: this.broker,
+      sessionKey: this.session.authority.sessionHeader.sessionKey,
+      executionCallId,
+      runtimeCallId,
+    });
     const loop = new HostedMonitorLoop(
       this.monitors,
       executionCallId,
