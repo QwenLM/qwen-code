@@ -350,6 +350,19 @@ class WorkspaceCsiSessionMainTest {
     }
 
     @Test
+    void genericPublicationCannotAllocatePrivateReadLeasesOrPhysicalPuts() {
+        var original = create(request("publication-boundary"));
+        var retention = new ToolPublicationRetentionStore(jdbc, manager);
+        var key = json.createObjectNode().put("tenantId", "tenant").put("sessionId", original.sessionId());
+        var objects = mock(ToolPublicationObjectStore.class);
+        var before = allTables();
+        assertPrivateRefusal(() -> retention.read(key));
+        assertPrivateRefusal(() -> retention.put(key, "scope", "publication", "object", new byte[] {1}, objects));
+        verify(objects, never()).putIfAbsent(anyString(), any());
+        assertThat(allTables()).isEqualTo(before);
+    }
+
+    @Test
     void ordinaryAgentInstructionPublisherCannotWritePrivateResources() {
         var original = create(request("agent-instructions"));
         var before = allTables();

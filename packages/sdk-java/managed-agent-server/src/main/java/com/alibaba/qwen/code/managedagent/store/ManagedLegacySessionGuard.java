@@ -26,7 +26,11 @@ final class ManagedLegacySessionGuard {
     }
 
     static void requireLegacyMutation(JdbcTemplate jdbc, String tenantId, String sessionId) {
-        if (isPrivate(jdbc, tenantId, sessionId)) {
+        requireLegacyMutation(isPrivate(jdbc, tenantId, sessionId));
+    }
+
+    static void requireLegacyMutation(boolean privateSession) {
+        if (privateSession) {
             throw new ApiException(HttpStatus.CONFLICT, "csi_managed_mutation_unavailable",
                     "The private CSI Session does not admit legacy Managed Agent mutations.");
         }

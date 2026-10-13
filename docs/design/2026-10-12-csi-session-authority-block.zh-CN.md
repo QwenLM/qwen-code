@@ -76,6 +76,14 @@ Worker path、input bytes 与 preparation evidence 来自已提交 record，不�
 标志。不可变 grant 固定原 dispatch generation 和授权 journal revision/sequence。
 重试不能用新 head 或新 owner 替换它。
 
+### 普通查询预算与兼容性
+
+已有的普通 Session 加锁读取直接检查生成列 `csi_guard`，同时保留请求 pin 的拒绝边界，不再重复读取同一 Session。没有现成父行读取的变更继续使用专用加锁检查。placement、retention 和 Session 的锁顺序保持不变。
+
+普通 publication 在分配读取租约和 PUT attempt 时拒绝私有 Session。Session 的 profile 与请求 pin 在创建时确定，支持的 API 不会将普通 Session 转换为私有 Session。已准入租约继续检查到期与退役，close 只清除该租约；已准入 PUT 必须记录 RETURNED 或 UNKNOWN，不能因再次准入而丢失物理写入证据。这些收尾操作无需再次锁 journal head。collector 的私有检查和锁顺序继续保留。主干的预算断言不变：空 materialize tick 为 4 条语句，完整批次为 35 条、末批为 17 条，受测 publish 路径为 6 次 head 加锁读取。
+
+身份实现由 Broker 与 Server 共享；旧 `com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity` 保留已公开的 `verify`、`boot` 与 `expectedPod` 静态方法，并委托给 Broker 实现。旧入口标记为 deprecated，不复制身份验证逻辑。新增的 Broker API 与本 feature 仍需 maintainer 评审。
+
 ### READY 范围与失败行为
 
 Adapter 仅准入 READY 工作。既有 retirement evidence 是拒绝条件，不是 DRAINING
@@ -135,7 +143,7 @@ Darwin 上的正向私有 worker 执行需要明确记录 Linux metadata/procfs 
 
 ### 已观察证据与待完成验收
 
-本拆分是供评审的 Draft。本地 build、typecheck、bundle、定向 Java 与 worker
+本拆分已由外部操作转为 Ready，仍需 maintainer 评审。本地 build、typecheck、bundle、定向 Java 与 worker
 测试已通过。独立自有 MySQL 8.4 测试应用了完整 migration 清单，并观察到实际
 私有 CREATE/replay、七个原生日志 commit 及其 replay、原 activation/renewal、
 替代拒绝、普通对照、认证 adapter bind 回读，以及两种 isolation level 下的

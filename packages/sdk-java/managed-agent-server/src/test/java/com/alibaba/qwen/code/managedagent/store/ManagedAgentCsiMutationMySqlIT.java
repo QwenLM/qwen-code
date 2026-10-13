@@ -203,9 +203,10 @@ class ManagedAgentCsiMutationMySqlIT {
                     }
                     created.countDown();
                     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                    while (jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.PROCESSLIST"
-                            + " WHERE DB = DATABASE() AND COMMAND = 'Query'"
-                            + " AND INFO LIKE 'SELECT csi_guard FROM managed_agent_session%FOR UPDATE'", Integer.class) == 0) {
+                    while (jdbc.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits w"
+                            + " JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID"
+                            + " WHERE l.OBJECT_SCHEMA = DATABASE() AND l.OBJECT_NAME = 'managed_agent_session'",
+                            Integer.class) == 0) {
                         assertThat(mutation).isNotDone();
                         assertThat(System.nanoTime()).isLessThan(deadline);
                         Thread.sleep(20);

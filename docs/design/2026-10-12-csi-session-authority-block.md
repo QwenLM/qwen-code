@@ -89,6 +89,14 @@ caller assertions. An immutable grant binds the original dispatch generation
 and authorized journal revision/sequence. Retries cannot replace it with a
 newer head or a new owner.
 
+### Ordinary query budgets and compatibility
+
+Existing ordinary Session locking reads check the generated `csi_guard` column directly, retaining refusal for a persisted request pin without reading the same Session twice. Mutations with no existing parent-row read retain the dedicated locking guard. Placement, retention and Session lock order remains unchanged.
+
+Ordinary publication refuses private Sessions when allocating a read lease or PUT attempt. Session profile and request pin are fixed at creation; supported APIs never convert an ordinary Session into a private Session. Admitted leases continue checking expiration and retirement, and close only removes that lease. Admitted PUTs must record RETURNED or UNKNOWN without losing physical-write evidence to another admission check. These settlement operations do not need another journal-head lock. Collector guards and lock order remain intact. Main's budget assertions are unchanged: 4 statements for an empty materialization tick, 35 for a full batch and 17 for its tail, and 6 locked head reads in the exercised publication path.
+
+Broker and Server share the identity implementation. The former `com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity` retains its public static `verify`, `boot` and `expectedPod` methods, delegating to Broker. The former entry point is deprecated without duplicating validation logic. The added Broker API and feature still require maintainer review.
+
 ### READY scope and failure behavior
 
 The adapter admits only READY work. Existing retirement evidence is a refusal,
@@ -162,7 +170,7 @@ Tests against the original proposal do not qualify the extracted branch.
 
 ### Observed evidence and remaining acceptance work
 
-The extraction is a Draft for review. Local build, typecheck, bundle, focused
+The extraction has been externally marked Ready and still requires maintainer review. Local build, typecheck, bundle, focused
 Java and worker tests have passed. An independent owned MySQL 8.4 run applied
 the complete migration inventory and observed real private CREATE/replay,
 seven native journal commits and their replays, original activation/renewal,

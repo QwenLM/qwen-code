@@ -230,21 +230,18 @@ public final class ToolPublicationRetentionStore {
         }
 
         public void check() {
-            transactions.executeWithoutResult(status -> {
-                lockGenericSession(jdbc, tenant, session);
-                var rows = jdbc.queryForList("SELECT l.expires_at, l.retirement_generation, r.generation,"
-                        + " CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000 + EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000 AS db_now FROM"
-                                + " qwen_output_read_lease l LEFT JOIN qwen_output_session_retirement r"
-                                + " ON r.tenant_key = l.tenant_key AND r.session_key = l.session_key"
-                                + " WHERE l.lease_id = ? AND l.tenant_key = ? AND l.session_key = ?",
-                        id, hash(tenant), hash(session));
-                if (closed || rows.size() != 1 || ((Number) rows.getFirst().get("expires_at")).longValue() <= ((Number) rows.getFirst().get("db_now")).longValue()
-                        || rows.getFirst().get("generation") != null
-                        || ((Number) rows.getFirst().get("retirement_generation")).longValue() != 0) {
-                    throw new ApiException(HttpStatus.CONFLICT, "tool_output_read_expired",
-                            "The output read lease expired or its Session was retired.");
-                }
-            });
+            var rows = jdbc.queryForList("SELECT l.expires_at, l.retirement_generation, r.generation,"
+                    + " CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000 + EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000 AS db_now FROM"
+                            + " qwen_output_read_lease l LEFT JOIN qwen_output_session_retirement r"
+                            + " ON r.tenant_key = l.tenant_key AND r.session_key = l.session_key"
+                            + " WHERE l.lease_id = ? AND l.tenant_key = ? AND l.session_key = ?",
+                    id, hash(tenant), hash(session));
+            if (closed || rows.size() != 1 || ((Number) rows.getFirst().get("expires_at")).longValue() <= ((Number) rows.getFirst().get("db_now")).longValue()
+                    || rows.getFirst().get("generation") != null
+                    || ((Number) rows.getFirst().get("retirement_generation")).longValue() != 0) {
+                throw new ApiException(HttpStatus.CONFLICT, "tool_output_read_expired",
+                        "The output read lease expired or its Session was retired.");
+            }
         }
 
         @Override
@@ -252,11 +249,8 @@ public final class ToolPublicationRetentionStore {
             if (closed) {
                 return;
             }
-            transactions.executeWithoutResult(status -> {
-                lockGenericSession(jdbc, tenant, session);
-                jdbc.update("DELETE FROM qwen_output_read_lease WHERE lease_id = ?", id);
-            });
             closed = true;
+            jdbc.update("DELETE FROM qwen_output_read_lease WHERE lease_id = ?", id);
         }
     }
 
@@ -281,17 +275,11 @@ public final class ToolPublicationRetentionStore {
         try {
             objects.putIfAbsent(objectKey, bytes);
         } catch (RuntimeException error) {
-            transactions.executeWithoutResult(status -> {
-                lockGenericSession(jdbc, key.path("tenantId").asText(), key.path("sessionId").asText());
-                jdbc.update("UPDATE qwen_output_put_attempt SET state = 'UNKNOWN' WHERE attempt_id = ?", attempt);
-            });
+            jdbc.update("UPDATE qwen_output_put_attempt SET state = 'UNKNOWN' WHERE attempt_id = ?", attempt);
             throw error;
         }
-        transactions.executeWithoutResult(status -> {
-            lockGenericSession(jdbc, key.path("tenantId").asText(), key.path("sessionId").asText());
-            jdbc.update("UPDATE qwen_output_put_attempt SET state = 'RETURNED', completed_at = ?"
-                    + " WHERE attempt_id = ? AND state = 'IN_FLIGHT'", now(jdbc), attempt);
-        });
+        jdbc.update("UPDATE qwen_output_put_attempt SET state = 'RETURNED', completed_at = ?"
+                + " WHERE attempt_id = ? AND state = 'IN_FLIGHT'", now(jdbc), attempt);
     }
 
     public record Candidate(String scope, String publication, String tenant, String session,
