@@ -55,6 +55,7 @@ import {
   parseHarnessCheckpointV1,
   type HarnessRunAuthorization,
   harnessCheckpointIsAgentWait,
+  harnessCheckpointIsCommandWait,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
@@ -100,13 +101,16 @@ import type {
   ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
+  CHILD_NOTIFICATION_SOURCES,
   ManagedSessionModeGateError,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  isChildNotificationSource,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import {
   sanitizeDaemonLogLine,
   writeStderrLineSafe,
@@ -120,6 +124,12 @@ import {
   type HostedAgentDefinition,
 } from './hosted-agent-definition.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
+import {
+  parseHostedWorkflowLaunchBlock,
+  runHostedWorkflowTurn,
+  workflowLaunchSummaryText,
+  type HostedWorkflowLaunch,
+} from './hosted-workflow-turn.js';
 import {
   HostedHookSession,
   HostedHookInputConflictError,
@@ -141,6 +151,19 @@ import {
   SessionMessageNotReadyError,
   withSessionMessageConsumption,
 } from './hosted-session-message-session.js';
+import {
+  HostedSessionCommandSession,
+  SessionCommandBlockedError,
+  SessionCommandRefusalError,
+} from './hosted-session-command-session.js';
+import {
+  parseSessionCommandReply,
+  type SessionCommandReply,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
+import {
+  MANAGED_SESSION_COMMAND_LIMITS,
+  type SessionCommandKind,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-record.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   AutomationNotFoundError,
@@ -204,11 +227,13 @@ import {
   answerCommittedTurnCalls,
   answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
+  fillParkedRoundCommandGaps,
   isDurableBlockedVerdict,
   originalRuntimeBroker,
   RecoveryDeclined,
   recoverHostedRuntimeTurn,
   settleCancelledAgentWaitRuns,
+  settleCancelledCommandWaitRuns,
   settleInterruptedTurnRuntime,
   settleParkedTurnCancelled,
   stopParkedRuntimeExecutions,
@@ -337,6 +362,8 @@ interface HostedSession {
   childAgents?: HostedChildAgentSession;
   /** H4d-b: the Session's messages along its lineage, beside its children. */
   messages?: HostedSessionMessageSession;
+  /** H4e-b3: the Session's commands to its parent, on the same chain. */
+  commands?: HostedSessionCommandSession;
   /** H4d-b: message operations past the closing check, which a close waits
    * out before it cancels the pending inputs. */
   messageOperations?: Set<Promise<void>>;
@@ -371,6 +398,7 @@ interface HostedSession {
   lifecycle?: ManagedSessionLifecycleAuthority;
   lifecycleKind?: 'close' | 'delete';
   cleanupBlocked?: boolean;
+  lifecycleProtocolVersion?: 1 | 2;
   /** Fetched Workspace instructions; undefined until the first fetch. */
   workspaceContext?: string;
   monitorWake?: HostedMonitorWakeScheduler;
@@ -796,13 +824,15 @@ function unansweredPrompts(session: HostedSession): Set<string> {
 
 /** Which input sources ride the wake pump — the one predicate the probe,
  * the park guard, the pump's pick and the wake-owned classifier share:
- * a monitor notification, an H6 automation input, and H4b's child
- * acceptance notification alike (child runs park as Turns, never here). */
+ * a monitor notification, an H6 automation input, and a child
+ * acceptance notification of either child Session kind alike (child
+ * runs park as Turns, never here; #13803 widened the child source to
+ * the record's own kind, `child_agent` or `workflow`). */
 function isWakeInputSource(source: string): boolean {
   return (
     source === 'monitor' ||
     source === AUTOMATION_INPUT_SOURCE ||
-    source === 'child_agent' ||
+    isChildNotificationSource(source) ||
     source === SESSION_MESSAGE_INPUT_SOURCE
   );
 }
@@ -1070,6 +1100,7 @@ export async function settleCrashedWakeTurnAftermath(params: {
       children: session.childAgents,
       teams: session.teams,
       messages: session.messages,
+      commands: session.commands,
     });
     // Consume the crashed input: until its turnId settles, every reload
     // re-classifies it as recovery and re-blocks the Session over the
@@ -1125,8 +1156,9 @@ function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
   if (isWakeInputSource(event.payload['source'] as string)) return true;
   if (event.payload['source'] === CHANNEL_INPUT_SOURCE) return true;
   const turnId = event.payload['turnId'];
+  const source = event.payload['source'];
   return (
-    event.payload['source'] === 'child_agent' &&
+    isChildNotificationSource(source) &&
     typeof turnId === 'string' &&
     turnId.endsWith(':accept:notify')
   );
@@ -1490,6 +1522,7 @@ async function settleCancelledHarnessTurn(
     children: session.childAgents,
     teams: session.teams,
     messages: session.messages,
+    commands: session.commands,
   });
   await managed.sink.write(
     record(session, sessionId, 'system', null, {
@@ -1527,6 +1560,11 @@ export async function parkNeedsNoRuntimeSettlement(
   // settlement: the faithful cancel is the abandoned-wait fold, never a
   // settle that would orphan the ledger.
   if (harnessCheckpointIsAgentWait(checkpoint)) return false;
+  // So does one parked at a member's command wait (H4e-b3): only the
+  // recovery cancel folds its runs, each answered by its own journal; a
+  // plain settle would leave the checkpoint parked and refuse the next
+  // Turn's model start.
+  if (harnessCheckpointIsCommandWait(checkpoint)) return false;
   if (
     !(checkpoint.tools?.items ?? []).every(
       (item) => item.state === 'settled' && item.consumed,
@@ -2050,6 +2088,10 @@ async function verifyWorkspaceRestore(
         // H4e-b1: the lead's team roster and board.
         'team_state',
         'team_task',
+        'team_plan',
+        // H4e-b3: member command ledgers — the outbox entries, the
+        // lead's inbound receipts, and the replies they carry.
+        'session_command',
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');
@@ -2644,6 +2686,7 @@ async function executeHostedTurn(
   onResumeReady?: () => void,
   resumeApproval?: RestoredHostedApprovalContinuation,
   resumeModel?: HostedModelRequest,
+  workflowLaunch?: HostedWorkflowLaunch,
 ): Promise<ChatRecord> {
   const authority = session.managed.authority;
   const harness = createManagedHarnessHandle(session.managed);
@@ -2886,8 +2929,11 @@ async function executeHostedTurn(
             session.workspaceContext = undefined;
           },
         };
+        // #13803: a workflow Turn owns no tool turn — its work is the
+        // runner's own dispatch, and the Session's broker-backed tool
+        // surface belongs to model turns.
         toolTurn =
-          session.toolProfile && brokerOptions
+          workflowLaunch === undefined && session.toolProfile && brokerOptions
             ? new HostedWorkspaceToolTurn(
                 brokerOptions,
                 session.managed,
@@ -2916,6 +2962,7 @@ async function executeHostedTurn(
                   childAgents: childAgentsOf(session),
                   messages: session.messages,
                   teams: session.teams,
+                  commands: session.commands,
                   memberPlanMode: await ensureMemberPlanMode(session),
                 },
               )
@@ -2954,57 +3001,66 @@ async function executeHostedTurn(
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         let stopReason = 'end_turn';
         try {
-          const result = await runHostedHarnessTextTurn({
-            sessionId,
-            cwd,
-            history,
-            prompt: text,
-            promptId,
-            signal: abort.signal,
-            modelScope,
-            workspaceContext,
-            agentDefinition: session.agentDefinition,
-            agentInstructions: await readHostedAgentInstructions(
-              session.agentDefinition,
-              session.managed.resources,
-            ),
-            ...(session.hooks ? { hooks: session.hooks } : {}),
-            ...(toolTurn ? { toolTurn } : {}),
-            ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
-            ...(resumeApproval
-              ? { initialRound: resumeApproval.plan.round + 1 }
-              : {}),
-            ...(resumeModel ? { resumeModel } : {}),
-            ...(!session.hooks
-              ? {
-                  prepareModel: async (
-                    prepared,
-                    round,
-                    pendingToolResults,
-                    context,
-                    captureUnsupported,
-                  ) => {
-                    if (captureUnsupported) return undefined;
-                    const snapshot = createHostedModelRequest(
-                      session.managed,
-                      promptId,
-                      prepared,
-                      round,
-                      pendingToolResults,
-                      context,
-                      session.streamOwner,
-                    );
-                    const ref = await publishHostedModelRequest(
-                      session.managed,
-                      snapshot,
-                    );
-                    deltas.bindMessageId(snapshot.messageId);
-                    return ref;
-                  },
-                }
-              : {}),
-            ...(deltas ? { textDeltas: deltas } : {}),
-          });
+          const result =
+            workflowLaunch !== undefined
+              ? await runHostedWorkflowTurn({
+                  sessionId,
+                  cwd,
+                  launch: workflowLaunch,
+                  signal: abort.signal,
+                  agentDefinition: session.agentDefinition,
+                })
+              : await runHostedHarnessTextTurn({
+                  sessionId,
+                  cwd,
+                  history,
+                  prompt: text,
+                  promptId,
+                  signal: abort.signal,
+                  modelScope,
+                  workspaceContext,
+                  agentDefinition: session.agentDefinition,
+                  agentInstructions: await readHostedAgentInstructions(
+                    session.agentDefinition,
+                    session.managed.resources,
+                  ),
+                  ...(session.hooks ? { hooks: session.hooks } : {}),
+                  ...(toolTurn ? { toolTurn } : {}),
+                  ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
+                  ...(resumeApproval
+                    ? { initialRound: resumeApproval.plan.round + 1 }
+                    : {}),
+                  ...(resumeModel ? { resumeModel } : {}),
+                  ...(!session.hooks
+                    ? {
+                        prepareModel: async (
+                          prepared,
+                          round,
+                          pendingToolResults,
+                          context,
+                          captureUnsupported,
+                        ) => {
+                          if (captureUnsupported) return undefined;
+                          const snapshot = createHostedModelRequest(
+                            session.managed,
+                            promptId,
+                            prepared,
+                            round,
+                            pendingToolResults,
+                            context,
+                            session.streamOwner,
+                          );
+                          const ref = await publishHostedModelRequest(
+                            session.managed,
+                            snapshot,
+                          );
+                          deltas.bindMessageId(snapshot.messageId);
+                          return ref;
+                        },
+                      }
+                    : {}),
+                  ...(deltas ? { textDeltas: deltas } : {}),
+                });
           await commit(
             'assistant',
             result.parts ?? [{ text: result.text }],
@@ -3028,6 +3084,17 @@ async function executeHostedTurn(
             cause instanceof HostedModelUnavailableError
           )
             stopReason = 'model_unavailable';
+          if (
+            stopReason === 'error' &&
+            cause instanceof WorkflowStartCancelledError
+          ) {
+            // A registry-side cancel while the workflow start is held
+            // (cancelStarting/abortAll reaches the run's controller with
+            // this Turn's signal live) is a cancelled Turn, not a failed
+            // one — the Workflow tool answers the same error as cancelled.
+            state = 'cancelled';
+            stopReason = 'cancelled';
+          }
           if (state === 'error') {
             // The model layer surfaces any abort as a cancellation, so a
             // deadline expiry names the deadline, not the thrown cause.
@@ -3235,7 +3302,12 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     try {
-      if (toolProfile === HOSTED_MCP_PROFILE)
+      if (
+        toolProfile === HOSTED_MCP_PROFILE &&
+        (create ||
+          body?.['lifecycleAuthority'] === undefined ||
+          body?.['mcpServers'] !== undefined)
+      )
         mcpServers = parseHostedMcpServers(body?.['mcpServers']);
       else if (body?.['mcpServers'] !== undefined)
         throw new Error('MCP requires its explicit profile.');
@@ -3301,11 +3373,28 @@ export function registerHostedHarnessSessionRoutes(
     let lifecycle: ManagedSessionLifecycleAuthority | undefined;
     try {
       lifecycle = lifecycleAuthority(body?.['lifecycleAuthority']);
-      if (lifecycle && create)
-        throw new Error('Lifecycle load cannot create a Session.');
+      if (
+        lifecycle &&
+        (create ||
+          (body?.['lifecycleProtocolVersion'] !== undefined &&
+            body['lifecycleProtocolVersion'] !== 1 &&
+            body['lifecycleProtocolVersion'] !== 2))
+      )
+        throw new Error('Invalid lifecycle load.');
     } catch {
       error(res, 400, 'invalid_hosted_lifecycle_authority');
       return;
+    }
+    const lifecycleProtocolVersion =
+      body?.['lifecycleProtocolVersion'] === 2 ? 2 : 1;
+    if (
+      lifecycle &&
+      (lifecycleProtocolVersion === 1
+        ? toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE
+        : typeof toolProfile !== 'string' ||
+          !contract.lifecycleV2Profiles?.includes(toolProfile))
+    ) {
+      return error(res, 409, 'hosted_lifecycle_profile_unavailable');
     }
     const resident = sessions.get(sessionId);
     // H4f × H4d-b: the load of a stopped run's child carries the stop, so
@@ -3375,8 +3464,17 @@ export function registerHostedHarnessSessionRoutes(
     if (resident !== undefined && lifecycle) {
       if (
         !isDeepStrictEqual(store, resident.storeDescriptor) ||
-        toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE ||
-        resident.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE ||
+        toolProfile !== resident.toolProfile ||
+        (mcpServers !== undefined &&
+          !isDeepStrictEqual(
+            mcpServers,
+            resident.definition?.['mcpServers'],
+          )) ||
+        (hookCatalog !== undefined &&
+          !isDeepStrictEqual(
+            hookCatalog,
+            resident.definition?.['hookCatalog'],
+          )) ||
         (resident.lifecycle &&
           resident.lifecycle.operationId !== lifecycle.operationId)
       ) {
@@ -3398,6 +3496,8 @@ export function registerHostedHarnessSessionRoutes(
       try {
         await resident.stores!.assertWritable();
         resident.lifecycle = lifecycle;
+        resident.lifecycleProtocolVersion = lifecycleProtocolVersion;
+        resident.mcpClosing = true;
         sendAttachment(res, sessionId, resident);
       } catch (cause) {
         resident.stores!.setLifecycleAuthority(previous);
@@ -3952,6 +4052,14 @@ export function registerHostedHarnessSessionRoutes(
         isHostedWorkspaceProfile(savedProfile)
       )
         toolProfile = savedProfile;
+      if (
+        !create &&
+        lifecycle &&
+        toolProfile === HOSTED_MCP_PROFILE &&
+        mcpServers === undefined
+      ) {
+        mcpServers = parseHostedMcpServers(definition?.['mcpServers']);
+      }
       if (!create && hookCatalog === undefined && definition?.['hookCatalog']) {
         try {
           hookCatalog = parseHostedHookPin(definition['hookCatalog']);
@@ -4008,6 +4116,7 @@ export function registerHostedHarnessSessionRoutes(
         stores,
         storeDescriptor: store,
         lifecycle,
+        ...(lifecycle ? { lifecycleProtocolVersion, mcpClosing: true } : {}),
         ...(childWorkspaces ? { childWorkspaces: true } : {}),
         ...(toolProfile ? { toolProfile } : {}),
         ...(isHostedWorkspaceShellProfile(toolProfile) &&
@@ -4060,13 +4169,18 @@ export function registerHostedHarnessSessionRoutes(
         return;
       }
       if (mcpServers && brokerOptions)
-        session.mcp = new HostedMcpSession(brokerOptions, managed, mcpServers);
+        session.mcp = new HostedMcpSession(
+          { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
+          managed,
+          mcpServers,
+        );
       if (hookCatalog && brokerOptions)
         session.hooks = new HostedHookSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
           hookCatalog,
           session.mcp?.broker,
+          () => session.lifecycleProtocolVersion === 2,
         );
       if (session.toolProfile && brokerOptions) {
         session.childRuns = new HostedChildRunSession(
@@ -4105,8 +4219,20 @@ export function registerHostedHarnessSessionRoutes(
             // H4f cancel would, through the child funnel's own chain.
             session.childAgents,
           );
+          // H4d-b: the Session messages along its lineage on the same
+          // writes chain; a child names its parent from its definition.
+          const lineage =
+            session.childDepth !== undefined &&
+            typeof savedLineage?.['parentSessionId'] === 'string' &&
+            typeof savedLineage['parentChildRunId'] === 'string'
+              ? {
+                  parentSessionId: savedLineage['parentSessionId'],
+                  parentChildRunId: savedLineage['parentChildRunId'],
+                }
+              : undefined;
           // H4d-b: messages share the child orchestrator's write chain, so
-          // a Shell lane that suppressed the agent tool has no funnel.
+          // a Shell lane that suppressed the agent tool has no funnel. The
+          // commands funnel (H4e-b3) rides the same guard.
           if (session.childAgents) {
             session.messages = new HostedSessionMessageSession(
               {
@@ -4115,14 +4241,19 @@ export function registerHostedHarnessSessionRoutes(
               },
               session.managed.authority.sessionHeader.sessionKey,
               session.childAgents,
-              session.childDepth !== undefined &&
-              typeof savedLineage?.['parentSessionId'] === 'string' &&
-              typeof savedLineage['parentChildRunId'] === 'string'
-                ? {
-                    parentSessionId: savedLineage['parentSessionId'],
-                    parentChildRunId: savedLineage['parentChildRunId'],
-                  }
-                : undefined,
+              lineage,
+            );
+            // H4e-b3: the Session's commands run beside its messages — its
+            // own outbox as a member, and the lead's execute on the same
+            // funnels when its children command it.
+            session.commands = new HostedSessionCommandSession(
+              {
+                authority: session.managed.authority,
+                resources: session.managed.resources,
+              },
+              session.managed.authority.sessionHeader.sessionKey,
+              session.childAgents,
+              lineage,
             );
           }
         }
@@ -4327,6 +4458,7 @@ export function registerHostedHarnessSessionRoutes(
                       session.childConsumption.add(childRunId),
                     teams: session.teams,
                     messages: session.messages,
+                    commands: session.commands,
                   });
                 } catch (cause) {
                   // R6 P1: a durable decline freezes for the fleet, but a
@@ -4594,6 +4726,7 @@ export function registerHostedHarnessSessionRoutes(
             children: session.childAgents,
             teams: session.teams,
             messages: session.messages,
+            commands: session.commands,
           });
         } catch (cause) {
           writeStderrLineSafe(
@@ -5021,6 +5154,7 @@ export function registerHostedHarnessSessionRoutes(
             children: session.childAgents,
             teams: session.teams,
             messages: session.messages,
+            commands: session.commands,
           });
         const projected = await managed.sink.project();
         const current = projected.filter(
@@ -5333,14 +5467,27 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 400, 'invalid_hosted_lifecycle_authority');
     }
     const kind = body?.['kind'];
+    const protocolVersion =
+      body?.['protocolVersion'] === undefined ? 1 : body['protocolVersion'];
+    const phase = protocolVersion === 1 ? 'effects' : body?.['phase'];
+    const v2 =
+      protocolVersion === 2 &&
+      typeof session.toolProfile === 'string' &&
+      contract.lifecycleV2Profiles?.includes(session.toolProfile) &&
+      body?.['toolProfile'] === session.toolProfile;
     if (
       !authority ||
+      (protocolVersion !== 1 && !v2) ||
+      !['effects', 'prepare_resources', 'settle_resources'].includes(
+        String(phase),
+      ) ||
       (kind !== 'close' && kind !== 'delete') ||
       !isDeepStrictEqual(
         body?.['sessionKey'],
         session.managed.authority.sessionHeader.sessionKey,
       ) ||
-      session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE
+      (protocolVersion === 1 &&
+        session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE)
     )
       return error(res, 400, 'invalid_hosted_lifecycle_request');
     if (
@@ -5363,18 +5510,70 @@ export function registerHostedHarnessSessionRoutes(
     session.hooksBusy = true;
     let authorized = false;
     try {
-      await session.stores!.authorizeLifecycle(kind);
+      if (phase !== 'effects') await session.stores!.assertWritable();
+      await session.stores!.authorizeLifecycle(
+        phase === 'effects' ? kind : undefined,
+      );
       authorized = true;
       session.lifecycle = authority;
       session.lifecycleKind = kind;
+      session.lifecycleProtocolVersion = protocolVersion as 1 | 2;
       session.mcpClosing = true;
-      if (brokerOptions)
-        await retryHostedCleanup(session, {
-          ...brokerOptions,
-          lifecycleAuthority: () => session.lifecycle,
+      if (phase === 'effects') {
+        if (brokerOptions)
+          await retryHostedCleanup(session, {
+            ...brokerOptions,
+            lifecycleAuthority: () => session.lifecycle,
+          });
+        if (hasHostedCleanupDebt(session.managed))
+          throw new Error('Runtime cleanup remains owed.');
+      }
+      session.monitorWake?.close();
+      session.shell?.publisher?.prepareLifecycle();
+      session.backgroundLane?.publisher?.prepareLifecycle();
+      for (const loop of session.shell?.monitorLoops?.values() ?? [])
+        loop.prepareLifecycle();
+      for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
+        loop.prepareLifecycle();
+      if (phase !== 'effects') {
+        await Promise.all(session.messageOperations ?? []);
+        await settlePendingMonitorInputs({
+          authority: session.managed.authority,
+          sink: session.managed.sink,
+          sessionId: req.params['id'],
+          cwd: session.cwd,
+          sources: [
+            ...(session.monitors ? ['monitor'] : []),
+            ...(session.childAgents ? ['child_agent'] : []),
+            ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
+            ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
+            ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
+          ],
         });
-      if (hasHostedCleanupDebt(session.managed))
-        throw new Error('Runtime cleanup remains owed.');
+        await session.automations?.reconcileRuns();
+        if (phase === 'settle_resources') {
+          await session.hooks?.close();
+          await releaseLeaseNow(session);
+          for (const loop of session.shell?.monitorLoops?.values() ?? [])
+            await loop.stop('stop_requested');
+          for (const loop of session.backgroundLane?.monitorLoops?.values() ??
+            [])
+            await loop.stop('stop_requested');
+          await session.shell?.publisher?.close();
+          await session.backgroundLane?.publisher?.close();
+          await session.mcp?.closeResources();
+        }
+        res.json({
+          protocolVersion: 2,
+          phase,
+          toolProfile: session.toolProfile,
+          sessionKey: session.managed.authority.sessionHeader.sessionKey,
+          operationId: authority.operationId,
+          kind,
+        });
+        return;
+      }
+      await session.mcp?.reconcileEffects();
       const events =
         kind === 'close'
           ? [HookEventName.SessionEnd]
@@ -5407,7 +5606,8 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       res.json({
-        protocolVersion: 1,
+        protocolVersion,
+        ...(v2 ? { phase, toolProfile: session.toolProfile } : {}),
         sessionKey: session.managed.authority.sessionHeader.sessionKey,
         operationId: authority.operationId,
         kind,
@@ -5418,7 +5618,29 @@ export function registerHostedHarnessSessionRoutes(
       writeStderrLineSafe(
         `qwen serve: Hosted lifecycle requires recovery: ${String(cause)}`,
       );
-      error(res, 503, 'hosted_lifecycle_recovery_required');
+      const code =
+        cause instanceof ManagedSessionStoreHttpError
+          ? cause.remoteCode
+          : cause instanceof HostedWorkspaceBrokerRejection
+            ? String(cause.code)
+            : '';
+      if (
+        v2 &&
+        (code.startsWith('workspace_lifecycle_claim') ||
+          code.startsWith('workspace_lifecycle_authorization') ||
+          code === 'workspace_close_identity_unverified' ||
+          code === 'workspace_close_execution_unsettled' ||
+          code === 'runtime_admission_closed')
+      ) {
+        return error(res, 503, code);
+      }
+      error(
+        res,
+        503,
+        phase === 'effects'
+          ? 'hosted_lifecycle_recovery_required'
+          : 'workspace_lifecycle_resources_unsettled',
+      );
     } finally {
       if (!authorized) session.stores!.setLifecycleAuthority(previousAuthority);
       session.hooksBusy = false;
@@ -5442,20 +5664,44 @@ export function registerHostedHarnessSessionRoutes(
     const prompt = body?.['prompt'];
     const digest = body?.['payloadDigest'];
     const deadlineMs = body?.['deadlineMs'];
+    const workflowLaunch =
+      Array.isArray(prompt) && prompt.length === 1
+        ? parseHostedWorkflowLaunchBlock(prompt[0])
+        : undefined;
+    // #13803: a workflow_launch block names work outside any record, so it
+    // is admitted only where the control plane's own creation could mint
+    // it — a lined child Session at its very first prompt. Its byte-equal
+    // replay answers through the ordinary dedup machinery; every other
+    // shape keeps the pre-change refusal.
+    if (workflowLaunch !== undefined) {
+      const journaledInputs = session.managed.authority
+        .eventsInSequenceRange(1, session.managed.authority.committedSequence)
+        .filter((event) => event.kind === 'input.accepted');
+      if (
+        (session.childDepth ?? 0) < 1 ||
+        (journaledInputs.length > 0 &&
+          !journaledInputs.some(
+            (event) => event.payload['inputId'] === promptId,
+          ))
+      ) {
+        return error(res, 400, 'invalid_hosted_prompt');
+      }
+    }
     if (
       typeof promptId !== 'string' ||
       !HOSTED_UUID.test(promptId) ||
       !Array.isArray(prompt) ||
       prompt.length === 0 ||
-      !prompt.every((block) => {
-        const item = object(block);
-        return (
-          item?.['type'] === 'text' &&
-          typeof item['text'] === 'string' &&
-          item['text'].length > 0 &&
-          Object.keys(item).length === 2
-        );
-      }) ||
+      (workflowLaunch === undefined &&
+        !prompt.every((block) => {
+          const item = object(block);
+          return (
+            item?.['type'] === 'text' &&
+            typeof item['text'] === 'string' &&
+            item['text'].length > 0 &&
+            Object.keys(item).length === 2
+          );
+        })) ||
       typeof digest !== 'string' ||
       !DIGEST.test(digest) ||
       (deadlineMs !== undefined &&
@@ -5467,9 +5713,12 @@ export function registerHostedHarnessSessionRoutes(
     ) {
       return error(res, 400, 'invalid_hosted_prompt');
     }
-    const text = prompt
-      .map((block) => (block as { text: string }).text)
-      .join('\n');
+    // #13803: a workflow child Session's first Turn carries one
+    // `workflow_launch` block instead of text; the journal's user record
+    // keeps the one-line summary while the full payload rides the input.
+    const text = workflowLaunch
+      ? workflowLaunchSummaryText(workflowLaunch)
+      : prompt.map((block) => (block as { text: string }).text).join('\n');
     const maxBytes = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
     // A parent UUID is the largest possible parentUuid in the durable record.
     const userRecord = record(session, req.params['id'], 'user', promptId, {
@@ -5776,6 +6025,10 @@ export function registerHostedHarnessSessionRoutes(
           (result) => {
             turnResult = result;
           },
+          undefined,
+          undefined,
+          undefined,
+          workflowLaunch,
         );
         settled = true;
       } catch (cause) {
@@ -6790,6 +7043,178 @@ export function registerHostedHarnessSessionRoutes(
     });
   };
 
+  // One command verb onto the Session's journal, for the route below.
+  // Same replay rules as the message verbs; `execute` additionally answers
+  // with the reply document so the relay can copy it back to the member.
+  const runCommandOperation = async (
+    req: Request,
+    res: Response,
+    session: HostedSession,
+    commands: HostedSessionCommandSession,
+  ): Promise<void> => {
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const commandId = body?.['commandId'];
+    const kind = body?.['kind'];
+    if (typeof operationId !== 'string' || !HOSTED_UUID.test(operationId)) {
+      return error(res, 400, 'invalid_command_operation');
+    }
+    if (
+      typeof commandId !== 'string' ||
+      commandId.length < 1 ||
+      commandId.length > 320
+    ) {
+      return error(res, 400, 'invalid_command_operation');
+    }
+    let reply: SessionCommandReply | undefined;
+    try {
+      switch (kind) {
+        case 'handover': {
+          const targetSessionId = body?.['targetSessionId'];
+          if (
+            typeof targetSessionId !== 'string' ||
+            !HOSTED_UUID.test(targetSessionId)
+          ) {
+            return error(res, 400, 'invalid_command_operation');
+          }
+          await commands.handover(commandId, targetSessionId);
+          break;
+        }
+        case 'answered': {
+          try {
+            await commands.answered(
+              commandId,
+              parseSessionCommandReply(body?.['reply']),
+            );
+          } catch (cause) {
+            if (cause instanceof ManagedSessionRecordError) {
+              return error(res, 400, 'invalid_command_operation');
+            }
+            throw cause;
+          }
+          break;
+        }
+        case 'cancelled':
+        case 'rejected':
+        case 'unknown':
+          await commands.settle(commandId, kind);
+          break;
+        case 'execute': {
+          const commandKind = body?.['commandKind'];
+          const route = body?.['route'];
+          const childRunId = body?.['childRunId'];
+          const senderSessionId = body?.['senderSessionId'];
+          const argsBase64 = body?.['argsBase64'];
+          const argsDigest = body?.['argsDigest'];
+          if (
+            (commandKind !== 'board_read' &&
+              commandKind !== 'board_write' &&
+              commandKind !== 'member_message' &&
+              commandKind !== 'plan_submit') ||
+            route !== 'to_parent' ||
+            typeof childRunId !== 'string' ||
+            childRunId.length < 1 ||
+            childRunId.length > 320 ||
+            typeof senderSessionId !== 'string' ||
+            !HOSTED_UUID.test(senderSessionId) ||
+            typeof argsBase64 !== 'string' ||
+            argsBase64.length < 1 ||
+            // The base64 of at most the 64 KiB arguments bound.
+            argsBase64.length >
+              Math.ceil(MANAGED_SESSION_COMMAND_LIMITS.maxArgsBytes / 3) * 4 ||
+            typeof argsDigest !== 'string' ||
+            !/^[0-9a-f]{64}$/.test(argsDigest)
+          ) {
+            return error(res, 400, 'invalid_command_operation');
+          }
+          const argsBytes = Buffer.from(argsBase64, 'base64');
+          if (
+            createHash('sha256').update(argsBytes).digest('hex') !== argsDigest
+          ) {
+            return error(
+              res,
+              409,
+              'session_command_refused',
+              undefined,
+              `Session command ${commandId} names a digest that does not match its arguments.`,
+            );
+          }
+          let args: Record<string, unknown>;
+          try {
+            const parsed: unknown = JSON.parse(argsBytes.toString('utf8'));
+            if (
+              typeof parsed !== 'object' ||
+              parsed === null ||
+              Array.isArray(parsed)
+            ) {
+              throw new Error('not an object');
+            }
+            args = parsed as Record<string, unknown>;
+          } catch {
+            return error(
+              res,
+              409,
+              'session_command_refused',
+              undefined,
+              `Session command ${commandId} carries arguments that are not a JSON object.`,
+            );
+          }
+          if (session.teams === undefined) {
+            return error(res, 409, 'hosted_commands_unavailable');
+          }
+          reply = await commands.execute(session.teams, {
+            commandId,
+            kind: commandKind as SessionCommandKind,
+            childRunId,
+            senderSessionId,
+            args,
+          });
+          break;
+        }
+        default:
+          return error(res, 400, 'invalid_command_operation');
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      // A command whose sender has not attached yet waits for the
+      // control plane's attach commit: the relay defers it untouched,
+      // never toward `rejected` and never spending an attempt.
+      if (cause instanceof SessionCommandBlockedError) {
+        return error(res, 409, 'session_command_blocked', undefined, message);
+      }
+      // The lead cannot accept the command at all: the relay walks this
+      // entry into `rejected`, never re-executing it.
+      if (cause instanceof SessionCommandRefusalError) {
+        return error(res, 409, 'session_command_refused', undefined, message);
+      }
+      if (
+        cause instanceof ManagedSessionStoreHttpError ||
+        cause instanceof ManagedSessionStoreTransportError ||
+        cause instanceof ManagedSessionWritesStoppedError
+      ) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted command operation ${kind} of session ${req.params['id']} failed in its store: ${message}`,
+        );
+        return error(res, 503, 'session_command_failed', undefined, message);
+      }
+      if (cause instanceof ManagedSessionConflictError) {
+        return error(res, 409, 'session_command_conflict', undefined, message);
+      }
+      if (cause instanceof ManagedSessionRecordError) {
+        return error(res, 409, 'session_command_record', undefined, message);
+      }
+      writeStderrLineSafe(
+        `qwen serve: Hosted command operation ${kind} of session ${req.params['id']} failed: ${message}`,
+      );
+      return error(res, 503, 'session_command_failed', undefined, message);
+    }
+    res.status(202).json({
+      operationId,
+      state: 'settled',
+      ...(reply === undefined ? {} : { reply }),
+    });
+  };
+
   /**
    * H4d-b: the control plane's message relay onto this Session's journal.
    * A sender's outbox entry moves through its handover, its acceptance and
@@ -6799,23 +7224,45 @@ export function registerHostedHarnessSessionRoutes(
    * a second input. A turn in flight is not a refusal: the input queues
    * behind it in the journal. The child result relay's `stop` (H4f) is
    * idempotent rather than replayed: it settles only what is still waiting.
+   *
+   * H4e-b3: the same route carries the command relay's verbs when the body
+   * names a `commandId` — `handover`, `execute`, `answered` and the three
+   * endings — on the Session's command funnel instead.
    */
   app.post('/session/:id/messages/operations', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (!session.messages)
-      return error(res, 409, 'hosted_messages_unavailable');
-    if (session.blocked)
-      return error(
-        res,
-        409,
-        'hosted_turn_recovery_required',
-        hostedTurnBusyReason(session),
-      );
-    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    const commanding = typeof object(req.body)?.['commandId'] === 'string';
+    let operation: Promise<void>;
+    if (commanding) {
+      if (session.commands === undefined) {
+        return error(res, 409, 'hosted_commands_unavailable');
+      }
+      if (session.blocked)
+        return error(
+          res,
+          409,
+          'hosted_turn_recovery_required',
+          hostedTurnBusyReason(session),
+        );
+      if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+      operation = runCommandOperation(req, res, session, session.commands);
+    } else {
+      if (session.messages === undefined) {
+        return error(res, 409, 'hosted_messages_unavailable');
+      }
+      if (session.blocked)
+        return error(
+          res,
+          409,
+          'hosted_turn_recovery_required',
+          hostedTurnBusyReason(session),
+        );
+      if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+      operation = runMessageOperation(req, res, session, session.messages);
+    }
     // The close waits out an operation that passed the check above, so a
     // receipt never lands after its pass over the pending inputs.
-    const operation = runMessageOperation(req, res, session, session.messages);
     const settled = operation.catch(() => undefined);
     const operations = (session.messageOperations ??= new Set());
     operations.add(settled);
@@ -7075,8 +7522,13 @@ export function registerHostedHarnessSessionRoutes(
         'results_ready' &&
       // The agent wait (#13708): still outstanding, or folded past it —
       // the consumed advance lands as model_output_committed carrying the
-      // wait's group. Both re-enter through the same resume arm below.
+      // wait's group. Both re-enter through the same resume arm below, and
+      // so does the command wait (H4e-b3), which the takeover reports as
+      // await_command.
       !harnessCheckpointIsAgentWait(
+        continueAuthorization.authorization.checkpoint,
+      ) &&
+      !harnessCheckpointIsCommandWait(
         continueAuthorization.authorization.checkpoint,
       )
     ) {
@@ -7243,6 +7695,7 @@ export function registerHostedHarnessSessionRoutes(
             childAgents: childAgentsOf(session),
             messages: session.messages,
             teams: session.teams,
+            commands: session.commands,
             memberPlanMode: await ensureMemberPlanMode(session),
           },
         );
@@ -7314,6 +7767,59 @@ export function registerHostedHarnessSessionRoutes(
               ({ history, resumeParts } = deriveRound());
             }
           }
+          // H4e-b3: the command wait resumes exactly like the agent wait —
+          // re-enter each outstanding run's poll with what is left of its
+          // bound, then the round's never-reached calls pair off.
+          if (
+            continueAuthorization.authorization.status === 'runnable' &&
+            continueAuthorization.authorization.checkpoint.commandWait !== null
+          ) {
+            const commandWait =
+              continueAuthorization.authorization.checkpoint.commandWait;
+            if (session.commands === undefined)
+              throw new Error('Command wait checkpoint has no command funnel.');
+            const outstanding = commandWait.runs.filter((run) => !run.folded);
+            if (outstanding.length > 0) {
+              await toolTurn.resumeCommandWaitRuns(
+                outstanding,
+                commandWait.holdsWorkspaceMount,
+                'recovered',
+                abort.signal,
+              );
+            } else {
+              // The carried all-folded shape: restate the last resolve so
+              // this handle adopts the takeover activation.
+              const lastRun = commandWait.runs.at(-1);
+              if (lastRun !== undefined) {
+                let adopted;
+                try {
+                  adopted = await harness.resolveAwaitCommand(
+                    lastRun.commandId,
+                  );
+                } catch (cause) {
+                  throw new HostedToolRecoveryRequiredError(cause);
+                }
+                if (adopted === null)
+                  throw new Error(
+                    'Recovered command wait did not adopt the takeover activation.',
+                  );
+              }
+            }
+            const filled = await fillParkedRoundCommandGaps({
+              managed: session.managed,
+              sessionId,
+              promptId,
+              cwd: session.cwd,
+              gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+              commands: session.commands,
+              children: session.childAgents,
+              messages: session.messages,
+            });
+            if (outstanding.length > 0 || filled > 0) {
+              projected = await session.managed.sink.project();
+              ({ history, resumeParts } = deriveRound());
+            }
+          }
           // A sibling the Runtime reconciliation does not own (a team
           // call, a background launch) is answered before the resumed round
           // reads it: by what committed when it committed before the
@@ -7328,6 +7834,7 @@ export function registerHostedHarnessSessionRoutes(
             children: session.childAgents,
             teams: session.teams,
             messages: session.messages,
+            commands: session.commands,
           });
           if (answered > 0) {
             projected = await session.managed.sink.project();
@@ -7340,12 +7847,20 @@ export function registerHostedHarnessSessionRoutes(
           }
           if (
             continueAuthorization.authorization.status === 'runnable' &&
-            continueAuthorization.authorization.checkpoint.agentWait !== null
+            (continueAuthorization.authorization.checkpoint.agentWait !==
+              null ||
+              (continueAuthorization.authorization.checkpoint.commandWait !==
+                null &&
+                !continueAuthorization.authorization.checkpoint.commandWait
+                  .holdsWorkspaceMount))
           ) {
             // An agent-wait resume has no Runtime results to consume and
             // must NOT claim the Workspace mount in advance of any tool
             // work: the unconditional acquire would make the parent refuse
-            // its own later foreground agent call (R2-3). The pending
+            // its own later foreground agent call (R2-3). A command wait is
+            // the same unless its Turn held the mount, which its resume arm
+            // took back already: a member shares its lead's Workspace, and
+            // a mount it never held is not its to claim. The pending
             // file-history obligation dies with the Turn the terminal
             // record will close, exactly like the interrupted settle.
             const savedHistory = await readHostedFileHistory(session.managed);
@@ -7585,8 +8100,43 @@ export function registerHostedHarnessSessionRoutes(
         // to fold, the carried all-consumed shape names none — either way
         // the round pairs off — while no group means the Runtime park.
         const agentWait = cancelRunnable.checkpoint.agentWait;
+        const commandWait = cancelRunnable.checkpoint.commandWait;
         let broker: HostedWorkspaceBroker | undefined;
-        if (agentWait !== null) {
+        if (commandWait !== null) {
+          // H4e-b3's own mirror of the agent-wait cancellation: the
+          // outstanding command runs answer by what their journal
+          // committed (decision 14), the resolve moves the checkpoint
+          // past the wait, and the round's never-reached calls pair off
+          // from the same journal — no Broker binding ever exists to stop.
+          if (session.commands === undefined) {
+            void (async () => {
+              session.active = undefined;
+              throw new Error('Command wait checkpoint has no command funnel.');
+            })();
+          } else {
+            const outstanding = commandWait.runs.filter((run) => !run.folded);
+            if (outstanding.length > 0) {
+              await settleCancelledCommandWaitRuns({
+                managed: session.managed,
+                sessionId,
+                promptId,
+                cwd: session.cwd,
+                runs: outstanding,
+                commands: session.commands,
+              });
+            }
+            await fillParkedRoundCommandGaps({
+              managed: session.managed,
+              sessionId,
+              promptId,
+              cwd: session.cwd,
+              gapText: HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
+              commands: session.commands,
+              children: session.childAgents,
+              messages: session.messages,
+            });
+          }
+        } else if (agentWait !== null) {
           // The agent wait (#13708): no Runtime executions exist to stop or
           // settle — each outstanding run is folded as the abandoned answer
           // the live arm itself would have written, and the resolve moves
@@ -7651,6 +8201,7 @@ export function registerHostedHarnessSessionRoutes(
           children: session.childAgents,
           teams: session.teams,
           messages: session.messages,
+          commands: session.commands,
         });
         // Whatever shape the wait was in, its round is fully answered now:
         // the folds above landed (or the journaled proof they were never
@@ -8268,118 +8819,121 @@ export function registerHostedHarnessSessionRoutes(
           session.hooksBusy = false;
         }
       }
-      await session.hooks?.close();
-      // Deferred until the close is known terminal: a Hook fence refusal
-      // above keeps the Session attached and retryable, and its wake pump
-      // with it. wakeBusy() holds mcpClosing for the whole drain, so no
-      // wake turn can start meanwhile; pending notifications settle below.
-      session.monitorWake?.close();
-      // A lease a recovery load acquired must go back with the Session, or
-      // the Workspace stays pinned after every later route is gone.
-      await releaseLeaseNow(session);
-      // #13856: drain every Runtime a turn left held, ahead of the loop
-      // stops and the publisher close. The drain's stops land their
-      // finalize through the still-open publisher — the maintenance
-      // answer rides the completion that carries the finalize — so the
-      // records project the requested stop before anything else settles
-      // them. A drain that cannot prove a stop fails the close honestly
-      // below: the Session stays reopenable and nothing claims settled.
-      let heldDrainFailed: unknown = null;
-      if (brokerOptions) {
-        for (const heldTurn of [...session.heldRuntimeTurns]) {
-          try {
-            await new HostedWorkspaceBroker(
-              brokerOptions,
-              session.managed.authority.sessionHeader.sessionKey,
-              hostedRuntimeSessionId(heldTurn),
-            ).release({ drain: true });
-            session.heldRuntimeTurns.delete(heldTurn);
-          } catch (cause) {
-            // A "not found" answer means nothing remains to stop: the Runtime
-            // is already gone, so the turn owes nothing and the close may
-            // proceed — the same tolerance the sibling owner-release carries
-            // (#13856 R1-1). Every other refusal is unproven and parks
-            // honestly below.
-            if (
-              cause instanceof HostedWorkspaceBrokerRejection &&
-              cause.status === 404 &&
-              cause.code === 'runtime_session_not_found'
-            ) {
+      if (session.lifecycleProtocolVersion !== 2) {
+        await session.hooks?.close();
+        // Deferred until the close is known terminal: a Hook fence refusal
+        // above keeps the Session attached and retryable, and its wake pump
+        // with it. wakeBusy() holds mcpClosing for the whole drain, so no
+        // wake turn can start meanwhile; pending notifications settle below.
+        session.monitorWake?.close();
+        // A lease a recovery load acquired must go back with the Session, or
+        // the Workspace stays pinned after every later route is gone.
+        await releaseLeaseNow(session);
+        // #13856: drain every Runtime a turn left held, ahead of the loop
+        // stops and the publisher close. The drain's stops land their
+        // finalize through the still-open publisher — the maintenance
+        // answer rides the completion that carries the finalize — so the
+        // records project the requested stop before anything else settles
+        // them. A drain that cannot prove a stop fails the close honestly
+        // below: the Session stays reopenable and nothing claims settled.
+        let heldDrainFailed: unknown = null;
+        if (brokerOptions) {
+          for (const heldTurn of [...session.heldRuntimeTurns]) {
+            try {
+              await new HostedWorkspaceBroker(
+                brokerOptions,
+                session.managed.authority.sessionHeader.sessionKey,
+                hostedRuntimeSessionId(heldTurn),
+              ).release({ drain: true });
               session.heldRuntimeTurns.delete(heldTurn);
-              continue;
+            } catch (cause) {
+              // A "not found" answer means nothing remains to stop: the Runtime
+              // is already gone, so the turn owes nothing and the close may
+              // proceed — the same tolerance the sibling owner-release carries
+              // (#13856 R1-1). Every other refusal is unproven and parks
+              // honestly below.
+              if (
+                cause instanceof HostedWorkspaceBrokerRejection &&
+                cause.status === 404 &&
+                cause.code === 'runtime_session_not_found'
+              ) {
+                session.heldRuntimeTurns.delete(heldTurn);
+                continue;
+              }
+              heldDrainFailed ??= cause;
+              writeStderrLineSafe(
+                `qwen serve: Hosted Harness drain of held Runtime ${heldTurn} failed: ${String(cause)}`,
+              );
             }
-            heldDrainFailed ??= cause;
-            writeStderrLineSafe(
-              `qwen serve: Hosted Harness drain of held Runtime ${heldTurn} failed: ${String(cause)}`,
-            );
           }
         }
-      }
-      // A registered observation loop outlives its turn: only the Session
-      // close ends it. Stop every live loop here, ahead of the publisher
-      // close and the log close, so its settle write can still reach the
-      // journal. A Session whose own settlement already failed (blocked)
-      // never proved to the Runtime that anything stopped: claiming
-      // `stop_requested` there would display an unconfirmed task as
-      // settled, so the record parks on the runtime_lost line instead —
-      // the loop ends, and the record keeps an honest rebuild path. A
-      // failed held-Runtime drain is the same unproven shape.
-      const stopSettle =
-        session.blocked || heldDrainFailed !== null
-          ? 'runtime_lost'
-          : 'stop_requested';
-      for (const loop of session.shell?.monitorLoops?.values() ?? [])
-        await loop.stop(stopSettle);
-      for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
-        await loop.stop(stopSettle);
-      if (heldDrainFailed !== null) throw heldDrainFailed;
-      // The drains above stopped the Session's background Shells and
-      // watches, and their exits settled through this publisher; it
-      // closes last.
-      await session.shell?.publisher?.close();
-      await session.backgroundLane?.publisher?.close();
-      const mcpLease = session.runtimeLeaseHeld;
-      await session.mcp?.close();
-      if (
-        session.mcp &&
-        mcpLease !== undefined &&
-        mcpLease.runtimeSessionId !==
-          hostedRuntimeSessionId(mcpLease.promptId) &&
-        session.runtimeLeaseHeld === mcpLease
-      )
-        session.runtimeLeaseHeld = undefined;
-      // No monitor, channel or automation notification may park the
-      // Session: every pending one settles cancelled here, model-free,
-      // before the log closes; a run whose input settled that way ends
-      // cancelled with an execution proven not to have started.
-      if (
-        session.monitors ||
-        session.childAgents ||
-        session.automations ||
-        session.channels
-      ) {
-        await settlePendingMonitorInputs({
-          authority: session.managed.authority,
-          sink: session.managed.sink,
-          sessionId: req.params['id'],
-          cwd: session.cwd,
-          sources: [
-            ...(session.monitors ? ['monitor'] : []),
-            ...(session.childAgents ? ['child_agent'] : []),
-            ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
-            ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
-            ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
-          ],
-        });
-        // A refused settle revision never blocks the close: the next open
-        // reconciles it again from the same committed facts.
-        await session.automations
-          ?.reconcileRuns()
-          .catch((cause: unknown) =>
-            writeStderrLineSafe(
-              `qwen serve: Hosted automation runs of session ${req.params['id']} could not be settled on close: ${String(cause)}`,
-            ),
-          );
+        // A registered observation loop outlives its turn: only the Session
+        // close ends it. Stop every live loop here, ahead of the publisher
+        // close and the log close, so its settle write can still reach the
+        // journal. A Session whose own settlement already failed (blocked)
+        // never proved to the Runtime that anything stopped: claiming
+        // `stop_requested` there would display an unconfirmed task as
+        // settled, so the record parks on the runtime_lost line instead —
+        // the loop ends, and the record keeps an honest rebuild path. A
+        // failed held-Runtime drain is the same unproven shape.
+        const stopSettle =
+          session.blocked || heldDrainFailed !== null
+            ? 'runtime_lost'
+            : 'stop_requested';
+        for (const loop of session.shell?.monitorLoops?.values() ?? [])
+          await loop.stop(stopSettle);
+        for (const loop of session.backgroundLane?.monitorLoops?.values() ?? [])
+          await loop.stop(stopSettle);
+        if (heldDrainFailed !== null) throw heldDrainFailed;
+        // The drains above stopped the Session's background Shells and
+        // watches, and their exits settled through this publisher; it
+        // closes last.
+        await session.shell?.publisher?.close();
+        await session.backgroundLane?.publisher?.close();
+        const mcpLease = session.runtimeLeaseHeld;
+        await session.mcp?.close();
+        if (
+          session.mcp &&
+          mcpLease !== undefined &&
+          mcpLease.runtimeSessionId !==
+            hostedRuntimeSessionId(mcpLease.promptId) &&
+          session.runtimeLeaseHeld === mcpLease
+        )
+          session.runtimeLeaseHeld = undefined;
+        // No monitor, channel or automation notification may park the
+        // Session: every pending one settles cancelled here, model-free,
+        // before the log closes; a run whose input settled that way ends
+        // cancelled with an execution proven not to have started.
+        if (
+          session.monitors ||
+          session.childAgents ||
+          session.automations ||
+          session.channels
+        ) {
+          await settlePendingMonitorInputs({
+            authority: session.managed.authority,
+            sink: session.managed.sink,
+            sessionId: req.params['id'],
+            cwd: session.cwd,
+            sources: [
+              ...(session.monitors ? ['monitor'] : []),
+              // #13803: child notifications of either child Session kind.
+              ...(session.childAgents ? [...CHILD_NOTIFICATION_SOURCES] : []),
+              ...(session.messages ? [SESSION_MESSAGE_INPUT_SOURCE] : []),
+              ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
+              ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
+            ],
+          });
+          // A refused settle revision never blocks the close: the next open
+          // reconciles it again from the same committed facts.
+          await session.automations
+            ?.reconcileRuns()
+            .catch((cause: unknown) =>
+              writeStderrLineSafe(
+                `qwen serve: Hosted automation runs of session ${req.params['id']} could not be settled on close: ${String(cause)}`,
+              ),
+            );
+        }
       }
       await session.managed.close(
         session.lifecycle ? { releaseActivation: false } : undefined,
