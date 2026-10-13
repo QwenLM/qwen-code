@@ -87,6 +87,18 @@ class HostedRecoveryWedgeGate {
                 ? Path.of(System.getProperty("qwen.wedge.evidence")).toAbsolutePath()
                 : moduleDir.resolve("target/wedge-evidence")).resolve("wedge");
         Files.createDirectories(evidence);
+        // Runs share this fixed evidence directory; a stale wedged run's
+        // artifacts must not survive into a later green run's bundle, so the
+        // subtree this invocation owns is wiped before any write.
+        try (var stale = Files.walk(evidence)) {
+            stale.sorted(java.util.Comparator.reverseOrder()).forEach(entry -> {
+                try {
+                    Files.deleteIfExists(entry);
+                } catch (java.io.IOException ignored) {
+                }
+            });
+        }
+        Files.createDirectories(evidence);
         Path reportsDir = evidence.resolve("node-reports");
         Files.createDirectories(reportsDir);
         temporary = temporary.toRealPath();
@@ -279,7 +291,11 @@ class HostedRecoveryWedgeGate {
                 Files.writeString(clearedFile, clearReport);
                 dumpAll(jdbc, evidence, sessions, tenant, "after-clear");
 
-                assertThat(driver.waitFor(300, TimeUnit.SECONDS))
+                // The driver's post-clear budget is two sequential 240 s
+                // windows plus a 30 s transcript fetch; exceeding it turns a
+                // legitimate recovery into an opaque timeout and discards the
+                // clear-and-recover evidence this witness exists to collect.
+                assertThat(driver.waitFor(600, TimeUnit.SECONDS))
                         .as("Driver timeout:\n%s", Files.readString(driverLog)).isTrue();
                 Files.copy(driverLog, evidence.resolve("driver-final.log"),
                         java.nio.file.StandardCopyOption.REPLACE_EXISTING);

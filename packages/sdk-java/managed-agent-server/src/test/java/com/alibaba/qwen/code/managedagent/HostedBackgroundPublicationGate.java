@@ -27,11 +27,14 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * Post-A1-fix end-to-end witness (#13533, finding A1; the fix landed with
- * PR #13815): the background Shell and Monitor payload families were
- * admitted into the publication contract, so a hosted turn's background
- * {@code run_shell_command} and {@code monitor} calls now reach a reserve
- * instead of the removed 400.
+ * End-to-end witness for #13533 finding A1: the background Shell and
+ * Monitor payload families were admitted into the publication contract
+ * earlier, with #13789; this PR extracts the publishable family list into
+ * {@code ToolPublicationContract.PUBLISHABLE_TOOL_NAMES} and widens the
+ * integral-valued numerics via {@code boundedIntField}, pinned in both
+ * languages by the shared {@code payloadVectors} corpus. Admitted
+ * background {@code run_shell_command} and {@code monitor} calls now
+ * reach a reserve instead of the removed 400.
  *
  * <p>Arms (production binaries in-process: MariaDB + embedded broker + real
  * hosted-harness daemon running the bundled CLI with the H3 domains enabled
@@ -51,8 +54,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * integral-valued numerics with {@code boundedIntField}; the admitted
  * Monitor reserve answers <b>OPEN</b> like the background arm, then
  * declines {@code not_started} on the ephemeral lane (no cgroup v2 root),
- * closes NOT_STARTED (200), and the turn blocks; the earlier
- * checkpoint-refusal findings are closed by that chain.
+ * closes NOT_STARTED (200), and the turn blocks. The store-side
+ * checkpoint gate that earlier refused its toolName now reads the same
+ * constant extracted here.
  * <li>refusal-edges-live: per-family raw negatives replayed against the
  * captured OPEN grant with only its digests forged — shape-level negatives
  * can't be emitted by the turn and the digest-bound protocol admits no
@@ -102,6 +106,18 @@ class HostedBackgroundPublicationGate {
         Path evidence = (System.getProperty("qwen.wedge.evidence") != null
                 ? Path.of(System.getProperty("qwen.wedge.evidence")).toAbsolutePath()
                 : moduleDir.resolve("target/wedge-evidence")).resolve("publication");
+        Files.createDirectories(evidence);
+        // Runs share this fixed evidence directory; a stale wedged run's
+        // artifacts must not survive into a later green run's bundle, so the
+        // subtree this invocation owns is wiped before any write.
+        try (var stale = Files.walk(evidence)) {
+            stale.sorted(java.util.Comparator.reverseOrder()).forEach(entry -> {
+                try {
+                    Files.deleteIfExists(entry);
+                } catch (java.io.IOException ignored) {
+                }
+            });
+        }
         Files.createDirectories(evidence);
         Path reportsDir = evidence.resolve("node-reports");
         Files.createDirectories(reportsDir);
