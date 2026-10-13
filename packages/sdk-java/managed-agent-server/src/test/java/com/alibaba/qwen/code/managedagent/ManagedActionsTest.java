@@ -143,8 +143,8 @@ class ManagedActionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"read_file", "write_file", "edit", "run_shell_command",
-            "team_create", "task_create", "task_update", "request_shutdown",
-            "exit_plan_mode", "team_plan_approval"})
+            "team_create", "task_create", "task_update", "workflow",
+            "request_shutdown", "exit_plan_mode", "team_plan_approval"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
         String tenant = tenant();
         String session = session(tenant);
@@ -156,6 +156,7 @@ class ManagedActionsTest {
             case "team_create" -> "{ \"team_name\" : \"review\" }";
             case "task_create" -> "{ \"subject\" : \"Audit\", \"description\" : \"the diff\" }";
             case "task_update" -> "{ \"taskId\" : \"1\", \"status\" : \"in_progress\", \"owner\" : \"alice\" }";
+            case "workflow" -> "{ \"script\" : \"return 1;\" }";
             case "request_shutdown" -> "{ \"to\" : \"alice\" }";
             case "exit_plan_mode" -> "{ \"plan\" : \"Read then edit\" }";
             case "team_plan_approval" -> "{ \"request_id\" : \"cmd_plan\", \"decision\" : \"approve\" }";

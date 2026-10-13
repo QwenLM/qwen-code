@@ -4,8 +4,9 @@
 
 ## Status and scope
 
-Implementation plan, not verification evidence. This slice stacks on PR #13955
-(`c160d16e17`) and implements decisions 9, 13 and 14 of the
+Implementation plan, not verification evidence. This slice requires the member
+message capability merged into main by PR #13955 and implements decisions 9,
+13 and 14 of the
 [member commands design](2026-10-11-managed-agent-team-member-commands.md).
 It does not add D6 cards, public Actions, a read-only shell, migrations, or a new
 relay. The existing bilingual design remains the behavioral contract.
