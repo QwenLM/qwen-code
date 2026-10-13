@@ -4585,7 +4585,7 @@ export class HostedWorkspaceToolTurn {
       monitorRecord?.stopReason === null &&
       monitorRecord.run.state !== 'recovery_blocked'
     ) {
-      await this.resumeMonitorWatch(executionCallId);
+      await this.resumeMonitorWatch(executionCallId, saved.runtimeCallId);
     }
     let ref: ManagedSessionDurableRef;
     let converted: Part[];
@@ -6050,7 +6050,10 @@ export class HostedWorkspaceToolTurn {
    * once per Session lifetime: the loop resumes an already-attached
    * record and is fed lines through the Session publisher's fan-out.
    */
-  private async resumeMonitorWatch(executionCallId: string): Promise<void> {
+  private async resumeMonitorWatch(
+    executionCallId: string,
+    runtimeCallId: string,
+  ): Promise<void> {
     // The lane is Shell-mode or the publication lane, whichever this turn
     // owns — the detached family's loops park on it either way.
     const lane = this.shell ?? this.backgroundLane;
@@ -6062,7 +6065,14 @@ export class HostedWorkspaceToolTurn {
     const argsBody = JSON.parse(
       (await this.session.resources.read(record.commandRef)).toString('utf8'),
     ) as Record<string, unknown>;
-    const executor = new HostedMonitorRemoteExecutor(this.publisher);
+    // The watch runs on this turn's Runtime Session; its auto-stop asks
+    // the worker there, and that Session outlives the turn as a hold.
+    const executor = new HostedMonitorRemoteExecutor(this.publisher, {
+      broker: this.broker,
+      sessionKey: this.session.authority.sessionHeader.sessionKey,
+      executionCallId,
+      runtimeCallId,
+    });
     const loop = new HostedMonitorLoop(
       this.monitors,
       executionCallId,
