@@ -34,12 +34,14 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/internal/managed-tool-publications/v1/sessions/{sessionId}")
 public class ToolPublicationController {
     public static final String PUBLICATION_TOKEN_HEADER = "X-Qwen-Tool-Publication-Token";
+    public static final String ASYNC_HEADER = "X-Qwen-Tool-Publication-Async";
     public static final String OPERATION_ID_HEADER = "X-Qwen-Tool-Publication-Operation";
     private static final ObjectMapper JSON = new ObjectMapper();
     private final ToolPublicationStore grants;
     private final ToolPublicationDataStore data;
     private final ToolPublicationAdmissionStore admissions;
     private final Semaphore entries;
+    private final boolean asyncVerificationEnabled;
 
     public ToolPublicationController(ToolPublicationStore grants,
             ToolPublicationDataStore data, ToolPublicationAdmissionStore admissions,
@@ -47,7 +49,18 @@ public class ToolPublicationController {
         this.grants = Objects.requireNonNull(grants);
         this.data = Objects.requireNonNull(data);
         this.admissions = Objects.requireNonNull(admissions);
+        this.asyncVerificationEnabled = properties.getToolPublication().isAsyncVerificationEnabled();
         this.entries = new Semaphore(properties.getToolPublication().getEntryConcurrency());
+    }
+
+    private boolean asynchronous(String header) {
+        return asyncVerificationEnabled && "1".equals(header);
+    }
+
+    private ResponseEntity<JsonNode> producerResponse(JsonNode result) {
+        return ResponseEntity.status("PENDING".equals(result.path("state").asText())
+                        ? HttpStatus.ACCEPTED : HttpStatus.OK)
+                .header(HttpHeaders.CACHE_CONTROL, "no-store").body(result);
     }
 
     @PostMapping("/grants")
@@ -63,73 +76,76 @@ public class ToolPublicationController {
     }
 
     @PostMapping("/publications/{publicationId}/segments/{streamId}/{ordinal}")
-    public JsonNode segment(TenantContext tenant, @PathVariable String sessionId,
+    public ResponseEntity<JsonNode> segment(TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String publicationId, @PathVariable String streamId,
             @PathVariable int ordinal, @RequestParam String workspaceId,
             @RequestHeader(PUBLICATION_TOKEN_HEADER) String token,
             @RequestHeader(OPERATION_ID_HEADER) String operationId,
             @RequestHeader(value = "X-Qwen-Tool-Segment-Digest", required = false) String digest,
             HttpServletRequest request) throws IOException {
-        return limited(() -> {
+        return producerResponse(limited(() -> {
             JsonNode key = scope(tenant, workspaceId, sessionId);
             byte[] bytes = read(request, 16 * 1024 * 1024);
             return data.publishSegment(key, publicationId, token,
-                    operationId, streamId, ordinal, bytes, digest);
-        });
+                    operationId, streamId, ordinal, bytes, digest, asynchronous(request.getHeader(ASYNC_HEADER)));
+        }));
     }
 
     @PostMapping("/publications/{publicationId}/resources/{kind}/{slot}")
-    public JsonNode resource(TenantContext tenant, @PathVariable String sessionId,
+    public ResponseEntity<JsonNode> resource(TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String publicationId, @PathVariable String kind,
             @PathVariable String slot, @RequestParam String workspaceId,
             @RequestHeader(PUBLICATION_TOKEN_HEADER) String token,
             @RequestHeader(OPERATION_ID_HEADER) String operationId,
             HttpServletRequest request) throws IOException {
-        return limited(() -> {
+        return producerResponse(limited(() -> {
             JsonNode key = scope(tenant, workspaceId, sessionId);
             byte[] bytes = read(request, 16 * 1024 * 1024);
             return data.publishResource(key, publicationId, token,
-                    operationId, slot, kind, bytes);
-        });
+                    operationId, slot, kind, bytes, asynchronous(request.getHeader(ASYNC_HEADER)));
+        }));
     }
 
     @PostMapping("/publications/{publicationId}/streams/{streamId}/seal")
-    public JsonNode seal(TenantContext tenant, @PathVariable String sessionId,
+    public ResponseEntity<JsonNode> seal(TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String publicationId, @PathVariable String streamId,
             @RequestParam String workspaceId,
             @RequestHeader(PUBLICATION_TOKEN_HEADER) String token,
             @RequestHeader(OPERATION_ID_HEADER) String operationId,
             HttpServletRequest request) throws IOException {
-        return limited(() -> {
+        return producerResponse(limited(() -> {
             JsonNode body = ToolPublicationContract.readJson(read(request, 64 * 1024));
             JsonNode key = scope(tenant, workspaceId, sessionId);
             return data.seal(key, publicationId, token, operationId,
                     streamId, body.path("segmentCount").asInt(-1),
-                    body.path("byteLength").asLong(-1), body.path("digest").asText(null));
-        });
+                    body.path("byteLength").asLong(-1), body.path("digest").asText(null),
+                    asynchronous(request.getHeader(ASYNC_HEADER)));
+        }));
     }
 
     @PostMapping("/publications/{publicationId}/streams/{streamId}/prefix")
-    public JsonNode prefix(TenantContext tenant, @PathVariable String sessionId,
+    public ResponseEntity<JsonNode> prefix(TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String publicationId, @PathVariable String streamId,
             @RequestParam String workspaceId,
             @RequestHeader(PUBLICATION_TOKEN_HEADER) String token,
-            @RequestHeader(OPERATION_ID_HEADER) String operationId) {
+            @RequestHeader(OPERATION_ID_HEADER) String operationId,
+            @RequestHeader(value = ASYNC_HEADER, required = false) String async) {
         JsonNode key = scope(tenant, workspaceId, sessionId);
-        return limited(() -> data.prefix(key, publicationId, token, operationId, streamId));
+        return producerResponse(limited(() -> data.prefix(key, publicationId, token,
+                operationId, streamId, asynchronous(async))));
     }
 
     @PostMapping("/publications/{publicationId}/finish")
-    public JsonNode finish(TenantContext tenant, @PathVariable String sessionId,
+    public ResponseEntity<JsonNode> finish(TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String publicationId, @RequestParam String workspaceId,
             @RequestHeader(PUBLICATION_TOKEN_HEADER) String token,
             @RequestHeader(OPERATION_ID_HEADER) String operationId,
             HttpServletRequest request) throws IOException {
-        return limited(() -> {
+        return producerResponse(limited(() -> {
             byte[] body = read(request, 2 * 1024 * 1024);
             JsonNode key = scope(tenant, workspaceId, sessionId);
-            return data.finish(key, publicationId, token, operationId, body);
-        });
+            return data.finish(key, publicationId, token, operationId, body, asynchronous(request.getHeader(ASYNC_HEADER)));
+        }));
     }
 
     @GetMapping("/publications/{publicationId}/operations/{operationId}")

@@ -52,6 +52,7 @@ import {
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
   HOSTED_AGENT_TOOL,
+  HOSTED_WORKFLOW_TOOL,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -63,6 +64,7 @@ import {
   type HostedApprovalMode,
 } from './hosted-tool-approval.js';
 import * as stdio from '../utils/stdioHelpers.js';
+import { monitorUnitNameOf } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
 
 const broker = vi.hoisted(() => ({
   fileHistory: vi.fn(),
@@ -79,12 +81,14 @@ const broker = vi.hoisted(() => ({
   release: vi.fn(),
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
+  monitorControl: vi.fn(),
 }));
-// child_run is enabled by the H3 enablement slice; background tests flip
-// this per case, per the same harness the core suites use.
+// child_run's shell kind and monitor_run are enabled by the H3 enablement
+// slice (#13856); a case that needs a gate shut closes it here, per test,
+// per the same harness the core suites use.
 const enablement = vi.hoisted(() => ({
-  childRun: false,
-  monitorRun: false,
+  childRun: true,
+  monitorRun: true,
 }));
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
@@ -104,6 +108,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     release = broker.release;
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
+    monitorControl = broker.monitorControl;
   },
 }));
 vi.mock(
@@ -115,19 +120,28 @@ vi.mock(
       >();
     return {
       ...actual,
+      // #13856: the production gates admit monitor_run and the shell kind;
+      // a test that needs either shut closes it per test, never the other
+      // way around.
       assertManagedSessionDomainEnabled: (
         domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
       ) => {
-        if (domain === 'child_run' && enablement.childRun) return;
-        if (domain === 'monitor_run' && enablement.monitorRun) return;
+        if (domain === 'monitor_run' && !enablement.monitorRun) {
+          throw new actual.ManagedSessionRecordError(
+            'domain monitor_run is registered but not enabled for submission.',
+          );
+        }
         actual.assertManagedSessionDomainEnabled(domain);
       },
       // H4b: record commits gate per kind; the admission mock above keeps
       // its plain-domain meaning, this one carries the commit side.
       assertManagedSessionChildRunKindEnabled: (kind: string) => {
-        if (!enablement.childRun) {
-          actual.assertManagedSessionChildRunKindEnabled(kind);
+        if (kind === 'shell' && !enablement.childRun) {
+          throw new actual.ManagedSessionRecordError(
+            'domain child_run kind shell is registered but not enabled for submission.',
+          );
         }
+        actual.assertManagedSessionChildRunKindEnabled(kind);
       },
     };
   },
@@ -261,8 +275,9 @@ beforeEach(async () => {
   turn = createTurn();
 });
 afterEach(async () => {
-  enablement.childRun = false;
-  enablement.monitorRun = false;
+  // Restores the production default a case closed on purpose.
+  enablement.childRun = true;
+  enablement.monitorRun = true;
   await turn?.close();
   vi.restoreAllMocks();
   // A Session whose writes stopped cannot record its own close.
@@ -316,6 +331,33 @@ it('commits the whole batch before the first dispatch and each receipt before re
   await turn.consumeResults();
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('settles the turn over a held Runtime and owes it to the close (#13856)', async () => {
+  // The broker refuses the routine release with the designed hold: a live
+  // background run keeps its Runtime, the turn settles clean, and the
+  // Session's close owes the drain.
+  broker.release.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+  );
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  await turn.consumeResults();
+  await expect(turn.finish()).resolves.toBeUndefined();
+  expect(turn.runtimeHeld).toBe(true);
+});
+
+it('keeps the honesty contract for a busy refusal (#13856)', async () => {
+  // The unproven busy refusal keeps its exact old meaning: the turn cannot
+  // prove its outcome, so the Session parks — only the held arm is soft.
+  broker.release.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy'),
+  );
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  await turn.consumeResults();
+  await expect(turn.finish()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  expect(turn.runtimeHeld).toBe(false);
 });
 
 async function shellReceiptScenario(
@@ -3336,6 +3378,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
     'team_create',
     'task_create',
     'task_update',
+    'workflow',
     'request_shutdown',
   ]);
   const declared = [
@@ -3344,6 +3387,7 @@ it('admits exactly the declared native tools to the version 2 input preview', ()
     HOSTED_SEND_MESSAGE_TO_CHILD_TOOL.name,
     HOSTED_SEND_MESSAGE_TO_PARENT_TOOL.name,
     ...HOSTED_TEAM_TOOLS.map((tool) => tool.name),
+    HOSTED_WORKFLOW_TOOL.name,
   ];
   for (const name of HOSTED_INPUT_PREVIEW_TOOLS)
     expect(declared).toContain(name);
@@ -5256,6 +5300,41 @@ describe('hosted Monitor admission arm', () => {
     expect(rig.options.monitorLoops?.has('monitor-execution')).toBe(true);
   });
 
+  it("stops the watch through its own Runtime call on the turn's broker (#13896)", async () => {
+    const { call, parts } = monitorCall();
+    const rig = monitorTurnRig(DETACHED);
+    turn = rig.turn;
+    await rig.turn.execute(
+      [call],
+      parts,
+      'model',
+      new AbortController().signal,
+    );
+    const runtimeCallId = broker.prepareV3.mock.calls.at(-1)![0];
+    broker.monitorControl.mockResolvedValue({
+      operationId: runtimeCallId,
+      state: 'unknown',
+    });
+    Object.assign(rig.monitors, { blockedRuntimeLost: vi.fn(async () => {}) });
+    // The worker derived the watch's unit from the Runtime call, not from
+    // the execution id: the stop must name that call to reach the watch.
+    await rig.options
+      .monitorLoops!.get('monitor-execution')!
+      .stop('runtime_lost');
+    expect(broker.monitorControl).toHaveBeenCalledExactlyOnceWith({
+      kind: 'monitor-stop',
+      sessionKey: session.authority.sessionHeader.sessionKey,
+      operationId: 'monitor-execution',
+      targetOperationId: runtimeCallId,
+    });
+    expect(runtimeCallId).not.toBe('monitor-execution');
+    // ...the very unit the start receipt recorded.
+    const attach = rig.monitors.calls.find(([name]) => name === 'attach')!;
+    expect(
+      (attach[1] as { receipt: Record<string, unknown> }).receipt['unitName'],
+    ).toBe(monitorUnitNameOf(runtimeCallId));
+  });
+
   it('drives a Monitor through the publication lane exactly where production admits it', async () => {
     const { call, parts } = monitorCall();
     const descriptor = { url: 'http://127.0.0.1:9/lane-mon', token: 'tok' };
@@ -5543,13 +5622,22 @@ describe('hosted Monitor admission arm', () => {
     );
     (bare as unknown as { publisher: unknown }).publisher = publisher;
     const resume = (
-      bare as unknown as { resumeMonitorWatch: (id: string) => Promise<void> }
+      bare as unknown as {
+        resumeMonitorWatch: (
+          executionCallId: string,
+          runtimeCallId: string,
+        ) => Promise<void>;
+      }
     ).resumeMonitorWatch.bind(bare);
-    await expect(resume('monitor-x')).rejects.toThrow('observer bridge gone');
+    await expect(resume('monitor-x', 'runtime-call-x')).rejects.toThrow(
+      'observer bridge gone',
+    );
     // The failed start leaves no dead loop behind to short-circuit the
     // retry that comes from a fresh accept.
     expect(shell.monitorLoops.has('monitor-x')).toBe(false);
-    await expect(resume('monitor-x')).resolves.toBeUndefined();
+    await expect(
+      resume('monitor-x', 'runtime-call-x'),
+    ).resolves.toBeUndefined();
     expect(shell.monitorLoops.has('monitor-x')).toBe(true);
   });
 

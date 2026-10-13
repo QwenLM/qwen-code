@@ -1394,7 +1394,7 @@ public class ManagedAgentStore implements AgentStateStore {
         requireNoOpenOperation(tenantId, sessionId);
         validateOperationStart(session, kind);
         if (protocolVersion == 1) {
-            WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId);
+            WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId, true);
         }
         long now = lifecycleDatabaseTime();
         String operationId = publicId("op");
@@ -3067,6 +3067,20 @@ public class ManagedAgentStore implements AgentStateStore {
     public void retractHarnessTurnOutput(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             long fromSourceId, long retractionSourceId) {
+        retractHarnessTurnOutput(tenantId, sessionId, turnId, owner, eventEpoch,
+                fromSourceId, retractionSourceId, null, null, null);
+    }
+
+    @Transactional
+    public void retractHarnessTurnOutput(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch,
+            long fromSourceId, long retractionSourceId, String sourceBootId,
+            String sourceEventEpoch, Long throughSourceId) {
+        boolean bounded = throughSourceId != null;
+        if (bounded && (sourceBootId == null || sourceEventEpoch == null
+                || fromSourceId < 1 || throughSourceId < fromSourceId || throughSourceId >= retractionSourceId)) {
+            throw new IllegalArgumentException("Invalid bounded Hosted retraction");
+        }
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
@@ -3079,9 +3093,10 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new IllegalStateException(
                     "Hosted Harness event epoch changed");
         }
-        String sourcePrefix = session.harnessBootId() + ":" + eventEpoch + ":";
+        String sourcePrefix = (bounded ? sourceBootId : session.harnessBootId()) + ":"
+                + (bounded ? sourceEventEpoch : eventEpoch) + ":";
         String reconciliationKey = "reconcile:inband:" + sourcePrefix + turnId
-                + ":" + fromSourceId;
+                + ":" + fromSourceId + (bounded ? ":" + throughSourceId : "");
         if (!hasSourceEvent(tenantId, sessionId, reconciliationKey)) {
             jdbc.queryForObject("SELECT covered_sequence FROM"
                             + " managed_agent_consumer_progress WHERE tenant_id"
@@ -3097,8 +3112,9 @@ public class ManagedAgentStore implements AgentStateStore {
             long firstRetracted = Long.MAX_VALUE;
             for (EventRecord event : deltas) {
                 if (event.sourceKey() == null
-                        || !event.sourceKey().startsWith(sourcePrefix)
-                        || sourceIdOf(event.sourceKey()) < fromSourceId) {
+                        || (!bounded && !event.sourceKey().startsWith(sourcePrefix))
+                        || sourceIdOf(event.sourceKey()) < fromSourceId
+                        || (bounded && sourceIdOf(event.sourceKey()) > throughSourceId)) {
                     continue;
                 }
                 Map<String, Object> data = new LinkedHashMap<>(event.data());
@@ -3413,12 +3429,38 @@ public class ManagedAgentStore implements AgentStateStore {
             Map<String, Object> block = input.get(index);
             String text = string(block.get("text"));
             if (text == null) {
+                text = workflowLaunchSummary(block);
+            }
+            if (text == null) {
                 continue;
             }
             replacePart(event, itemId,
                     "part_" + event.turnId() + "_input_" + index,
                     "input_text", text);
         }
+    }
+
+    /**
+     * A workflow child's first turn carries one {@code workflow_launch}
+     * block and no text (#13803 K1): the message names the launch pin
+     * exactly as the daemon journal does ({@code workflowLaunchSummaryText}
+     * in hosted-workflow-turn.ts), so both projections of the turn agree.
+     * The block itself is never given a text key — the daemon parser
+     * requires its closed key set.
+     */
+    private static String workflowLaunchSummary(Map<String, Object> block) {
+        if (!"workflow_launch".equals(block.get("type"))
+                || !(block.get("definition") instanceof Map<?, ?> pin)) {
+            return null;
+        }
+        String id = string(pin.get("definitionId"));
+        String digest = string(pin.get("definitionDigest"));
+        if (id == null || digest == null
+                || !(pin.get("definitionRevision") instanceof Number revision)) {
+            return null;
+        }
+        return "<workflow " + id + "@" + revision.longValue() + " sha256:"
+                + digest.substring(0, Math.min(16, digest.length())) + ">";
     }
 
     private void materializeText(EventRecord event, String partType) {

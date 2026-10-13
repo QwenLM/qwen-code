@@ -269,6 +269,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const mouseTrackingEnabled = useMouseTrackingEnabled();
   const isVpMode = useVirtualViewport(settings.merged.ui?.useTerminalBuffer);
   const mouseInteractionsEnabled = isVpMode && mouseTrackingEnabled;
+  // Bare ↑/↓ belong to input history; the transcript is scrolled with
+  // Shift+↑/↓, PgUp/PgDn, Ctrl+Home/End or the mouse wheel (the contract
+  // ui.useTerminalBuffer documents). Opt-in only: on a terminal that cannot
+  // report the wheel — macOS Terminal.app — the wheel arrives as a burst of
+  // ↑/↓ and would rewrite the composer with an older prompt (#10749), so
+  // ui.arrowKeysScrollTranscript hands those keys to the viewport instead.
+  // Derived once so the ↑ and ↓ branches cannot drift apart.
+  const arrowKeysScrollTranscript =
+    isVpMode && settings.merged.ui?.arrowKeysScrollTranscript === true;
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
@@ -1741,14 +1750,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
-          // In VP mode with empty input, scroll the conversation instead of
-          // navigating input history. This handles terminals that translate
-          // mouse wheel events to Up/Down arrow keys. Only take the key when
-          // the transcript actually overflows: in a short conversation there is
-          // nothing to scroll and ↑ must keep recalling history rather than
-          // going dead.
+          // Opt-in wheel fallback (ui.arrowKeysScrollTranscript): a terminal
+          // that cannot report the mouse wheel delivers it as bare ↑/↓, so
+          // hand those to the viewport while the composer is empty. Only take
+          // the key when the transcript actually overflows: in a short
+          // conversation there is nothing to scroll and ↑ must keep recalling
+          // history rather than going dead.
           if (
-            isVpMode &&
+            arrowKeysScrollTranscript &&
             buffer.text.length === 0 &&
             scrollActions?.hasScrollableTranscript()
           ) {
@@ -1770,14 +1779,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             buffer.visualCursor[0] === buffer.allVisualLines.length - 1)
         ) {
-          // In VP mode with empty input, scroll the conversation instead of
-          // navigating input history. This handles terminals that translate
-          // mouse wheel events to Up/Down arrow keys. Yields to history when
-          // the transcript does not overflow, and to descendFromComposer when
-          // an agent surface is on screen — descending is the only keyboard
-          // route into those.
+          // Opt-in wheel fallback (ui.arrowKeysScrollTranscript), mirroring ↑.
+          // Yields to history when the transcript does not overflow, and to
+          // descendFromComposer when an agent surface is on screen —
+          // descending is the only keyboard route into those.
           if (
-            isVpMode &&
+            arrowKeysScrollTranscript &&
             buffer.text.length === 0 &&
             scrollActions?.hasScrollableTranscript() &&
             !hasComposerDescendTarget()
@@ -2024,7 +2031,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       categoryTabsVisible,
       voiceInput,
       targetDir,
-      isVpMode,
+      arrowKeysScrollTranscript,
       scrollActions,
     ],
   );
