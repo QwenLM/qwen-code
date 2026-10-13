@@ -356,6 +356,128 @@ describe('team plans', () => {
     ).toContain('revision 1');
   });
 
+  it.each(['cut', 'settled', 'newer'] as const)(
+    'recovers partial supersede: %s',
+    async (scenario) => {
+      await member();
+      await teams.submitPlan('original', 'run-alice', 'first');
+      const interrupted = new HostedTeamSession(
+        {
+          resources: session.resources,
+          authority: Object.create(session.authority, {
+            commitExtensionRecord: {
+              value: async (
+                ...args: Parameters<
+                  HostedTeamStore['authority']['commitExtensionRecord']
+                >
+              ) => {
+                const result = await session.authority.commitExtensionRecord(
+                  ...args,
+                );
+                if (args[0].commandId === 'supersede:replacement:original') {
+                  if (scenario === 'settled') await settle('run-alice');
+                  else throw new Error('cut after cancel');
+                }
+                return result;
+              },
+            },
+          }),
+        },
+        sessionKey,
+        children,
+      );
+      if (scenario === 'settled') {
+        expect(
+          await interrupted.submitPlan('replacement', 'run-alice', 'second'),
+        ).toContain('revision 2');
+      } else {
+        await expect(
+          interrupted.submitPlan('replacement', 'run-alice', 'second'),
+        ).rejects.toThrow('cut after cancel');
+        await settle('run-alice');
+        if (scenario === 'newer') {
+          await children.sendToChild({
+            taskId: children.taskIdOf('run-alice'),
+            text: 'next',
+            messageId: 'next',
+            continuationRunId: 'next',
+            executionCallId: 'next',
+            closing: false,
+          });
+          await teams.submitPlan('newer', 'next', 'third');
+          const newer = teams.plan('newer');
+          await expect(
+            teams.submitPlan('fresh-stale', 'run-alice', 'stale'),
+          ).rejects.toThrow('Only the running');
+          const answer = await teams.submitPlan(
+            'replacement',
+            'run-alice',
+            'second',
+          );
+          expect(answer).toContain('superseded');
+          expect(answer).not.toContain('decision arrives');
+          expect(teams.plan('newer')).toEqual(newer);
+          expect(
+            teams
+              .plans()
+              .filter((plan) => plan.run.state === 'waiting')
+              .map((plan) => plan.requestId),
+          ).toEqual(['newer']);
+          return;
+        }
+        expect(
+          await teams.submitPlan('replacement', 'run-alice', 'second'),
+        ).toContain('revision 2');
+      }
+      expect(teams.plan('original')?.run.state).toBe('cancelled');
+      expect(teams.plan('replacement')?.run.state).toBe('waiting');
+    },
+  );
+
+  it('refuses a fresh submission whose head changes while publishing without cancelling the newer plan', async () => {
+    await member();
+    await teams.submitPlan('original', 'run-alice', 'first');
+    let raced = false;
+    const racing = new HostedTeamSession(
+      {
+        authority: session.authority,
+        resources: {
+          ...session.resources,
+          read: session.resources.read.bind(session.resources),
+          publish: async (
+            ...args: Parameters<typeof session.resources.publish>
+          ) => {
+            const result = await session.resources.publish(...args);
+            if (!raced) {
+              raced = true;
+              await settle('run-alice');
+              await children.sendToChild({
+                taskId: children.taskIdOf('run-alice'),
+                text: 'next',
+                messageId: 'next',
+                continuationRunId: 'next',
+                executionCallId: 'next',
+                closing: false,
+              });
+              await teams.submitPlan('newer', 'next', 'third');
+            }
+            return result;
+          },
+        },
+      },
+      sessionKey,
+      children,
+    );
+    await expect(
+      racing.submitPlan('stale', 'run-alice', 'second'),
+    ).rejects.toThrow('no longer the running');
+    expect(teams.plan('newer')).toMatchObject({
+      planRevision: 2,
+      run: { state: 'waiting' },
+    });
+    expect(teams.plan('stale')).toBeUndefined();
+  });
+
   it('supersedes only from the current run and withdraws on finished-member shutdown', async () => {
     await member();
     await teams.submitPlan('submit-1', 'run-alice', 'first');
@@ -1438,6 +1560,57 @@ describe('the board', () => {
         .record,
     );
     expect(two.blockedBy).toHaveLength(0);
+  });
+
+  // The blocker-count limit follows the same replay rule: the remaining
+  // place is validated against the current board, so a crowded target
+  // gets its Not-committed entry instead of a fault escaping execute.
+  it('replays a remaining addBlocks place by its blocker cap against the current board', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'one', description: 'do one' },
+      'prompt:t1',
+    );
+    await teams.run(
+      'task_create',
+      { subject: 'two', description: 'do two' },
+      'prompt:t2',
+    );
+    // The original call committed only the subject place.
+    await teams.memberTaskUpdate('alice', 'cmd_cap', {
+      taskId: '1',
+      subject: 'renamed',
+    });
+    // The leader filled task 2 with the maximum since: 64 blockers.
+    const blockers: string[] = [];
+    for (let index = 0; index < 64; index += 1) {
+      const number = index + 3;
+      blockers.push(`${number}`);
+      await teams.run(
+        'task_create',
+        { subject: `filler-${number}`, description: 'f' },
+        `prompt:cap-${number}`,
+      );
+    }
+    await teams.run(
+      'task_update',
+      { taskId: '2', addBlockedBy: blockers },
+      'prompt:cap-fill',
+    );
+    const result = await teams.memberTaskUpdate('alice', 'cmd_cap', {
+      taskId: '1',
+      subject: 'renamed',
+      addBlocks: ['2'],
+    });
+    expect(result).toContain('Not committed');
+    expect(result).toContain('would exceed 64 blockers');
+    const two = parseTeamTask(
+      session.authority.extensionRecord('team_task', 'prompt:call-team#2')!
+        .record,
+    );
+    expect(two.blockedBy).toHaveLength(64);
   });
 
   it('opens new tasks only in an active team', async () => {

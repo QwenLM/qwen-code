@@ -968,7 +968,8 @@ export class HostedChildAgentSession {
           | 'budget_exhausted'
           | 'count_limit'
           | 'member_budget'
-          | 'member_count_limit';
+          | 'member_count_limit'
+          | 'completed_after_stop';
       }
   > {
     return this.inWrites(async () => {
@@ -1000,6 +1001,11 @@ export class HostedChildAgentSession {
         view.state === 'cancelled'
       ) {
         return { kind: 'notReached', reason: 'ended' };
+      }
+      // R1-3: a completed head that was stopped before completing is not
+      // the `finished` case — the leader cannot continue it either.
+      if (view.stopRequestedCompletion) {
+        return { kind: 'notReached', reason: 'completed_after_stop' };
       }
       if (view.state === 'completed') {
         return { kind: 'notReached', reason: 'finished' };

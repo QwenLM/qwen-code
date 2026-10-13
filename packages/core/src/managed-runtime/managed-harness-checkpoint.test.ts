@@ -27,6 +27,7 @@ import {
 import {
   createAwaitCommandHarnessCheckpoint,
   createConsumedCommandWaitHarnessCheckpoint,
+  harnessCommandLocked,
   type HarnessCommandWaitGroup,
 } from './managed-harness-checkpoint.js';
 import {
@@ -1230,7 +1231,6 @@ function commandWaitOf(
       folded: false,
     })),
     holdsWorkspaceMount,
-    timedOut: false,
   };
 }
 
@@ -1278,8 +1278,8 @@ describe('command wait', () => {
     expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
   });
 
-  // Decision 4: the fold that carried the timeout stamps the group, and
-  // the stamp rides every later fold of the same wait — a replacement
+  // Decision 4: the fold that carried the timeout stamps the Turn's lock,
+  // and every later fold of the same wait carries it — a replacement
   // owner re-arms from it.
   it('carries the timeout lock on every fold after the one that stamped it', () => {
     const wait = createAwaitCommandHarnessCheckpoint({
@@ -1290,6 +1290,7 @@ describe('command wait', () => {
       attempt: committedAttempt(),
       commandWait: commandWaitOf(['cmd_1', 'cmd_2']),
     });
+    expect(wait.commandLock).toBeNull();
     const stamped = createConsumedCommandWaitHarnessCheckpoint({
       previous: wait,
       checkpointId: 'ckpt-6',
@@ -1299,7 +1300,7 @@ describe('command wait', () => {
       timedOut: true,
     });
     expect(stamped.continuation.phase).toBe('await_command');
-    expect(stamped.commandWait?.timedOut).toBe(true);
+    expect(stamped.commandLock).toEqual({ turnId: 'turn-1' });
     const advanced = createConsumedCommandWaitHarnessCheckpoint({
       previous: stamped,
       checkpointId: 'ckpt-7',
@@ -1308,11 +1309,14 @@ describe('command wait', () => {
       commandId: 'cmd_2',
     });
     expect(advanced.continuation.phase).toBe('model_output_committed');
-    expect(advanced.commandWait?.timedOut).toBe(true);
+    expect(advanced.commandLock).toEqual({ turnId: 'turn-1' });
     expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
   });
 
-  it('reads a group written before the lock existed as not timed out', () => {
+  // The lock is the Turn's, not the wait group's: the Turn's next command
+  // batch replaces the group and its Runtime work clears it, and neither
+  // may unlock the Turn. The Turn's end drops it.
+  it("keeps the timeout lock through the Turn's later checkpoints and drops it when the Turn ends", () => {
     const wait = createAwaitCommandHarnessCheckpoint({
       previous: seed(),
       checkpointId: 'ckpt-5',
@@ -1321,12 +1325,113 @@ describe('command wait', () => {
       attempt: committedAttempt(),
       commandWait: commandWaitOf(['cmd_1']),
     });
-    const json = JSON.parse(bytesOf(wait).toString('utf8'));
-    delete json['commandWait']['timedOut'];
-    const parsed = parseHarnessCheckpointV1(
-      Buffer.from(JSON.stringify(json), 'utf8'),
+    const locked = createConsumedCommandWaitHarnessCheckpoint({
+      previous: wait,
+      checkpointId: 'ckpt-6',
+      coveredSequence: 5,
+      previousCheckpointId: 'ckpt-5',
+      commandId: 'cmd_1',
+      timedOut: true,
+    });
+    expect(harnessCommandLocked(locked, 'turn-1')).toBe(true);
+    const nextBatch = createAwaitCommandHarnessCheckpoint({
+      previous: locked,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      attempt: null,
+      commandWait: commandWaitOf(['cmd_2']),
+    });
+    expect(nextBatch.commandWait?.runs.map((run) => run.commandId)).toEqual([
+      'cmd_2',
+    ]);
+    expect(harnessCommandLocked(nextBatch, 'turn-1')).toBe(true);
+    expect(
+      harnessCommandLocked(
+        parseHarnessCheckpointV1(bytesOf(nextBatch)),
+        'turn-1',
+      ),
+    ).toBe(true);
+    const runtime = createAwaitRuntimeHarnessCheckpoint({
+      previous: locked,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      attempt: committedAttempt(),
+      ...inProgressRuntime(),
+    });
+    expect(runtime.commandWait).toBeNull();
+    expect(harnessCommandLocked(runtime, 'turn-1')).toBe(true);
+    expect(
+      harnessCommandLocked(
+        parseHarnessCheckpointV1(bytesOf(runtime)),
+        'turn-1',
+      ),
+    ).toBe(true);
+    // The ready checkpoint the settled Turn writes under its own id ends
+    // it too, so an idle Session carries no lock key.
+    const settled = createNextTurnReadyHarnessCheckpoint({
+      previous: locked,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      activationId: 'act-1',
+      turnId: 'turn-1',
+      promptId: null,
+    });
+    expect(settled.commandLock).toBeNull();
+    expect(
+      Object.keys(JSON.parse(bytesOf(settled).toString('utf8'))),
+    ).not.toContain('commandLock');
+    const nextTurn = createNextTurnReadyHarnessCheckpoint({
+      previous: locked,
+      checkpointId: 'ckpt-7',
+      coveredSequence: 6,
+      previousCheckpointId: 'ckpt-6',
+      activationId: 'act-1',
+      turnId: 'turn-2',
+      promptId: null,
+    });
+    expect(nextTurn.commandLock).toBeNull();
+    expect(harnessCommandLocked(nextTurn, 'turn-2')).toBe(false);
+  });
+
+  it('omits the commandLock key while the Turn is unlocked and rejects a malformed lock', () => {
+    const bytes = bytesOf(seed());
+    expect(Object.keys(JSON.parse(bytes.toString('utf8')))).not.toContain(
+      'commandLock',
     );
-    expect(parsed.commandWait?.timedOut).toBe(false);
+    expect(parseHarnessCheckpointV1(bytes).commandLock).toBeNull();
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(seed(), (value) => {
+          value['commandLock'] = { turnId: 'turn-1', timedOut: true };
+        }),
+      ),
+    ).toThrow(/commandLock/);
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(seed(), (value) => {
+          value['commandLock'] = { turnId: '' };
+        }),
+      ),
+    ).toThrow(/commandLock\.turnId/);
+    // The group no longer holds the lock: a stale stamp there is refused.
+    const wait = createAwaitCommandHarnessCheckpoint({
+      previous: seed(),
+      checkpointId: 'ckpt-5',
+      coveredSequence: 4,
+      previousCheckpointId: 'ckpt-4',
+      attempt: committedAttempt(),
+      commandWait: commandWaitOf(['cmd_1']),
+    });
+    expect(() =>
+      parseHarnessCheckpointV1(
+        mutate(wait, (value) => {
+          (value['commandWait'] as Record<string, unknown>)['timedOut'] = true;
+        }),
+      ),
+    ).toThrow(/commandWait/);
   });
 
   it('treats a checkpoint without a commandWait key as carrying none', () => {
@@ -1464,7 +1569,7 @@ describe('command wait', () => {
         coveredSequence: 5,
         previousCheckpointId: 'ckpt-5',
         attempt: committedAttempt(),
-        commandWait: { runs: [], holdsWorkspaceMount: false, timedOut: false },
+        commandWait: { runs: [], holdsWorkspaceMount: false },
       }),
     ).toThrow(/requires at least one run/);
     expect(() =>

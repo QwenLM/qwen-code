@@ -34,8 +34,10 @@ import {
   teamOpenBody,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-operations.js';
 import {
+  MEMBER_MESSAGE_ID_PREFIX,
   broadcastMessageId,
   broadcastRunId,
+  firstInputOpensWithMemberPreamble,
   hasPlanModeBlock,
   hostedCallKey,
   hostedNeverStarted,
@@ -297,6 +299,9 @@ describe('member-message ids (H4e-b3 decision 8, b3c)', () => {
       position: 2,
     });
     expect(id).toMatch(/^msgc_[0-9a-f]{32}$/);
+    // The minter and its consumers read the one prefix constant, or the
+    // member caps silently stop bounding (R1-9).
+    expect(id.startsWith(MEMBER_MESSAGE_ID_PREFIX)).toBe(true);
     // Separate leads, commands and positions.
     expect(
       new Set([
@@ -346,13 +351,37 @@ describe('member messages lift the preamble sentences (b3c decision 8)', () => {
     expect(body).toContain(
       'You are in plan mode until the leader approves your plan:',
     );
+    // The junction itself stands: a zero-space composition would glue
+    // "instruction" straight onto "You", and only / {2}/ never notices.
+    expect(body).toContain('next instruction. You are in plan mode');
     expect(body).not.toMatch(/ {2}/);
+  });
+
+  it('ends the default commands-enabled body without trailing whitespace (R1-11)', () => {
+    const body = teamMemberPreamble(alice).split('\n')[1]!;
+    expect(body).not.toMatch(/\s$/);
   });
 });
 
 describe('the member preamble identity (b3c decision 5)', () => {
   const alice = { name: 'alice', teamName: 'review' };
   const identity = { name: 'alice', team: 'review' };
+
+  it('agrees with the boolean gate on every cut (R1-9)', () => {
+    for (const input of [
+      teamMemberPreamble(alice),
+      '[review the change]\n\n' + teamMemberPreamble(alice),
+      'earlier work happened.\nYour next instruction: ' +
+        teamMemberPreamble(alice, true) +
+        'do the work',
+      'plain text',
+      'nothing to [see] here',
+    ]) {
+      expect(firstInputOpensWithMemberPreamble(input)).toBe(
+        memberPreambleIdentity(input) !== undefined,
+      );
+    }
+  });
 
   it('reads the member from the launch envelope and the continuation marker', () => {
     expect(memberPreambleIdentity(teamMemberPreamble(alice))).toEqual(identity);

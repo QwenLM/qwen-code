@@ -784,6 +784,9 @@ export class HostedTeamSession {
     return this.serial(async () => {
       const prior = this.plan(commandId);
       if (prior !== undefined) return this.submissionAnswer(prior);
+      const superseded = this.supersededPlan(commandId);
+      if (superseded !== undefined)
+        return this.finishSupersede(commandId, superseded, text);
       assertManagedSessionDomainEnabled('team_plan');
       const chains = this.chains();
       const member = hostedOpenTeamChainMember(
@@ -851,14 +854,14 @@ export class HostedTeamSession {
       const plans = this.plans(member.team.teamId).filter(
         (plan) => plan.member === member.name,
       );
-      // A replay after the supersede commit may finish its opening, but only
-      // while its original run is still the head. Never withdraw a newer run's plan.
       await this.withdrawPlans(
         member.team.teamId,
         member.name,
         `supersede:${commandId}`,
       );
-      checkHead();
+      // A committed cancellation owes its successor even if the run settled.
+      // Without that evidence this is still a fresh admission.
+      if (this.supersededPlan(commandId) === undefined) checkHead();
       const plan = teamPlanOpenBody({
         teamId: member.team.teamId,
         requestId: commandId,
@@ -870,6 +873,45 @@ export class HostedTeamSession {
       await this.commit('team_plan', plan, 'submitTeamPlan', commandId);
       return this.submissionAnswer(plan);
     });
+  }
+
+  supersededPlan(commandId: string): TeamPlan | undefined {
+    return this.plans()
+      .filter(
+        (plan) =>
+          this.committed(
+            'withdrawTeamPlan',
+            `supersede:${commandId}:${plan.requestId}`,
+          ) !== undefined,
+      )
+      .sort((a, b) => b.planRevision - a.planRevision)[0];
+  }
+
+  private async finishSupersede(
+    commandId: string,
+    previous: TeamPlan,
+    text: string,
+  ): Promise<string> {
+    const revision = previous.planRevision + 1;
+    const newer = this.plans(previous.teamId).find(
+      (plan) =>
+        plan.member === previous.member && plan.planRevision >= revision,
+    );
+    if (newer !== undefined)
+      return `This submission was superseded by plan ${newer.requestId} revision ${newer.planRevision}; it is not pending approval. End your turn.`;
+    const planRef = await this.store.resources.publish(
+      'managed-team-content',
+      Buffer.from(text, 'utf8'),
+    );
+    const plan = teamPlanOpenBody({
+      teamId: previous.teamId,
+      member: previous.member,
+      requestId: commandId,
+      planRevision: revision,
+      planRef,
+    });
+    await this.commit('team_plan', plan, 'submitTeamPlan', commandId);
+    return this.submissionAnswer(plan);
   }
 
   private submissionAnswer(plan: TeamPlan): string {
@@ -1898,6 +1940,13 @@ export class HostedTeamSession {
             continue;
           }
           const current = this.task(target.taskId);
+          const nextBlocks = new Set([...current.blockedBy, selfTask.taskId]);
+          if (nextBlocks.size > MANAGED_TEAM_LIMITS.maxBlockers) {
+            notCommitted.push(
+              `#${targetNumber} would exceed ${MANAGED_TEAM_LIMITS.maxBlockers} blockers`,
+            );
+            continue;
+          }
           try {
             await this.commit(
               'team_task',

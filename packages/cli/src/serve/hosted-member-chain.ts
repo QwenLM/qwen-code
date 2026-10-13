@@ -21,8 +21,13 @@ import {
   parseTeamState,
   type TeamState,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
-import type { ManagedSessionDomain } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { assertManagedSessionDomainEnabled } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  assertManagedSessionDomainEnabled,
+  assertManagedSessionDurableRef,
+  type ManagedSessionDomain,
+  type ManagedSessionDurableRef,
+  type ManagedSessionJsonValue,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 // H4e-b2 of #12827: what a team adds on top of H4d-b's Session messages —
 // a member is its continuation chain, every run of that chain opens its
@@ -84,6 +89,9 @@ export function broadcastMessageId(params: {
     .slice(0, 32)}`;
 }
 
+/** The id prefix under which only a lead's member messages live (decision 8). */
+export const MEMBER_MESSAGE_ID_PREFIX = 'msgc_';
+
 /**
  * Decision 8 (b3c): the message id of one member message's recipient. The
  * lead alone mints it while it executes a `member_message` command:
@@ -97,14 +105,11 @@ export function memberMessageId(params: {
   readonly commandId: string;
   readonly position: number;
 }): string {
-  return `msgc_${createHash('sha256')
+  return `${MEMBER_MESSAGE_ID_PREFIX}${createHash('sha256')
     .update(`${params.leadSessionId}\0${params.commandId}\0${params.position}`)
     .digest('hex')
     .slice(0, 32)}`;
 }
-
-/** The id prefix under which only a lead's member messages live (decision 8). */
-export const MEMBER_MESSAGE_ID_PREFIX = 'msgc_';
 
 /**
  * Decision 8's bounds: member messages share H4d-b's 8 in flight and 64
@@ -116,7 +121,7 @@ export const HOSTED_MEMBER_MESSAGE_IN_FLIGHT = 4;
 export const HOSTED_MEMBER_MESSAGE_PER_RUN = 16;
 
 const PREAMBLE_BODY_HEAD =
-  'You are a member of this team. Your parent, the agent that launched you, is the team leader. Your result is your answer to the last instruction you receive: if another message from the leader arrives after you have answered, your answer to it becomes your whole result, so answer it in full and repeat anything from your earlier answers the leader still needs. To ask the leader something, use send_message with to "parent"; its reply reaches you after you have answered, as your next instruction. ';
+  'You are a member of this team. Your parent, the agent that launched you, is the team leader. Your result is your answer to the last instruction you receive: if another message from the leader arrives after you have answered, your answer to it becomes your whole result, so answer it in full and repeat anything from your earlier answers the leader still needs. To ask the leader something, use send_message with to "parent"; its reply reaches you after you have answered, as your next instruction.';
 
 const PREAMBLE_TAIL_NO_COMMANDS =
   "You cannot message other members or edit the team's task board.";
@@ -138,7 +143,10 @@ const PLAN_MODE_BODY =
  * `session_command` disabled the member can neither message other
  * members nor edit the task board, and the body says so; with it
  * enabled this build carries both the board commands (b3b) and member
- * messages (b3c), so the closing sentence lifts entirely.
+ * messages (b3c), so the closing sentence lifts entirely. The body is
+ * composed with explicit single-space separators, so the default
+ * commands-enabled non-plan-mode shape — the only build with no
+ * trailing clause at all — never ends in whitespace.
  */
 export function teamMemberPreamble(
   member: {
@@ -156,9 +164,9 @@ export function teamMemberPreamble(
   }
   const attribute = planMode ? ' plan-mode="required"' : '';
   let body = PREAMBLE_BODY_HEAD;
-  if (!commandsEnabled) body += PREAMBLE_TAIL_NO_COMMANDS;
+  if (!commandsEnabled) body += ' ' + PREAMBLE_TAIL_NO_COMMANDS;
   if (planMode) {
-    body += (commandsEnabled ? '' : ' ') + PLAN_MODE_BODY;
+    body += ' ' + PLAN_MODE_BODY;
     try {
       assertManagedSessionDomainEnabled('team_plan');
       body += ' Submit your plan with exit_plan_mode, then end your turn.';
@@ -243,6 +251,25 @@ export function memberPlanModeRequired(
 }
 
 /**
+ * The text after a launch's `[description]` wrapper and blank line, or
+ * after a continuation's `Your next instruction:` marker — whichever
+ * gives this run's own unescaped start. History before the marker is
+ * escaped, so only the run's own block can match a preamble form. This
+ * one cut serves both callers that must see the same block: the boolean
+ * gate and the identity parse (R1-9 — they must never disagree).
+ */
+function memberPreambleBlockText(firstInput: string): string {
+  const marker = 'Your next instruction:';
+  const at = firstInput.lastIndexOf(marker);
+  if (at >= 0) {
+    return firstInput.slice(at + marker.length).replace(/^\s+/, '');
+  }
+  const wrapped = /^\[[\s\S]*?\]\n\n/.exec(firstInput);
+  if (wrapped !== null) return firstInput.slice(wrapped[0].length);
+  return firstInput;
+}
+
+/**
  * b3b decision 5: whether one run's first input declares member tools —
  * its instruction part opens with a well-formed preamble block, read
  * after a launch's `[description]` and its blank line, or after a
@@ -251,18 +278,7 @@ export function memberPlanModeRequired(
  * hides the tools: admission is the lead's, not the declaration's.
  */
 export function firstInputOpensWithMemberPreamble(firstInput: string): boolean {
-  const marker = 'Your next instruction:';
-  const at = firstInput.lastIndexOf(marker);
-  if (at >= 0) {
-    return PREAMBLE_FORM.test(
-      firstInput.slice(at + marker.length).replace(/^\s+/, ''),
-    );
-  }
-  const wrapped = /^\[[\s\S]*?\]\n\n/.exec(firstInput);
-  if (wrapped !== null) {
-    return PREAMBLE_FORM.test(firstInput.slice(wrapped[0].length));
-  }
-  return PREAMBLE_FORM.test(firstInput);
+  return PREAMBLE_FORM.test(memberPreambleBlockText(firstInput));
 }
 
 const PREAMBLE_IDENTITY_FORM =
@@ -273,24 +289,55 @@ const PREAMBLE_IDENTITY_FORM =
  * and team its preamble block carries, cut the same way {@link
  * firstInputOpensWithMemberPreamble} cuts. The tool turn's local refusals
  * (self-addressing, `"leader"`) need the name before anything is sent.
+ * Built on the same grammar source as the boolean gate, so
+ * `firstInputOpensWithMemberPreamble(x) === true` exactly when
+ * `memberPreambleIdentity(x) !== undefined`.
  */
 export function memberPreambleIdentity(
   firstInput: string,
 ): { readonly name: string; readonly team: string } | undefined {
-  const parse = (
-    text: string,
-  ): { readonly name: string; readonly team: string } | undefined => {
-    const match = PREAMBLE_IDENTITY_FORM.exec(text);
-    return match === null ? undefined : { name: match[1]!, team: match[2]! };
+  const match = PREAMBLE_IDENTITY_FORM.exec(
+    memberPreambleBlockText(firstInput),
+  );
+  return match === null ? undefined : { name: match[1]!, team: match[2]! };
+}
+
+/**
+ * R1-10: the one read of a Session's first accepted input's text — an
+ * OpenAI message-content array, or a plain {text} envelope for test-path
+ * fixtures. A missing first input or a durable ref that is not a
+ * 'managed-input' yields undefined; a read failure (malformed ref shape,
+ * unreadable resource, unparsed body) propagates, so each caller keeps
+ * its own fail direction on `undefined` vs on an exception.
+ */
+export async function hostedFirstInputText(input: {
+  readonly authority: {
+    committedSequence: number;
+    eventsInSequenceRange(
+      from: number,
+      through: number,
+    ): ReadonlyArray<{
+      readonly kind: string;
+      readonly payload: Readonly<
+        Partial<Record<string, ManagedSessionJsonValue>>
+      >;
+    }>;
   };
-  const marker = 'Your next instruction:';
-  const at = firstInput.lastIndexOf(marker);
-  if (at >= 0) {
-    return parse(firstInput.slice(at + marker.length).replace(/^\s+/, ''));
-  }
-  const wrapped = /^\[[\s\S]*?\]\n\n/.exec(firstInput);
-  if (wrapped !== null) return parse(firstInput.slice(wrapped[0].length));
-  return parse(firstInput);
+  readonly resources: {
+    read(ref: ManagedSessionDurableRef): Promise<Buffer>;
+  };
+}): Promise<string | undefined> {
+  const first = input.authority
+    .eventsInSequenceRange(1, input.authority.committedSequence)
+    .find((event) => event.kind === 'input.accepted');
+  const contentRef = first?.payload['contentRef'];
+  if (contentRef === undefined) return undefined;
+  const ref = assertManagedSessionDurableRef(contentRef, 'session first input');
+  if (ref.kind !== 'managed-input') return undefined;
+  const parsed: unknown = JSON.parse(
+    (await input.resources.read(ref)).toString('utf8'),
+  );
+  return inputBodyText(parsed);
 }
 
 /**
