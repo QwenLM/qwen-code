@@ -141,4 +141,44 @@ class ManagedEventEnvelopesTest {
                 + "a".repeat(64) + "\"}}";
         return JSON.readTree(raw);
     }
+
+    /**
+     * The mirror's vocabulary and bounds pinned to the frozen fixtures, so a
+     * Java-only drift of a constant goes red here and not only through the
+     * cases that happen to exercise it.
+     */
+    @Test
+    void theMirrorsConstantsAreTheFixtures() throws Exception {
+        JsonNode fixtures = fixtures();
+        assertEquals(ManagedEventEnvelopes.STREAMS,
+                JSON.convertValue(fixtures.get("streams"), java.util.List.class));
+        assertEquals(ManagedEventEnvelopes.KINDS,
+                JSON.convertValue(fixtures.get("kinds"), java.util.List.class));
+        assertEquals(ManagedEventEnvelopes.FORBIDDEN_FIELDS,
+                java.util.Set.copyOf(JSON.convertValue(
+                        fixtures.get("forbiddenFields"), java.util.List.class)));
+        JsonNode limits = fixtures.get("limits");
+        assertEquals(ManagedEventEnvelopes.MAX_ID_BYTES,
+                limits.get("maxIdBytes").intValue());
+        assertEquals(ManagedEventEnvelopes.MAX_JSON_DEPTH,
+                limits.get("maxJsonDepth").intValue());
+        assertEquals(ManagedEventEnvelopes.MAX_PUBLIC_KIND_BYTES,
+                limits.get("maxPublicKindBytes").intValue());
+        assertEquals(ManagedEventEnvelopes.MAX_TIME_MS,
+                limits.get("maxTimeMs").longValue());
+    }
+
+    private static JsonNode fixtures() throws java.io.IOException {
+        java.nio.file.Path directory = java.nio.file.Path.of("")
+                .toAbsolutePath();
+        while (directory != null) {
+            java.nio.file.Path path = directory.resolve(
+                    "packages/core/src/managed-runtime/contracts/managed-event-envelope-v1.fixtures.json");
+            if (java.nio.file.Files.exists(path)) {
+                return JSON.readTree(java.nio.file.Files.readString(path));
+            }
+            directory = directory.getParent();
+        }
+        throw new java.io.IOException("envelope contract fixtures not found");
+    }
 }
