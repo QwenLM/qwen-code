@@ -109,7 +109,9 @@ class HostedHarnessMySqlIT {
                 "SELECT VERSION() AS version, @@version_comment AS engine");
         System.out.println("HOSTED_MYSQL_DATABASE " + json.writeValueAsString(database));
         assertThat(database.get("version").toString()).doesNotContainIgnoringCase("mariadb");
-        assertThat(database.get("engine").toString()).containsIgnoringCase("mysql");
+        try (var connection = dataSource.getConnection()) {
+            assertThat(connection.getMetaData().getDatabaseProductName()).isEqualTo("MySQL");
+        }
 
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class).run(
