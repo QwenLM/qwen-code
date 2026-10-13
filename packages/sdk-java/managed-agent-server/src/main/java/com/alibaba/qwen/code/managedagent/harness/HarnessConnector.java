@@ -115,10 +115,12 @@ public interface HarnessConnector extends AutoCloseable {
      * result relay's stop of a stopped run's message turns (stop). The
      * Hosted side settles it before answering. A receive or consume starts
      * work in the Session, so it takes the same Workspace admission as a
-     * submit.
+     * submit. H4e-b3's command operations ride the same route when the body
+     * names a command id, and a settled {@code execute} answers with the
+     * reply the relay copies back.
      */
-    default void runMessageOperation(String tenantId, String sessionId,
-            Map<String, Object> body) {
+    default Map<String, Object> runMessageOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
         throw new UnsupportedOperationException(
                 "Message operations are unavailable");
     }
