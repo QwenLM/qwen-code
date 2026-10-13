@@ -13888,15 +13888,18 @@ describe('Hosted Harness no-tool session', () => {
       ).send({ managedSessionStore: store(), driveRuntimeRecovery: true });
       expect(loaded.status).toBe(200);
       if (scenario.redrive) {
-        await vi.waitFor(async () => {
-          const status = await headers(
-            supertest(replacementServer).get(`/session/${SESSION_ID}/status`),
-          ).set('X-Qwen-Client-Id', loaded.body.clientId);
-          expect(status.body).toMatchObject({
-            hasActivePrompt: false,
-            recoveryBlocked: true,
-          });
-        });
+        await vi.waitFor(
+          async () => {
+            const status = await headers(
+              supertest(replacementServer).get(`/session/${SESSION_ID}/status`),
+            ).set('X-Qwen-Client-Id', loaded.body.clientId);
+            expect(status.body).toMatchObject({
+              hasActivePrompt: false,
+              recoveryBlocked: true,
+            });
+          },
+          { timeout: 15_000, interval: 100 },
+        );
         vi.mocked(
           LocalManagedSessionResourceStore.prototype.publish,
         ).mockRestore();
@@ -13906,30 +13909,36 @@ describe('Hosted Harness no-tool session', () => {
           .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
           .expect(200);
       }
-      await vi.waitFor(async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
-            tenantId: 'tenant',
-            workspaceId: 'workspace',
-            sessionId: SESSION_ID,
-          },
-        );
-        expect(
-          journal.events.filter((event) => event.kind === 'turn.settled'),
-        ).toHaveLength(1);
-      });
+      await vi.waitFor(
+        async () => {
+          const journal = await LocalJsonlManagedSessionJournalStore.read(
+            path.join(state.root, `${SESSION_ID}.jsonl`),
+            {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+          );
+          expect(
+            journal.events.filter((event) => event.kind === 'turn.settled'),
+          ).toHaveLength(1);
+        },
+        { timeout: 15_000, interval: 100 },
+      );
       expect(state.model).toHaveBeenCalledTimes(1);
       expect(release).not.toHaveBeenCalled();
-      await vi.waitFor(async () => {
-        const status = await headers(
-          supertest(replacementServer).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', loaded.body.clientId);
-        expect(status.body).toMatchObject({
-          hasActivePrompt: false,
-          recoveryBlocked: false,
-        });
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(replacementServer).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId);
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        },
+        { timeout: 15_000, interval: 100 },
+      );
       await headers(
         supertest(replacementServer).post(`/session/${SESSION_ID}/detach`),
       )
@@ -13976,13 +13985,18 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    // A contended gate runner stalls this settle past the 1 s default
+    // waitFor budget; the wait is healthy, its budget was sized for idle.
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .set('X-Qwen-Client-Id', clientId)
       .expect(204);
@@ -15824,13 +15838,18 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    // A contended gate runner stalls this settle past the 1 s default
+    // waitFor budget; the wait is healthy, its budget was sized for idle.
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
     ).set('X-Qwen-Client-Id', clientId);
