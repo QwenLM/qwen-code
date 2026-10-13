@@ -8,7 +8,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { createHash, X509Certificate } from 'node:crypto';
-import { createServer, request as httpRequest } from 'node:http';
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+} from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -1085,6 +1089,7 @@ async function startDeferredDaemon(
   overrides: {
     serveOptions?: Partial<Parameters<typeof runQwenServe>[0]>;
     createBridge?: () => HttpAcpBridge;
+    deps?: RunQwenServeDeps;
   } = {},
 ) {
   const createBridge = vi
@@ -1109,21 +1114,31 @@ async function startDeferredDaemon(
       resolveOnListen: true,
       deferRuntimeUntilFirstHealth: true,
       runtimeStartupTimeoutMs: 0,
+      ...overrides.deps,
     },
   );
   return { handle, createBridge };
 }
 
+interface AcpUpgradeWireResponse {
+  status: number | undefined;
+  retryAfter: string | undefined;
+}
+
 /**
- * Raw upgrade probe (no `ws` client): resolves with the wire status the
- * daemon answered the /acp upgrade with — 101 when the socket was upgraded,
- * an HTTP error status when it was answered as a plain request.
+ * Raw upgrade probe (no `ws` client): resolves with the wire status and the
+ * Retry-After header the daemon answered the /acp upgrade with — status 101
+ * when the socket was upgraded, an HTTP error status when it was answered as
+ * a plain request. `authorization` overrides the bearer header (pass
+ * undefined to omit it); `onSocket` observes the client socket.
  */
-function probeAcpUpgradeWireStatus(
+function probeAcpUpgradeWireResponse(
   handle: RunHandle,
-): Promise<number | undefined> {
+  authorization: string | undefined = 'Bearer secret-token',
+  onSocket?: (socket: net.Socket) => void,
+): Promise<AcpUpgradeWireResponse> {
   const url = new URL(handle.url);
-  return new Promise<number | undefined>((resolve, reject) => {
+  return new Promise<AcpUpgradeWireResponse>((resolve, reject) => {
     const req = httpRequest({
       hostname: url.hostname,
       port: url.port,
@@ -1133,20 +1148,60 @@ function probeAcpUpgradeWireStatus(
         Upgrade: 'websocket',
         'Sec-WebSocket-Key': Buffer.from('0123456789abcdef').toString('base64'),
         'Sec-WebSocket-Version': '13',
-        Authorization: 'Bearer secret-token',
+        ...(authorization === undefined
+          ? {}
+          : { Authorization: authorization }),
       },
     });
+    if (onSocket) req.once('socket', onSocket);
+    const settle = (res: IncomingMessage): void => {
+      const retryAfter = res.headers['retry-after'];
+      resolve({
+        status: res.statusCode,
+        retryAfter: typeof retryAfter === 'string' ? retryAfter : undefined,
+      });
+    };
     req.once('upgrade', (res, socket) => {
       socket.destroy();
-      resolve(res.statusCode);
+      settle(res);
     });
     req.once('response', (res) => {
       res.resume();
-      resolve(res.statusCode);
+      settle(res);
     });
     req.once('error', reject);
     req.end();
   });
+}
+
+/**
+ * Holds the deferred runtime's boot inside buildRuntime (the trust-policy
+ * snapshot read is its first awaited step) so a test can keep the
+ * pre-transport park window open deterministically. `bootStarted` resolves
+ * once the boot begins; `releaseBoot` lets it proceed.
+ */
+function gateDeferredRuntimeBoot(): {
+  bootStarted: Promise<void>;
+  releaseBoot: () => void;
+} {
+  let releaseBoot!: () => void;
+  let started!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseBoot = resolve;
+  });
+  const bootStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const original = trustPolicyRuntime.readDaemonTrustPolicySnapshot;
+  vi.spyOn(
+    trustPolicyRuntime,
+    'readDaemonTrustPolicySnapshot',
+  ).mockImplementation(async () => {
+    started();
+    await gate;
+    return original();
+  });
+  return { bootStarted, releaseBoot };
 }
 
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
@@ -11071,7 +11126,7 @@ describe('runQwenServe runtime startup failures', () => {
       // 101 once the held upgrade is replayed onto the attached transport;
       // 406 when it falls through to the SSE GET /acp handler instead (the
       // bug this pins against, issue #13995).
-      expect(await probeAcpUpgradeWireStatus(handle)).toBe(101);
+      expect((await probeAcpUpgradeWireResponse(handle)).status).toBe(101);
       // The held upgrade must itself force the deferred runtime up — a client
       // that only opens a socket never touches a REST route.
       expect(createBridge).toHaveBeenCalledTimes(1);
@@ -11081,7 +11136,7 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('answers a retryable 503 to an /acp WebSocket upgrade when the deferred runtime fails to start', async () => {
+  it('answers a terminal 503 to an /acp WebSocket upgrade when the deferred runtime fails to start', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-503-')),
     );
@@ -11092,12 +11147,18 @@ describe('runQwenServe runtime startup failures', () => {
     });
     try {
       // The probe is held in the pre-transport window and flushed with a 503
-      // once the runtime startup failure rejects runtimeReady.
-      expect(await probeAcpUpgradeWireStatus(handle)).toBe(503);
+      // once the runtime startup failure rejects runtimeReady. The failure
+      // is terminal — the runtime never restarts — so the 503 must not
+      // claim retryability.
+      const flushed = await probeAcpUpgradeWireResponse(handle);
+      expect(flushed.status).toBe(503);
+      expect(flushed.retryAfter).toBeUndefined();
       await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
-      // The gate stays closed: a later upgrade gets the same 503 immediately
-      // instead of queueing behind a flush that already ran.
-      expect(await probeAcpUpgradeWireStatus(handle)).toBe(503);
+      // The gate stays closed: a later upgrade gets the same terminal 503
+      // immediately instead of queueing behind a flush that already ran.
+      const later = await probeAcpUpgradeWireResponse(handle);
+      expect(later.status).toBe(503);
+      expect(later.retryAfter).toBeUndefined();
     } finally {
       await handle.close();
     }
@@ -11130,7 +11191,245 @@ describe('runQwenServe runtime startup failures', () => {
       // transport, so the upgrade keeps the pre-gate fall-through — a plain
       // GET /acp answered with the SSE handler's 406, not the gate's 503.
       await handle.runtimeReady;
-      expect(await probeAcpUpgradeWireStatus(handle)).toBe(406);
+      expect((await probeAcpUpgradeWireResponse(handle)).status).toBe(406);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('survives a parked upgrade whose peer resets the connection mid-boot', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-reset-')),
+    );
+    const { bootStarted, releaseBoot } = gateDeferredRuntimeBoot();
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+    const observedUncaught: unknown[] = [];
+    const uncaughtObserver = (error: unknown): void => {
+      observedUncaught.push(error);
+    };
+    process.on('uncaughtException', uncaughtObserver);
+    try {
+      const url = new URL(handle.url);
+      const req = httpRequest({
+        hostname: url.hostname,
+        port: url.port,
+        path: '/acp',
+        headers: {
+          Connection: 'Upgrade',
+          Upgrade: 'websocket',
+          'Sec-WebSocket-Key':
+            Buffer.from('0123456789abcdef').toString('base64'),
+          'Sec-WebSocket-Version': '13',
+          Authorization: 'Bearer secret-token',
+        },
+      });
+      // The probe stays parked until the runtime settles; its late answer is
+      // irrelevant here, so swallow the response and the hang-up error.
+      req.once('response', (res) => res.resume());
+      req.once('upgrade', (_res, socket) => socket.destroy());
+      req.once('error', () => {});
+      req.end();
+      // The runtime only starts this early when the parked upgrade's guard
+      // triggers it (the fallback timer is 1s out), so by now the socket is
+      // parked and the boot is blocked on the trust-policy gate.
+      await bootStarted;
+      const parkedSocket = req.socket;
+      if (!parkedSocket) throw new Error('probe socket was never assigned');
+      parkedSocket.resetAndDestroy();
+      // Let the daemon process the RST while the boot is still gated. The
+      // parked socket has no owner yet, so without the guard's error sink
+      // this ECONNRESET escapes as an uncaught exception.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      releaseBoot();
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+      // The daemon survived: a fresh upgrade is served by the transport.
+      expect((await probeAcpUpgradeWireResponse(handle)).status).toBe(101);
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      expect(observedUncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', uncaughtObserver);
+      await handle.close();
+    }
+  });
+
+  it('restores the Express fall-through after a failed handle-less boot', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-handleless-failed-')),
+    );
+    // QWEN_SERVE_ACP_HTTP=0: the runtime app never mounts an ACP transport,
+    // so no transport can ever attach — the failed boot must not keep the
+    // raw upgrade gate.
+    vi.stubEnv('QWEN_SERVE_ACP_HTTP', '0');
+    const { handle } = await startDeferredDaemon(tmpDir, {
+      createBridge: () => {
+        throw new Error('runtime boom');
+      },
+    });
+    try {
+      // The probe parked in the pre-transport window is flushed with a
+      // terminal 503 once the startup failure rejects runtimeReady.
+      const flushed = await probeAcpUpgradeWireResponse(handle);
+      expect(flushed.status).toBe(503);
+      expect(flushed.retryAfter).toBeUndefined();
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      // The gate stepped aside: Express answers later upgrades, so a wrong
+      // token hits the bearer gate (401) instead of the raw pre-auth 503.
+      const rejected = await probeAcpUpgradeWireResponse(
+        handle,
+        'Bearer wrong-token',
+      );
+      expect(rejected.status).toBe(401);
+      // An authorized upgrade gets the bootstrap app's startup-failure
+      // envelope: 503 with no Retry-After (a terminal state is not
+      // retryable).
+      const authorized = await probeAcpUpgradeWireResponse(handle);
+      expect(authorized.status).toBe(503);
+      expect(authorized.retryAfter).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+      await handle.close();
+    }
+  });
+
+  it('replays every parked upgrade once the transport attaches', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-replay-')),
+    );
+    const { bootStarted, releaseBoot } = gateDeferredRuntimeBoot();
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+    try {
+      // Start both probes before awaiting anything so both are parked while
+      // the boot is gated.
+      const first = probeAcpUpgradeWireResponse(handle);
+      const second = probeAcpUpgradeWireResponse(handle);
+      await bootStarted;
+      // Let any in-flight arrival land in the park queue before releasing.
+      await new Promise((resolve) => setImmediate(resolve));
+      releaseBoot();
+      const [firstRes, secondRes] = await Promise.all([first, second]);
+      expect(firstRes.status).toBe(101);
+      expect(secondRes.status).toBe(101);
+      // Two parked upgrades must not start the runtime twice (startRuntime
+      // is idempotent while one is in flight).
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('caps parked upgrades and evicts sockets whose peer went away', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-cap-')),
+    );
+    const { bootStarted, releaseBoot } = gateDeferredRuntimeBoot();
+    const { handle } = await startDeferredDaemon(tmpDir);
+    try {
+      // PRE_TRANSPORT_UPGRADE_HOLD_MAX is 32: fill the park queue while the
+      // boot is gated.
+      const parkedSockets: net.Socket[] = [];
+      const parked = Array.from({ length: 32 }, () =>
+        probeAcpUpgradeWireResponse(handle, undefined, (socket) =>
+          parkedSockets.push(socket),
+        ),
+      );
+      await bootStarted;
+      // Let all 32 arrivals land in the park queue.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The overflow upgrade is answered immediately — still booting, so
+      // this 503 is the retryable kind.
+      const overflow = await probeAcpUpgradeWireResponse(handle);
+      expect(overflow.status).toBe(503);
+      expect(overflow.retryAfter).toBe('1');
+      // A peer that went away must release its slot: destroy the first
+      // parked socket client-side and give the daemon a moment to evict it.
+      const evicted = parked.shift()!;
+      void evicted.catch(() => 'aborted');
+      parkedSockets[0]!.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The freed slot lets one more upgrade park; without eviction it would
+      // hit the cap and be answered 503 like the overflow probe above.
+      const refilled = probeAcpUpgradeWireResponse(handle);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      releaseBoot();
+      expect((await refilled).status).toBe(101);
+      const results = await Promise.all(parked);
+      for (const res of results) {
+        expect(res.status).toBe(101);
+      }
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps a parked upgrade held until the runtime fully settles when channel workers start', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-ws-settle-')),
+    );
+    let releaseWorker!: () => void;
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    const workerSnapshot: ChannelWorkerSnapshot = {
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    };
+    const worker = {
+      start: vi.fn(),
+      stop: vi.fn().mockResolvedValue(undefined),
+      restart: vi.fn().mockResolvedValue(workerSnapshot),
+      killAllSync: vi.fn(),
+      snapshot: vi.fn(() => workerSnapshot),
+      enqueueWebhookTask: vi
+        .fn()
+        .mockRejectedValue(new Error('Channel worker is not running.')),
+      deliverChannelMessage: vi
+        .fn()
+        .mockRejectedValue(new Error('Channel worker is not running.')),
+    };
+    const factory = vi.fn((opts: CreateChannelWorkerSupervisorOptions) => {
+      worker.start.mockImplementation(async () => {
+        await workerGate;
+        opts.onReady?.(worker.snapshot());
+      });
+      return worker;
+    });
+    const { handle } = await startDeferredDaemon(tmpDir, {
+      serveOptions: {
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      deps: {
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: {
+          readServiceInfo: vi.fn(() => null),
+          writeServeServiceInfo: vi.fn(),
+          reserveServeServiceInfo: vi.fn(),
+          removeServiceInfo: vi.fn(),
+          removeServeServiceInfo: vi.fn(() => true),
+        },
+      },
+    });
+    try {
+      const probe = probeAcpUpgradeWireResponse(handle);
+      // The transport attaches before channel workers start: once the worker
+      // is starting, attach has already run but the runtime has not settled.
+      await vi.waitFor(() => {
+        expect(worker.start).toHaveBeenCalled();
+      });
+      // The parked upgrade must not be replayed at attach time — it waits
+      // for the same settle boundary the REST hold waits on.
+      await expect(
+        Promise.race([
+          probe.then(() => 'answered'),
+          new Promise((resolve) => setTimeout(() => resolve('pending'), 150)),
+        ]),
+      ).resolves.toBe('pending');
+      releaseWorker();
+      expect((await probe).status).toBe(101);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
     } finally {
       await handle.close();
     }

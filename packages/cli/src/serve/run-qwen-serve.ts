@@ -478,6 +478,10 @@ const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
 const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
 // Keep manual/non-probed starts moving; health probes cancel this fallback.
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
+// Cap parked pre-transport upgrades: the park is pre-auth, so without a cap
+// an unauthenticated peer could hold one connection slot per upgrade for the
+// whole boot window.
+const PRE_TRANSPORT_UPGRADE_HOLD_MAX = 32;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
 const DEFAULT_MAX_SESSIONS = 32;
@@ -10775,21 +10779,48 @@ async function runQwenServeImpl(
     // 'upgrade' listener registered yet, Node routes an upgrade request to
     // Express as a plain GET, which the delegating app holds until the
     // runtime is ready and then forwards to the SSE GET handler: the client
-    // sees a misleading 406 instead of a socket. Hold early upgrades here
-    // and replay them once the transport attaches (the same hold the
-    // delegating app gives REST requests), or answer a retryable 503 once
-    // startup has failed. A runtime that settles without a transport
-    // (handle-less app) restores the fall-through instead.
+    // sees a misleading 406 instead of a socket. Park early upgrades here
+    // and replay them once the runtime settles with a transport attached —
+    // the same settle boundary the delegating app's REST hold waits on.
+    // Unlike the REST hold this parks pre-auth (the replayed handshake
+    // re-authenticates in the acp-http listener), so the queue is capped and
+    // sockets whose peer went away are evicted. Once startup settles or
+    // fails without a transport the answer is a terminal 503, and a runtime
+    // that settles without a transport (handle-less app) restores the
+    // Express fall-through for later upgrades.
     const preTransportUpgrades: Array<{
       req: IncomingMessage;
       socket: Duplex;
       head: Buffer;
+      detach: () => void;
     }> = [];
     let acpWsTransportAttached = false;
     let preTransportUpgradeGateClosed = false;
+    const dropPreTransportUpgrade = (socket: Duplex): void => {
+      const index = preTransportUpgrades.findIndex(
+        (queued) => queued.socket === socket,
+      );
+      if (index !== -1) preTransportUpgrades.splice(index, 1);
+    };
+    const answerPreTransportUpgrade503 = (
+      socket: Duplex,
+      retryable: boolean,
+    ): void => {
+      // Retry-After only while the daemon may still finish booting (queue
+      // overflow); the settle/failure flushes are terminal — this process
+      // never retries the runtime startup.
+      socket.write(
+        retryable
+          ? 'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n'
+          : 'HTTP/1.1 503 Service Unavailable\r\n\r\n',
+      );
+      socket.destroy();
+    };
     const releasePreTransportUpgrades = (): void => {
       const queued = preTransportUpgrades.splice(0);
-      for (const { req, socket, head } of queued) {
+      let rejected = 0;
+      for (const { req, socket, head, detach } of queued) {
+        detach();
         if (socket.destroyed) continue;
         if (acpWsTransportAttached) {
           // 'upgrade' listeners run in registration order: this guard is
@@ -10798,11 +10829,15 @@ async function runQwenServeImpl(
           // routing, handshake) exactly as for a direct arrival.
           server.emit('upgrade', req, socket, head);
         } else {
-          socket.write(
-            'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n',
-          );
-          socket.destroy();
+          rejected += 1;
+          answerPreTransportUpgrade503(socket, false);
         }
+      }
+      if (rejected > 0) {
+        daemonLog.warn(
+          `deferred runtime: answered ${rejected} parked upgrade(s) with ` +
+            '503 (no ACP transport attached)',
+        );
       }
     };
     const attachAcpWsTransport = (
@@ -10811,7 +10846,10 @@ async function runQwenServeImpl(
       if (!acpHandle || acpWsTransportAttached) return;
       acpHandle.attachServer(server);
       acpWsTransportAttached = true;
-      releasePreTransportUpgrades();
+      // Parked upgrades are deliberately not released here: attach precedes
+      // channel-worker startup in completeRuntimeStartup, and the REST hold
+      // ends only when runtimeReady settles. The runtimeReady handlers below
+      // release the queue, keeping WS clients on the same settle boundary.
     };
     const preTransportUpgradeGuard = (
       req: IncomingMessage,
@@ -10820,13 +10858,37 @@ async function runQwenServeImpl(
     ): void => {
       if (acpWsTransportAttached) return;
       if (preTransportUpgradeGateClosed) {
-        socket.write(
-          'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n',
-        );
-        socket.destroy();
+        answerPreTransportUpgrade503(socket, false);
         return;
       }
-      preTransportUpgrades.push({ req, socket, head });
+      if (preTransportUpgrades.length >= PRE_TRANSPORT_UPGRADE_HOLD_MAX) {
+        answerPreTransportUpgrade503(socket, true);
+        return;
+      }
+      // Node detaches its own error handling before emitting 'upgrade', so
+      // without these sinks a peer that resets or abandons a parked socket
+      // would surface as an uncaught ECONNRESET and take the daemon down.
+      const dropAndDestroy = (): void => {
+        dropPreTransportUpgrade(socket);
+        socket.destroy();
+      };
+      const drop = (): void => dropPreTransportUpgrade(socket);
+      const detach = (): void => {
+        socket.removeListener('error', dropAndDestroy);
+        socket.removeListener('end', dropAndDestroy);
+        socket.removeListener('close', drop);
+      };
+      socket.once('error', dropAndDestroy);
+      socket.once('end', dropAndDestroy);
+      socket.once('close', drop);
+      preTransportUpgrades.push({ req, socket, head, detach });
+      daemonLog.info(
+        `deferred runtime: parked pre-transport upgrade ${
+          req.url?.split('?', 1)[0] ?? '/'
+        } from ${
+          (socket as { remoteAddress?: string }).remoteAddress ?? 'unknown'
+        } (${preTransportUpgrades.length} held)`,
+      );
       // A socket opened before any REST request must still force the
       // deferred runtime up, same as the delegating app's start-on-request.
       if (!runtimeStartupSettled) startRuntimeForRequest?.();
@@ -10838,17 +10900,37 @@ async function runQwenServeImpl(
         // hosted-harness profile, QWEN_SERVE_ACP_HTTP=0) must keep the
         // Express fall-through its routes already expose (hidden 404, SSE
         // 406), so the guard steps aside for later upgrades. Upgrades that
-        // raced the startup window still get the gate's retryable 503.
+        // raced the startup window still get the gate's terminal 503.
         const acpHandle = (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
           'acpHandle'
         ] as AcpHttpHandle | undefined;
         if (!acpHandle) {
           server.removeListener('upgrade', preTransportUpgradeGuard);
+          daemonLog.info(
+            'deferred runtime: settled without an ACP transport, ' +
+              'restoring Express upgrade fall-through',
+          );
         }
         preTransportUpgradeGateClosed = true;
         releasePreTransportUpgrades();
       },
       () => {
+        // A failed startup never retries (runtimeStarting is never reset),
+        // so a handle-less configuration must not keep the raw gate: it
+        // would answer every upgrade pre-auth for the rest of the process
+        // lifetime. The app-local handle cannot decide here — a failed
+        // buildRuntime leaves both runtimeApp and runtimeAppForCleanup
+        // undefined — so mirror the boot-time mount condition instead.
+        if (
+          opts.profile === 'hosted-harness' ||
+          !resolveAcpHttpEnabled(daemonRuntimeBaseEnv)
+        ) {
+          server.removeListener('upgrade', preTransportUpgradeGuard);
+          daemonLog.info(
+            'deferred runtime: startup failed without an ACP transport, ' +
+              'restoring Express upgrade fall-through',
+          );
+        }
         preTransportUpgradeGateClosed = true;
         releasePreTransportUpgrades();
       },
