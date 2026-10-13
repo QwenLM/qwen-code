@@ -23,7 +23,11 @@ export interface ModSource {
 
 export type ModOption = string | number | boolean | string[];
 export type ModOptions = Record<string, ModOption>;
-export type ModPluginConfigs = Record<string, { options?: ModOptions }>;
+export type ModToolDialect = 'native' | 'claude';
+export type ModPluginConfigs = Record<
+  string,
+  { options?: ModOptions; toolDialect?: ModToolDialect }
+>;
 
 export interface ModDependency {
   name: string;
@@ -47,6 +51,7 @@ export interface ModPlugin {
   name: string;
   source: ModSource;
   options: ModOptions;
+  toolDialect?: ModToolDialect;
 }
 
 export interface ModLog {

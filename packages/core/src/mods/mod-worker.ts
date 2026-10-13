@@ -12,6 +12,7 @@ import {
 } from 'quickjs-emscripten-core';
 import { MOD_GUEST_FACTORY } from './guest.js';
 import { compileModModules } from './module-loader.js';
+import { modToolInputView } from './tool-dialect.js';
 import type { ModToolCallInput, ModToolCheckResult } from './tool-events.js';
 import {
   MOD_MAX_BYTES,
@@ -347,6 +348,8 @@ async function dispatch(
     dispatch(event, e, origin, nested, bottom, index + 1, owner);
   if (!realm.patterns.some((pattern) => patternMatches(pattern, event)))
     return next(input, frames);
+  const view = modToolInputView(event, input, realm.plugin.toolDialect);
+  if (!view) return next(input, frames);
   const active = frames.filter((frame) => frame.plugin === index);
   const lastFrame = frames.at(-1);
   const leftOut = lastFrame?.plugin === index ? [lastFrame.registration] : [];
@@ -360,7 +363,8 @@ async function dispatch(
     closed: false,
     plugin: index,
     event,
-    input,
+    input: view.input,
+    toNativeInput: view.toNativeInput,
     origin,
     frames,
     budget: new ModBudget(told.length ? 1000 : MOD_TIMEOUT_MS),
@@ -378,7 +382,7 @@ async function dispatch(
         realm.invoke('run', {
           id: call.id,
           event,
-          input,
+          input: call.input,
           origin,
           leftOut,
           told,
@@ -472,7 +476,8 @@ async function hostCall(
   if (method === 'next') {
     if (call.recovering && call.last) return call.budget.lend(() => call.last!);
     validateInput(call.event, value, call.input);
-    const task = call.budget.lend(() => call.next(value, frames));
+    const nativeInput = call.toNativeInput(value);
+    const task = call.budget.lend(() => call.next(nativeInput, frames));
     call.last = task;
     void task.catch(() => {});
     return task;
