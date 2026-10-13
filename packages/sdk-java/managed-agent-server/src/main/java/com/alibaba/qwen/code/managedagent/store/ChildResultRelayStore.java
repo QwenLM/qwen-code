@@ -63,14 +63,21 @@ public class ChildResultRelayStore {
         }
     }
 
-    // delivery_state is null on the shell kind, and the relay drives only
-    // the child_agent kind: a workflow child's execution belongs to the
-    // workflow runtime, which does not exist yet (H4c registers the kind
-    // disabled), so its rows never reach this page; the ledger join
-    // drops every row whose classification is terminal (delivered,
-    // orphaned or given up), because the bounded discovery set is for
-    // work still owed — accumulated terminal rows would otherwise starve
-    // the fleet-wide scan behind an ORDER BY created_at LIMIT. The
+    /**
+     * The child Session kinds — the {@code task_kind} values the relay
+     * discovery page and the close cascade both act on (#13803): one SQL
+     * list, so a third kind joins both queries or neither.
+     */
+    private static final String CHILD_SESSION_KINDS_SQL =
+            "('child_agent', 'workflow')";
+
+    // delivery_state is null on the shell kind, and the relay drives the
+    // two child Session kinds (`child_agent` and `workflow`, the latter
+    // since the workflow runtime slice of #13803); the ledger join drops
+    // every row whose classification is terminal (delivered, orphaned or
+    // given up), because the bounded discovery set is for work still
+    // owed — accumulated terminal rows would otherwise starve the
+    // fleet-wide scan behind an ORDER BY created_at LIMIT. The
     // eligibility halves apply to both delivery arms: an unfiltered
     // accepted/consumed arm lets backed-off or foreign-leased rows squat
     // every slot of the bounded page, so a newer due launch is never
@@ -102,7 +109,7 @@ public class ChildResultRelayStore {
                     + " ON l.parent_session_id = r.session_id"
                     + " AND l.child_run_id = r.record_id"
                     + " WHERE r.domain = 'child_run'"
-                    + " AND r.task_kind = 'child_agent'"
+                    + " AND r.task_kind IN " + CHILD_SESSION_KINDS_SQL
                     + " AND ((r.delivery_state IN ('planned', 'accepting',"
                     + " 'unknown') AND (l.state IS NULL OR l.state NOT IN"
                     + " ('done', 'orphaned', 'unknown')))"
@@ -574,11 +581,11 @@ public class ChildResultRelayStore {
     }
 
     /**
-     * The non-terminal child-agent runs of one Session, for the close
-     * cascade: task projections say what is still alive; the bodies name
-     * the child Sessions (null when creation never attached). Like the
-     * relay's discovery page, the cascade acts on the child_agent kind
-     * only until the workflow runtime exists.
+     * The non-terminal child runs of one Session, for the close cascade:
+     * task projections say what is still alive; the bodies name the child
+     * Sessions (null when creation never attached). Like the relay's
+     * discovery page, the cascade acts on both child Session kinds
+     * (`child_agent` and `workflow`, #13803).
      */
     public List<LiveScope> findLiveScopes(String tenantId,
             String parentSessionId) {
@@ -587,7 +594,7 @@ public class ChildResultRelayStore {
                         + " FROM qwen_managed_session_extension_record"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND delivery_state IS NOT NULL"
-                        + " AND task_kind = 'child_agent'"
+                        + " AND task_kind IN " + CHILD_SESSION_KINDS_SQL
                         + " AND task_state NOT IN ('completed', 'failed',"
                         + " 'cancelled')"
                         + " ORDER BY created_at, record_id",
