@@ -3,11 +3,13 @@ package com.alibaba.qwen.code.managedagent.store;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.sun.source.tree.AssignmentTree;
 import com.sun.source.tree.BinaryTree;
 import com.sun.source.tree.BlockTree;
 import com.sun.source.tree.CaseTree;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
+import com.sun.source.tree.CompoundAssignmentTree;
 import com.sun.source.tree.ConditionalExpressionTree;
 import com.sun.source.tree.IdentifierTree;
 import com.sun.source.tree.LambdaExpressionTree;
@@ -133,7 +135,11 @@ class SessionRowLockOrderTest {
     // provably reaches neither the session lock nor the turn row — a
     // candidate that starts reaching a side throws instead of exempting —
     // and the pin is asserted exactly, so a new unresolvable reference or
-    // a stale entry fails the sibling boundary test.
+    // a stale entry fails the sibling boundary test. ManagedEventEnvelopes
+    // and the staged-placement delegation entered through the merge:
+    // MessageDigest.digest at line ~352 names the local digest/1 on the
+    // untypeable receiver, and the lockStagedPlacement/2 delegator names
+    // only itself; both candidates are JSON/delegation only.
     private static final Map<String, Set<String>> AMBIGUITY_EXEMPTIONS =
             Map.ofEntries(
                     Map.entry("ChildResultRelayStore.java",
@@ -148,6 +154,8 @@ class SessionRowLockOrderTest {
                             Set.of("ManagedArtifactReader.open/1",
                                     "ManagedArtifactReader.readRange/3",
                                     "ManagedArtifactReader.readRange/5")),
+                    Map.entry("ManagedEventEnvelopes.java",
+                            Set.of("ManagedEventEnvelopes.digest/1")),
                     Map.entry("ManagedExtensionRecordStore.java",
                             Set.of("ManagedExtensionRecordStore.sha256/1",
                                     "ManagedExtensionRecordStore.storedRow/2")),
@@ -178,6 +186,7 @@ class SessionRowLockOrderTest {
                     Map.entry("ToolPublicationDataStore.java",
                             Set.of("ToolPublicationDataStore.hash/1",
                                     "ToolPublicationDataStore.lockOriginalSettledResult/3",
+                                    "ToolPublicationDataStore.lockStagedPlacement/2",
                                     "ToolPublicationDataStore.requireStagedCall/2",
                                     "ToolPublicationDataStore.usesDataSource/1",
                                     "VerificationBudget.timeout/2",
@@ -1192,6 +1201,144 @@ class SessionRowLockOrderTest {
                 .hasMessageContaining("anonLocker");
     }
 
+    // A mutually-recursive delegate pair cannot be ranked without
+    // deciding which member runs first, so the descent re-entry is
+    // undecidable and fails closed exactly like the audit's other
+    // undecidable shapes; deleting the recursion is the only way the two
+    // violations (each writes the turn row before its session lock)
+    // surface at all.
+    @Test
+    void theAuditFailsClosedOnAMutuallyRecursiveDelegate() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void writerA(String tenantId, String sessionId) {
+                        writerB(tenantId, sessionId);
+                    }
+
+                    @Transactional
+                    public void writerB(String tenantId, String sessionId) {
+                        writerA(tenantId, sessionId);
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThatThrownBy(() -> audit(synthetic))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("recursive");
+    }
+
+    // The String-local overlay must follow reassignment, not only the
+    // declaration: below, the declaration spells the session lock, the
+    // reassignment spells the turn row, and the later use runs the turn
+    // row spelling. Scoring the declaration's stale text at the use —
+    // and at the assignment itself, as [stale, new] — would read the
+    // inversion as lock-before-turn and let the writer off.
+    @Test
+    void theAuditTracksAStringLocalThroughReassignment() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void reassignedLocalWriter(String tenantId,
+                            String sessionId) {
+                        String sql = "SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE";
+                        sql = "UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'";
+                        jdbc.update(sql);
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThat(audit(synthetic).violations()).containsExactly(
+                "reassignedLocalWriter");
+    }
+
+    // A local class declared inside a member body runs its methods where
+    // they are invoked — after the turn-row write below — so its body
+    // reaching the session lock fails closed exactly like an
+    // anonymous-class body or a held lambda; folding it inline at the
+    // declaration would put the lock before the write and certify the
+    // inversion.
+    @Test
+    void theAuditFailsClosedOnALocalClassHoldingTheSessionLock() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void localClassWriter(String tenantId,
+                            String sessionId) {
+                        class HeldLocker {
+                            void run() {
+                                jdbc.queryForMap("SELECT session_id FROM"
+                                        + " managed_agent_session"
+                                        + " FOR UPDATE");
+                            }
+                        }
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        new HeldLocker().run();
+                    }
+                }
+                """;
+        assertThatThrownBy(() -> audit(synthetic))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("localClassWriter");
+    }
+
+    // A merged conditional spelling that carries both needles — the
+    // false-branch turn-row write and the other branch's session lock —
+    // is not a statement any run executes, so it cannot certify the
+    // member on its own; the walk must look past it, where the second
+    // turn-row write lands before the required locking call, and the
+    // either-branch rule for a lock-only spelling still certifies the
+    // runs that take it.
+    @Test
+    void theAuditDoesNotCertifyAMergedConditionalBranchCarryingBothSides() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void conditionalWriter(String tenantId,
+                            String sessionId, boolean chooseLock) {
+                        jdbc.queryForMap(chooseLock
+                                ? "SELECT session_id FROM"
+                                        + " managed_agent_session"
+                                        + " FOR UPDATE"
+                                : "UPDATE managed_agent_turn SET status"
+                                        + " = 'FAILED'");
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'BROKEN'");
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThat(audit(synthetic).violations()).containsExactly(
+                "conditionalWriter");
+    }
+
     // A lambda handed straight into a call runs within it, so its body
     // folds at that position: the writer that locks first stays clean.
     @Test
@@ -1483,8 +1630,8 @@ class SessionRowLockOrderTest {
                                         || turnReaching.contains(
                                                 event.callee()));
                 if (sideReaching) {
-                    throw new IllegalStateException("a lambda or"
-                            + " anonymous-class body in "
+                    throw new IllegalStateException("a lambda,"
+                            + " anonymous-class or local-class body in "
                             + member.getKey().handle() + " reaches the"
                             + " session lock or the turn row, and its"
                             + " invocation site is invisible to the audit");
@@ -1590,13 +1737,23 @@ class SessionRowLockOrderTest {
     // order: the session-row lock must precede the first turn-row access.
     // A call reaching both sides is the delegator shape — the two events
     // sit on the same call site — so the comparison descends into the
-    // callee, whose own order is what the site answers. The visited set
-    // ends the cycle when a delegate is its own caller's sibling.
+    // callee, whose own order is what the site answers. A descent that
+    // revisits a member on its own stack is undecidable — a
+    // mutually-recursive delegate chain — and fails closed like every
+    // other undecidable shape in this audit, never rated clean by
+    // accident.
     private static boolean lockAfterTurn(Key method,
             Map<Key, List<Event>> events, Set<Key> lockReaching,
             Set<Key> turnReaching, Set<Key> visiting) {
         if (!visiting.add(method)) {
-            return false;
+            // A delegate cycle reaches this member again while it is still
+            // on the descent stack: the walk cannot rank a recursive chain
+            // any more than it can rank the other undecidable shapes in
+            // this file, so it fails closed the same way instead of
+            // awarding the recursion an unearned clean answer.
+            throw new IllegalStateException("a mutually-recursive delegate"
+                    + " chain revisits " + method.handle()
+                    + " — the walk cannot rank it");
         }
         for (Event event : events.getOrDefault(method, List.of())) {
             if (event.callee() != null) {
@@ -1614,9 +1771,15 @@ class SessionRowLockOrderTest {
                 }
                 continue;
             }
-            // A statement whose SQL locks the session row while reading the
-            // turn row takes the write lock it declares; the read half is
-            // the database's own ordering.
+            // A merged conditional/switch spelling that carries both
+            // needles is not a statement any run executes: it must not
+            // certify the member clean by its lock flag alone, so the
+            // walk keeps looking past it to the statement that actually
+            // precedes the lock. A statement whose SQL locks the session
+            // row on its own takes the write lock it declares.
+            if (event.lock() && event.turn()) {
+                continue;
+            }
             if (event.lock()) {
                 return false;
             }
@@ -1789,6 +1952,33 @@ class SessionRowLockOrderTest {
         }
 
         @Override
+        public Void visitAssignment(AssignmentTree node, Void unused) {
+            // The overlay must follow the reassignment: without it a local
+            // re-aimed at the turn row keeps scoring the declaration's
+            // stale lock spelling at every later use. The overlay updates
+            // before the walk scores the assigned expression, so the
+            // statement itself reads in evaluation order.
+            if (node.getVariable() instanceof IdentifierTree identifier) {
+                constants.put(identifier.getName().toString(),
+                        flatten(node.getExpression(), constants));
+            }
+            return super.visitAssignment(node, unused);
+        }
+
+        @Override
+        public Void visitCompoundAssignment(CompoundAssignmentTree node,
+                Void unused) {
+            // `sql += "..."`: the overlay gains the appended text instead
+            // of forgetting the spelling reached so far.
+            if (node.getVariable() instanceof IdentifierTree identifier) {
+                String name = identifier.getName().toString();
+                constants.put(name, constants.getOrDefault(name, "")
+                        + flatten(node.getExpression(), constants));
+            }
+            return super.visitCompoundAssignment(node, unused);
+        }
+
+        @Override
         public Void visitLambdaExpression(LambdaExpressionTree node,
                 Void unused) {
             if (directArgumentLambdas.contains(node)) {
@@ -1829,6 +2019,27 @@ class SessionRowLockOrderTest {
                     }
                 } else {
                     scan(member, null);
+                }
+            }
+            heldLambdas.add(held.events);
+            heldLambdas.addAll(held.heldLambdas);
+            return null;
+        }
+
+        @Override
+        public Void visitClass(ClassTree node, Void unused) {
+            // A local class declared inside a member body runs its methods
+            // where new Locker().method() is invoked — never at the class
+            // declaration — so its bodies must be held aside exactly like
+            // an anonymous-class body; folding them inline would score the
+            // session lock the body takes where it never runs.
+            EventScanner held = new EventScanner(new ArrayList<>(), caller,
+                    methods, constants, ambiguous);
+            for (Tree member : node.getMembers()) {
+                if (member instanceof MethodTree method
+                        && method.getBody() != null
+                        && !method.getName().contentEquals("<init>")) {
+                    held.scan(method.getBody(), null);
                 }
             }
             heldLambdas.add(held.events);

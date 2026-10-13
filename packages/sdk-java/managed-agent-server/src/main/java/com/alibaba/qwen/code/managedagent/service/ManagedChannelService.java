@@ -511,12 +511,14 @@ public class ManagedChannelService {
         // Session (decision 4). The create route refuses C0 control
         // characters and DEL in a title, and the producer chain sanitizes
         // only [\r\n\0], so a TAB in a subject — or in the senderId the
-        // title falls back to — would refuse the route's Session: fold
-        // them to spaces here, keeping the senderId fallback for a subject
-        // that folds to blank.
+        // title falls back to, or in the platform the registered channel
+        // carries — would refuse the route's Session: fold them to spaces
+        // here, keeping the senderId fallback for a subject that folds to
+        // blank.
         String subject = event.subject() == null ? null
                 : event.subject().replaceAll("[\\p{Cntrl}]", " ");
-        String title = instance.platform() + ": "
+        String title = instance.platform().replaceAll("[\\p{Cntrl}]", " ")
+                + ": "
                 + (subject == null || subject.isBlank()
                         ? event.senderId().replaceAll("[\\p{Cntrl}]", " ")
                         : subject);
