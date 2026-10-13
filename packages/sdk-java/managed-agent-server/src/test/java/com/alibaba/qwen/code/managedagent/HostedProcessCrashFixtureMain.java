@@ -64,11 +64,11 @@ public final class HostedProcessCrashFixtureMain {
             sessionId = Files.readString(saved);
         } else {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
-            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage',"
                     + " 'Workspace', ?, ?, 'ACTIVE')", tenant,
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             sessionId = spring.getBean(ManagedAgentStore.class).insertWorkspaceSessionCommand(tenant, "actor", "create",
                     "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,

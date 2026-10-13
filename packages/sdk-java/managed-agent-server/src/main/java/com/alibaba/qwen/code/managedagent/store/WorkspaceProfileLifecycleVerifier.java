@@ -261,10 +261,10 @@ public class WorkspaceProfileLifecycleVerifier {
     private java.util.Set<String> nativeFileInputs(OperationRecord operation) {
         var inputs = new java.util.HashSet<String>();
         var refs = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256"
-                + " FROM qwen_managed_session_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
-                + " AND kind = 'managed-tool-input' AND state = 'REFERENCED' FOR UPDATE",
+                + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                + " AND kind = ? AND state = 'REFERENCED' FOR UPDATE",
                 ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
-                operation.tenantId(), operation.sessionId());
+                operation.tenantId(), operation.sessionId(), "managed-tool-input");
         for (var row : refs) {
             var ref = JSON.createObjectNode().put("resourceId", row.get("resource_id").toString())
                     .put("kind", "managed-tool-input").put("schemaVersion", ((Number) row.get("schema_version")).intValue())

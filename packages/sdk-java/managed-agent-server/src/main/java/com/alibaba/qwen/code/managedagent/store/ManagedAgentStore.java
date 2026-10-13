@@ -126,8 +126,17 @@ public class ManagedAgentStore implements AgentStateStore {
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
-    private final RowMapper<SessionRecord> sessionMapper = (result, row) -> readSession(result,
-            streamCounters(result.getString("tenant_id"), result.getString("session_id")));
+    private static final String SESSION_WITH_STREAM = "SELECT ma_session.*, es.last_sequence AS list_last_sequence,"
+            + " es.replay_floor_sequence AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es"
+            + " ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id"
+            + " AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
+    private final RowMapper<SessionRecord> sessionMapper = (result, row) -> {
+        if (result.getObject("list_last_sequence") == null || result.getObject("list_floor_sequence") == null) {
+            throw new IllegalStateException("Session stream is unavailable.");
+        }
+        return readSession(result, new StreamCounters(result.getLong("list_last_sequence"),
+                result.getLong("list_floor_sequence")));
+    };
     private final RowMapper<SessionRecord> sessionListMapper =
             (result, row) ->
                     readSession(
@@ -2825,8 +2834,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId) {
         List<SessionRecord> rows =
                 jdbc.query(
-                        "SELECT * FROM ma_session WHERE session_kind = 'PUBLIC' AND tenant_id = ?"
-                            + " AND session_id = ?",
+                        SESSION_WITH_STREAM + " WHERE ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id = ?"
+                            + " AND ma_session.session_id = ?",
                         sessionMapper,
                         tenantId,
                         sessionId);
@@ -2835,8 +2844,8 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public Optional<SessionRecord> findSessionById(String sessionId) {
         List<SessionRecord> rows = jdbc.query(
-                "SELECT * FROM ma_session WHERE session_kind = 'PUBLIC' AND"
-                        + " session_id = ?",
+                SESSION_WITH_STREAM + " WHERE ma_session.session_kind = 'PUBLIC' AND"
+                        + " ma_session.session_id = ?",
                 sessionMapper, sessionId);
         return rows.stream().findFirst();
     }
@@ -4086,9 +4095,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String sourceKey) {
         // A locking read sees the latest committed status, where a plain one
         // could still see the snapshot taken before a deletion committed.
-        Optional<SessionRecord> session = jdbc.query("SELECT * FROM"
-                        + " ma_session WHERE tenant_id = ?"
-                        + " AND session_kind = 'PUBLIC' AND session_id = ? FOR UPDATE",
+        Optional<SessionRecord> session = jdbc.query(SESSION_WITH_STREAM + " WHERE ma_session.tenant_id = ?"
+                        + " AND ma_session.session_kind = 'PUBLIC' AND ma_session.session_id = ? FOR UPDATE",
                 sessionMapper, tenantId, sessionId).stream()
                 .findFirst();
         if (session.isEmpty() || "DELETING".equals(session.get().status())
@@ -4563,8 +4571,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId) {
         try {
             return jdbc.queryForObject(
-                    "SELECT * FROM ma_session WHERE session_kind = 'PUBLIC' AND tenant_id = ? AND"
-                        + " session_id = ? FOR UPDATE",
+                    SESSION_WITH_STREAM + " WHERE ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id = ? AND"
+                        + " ma_session.session_id = ? FOR UPDATE",
                     sessionMapper,
                     tenantId,
                     sessionId);
@@ -5030,25 +5038,6 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private record StreamCounters(long lastSequence, long floorSequence) {}
-
-    private StreamCounters streamCounters(String tenantId, String sessionId) {
-        boolean lock = org.springframework.transaction.support.TransactionSynchronizationManager
-                .isActualTransactionActive() && !org.springframework.transaction.support.TransactionSynchronizationManager
-                .isCurrentTransactionReadOnly();
-        List<StreamCounters> rows =
-                jdbc.query(
-                        "SELECT last_sequence, replay_floor_sequence FROM ma_event_stream WHERE"
-                            + " tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND"
-                            + " stream_id = X''"
-                                + (lock ? " FOR UPDATE" : ""),
-                        (row, index) -> new StreamCounters(row.getLong(1), row.getLong(2)),
-                        tenantId,
-                        sessionId);
-        if (rows.size() != 1) {
-            throw new IllegalStateException("Session stream is unavailable.");
-        }
-        return rows.getFirst();
-    }
 
     private static String placeholders(int count) {
         return String.join(", ", Collections.nCopies(count, "?"));

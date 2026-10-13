@@ -477,8 +477,9 @@ public class ToolPublicationAsyncVerificationTest {
                 Timestamp.class)).isNotNull();
         // The deferral lands about a second out; pin it further ahead so the
         // not-yet-due rescan cannot lose that race on a loaded runner.
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = ?"
-                + " WHERE operation_id = 'retry'", Timestamp.valueOf("2100-01-01 00:00:00"));
+        assertThat(fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = ?"
+                + " WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = ?",
+                Timestamp.valueOf("2100-01-01 00:00:00"), "retry")).isOne();
         assertThat(data.verifyNextOperation()).isFalse();
         due("retry");
         assertThat(data.verifyNextOperation()).isTrue();

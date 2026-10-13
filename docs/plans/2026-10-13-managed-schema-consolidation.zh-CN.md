@@ -14,7 +14,7 @@
 
 在 `packages/sdk-java/runtime-broker` 执行 `mvn clean verify install`，在 `packages/sdk-java/managed-agent-server` 执行 `mvn clean verify`。检查最终应用 jar：Broker 依赖中应只有 canonical V1，不能包含旧 `db/migration` 资源或类，以及独立的 `schema.sql`。
 
-真实 MySQL8.4 测试使用 `mysql-integration` profile 和专用数据库管理地址。新增 schema 测试为每项创建随机库，仅删除自己创建的库。原有集成门禁也必须指向任务专用实例，不能使用应用数据库。JVM 时区变体在同一真实数据库上运行，并使用数据库原生时间的租约谓词。
+真实 MySQL 8.4 测试使用 `mysql-integration` profile，连接任务专用实例上的独立空库。部分用例通过此地址再创建随机库，其他用例直接初始化传入的库。每次 suite 使用唯一数据库，结束后仅删除该库及用例创建的子库。不能把系统 mysql 目录当作应用测试数据库，也不能使用应用数据库。JVM 时区变体在同一真实数据库上运行，并使用数据库原生时间的租约谓词。
 
 验证包括日志各写入边界的回滚与重放、旧 writer/claim generation、字节精确身份与创建模式冲突、快照一致性视图/游标签名/旧正文保护/事件保留边界、原对象 UNKNOWN 对账且不再次 PUT、继承的 child ACL 与关闭欠账、物理存储 alias 排他与逐 execution CSI ACK、schedule 定义和扫描竞争，以及历史数据扩大10倍时的执行计划。H2 明确跳过需 MySQL 才能证明的隔离和锁测试。
 
@@ -73,3 +73,17 @@ Server 全量单测2372项：0失败、0错误，5项按环境跳过。最后一
 同步后的本地 Server 制品 SHA256 为 `d5d8862175849b1eab661b408e2050b158d58b856daf540325e3a081fd6c5956`。DDL 摘要仍为 `64ed9772e461658f28ad22a0f936aafcb02b036aa60784c558bd4c6ae0143c8f`。发布分支不会接入正式流量，也不会升级任何已有数据库。
 
 独立工程师还实际执行两项 Hosted 成员命令/Harness 用例：2 项通过，无跳过，数据库恰好 32 张业务表。成员完成任务板读写交接；强制终止正在等待命令的成员 Harness 后重启，writer generation 推进，结果交接完成并进入 consumed。83 项 MySQL 及两项 Harness 用例采用截至 `d28bc60d73` 的编译产物，早于最后三条主线提交；当前源码另外通过完整 Server 检查、69 项输出契约及 40 项 CLI batch 回归。未对当前 head 重做 Linux 重启。
+
+## 2026-10-14 CI 与连接池后续修复
+
+分支已同步主线至 `49b3a75641`。本轮修复快照一致性视图/row mapper 的连接池嵌套依赖，将渠道对账 claim 身份经 live Harness 传入私有日志 command，为 Flyway 配置加引号，从 Docker 应用制品选择中排除维护 CLI classifier，并将现役 CI 夹具/检查接入 canonical 表和迁移位置。MariaDB 索引生成列的审批 scope 使用 RTRIM，避免依赖 CHAR 补空格模式；macOS 原生启动在 SQL 验证前被 AMFI 阻止，因此修改后的 MariaDB 验收仍待 CI。
+
+Server 全量单测通过 2,502 项（0 失败/错误，7 项按环境跳过）；最后 105 项连接池/查询预算/异步验证用例全部通过且无跳过，Checkstyle、SpotBugs 通过。Broker 通过 839 项单测（2 项按环境跳过）及 69 项真实 MySQL 8.4.11 用例。Server MySQL profile 通过 497 项；两个夹具仍从已归档的默认 Flyway 位置初始化，产生 7 项错误。改为 canonical V1 并保留两个 guard domain 的竞争屏障后，这 7 项锁/生命周期用例全部通过。独立真实 MySQL/Druid 探针验证单连接池的 HTTP/直接快照读取及构建、同一一致性视图内实际过期、视图释放后的提交续租，以及构建中退役时拒绝发布。浏览器 H2 夹具的启动、默认工作区可见性及隐藏项 ACL 也独立通过。
+
+身份修复后，6 项真实 MySQL Hosted 渠道故障/进程崩溃门禁全部通过。完整 Hosted macOS 尝试不能作为验收：该平台上的原生 Workspace/物理身份门禁失败或跳过，当前 head 仍需 Linux CI。它不替代上述历史 Linux 重启证据。本轮没有部署服务或改动现有应用数据库。
+
+Node build/typecheck/bundle、相关 ESLint/yamllint 通过；两组 CI 检查脚本的 80 项用例全部通过。独立渠道测试通过 20/20 项。Node 26 下两次完整 Harness 文件执行各复现一次未改动的 wake-park 拒绝 code 断言失败，该用例单独执行通过。改用 CI 的 Node 22.22.3 运行同一完整文件，460 项全部通过，无跳过，原断言保持不变。保留 Node 26 失败作为运行时差异证据；本轮不声称修复了这个独立行为。
+
+最终本地 Server 制品 SHA256 为 `ec2111953876a0aa70893e87187640f1fca4dd2441e41cdf7aebb55f466f7b26`；canonical DDL SHA256 为 `983915936568d67eeb34e11f84b68d8d89bec58d11b802439435a3a53f00ce1a`。读回确认恰好 32 张业务表、没有旧运行时迁移，且制品中的 556 个生产 class 文件均与已测试 class 一致。推送后的 GitHub CI 与这些本地结果分开记录。
+
+推送前，另一位贡献者将主线至 `8515d82f80` 合入 PR，生成 `740f8e8c5d`。保留该合并，仅在其上重放本轮修复。整合后的 Server 全量验证通过 2,506 项（0 失败/错误，7 项按环境跳过），包含新增的 cold child 与 procfs 竞争契约，Checkstyle、SpotBugs 通过。整合前后的已测试 CLI 源码/测试字节完全一致。整合后本地 Server 制品 SHA256 为 `38c79e949cc74370ff2fa4531fd54c00ffdd7b2287cc1c47b2fa2b102b660a26`，canonical DDL digest 不变。

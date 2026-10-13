@@ -153,6 +153,7 @@ final class ManagedSnapshotStore {
             if (draft == null) {
                 return;
             }
+            lease.check();
             publish.executeWithoutResult(
                     status -> {
                         var sessions =
@@ -303,7 +304,7 @@ final class ManagedSnapshotStore {
             if (root == null) {
                 return Optional.empty();
             }
-            return view.execute(
+            Optional<SnapshotRecord> result = view.execute(
                     status -> {
                         Manifest manifest = manifest(root, tenant, session);
                         List<ItemRecord> rows = new ArrayList<>();
@@ -326,6 +327,8 @@ final class ManagedSnapshotStore {
                                         root.created(),
                                         root.created()));
                     });
+            lease.check();
+            return result;
         }
     }
 
@@ -394,7 +397,7 @@ final class ManagedSnapshotStore {
             if (start == null) {
                 return new Page(List.of(), false, null, 0);
             }
-            return view.execute(
+            Page result = view.execute(
                     status -> {
                         Root root = start.root();
                         Cursor position = start.cursor();
@@ -483,6 +486,8 @@ final class ManagedSnapshotStore {
                         lease.check();
                         return new Page(List.copyOf(selected), more, next, root.sequence());
                     });
+            lease.check();
+            return result;
         }
     }
 
@@ -502,7 +507,12 @@ final class ManagedSnapshotStore {
         }
 
         void check() {
-            publish.executeWithoutResult(status -> lease.check());
+            if (TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {
+                // A read view cannot commit a renewal; it must finish before the committed lease expires.
+                lease.checkReadView();
+            } else {
+                publish.executeWithoutResult(status -> lease.check());
+            }
         }
 
         @Override

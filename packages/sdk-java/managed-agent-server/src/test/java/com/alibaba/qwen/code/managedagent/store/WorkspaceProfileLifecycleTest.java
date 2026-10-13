@@ -233,8 +233,8 @@ class WorkspaceProfileLifecycleTest {
                 .put("harnessSessionId", "wrong_harness".equals(mode) ? "other-session" : f.session)
                 .put("runtimeSessionId", "wrong_runtime".equals(mode) ? "other-owner" : "original-owner")
                 .put("payloadJson", payload));
-        if ("unreferenced".equals(mode)) f.jdbc.update("UPDATE qwen_managed_session_resource SET state = 'PUBLISHED'");
-        if ("corrupt".equals(mode)) f.jdbc.update("UPDATE qwen_managed_session_resource SET sha256 = ?", "f".repeat(64));
+        if ("unreferenced".equals(mode)) f.jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED'");
+        if ("corrupt".equals(mode)) f.jdbc.update("UPDATE ma_resource SET sha256 = ?", "f".repeat(64));
         var operation = admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE);
         var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
         var verifier = new WorkspaceProfileLifecycleVerifier(f.jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),

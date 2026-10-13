@@ -161,7 +161,7 @@ class Issue13181QueryBudgetTest {
         // batch's statement count is pinned, so any added per-row read
         // shows here.
         assertThat(totals)
-                .containsExactly(60L, 36L, 36L, 36L, 36L, 36L, 36L, 36L, 43L);
+                .containsExactly(60L, 35L, 35L, 35L, 35L, 35L, 35L, 35L, 43L);
         // Batch 1 covers session.created plus nine tool events; the last
         // batch sees all 81 items (80 tool plus the text delta's assistant).
         assertThat(itemRowsRead)
@@ -343,7 +343,7 @@ class Issue13181QueryBudgetTest {
         // The empty tick — the scheduler's hottest path — is pinned whole:
         // the event read, the session lock, the progress lock, and the
         // snapshot read.
-        assertThat(fixture.ledger.total()).isEqualTo(5);
+        assertThat(fixture.ledger.total()).isEqualTo(4);
         // The not-aged exit must leave the deferral marker untouched —
         // clearing or re-stamping it would stop the aged reselection from
         // ever converging the snapshot.
@@ -648,7 +648,7 @@ class Issue13181QueryBudgetTest {
         assertThat(fixture.service.getWebShellSession(plain, null,
                 plainIds.get(0)).sessionId()).isEqualTo(plainIds.get(0));
         // Session read + latest turns + environment events, one each.
-        assertThat(fixture.ledger.total()).isEqualTo(4);
+        assertThat(fixture.ledger.total()).isEqualTo(3);
 
         String bound = "tenant-" + UUID.randomUUID();
         fixture.jdbc.update("INSERT INTO ma_workspace"

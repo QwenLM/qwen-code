@@ -238,6 +238,14 @@ public final class ToolPublicationRetentionStore {
         }
 
         public synchronized void check() {
+            check(true);
+        }
+
+        synchronized void checkReadView() {
+            check(false);
+        }
+
+        private void check(boolean renew) {
             var rows = jdbc.query("SELECT l.expires_at, l.retirement_generation, r.retirement_generation AS generation,"
                     + " r.retired_at, CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000"
                     + " + EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000 AS db_now FROM"
@@ -254,7 +262,7 @@ public final class ToolPublicationRetentionStore {
                 throw expired();
             }
             var row = rows.getFirst();
-            if (number(row, "expires_at") - number(row, "db_now") <= READ_BUDGET_MILLIS * 3 / 4) {
+            if (renew && number(row, "expires_at") - number(row, "db_now") <= READ_BUDGET_MILLIS * 3 / 4) {
                 Boolean renewed = transactions.execute(status -> {
                     lockTenant(jdbc, tenant);
                     var roots = jdbc.query("SELECT retirement_generation, retired_at FROM ma_session"

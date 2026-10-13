@@ -31,6 +31,8 @@ Broker 单独使用时，Harness 准入屏障可能先于 Managed Session 登记
 
 message 保存最新投影和稳定 ID 的有序 parts；流式增量保存为事件，投影批量更新。大正文引用不可变资源。snapshot 保存不可变版本、水位及 manifest/page 引用。通过一个 repeatable-read 一致性视图构建，所有页验证后才发布指针，不能用多次独立事务或 INSERT SELECT 替代。游标有效期 30 分钟，保护所需资源及重放区间；最新快照在替代版本发布前保留。过期沿用 409 cursor_expired 和 SSE resync。
 
+快照构建及分页在一致性视图中复用当前连接检查已提交的读取租约，不从该视图内再次借用连接。视图必须在已提交的 120 秒租约内完成，过期立即拒绝继续读取。释放视图连接后、发布快照或返回页面前，再提交续租并检查最新退役代次。普通输出读取继续续租。这样保留 GC 保护，同时避免连接池的嵌套依赖。
+
 后台按有界批次删除已过期的替代快照，空闲 Session 也会清理。释放 SNAPSHOT 或 MESSAGE owner 时，以 resource.retention_until 标记其生成的内联正文，供索引扫描回收。回收器持有 Session 锁检查剩余引用、读取及快照构建租约、恢复保护，再原子清空 inline bytes 并写入 COLLECTED 墓碑。它不选择私有日志的暂存资源；当前快照继续保留。回收遵守已有 GC 启用开关。
 
 每个不可变快照页资源保存 snapshot 身份、页序号，以及该页消息 first-sequence 的最小值和最大值。这四个有类型的字段在快照页上必填，在其他资源上为空；scope 内的 snapshot/页序号唯一。首次数字 `after` 通过资源目录索引直接定位页，再在页内过滤；相同 first-sequence 跨页时仍沿用排除等值的数字边界。定位始终读取同一固定快照，不查询不断变化的最新 message 投影。后续 opaque cursor 保存 snapshot 身份及 page/offset。历史消息从 1,000 增大到 10,000 时，生产分页读取及目录索引扫描必须保持有界。
@@ -44,6 +46,8 @@ operation 是封闭且有类型的执行单元，覆盖生命周期/改名/cwd/�
 delivery 分别记录传输、接收和消费，领取字段内联。子结果交接后，关闭欠账仍是一条独立 operation。审批按 action 身份与版本唯一占位，租约过期不准入相反决定。改名结算必须匹配目标标题 revision，不能回退。V68 异步验证保留显式阶段与到期列。
 
 worker 用短事务领取，结算匹配同一 generation；持有领域行锁时不做外部 I/O。UNKNOWN 外部结果只查询原身份或由操作员明确结算；过期不允许分配新工具执行、对象写入或渠道发送。终态回执不能作为普通缓存重建。OBJECT_PUT 停留于 IN_FLIGHT 或 UNKNOWN 时，可以读取原不可变对象，核对完整长度与摘要后结算；不会再次发送 PUT，也不把租约到期作为完成证据。对象适配器必须只执行一次物理创建、禁止自动重试；普通服务和离线恢复/CSI 客户端使用同一重试策略。对象缺失或不匹配时继续保持未决与回收保护。
+
+渠道对账先按 tenant/channel/delivery 和 claim generation 预留稳定身份。拥有该 live Session 的 Harness 仅在结算 unknown 投递时接受这个保留身份，并原样传入私有日志 command。Server 在同一日志事务投影时核对该身份与当前 claim，旧 claim 不能修改后继状态。普通 UUID 请求保持已有 command 行为。
 
 ## Runtime、存储与资源闭包
 
@@ -71,7 +75,7 @@ Git 发现仓库前先检查元数据，再启动原生进程：即使 `rev-pars
 
 机器身份按字节精确比较，包括尾随空格。Actor 创建作用域保留原有 Base64 编码，并预留 2732 字节，以容纳完整合法的 2048 字节 actor 身份。Session 消息和渠道投递按 domain/delivery state 建立索引；渠道查询指定作用域内的状态索引，避免已完成历史量决定扫描成本。长身份保存原始字节，固定编码摘要建键，命中后核对原值。确定的一对多使用唯一约束和外键；多态引用用封闭 owner kind 和事务校验。领取、分页、GC、恢复阻塞条件使用索引列，不扫描全表 JSON。
 
-MySQL 8.4/InnoDB baseline 只有一个版本化来源，由 Managed Server/Broker 共用。初始化必须在创建/修改业务表前拒绝旧数据库。两个入口读取相同资源；不使用兼容 view、trigger、另一套独立 schema 或旧名 SQL 路由。HTTP/SDK 语义保持稳定；opaque cursor 内部可更新，并严格校验 scope/version/expiry。Task 事件游标使用有版本且不依赖分隔符的 tenant/Session/task 身份元组；所有事件行过期后，原 task 序号和 floor 仍为权威。使用数据库时间的原生租约保留 DATETIME(6) 精度，并通过数据库目录校验；公开时间字段继续使用原有 epoch 毫秒表示。
+MySQL 8.4/InnoDB baseline 只有一个版本化来源，由 Managed Server/Broker 共用。初始化必须在创建/修改业务表前拒绝旧数据库。两个入口读取相同资源；不使用兼容 view、trigger、另一套独立 schema 或旧名 SQL 路由。HTTP/SDK 业务身份及已有字段保持稳定。公开分页契约改为签名的 opaque snapshot cursor，明确 30 分钟有效期、409 cursor_expired 和 SSE 重同步语义，包括保留事件行已全部删除的情况；这些变化记录在公共契约版本 1.45.0。Task 事件游标使用有版本且不依赖分隔符的 tenant/Session/task 身份元组；所有事件行过期后，原 task 序号和 floor 仍为权威。使用数据库时间的原生租约保留 DATETIME(6) 精度，并通过数据库目录校验；公开时间字段继续使用原有 epoch 毫秒表示。
 
 历史 SQL/Java 迁移及仅用于升级的验收保存在 `docs/archive/managed-agent-schema`，不进入运行时或测试 classpath。原 Broker `schema.sql` 已移除。现役测试验证新库 baseline 启用及旧库拒绝，新应用不携带停用的升级入口或第二套结构定义。仅有迁移历史的库及历史 view 在 Flyway 写入前被拒绝。
 

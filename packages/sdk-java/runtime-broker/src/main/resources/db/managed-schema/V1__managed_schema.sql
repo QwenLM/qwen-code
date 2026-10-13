@@ -517,7 +517,7 @@ CREATE TABLE ma_request_receipt (
     semantic_revision BIGINT,
     action_id VARBINARY(512),
     action_version BIGINT,
-    decision_scope_key CHAR(64) GENERATED ALWAYS AS (CASE WHEN namespace = 'ACTION_DECISION' THEN scope_key ELSE NULL END),
+    decision_scope_key CHAR(64) GENERATED ALWAYS AS (CASE WHEN namespace = 'ACTION_DECISION' THEN RTRIM(scope_key) ELSE NULL END),
     mutation_attempt_sequence BIGINT,
     session_status_before VARCHAR(32),
     result_operation_key CHAR(64),
