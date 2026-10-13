@@ -208,7 +208,7 @@ public final class CsiNodeSourceJournal {
     private static void validate(JsonNode r) {
         String kind = text(r, "kind");
         var expected = new ArrayList<>(List.of("version", "incarnation", "sequence", "previous", "kind"));
-        require("qwen-k2-node-source/3".equals(text(r, "version"))
+        require("qwen-k2-node-source/4".equals(text(r, "version"))
                 && text(r, "incarnation").matches("[0-9a-f]{32}")
                 && text(r, "previous").matches("[0-9a-f]{64}") && text(r, "hash").matches("[0-9a-f]{64}"));
         if ("SOURCE_START".equals(kind)) {
@@ -258,8 +258,8 @@ public final class CsiNodeSourceJournal {
                 case "PUBLISH_FAILED" -> List.of("begin", "status");
                 case "STOP_INTENT" -> List.of("intentHash");
                 case "ORIGINAL_STOPPED" -> List.of("begin", "publish", "custody", "runtime", "intentHash");
-                case "UNPUBLISH_BEGIN" -> List.of("publish", "stop", "caller");
-                case "UNPUBLISH_OK" -> List.of("begin", "publish", "stop");
+                case "UNPUBLISH_BEGIN" -> List.of("publish", "stop", "custody", "runtime", "caller");
+                case "UNPUBLISH_OK" -> List.of("begin", "publish", "stop", "custody", "runtime");
                 case "UNPUBLISH_FAILED" -> List.of("begin", "publish", "stop", "status");
                 default -> throw new IllegalArgumentException("Unknown CSI node source record");
             };
@@ -380,7 +380,7 @@ public final class CsiNodeSourceJournal {
         require(integer(task, "pid", 0xffffffffL) == integer(c, "pid", 0xffffffffL));
         integer(task, "exitStatus", 0xffffffffL);
         long exited = integer(task, "exitedAtNano", Long.MAX_VALUE);
-        if ("ORIGINAL_STOPPED".equals(text(r, "kind"))) {
+        if (!"CUSTODY_OPEN".equals(text(r, "kind"))) {
             require(!c.path("populated").booleanValue() && c.path("terminal").booleanValue()
                     && "stopped".equals(text(task, "state")) && exited > 0);
         } else {
@@ -470,6 +470,8 @@ public final class CsiNodeSourceJournal {
                     dependency(r, "publish", publish, records);
                     dependency(r, "stop", stopped, records);
                     require(r.path("caller").equals(publishBegin.path("caller")));
+                    require(r.path("custody").equals(stopped.path("custody"))
+                            && r.path("runtime").equals(stopped.path("runtime")));
                     unpublishBegin = r;
                 }
                 case "UNPUBLISH_OK", "UNPUBLISH_FAILED" -> {
@@ -477,6 +479,8 @@ public final class CsiNodeSourceJournal {
                     dependency(r, "publish", publish, records);
                     dependency(r, "stop", stopped, records);
                     if ("UNPUBLISH_OK".equals(kind)) {
+                        require(r.path("custody").equals(stopped.path("custody"))
+                                && r.path("runtime").equals(stopped.path("runtime")));
                         unpublished = r;
                     } else {
                         blocked = true;

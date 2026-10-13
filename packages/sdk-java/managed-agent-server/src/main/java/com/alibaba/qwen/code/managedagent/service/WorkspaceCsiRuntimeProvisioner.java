@@ -521,6 +521,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
         spec.put("volumes", volumes);
         if (evidence != null) {
             spec.put("serviceAccountName", "qwen-k2-worker");
+            spec.put("runtimeClassName", com.alibaba.qwen.code.runtimebroker.KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS);
             security.put("appArmorProfile", Map.of("type", "Localhost", "localhostProfile", "qwen-k2-worker-v1"));
             spec.put("affinity", evidence.affinity());
             spec.put("tolerations", List.of(
@@ -615,7 +616,9 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                     "securityContext", "containers", "volumes", "nodeName", "serviceAccountName", "serviceAccount",
                     "schedulerName", "priority", "preemptionPolicy", "dnsPolicy", "terminationGracePeriodSeconds",
                     "tolerations", "hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace",
-                    "initContainers", "ephemeralContainers", "imagePullSecrets", "priorityClassName", "schedulingGates", "affinity").containsAll(spec.keySet()));
+                    "initContainers", "ephemeralContainers", "imagePullSecrets", "priorityClassName", "schedulingGates", "affinity", "runtimeClassName").containsAll(spec.keySet()));
+            require(expectedSpec.containsKey("runtimeClassName") ? expectedSpec.get("runtimeClassName").equals(spec.get("runtimeClassName"))
+                    : !spec.containsKey("runtimeClassName"));
             for (String field : List.of("affinity", "schedulingGates")) {
                 require(map(expected.get("spec")).containsKey(field) ? same(spec.get(field), map(expected.get("spec")).get(field))
                         : spec.get(field) == null || field.equals("schedulingGates") && empty(spec.get(field)));

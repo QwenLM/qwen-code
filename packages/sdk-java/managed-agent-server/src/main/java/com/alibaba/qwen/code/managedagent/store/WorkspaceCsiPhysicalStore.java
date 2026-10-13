@@ -5,6 +5,7 @@ import static com.alibaba.qwen.code.managedagent.store.WorkspaceCsiApplicationJs
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal;
 import com.alibaba.qwen.code.runtimebroker.CsiPodDeletion;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.sql.Connection;
@@ -200,9 +201,17 @@ public final class WorkspaceCsiPhysicalStore {
     }
 
     private static JsonNode plan(WorkspaceCsiApplicationStore.Drained drained, WorkspaceCsiNodeSourceStore.Association source) {
-        var binding = drained.binding();
-        var intent = drained.intent();
         var authority = drained.authority();
+        return retainedPlan(drained.binding(), drained.intent(), drained.inventory(), authority.frozenBytes(),
+                authority.cutBytes(), authority.receiptBytes(), source);
+    }
+
+    /** Data only; the caller proves the actual application image and immutable source before use. */
+    static JsonNode retainedPlan(RuntimeBindingRecord binding, WorkspaceCsiReservationStore.Retirement intent,
+            WorkspaceCsiApplicationInventory.Snapshot inventory, byte[] frozen, byte[] cut, byte[] receipt,
+            WorkspaceCsiNodeSourceStore.Association source) {
+        require(binding != null && intent != null && inventory != null && frozen != null && cut != null && receipt != null
+                && source != null && inventory.blockers().isEmpty());
         var observed = WorkspaceCsiNodeSourceStore.validateEvidence(source.configuration(), source.publication(), "PUBLISHED", source.podUid());
         var placement = WorkspaceCsiRuntimeIdentity.map(binding.getResourceHandle().getValue().get("placement"));
         require(source.bindingId().equals(binding.getBindingId()) && source.physicalKey().equals(intent.physicalKey())
@@ -216,22 +225,22 @@ public final class WorkspaceCsiPhysicalStore {
                 && placement.get("image").toString().endsWith("@sha256:" + source.configuration().imageDigest()));
         var value = new LinkedHashMap<String, Object>();
         value.put("format", "qwen-csi-physical-plan/3");
-        value.put("retirementId", authority.retirementId());
+        value.put("retirementId", intent.operationId());
         value.put("bindingId", binding.getBindingId());
         value.put("physicalKey", intent.physicalKey());
         value.put("registrationRevision", Long.toString(intent.reservation().registrationRevision()));
-        value.put("requestKey", authority.original().request().requestKey());
-        value.put("sealedBindingVersion", Long.toString(authority.sealedBindingVersion()));
+        value.put("requestKey", binding.getRequest().requestKey());
+        value.put("sealedBindingVersion", Long.toString(intent.sealedBindingVersion()));
         value.put("bootSha256", WorkspaceCsiRuntimeIdentity.digest(WorkspaceCsiRuntimeIdentity.boot(binding)));
-        value.put("drainedInventorySha256", hash(drained.inventory().bytes()));
-        value.put("ownershipReleaseInventorySha256", hash(WorkspaceCsiPhysicalReleaseImage.expected(drained.inventory()).bytes()));
-        value.put("historicalReleaseInventorySha256", hash(WorkspaceCsiPhysicalHistoryImage.expected(drained.inventory()).bytes()));
-        value.put("identitySha256", hash(WorkspaceCsiApplicationImage.sole(drained.inventory(), "managed_workspace_csi_retirement").cell("identity_json").bytes()));
-        value.put("baselineSha256", hash(WorkspaceCsiApplicationImage.baseline(authority.frozenBytes()).bytes()));
-        value.put("frozenRequestSha256", hash(authority.frozenBytes()));
-        value.put("cutSha256", hash(authority.cutBytes()));
-        value.put("finalizeReceiptSha256", hash(authority.receiptBytes()));
-        value.put("sourceRowSha256", hash(WorkspaceCsiApplicationImage.sole(drained.inventory(), "managed_workspace_csi_source").bytes()));
+        value.put("drainedInventorySha256", hash(inventory.bytes()));
+        value.put("ownershipReleaseInventorySha256", hash(WorkspaceCsiPhysicalReleaseImage.expected(inventory).bytes()));
+        value.put("historicalReleaseInventorySha256", hash(WorkspaceCsiPhysicalHistoryImage.expected(inventory).bytes()));
+        value.put("identitySha256", hash(WorkspaceCsiApplicationImage.sole(inventory, "managed_workspace_csi_retirement").cell("identity_json").bytes()));
+        value.put("baselineSha256", hash(WorkspaceCsiApplicationImage.baseline(frozen).bytes()));
+        value.put("frozenRequestSha256", hash(frozen));
+        value.put("cutSha256", hash(cut));
+        value.put("finalizeReceiptSha256", hash(receipt));
+        value.put("sourceRowSha256", hash(WorkspaceCsiApplicationImage.sole(inventory, "managed_workspace_csi_source").bytes()));
         value.put("sourceConfigurationBase64", java.util.Base64.getEncoder().encodeToString(WorkspaceCsiApplicationJson.encode(source.configuration())));
         value.put("sourceScope", observed.scope());
         value.put("publicationSha256", hash(source.publication().bytes()));

@@ -100,6 +100,16 @@ CREATE 只允许 coordinator 创建 exact 原 gated 模板，含固定 worker ac
 
 ## 必需输入与撤销
 
+Evidence worker 现在在 gated 与已开 gate 的模板中选择固定 RuntimeClass
+`qwen-k2-runc-v1`。CREATE/gate 守卫要求同一字段；Java node-evidence reader
+要求真实 class 具有该 name/handler、canonical UID，且不存在删除、overhead 或
+scheduling 字段。[runtime-class.json](runtime-class.json) 只提供此 class 对象。
+任何获准安装前，仍须实现并核实实际专用 handler/shim、effective options、实际
+消费的创建输入及 confinement。Class GET 或此 manifest 不会安装 handler，不
+证明执行了哪个 executable，也不授 birth/physical-release 权限。Coordinator
+RBAC 必须包含对这个唯一 `node.k8s.io` RuntimeClass 的 GET；runtime client 没有
+新增 class 写接口。
+
 已批准的实验节点 `cn-beijing.10.135.59.36` 于 2026-10-11 创建并设为不可调度。实际 Node UID 为 `8a55980c-65ba-4084-ab2b-083111ae39d9`，boot ID 为 `faf605a4-7552-43f2-bb15-524407ce9f2e`。经过认证的内网 API 与 host namespace 读取一致：Ubuntu 24.04.5、Linux 6.8.0-139、systemd 255、AppArmor 已启用、containerd 2.3.4。API 报告 `v1.36.2-aliyun.1`；原两个节点仍为 Ready 且可调度。这些是一次性实验节点的带日期观测，不能作为可移植部署 pin。
 
 2026-10-11 北京时间22:14:59，已批准的正常30秒/Background DELETE 使用原 `kube-system/csi-plugin-sz7rn` UID `4887f01a-6353-418c-9cb3-57fbb9b5416c` 和 fresh resourceVersion。删除前实际 API/host 未见 worker、PVC/inline-CSI、VolumeAttachment 或 CSI publication mount。实际 policy `qwen-k2-lab-exclusion-9ff330b1` UID 为 `47e33014-b3a4-4f4c-9d10-60c10dedd63b`，generation/observedGeneration 均为1，typeChecking 已完成且无 warning；同名 Deny binding UID 为 `88943877-0c7d-4276-9b8e-baaa561f63f9`。四个真实 admission dry-run 全符合预期，测试 Pod 未持久化；实际 DaemonSet 重建也被这两个对象拒绝。

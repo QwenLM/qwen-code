@@ -151,6 +151,63 @@ class CsiNativeToolReservationTest {
     }
 
     @Test
+    void historicalMemberDataUsesOriginalIntentAndCompleteFrozenMembership() throws Exception {
+        var prefix = prefix(capturedParts());
+        var tuples = List.of(tuple(prefix, 0), tuple(prefix, 1), tuple(prefix, 2));
+        var members = tuples.stream().map(Tuple::execution).toList();
+        var bodies = tupleBodies(tuples);
+        var entered = entered(prefix, tuples.getFirst(), 20, 20);
+        assertDoesNotThrow(() -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, entered, members,
+                ref -> bodies.get(ref.path("resourceId").textValue())));
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, entered,
+                members.subList(1, 3), ref -> bodies.get(ref.path("resourceId").textValue())));
+        var frozen = frozen(prefix, tuples);
+        assertDoesNotThrow(() -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, frozen, members,
+                ref -> bodies.get(ref.path("resourceId").textValue())));
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, frozen,
+                members.subList(0, 2), ref -> bodies.get(ref.path("resourceId").textValue())));
+    }
+
+    @Test
+    void historicalMemberDataRefusesDuplicatePositionsForeignOwnersAndRehashedWrongToolPayloads() throws Exception {
+        var prefix = prefix(capturedParts());
+        var tuples = List.of(tuple(prefix, 0), tuple(prefix, 1));
+        var bodies = tupleBodies(tuples);
+        var member = tuples.getFirst().execution();
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, prefix,
+                List.of(member, member), ref -> bodies.get(ref.path("resourceId").textValue())));
+        var foreign = ToolExecutionRecord.prepared(member.getExecutionCallId(), member.getIdempotencyKey(), "foreign", 1,
+                SESSION, SESSION, member.getTurnId(), member.getToolCallId(), member.getRequestDigest(), member.getReference());
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, prefix,
+                List.of(foreign), ref -> bodies.get(ref.path("resourceId").textValue())));
+        ObjectNode wrapper = (ObjectNode) JSON.readTree(tuples.getFirst().input());
+        ObjectNode payload = (ObjectNode) JSON.readTree(wrapper.path("payloadJson").textValue());
+        payload.put("toolName", "write_file");
+        wrapper.put("payloadJson", JSON.writeValueAsString(payload));
+        byte[] changed = JSON.writeValueAsBytes(wrapper);
+        var reference = new HashMap<>(member.getReference());
+        reference.put("inputRef", ref("managed-tool-input", changed));
+        reference.put("argsDigest", "sha256:" + CsiNativeActivationProof.sha256(
+                wrapper.path("payloadJson").textValue().getBytes(StandardCharsets.UTF_8)));
+        var changedMember = copy(member, reference);
+        bodies.put((String) ((Map<?, ?>) reference.get("inputRef")).get("resourceId"), changed);
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, prefix,
+                List.of(changedMember), ref -> bodies.get(ref.path("resourceId").textValue())));
+        assertThrows(RuntimeException.class, () -> JdbcCsiExecutionAdmission.verifyHistoricalMembers(original, prefix,
+                List.of(member), ignored -> null));
+    }
+
+    private static Map<String, byte[]> tupleBodies(List<Tuple> tuples) {
+        var result = new HashMap<String, byte[]>();
+        for (var tuple : tuples) {
+            JsonNode ref = JSON.valueToTree(tuple.execution().getReference());
+            result.put(ref.path("inputRef").path("resourceId").textValue(), tuple.input());
+            result.put(ref.path("toolDefinitionRef").path("resourceId").textValue(), tuple.definition());
+        }
+        return result;
+    }
+
+    @Test
     void qualifiesHistoricalRowsAgainstTheirOwnAssistantAndPrompt() throws Exception {
         var first = prefix(capturedParts());
         var prior = tuple(first, 0);

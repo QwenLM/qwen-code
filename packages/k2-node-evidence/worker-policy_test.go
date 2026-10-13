@@ -64,8 +64,8 @@ func TestPolicyRequiresActualClosedEnforceMeasurement(t *testing.T) {
 	}
 }
 
-func TestV3FixtureMatchesActualGoCanonicalEncoding(t *testing.T) {
-	raw, err := os.ReadFile("../sdk-java/runtime-broker/src/test/resources/contracts/k2-node-source-v3.fixture.json")
+func TestV4FixtureMatchesActualGoCanonicalEncoding(t *testing.T) {
+	raw, err := os.ReadFile("../sdk-java/runtime-broker/src/test/resources/contracts/k2-node-source-v4.fixture.json")
 	if err != nil {
 		t.Fatal(err)
 	}

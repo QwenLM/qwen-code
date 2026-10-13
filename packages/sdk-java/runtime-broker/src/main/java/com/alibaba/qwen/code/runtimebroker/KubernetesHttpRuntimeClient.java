@@ -28,6 +28,7 @@ import javax.net.ssl.TrustManagerFactory;
 /** Bounded core-v1 API calls with rotating service-account tokens and explicit CA trust. */
 public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClient, AutoCloseable {
     public static final String CSI_SOURCE_GATE = "qwen-code.io/k2-source-ready";
+    public static final String CSI_RUNTIME_CLASS = "qwen-k2-runc-v1";
     private static final int RESPONSE_LIMIT = 1024 * 1024;
     private static final int CONFIG_MAP_RESPONSE_LIMIT = RESPONSE_LIMIT + 64 * 1024;
     private final URI origin;
@@ -77,6 +78,9 @@ public final class KubernetesHttpRuntimeClient implements KubernetesRuntimeClien
             prefix = "/api/v1/";
         } else if (Set.of("validatingadmissionpolicies", "validatingadmissionpolicybindings").contains(resource)) {
             prefix = "/apis/admissionregistration.k8s.io/v1/";
+        } else if (resource.equals("runtimeclasses")) {
+            dnsLabel(name);
+            prefix = "/apis/node.k8s.io/v1/";
         } else {
             throw new IllegalArgumentException("Unsupported Kubernetes cluster resource");
         }

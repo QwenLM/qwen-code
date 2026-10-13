@@ -113,8 +113,12 @@ func (p *csiProxy) NodeUnpublishVolume(ctx context.Context, request *csi.NodeUnp
 		_ = p.source.block(original)
 		return nil, status.Error(codes.FailedPrecondition, "original unpublish target or source differs")
 	}
+	before, err := p.source.verifyStopped(ctx, original)
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "original stopped custody was lost")
+	}
 	publish, stop := original.publish.cursor(), original.stop.cursor()
-	begin, err := p.source.record(original, journalBody{Kind: "UNPUBLISH_BEGIN", Publish: &publish, Stop: &stop, Caller: &caller})
+	begin, err := p.source.record(original, journalBody{Kind: "UNPUBLISH_BEGIN", Publish: &publish, Stop: &stop, Caller: &caller, Custody: &before, Runtime: original.stop.Runtime})
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, "unpublish begin could not be persisted")
 	}
@@ -136,7 +140,11 @@ func (p *csiProxy) NodeUnpublishVolume(ctx context.Context, request *csi.NodeUnp
 		_ = p.source.block(original)
 		return nil, status.Error(codes.Unavailable, "original target remains mounted or unknown")
 	}
-	r, err := p.source.record(original, journalBody{Kind: "UNPUBLISH_OK", Begin: &beginCursor, Publish: &publish, Stop: &stop})
+	after, err := p.source.verifyStopped(ctx, original)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, "original stopped custody was lost during unpublish")
+	}
+	r, err := p.source.record(original, journalBody{Kind: "UNPUBLISH_OK", Begin: &beginCursor, Publish: &publish, Stop: &stop, Custody: &after, Runtime: original.stop.Runtime})
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, "unpublish success could not be persisted")
 	}

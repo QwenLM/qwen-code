@@ -45,6 +45,37 @@ public final class JdbcCsiFilesRetirementGuard {
         return scope != null && CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest());
     }
 
+    static Original readHistoricalBinding(Connection connection, RuntimeBindingRecord binding) throws SQLException {
+        if (connection == null || connection.getAutoCommit() || !connection.isReadOnly()
+                || connection.getTransactionIsolation() != Connection.TRANSACTION_REPEATABLE_READ
+                || binding == null || !isProfile(binding.getRequest().getScope())) {
+            throw unavailable();
+        }
+        try (var statement = statement(connection, "SELECT * FROM qwen_runtime_binding WHERE binding_id = ?")) {
+            statement.setString(1, binding.getBindingId());
+            try (var row = statement.executeQuery()) {
+                if (!row.next()) {
+                    throw unavailable();
+                }
+                var original = new Original(request(row), row.getString("binding_id"), row.getLong("runtime_generation"),
+                        RuntimeBindingRecord.State.valueOf(row.getString("binding_state")), row.getBoolean("drain_requested"),
+                        row.getLong("record_version"), row.getObject("first_activation_journal_revision", Long.class));
+                if (!binding.getBindingId().equals(original.bindingId()) || !binding.getRequest().equals(original.request())
+                        || binding.getGeneration() != original.generation() || binding.getState() != original.state()
+                        || binding.isDrainRequested() != original.draining() || binding.getVersion() != original.version()
+                        || original.generation() != 1 || !original.draining() || original.version() <= 0
+                        || original.state() != RuntimeBindingRecord.State.DRAINING && original.state() != RuntimeBindingRecord.State.RELEASED
+                        || !java.util.Objects.equals(original.firstActivationJournalRevision(), 2L)
+                        || !original.request().requestKey().equals(row.getString("request_key"))
+                        || !JdbcRepositorySupport.scopeKey(original.request().getScope()).equals(row.getString("scope_key"))
+                        || row.next()) {
+                    throw unavailable();
+                }
+                return original;
+            }
+        }
+    }
+
     static boolean requireProvisionPin(Connection connection, RuntimeProvisionRequest request)
             throws SQLException {
         if (!isProfile(request.getScope())) {

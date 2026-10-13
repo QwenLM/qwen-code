@@ -116,6 +116,18 @@ These objects do not read SQL ARM/BOUND/DRAINED, protect policy configuration fr
 
 ## Required inputs and undo
 
+The evidence worker now selects the fixed RuntimeClass `qwen-k2-runc-v1` in
+both its gated and opened templates. The CREATE/gate guards require the same
+field, and the Java node-evidence reader requires the actual class to have
+that name and handler, a canonical UID and no deletion, overhead or scheduling
+fields. [runtime-class.json](runtime-class.json) supplies only this class
+object. Before any approved installation, implement and verify the actual
+dedicated handler/shim, effective options, consumed creation inputs and
+confinement. A class GET or this manifest does not install the handler, prove
+which executable ran, or grant birth/physical-release permission. Coordinator
+RBAC must include GET of this single `node.k8s.io` RuntimeClass; no new class
+write is exposed by the runtime client.
+
 The approved experimental node `cn-beijing.10.135.59.36` was created and cordoned on 2026-10-11. Its actual Node UID is `8a55980c-65ba-4084-ab2b-083111ae39d9` and boot ID is `faf605a4-7552-43f2-bb15-524407ce9f2e`. Authenticated private API and host-namespace reads agree on Ubuntu 24.04.5, Linux 6.8.0-139, systemd 255, AppArmor enabled and containerd 2.3.4. The API reports `v1.36.2-aliyun.1`; the two original nodes remain Ready and schedulable. These are dated observations of this disposable node, not portable deployment pins.
 
 At 22:14:59 Asia/Shanghai on 2026-10-11, the approved normal 30-second/Background DELETE used the original `kube-system/csi-plugin-sz7rn` UID `4887f01a-6353-418c-9cb3-57fbb9b5416c` and fresh resourceVersion. Pre-deletion API and host reads found no worker/PVC/inline-CSI/VolumeAttachment or CSI publication mount. The installed policy `qwen-k2-lab-exclusion-9ff330b1` has UID `47e33014-b3a4-4f4c-9d10-60c10dedd63b`, generation/observedGeneration 1 and completed typeChecking with no warnings. Its same-name Deny binding has UID `88943877-0c7d-4276-9b8e-baaa561f63f9`. All four real admission dry-runs behaved as expected without persisting test Pods; actual DaemonSet recreation was denied by these objects.

@@ -363,6 +363,29 @@ class WorkspaceCsiRetirementStoreTest {
     }
 
     @Test
+    void retainedIdentityUsesTheOriginalFullLeaseSnapshotWithoutReadingTheCurrentHolder() throws Exception {
+        ready();
+        var intent = store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString());
+        var sealed = bindings.findById(original.getBindingId());
+        var before = jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease");
+        var json = new ObjectMapper();
+        WorkspaceCsiReservationStore.requireRetainedIdentity(json, intent, registration, sealed);
+        for (String digest : new String[]{"0".repeat(64), "1".repeat(64)}) {
+            var bytes = (com.fasterxml.jackson.databind.node.ObjectNode) json.valueToTree(intent);
+            bytes.put("leaseDigest", digest);
+            var altered = json.treeToValue(bytes, WorkspaceCsiReservationStore.Retirement.class);
+            assertUnavailable(() -> WorkspaceCsiReservationStore.requireRetainedIdentity(json, altered, registration, sealed));
+        }
+        var lease = sealed.getLease();
+        var changed = new RuntimeLease(lease.getRuntimeInstanceId(), URI.create("http://127.0.0.1:10"), lease.getToken(),
+                lease.getLeaseId(), lease.getEpoch());
+        var copy = sealed.withState(RuntimeBindingRecord.State.DRAINING, changed, Instant.now());
+        assertUnavailable(() -> WorkspaceCsiReservationStore.requireRetainedIdentity(json, intent, registration, copy));
+        assertThat(jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(before);
+        assertThat(bindings.findById(original.getBindingId()).getState()).isEqualTo(RuntimeBindingRecord.State.DRAINING);
+    }
+
+    @Test
     void duplicateJournalKeyRollsBackBindingAndPhysicalChanges() {
         String operation = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO managed_workspace_csi_retirement"

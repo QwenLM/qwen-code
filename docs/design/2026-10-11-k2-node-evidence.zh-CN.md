@@ -24,6 +24,17 @@ JSON 控制、配置及 gateway response 字段必须使用声明的精确拼写
 
 ## 持久 journal 与 incarnation
 
+下一版 journal 格式 `qwen-k2-node-source/4` 补齐 saved stop 到 backend
+卸载之间的观测区间。等待卸载期间，source 继续检查持续持有的原 pidfd、leaf、
+Pod parent 与 events descriptor。转发 NodeUnpublishVolume 前及取得实际 backend
+成功后，必须重新取得与 ORIGINAL_STOPPED 完全相同的 terminal、unpopulated
+custody tuple。UNPUBLISH_BEGIN 和 UNPUBLISH_OK 持久保存这些 fresh observation
+及未变化的 saved terminal runtime identity。观测失败、存活后代、对象替换或
+descriptor 丢失均永久阻断 scope。Java reader 要求两次 observation 均与原 stop
+相等；重新计算 hash 的替换观测或缺少这些字段的 journal 不能提供当前卸载证据。
+旧 v1–v3 journal 保留为历史材料，v4 reader 拒绝它们。本改动仅补齐后续观测区间，
+不建立首次执行前的 confinement，也不授权物理释放。
+
 journal 位于 worker 及其 PVC 之外的独立来源磁盘，使用排他所有权、有界 length-delimited records、连续 sequence、predecessor hash，并在确认来源转换前执行 `fsync`。每条 record 绑定 format、source incarnation 和 exact original scope。reader 拒绝截断、缺口、重复 sequence、hash mismatch 和未知字段。write 或 sync 失败使当前来源失效，后续调用不能修复未知 append outcome。
 
 reader 除 journal bytes 外，还要求独立保存的 durable head cursor；hash 有效的缩短 prefix 不能替代它。每个 CSI completion 必须绑定其持久 begin cursor 和 exact publish/stop dependencies，不能仅凭 record sequence 建立这些依赖。
@@ -70,7 +81,7 @@ gateway 通过经过审阅的 runtime/CRI identity 发现原 task。source 固�
 
 独立 Linux GC 观察使用此前 leaf-only custody 实现，真实 helper/descendant 正常退出后 Rmdir 空 child。同一原 events FD 随后返回 ENODEV，cgroup/proc Fstat 身份仍相等，原 observe 永久失败。从 helper 出生前打开的不同 parent 仍 populated0，未替换 custody。一个有界 native case、30 facts及13项完整性/关闭检查只资格化本地失败行为。runtime cleanup 可在下一次100ms poll前删除leaf，held FD或提前Wait均不保证empty观察窗口。原失败记录保留，不能通过替换events descriptor修复。
 
-当前 v3 候选在打开原 leaf、proc-directory 与 pidfd 时，显式打开不同的原 Pod-parent directory 及其 events 文件。canonical Pod UID/container ID 必须精确匹配支持的 cgroupfs 或 systemd kubelet layout；未知布局、路径穿越或身份错配拒绝 custody。首次绑定时，还必须从已保留 leaf descriptor 相对打开 `..`，核对它实际指向同一原 parent 内核对象；仅路径名称和 filesystem device 相同不够。临时 ancestry descriptor 随后关闭。五个 descriptor 持续归来源所有。每次 observation 验证原 leaf identity、不同的同 filesystem parent identity、kernel 类型及剩余目录 link，然后只读取同一个 retained parent events descriptor。`populated` 现在表示整个原 Pod-parent subtree。parent 丢失或读取失败永久 poison custody；不从 leaf 回退，不按名称重开。v3 wire 显式固定 `coverage=retained-pod-parent/1`、`parentDevice` 和 `parentInode`；ORIGINAL_STOPPED 必须与 leaf/PID/start tuple 一起保持它们。当前打开仍发生在 publication 后首次 created/running observation，不是首次执行前的创建回执。common tests 与 Linux cross build 仅覆盖协议和路径规则；实际 native parent lifetime 验收及 immutable birth confinement 仍须完成。
+retained-parent 实现在打开原 leaf、proc-directory 与 pidfd 时，显式打开不同的原 Pod-parent directory 及其 events 文件。canonical Pod UID/container ID 必须精确匹配支持的 cgroupfs 或 systemd kubelet layout；未知布局、路径穿越或身份错配拒绝 custody。首次绑定时，还必须从已保留 leaf descriptor 相对打开 `..`，核对它实际指向同一原 parent 内核对象；仅路径名称和 filesystem device 相同不够。临时 ancestry descriptor 随后关闭。五个 descriptor 持续归来源所有。每次 observation 验证原 leaf identity、不同的同 filesystem parent identity、kernel 类型及剩余目录 link，然后只读取同一个 retained parent events descriptor。`populated` 现在表示整个原 Pod-parent subtree。parent 丢失或读取失败永久 poison custody；不从 leaf 回退，不按名称重开。v3 wire 显式固定 `coverage=retained-pod-parent/1`、`parentDevice` 和 `parentInode`；ORIGINAL_STOPPED 必须与 leaf/PID/start tuple 一起保持它们。当前打开仍发生在 publication 后首次 created/running observation，不是首次执行前的创建回执。common tests 与 Linux cross build 仅覆盖协议和路径规则；实际 native parent lifetime 验收及 immutable birth confinement 仍须完成。
 
 Parent 包含原 sandbox 和全部 descendant，只有 worker 退出不足以使其为空。在固定的 Kubernetes v1.36.0 参考实现中，[正常清理先等卸载和 volume path 移除，再销毁 Pod cgroup](https://github.com/kubernetes/kubernetes/blob/ecf6decece6a6de25a57aad9ba90b6ce580f6f78/pkg/kubelet/kubelet.go#L2293)，[后台 orphan 清理同样在 Pod volume 仍存在时拒绝销毁](https://github.com/kubernetes/kubernetes/blob/ecf6decece6a6de25a57aad9ba90b6ce580f6f78/pkg/kubelet/kubelet_pods.go#L2658)。由此可推断，独占 CSI frontend 的 durable-stop-before-unpublish 屏障可以保留观察窗口。资格化必须在实际原 kubelet 中验证该顺序，包括后台清理和失败场景。仅 directory FD 不能阻止 Rmdir；在已验证 empty observation 之前 parent 被删除，仍须 fail closed。
 
@@ -79,6 +90,8 @@ Parent 包含原 sandbox 和全部 descendant，只有 worker 退出不足以使
 当前 Containers.Get 是 metadata，不是原 PID 创建时实际消费输入的回执。固定 normal runc create/start 合同提供有条件的 pre-exec 关联窗口，但必须控制实际输入对象、hook、rootfs/options、FIFO/start actor 与完整 kernel context。source 不能在正在创建的 task 尚未登记时同步要求 Tasks.Get 成功，也不能假定 start 路径持有 process lock 时可重入读取。parent 需要独立 retained object 和显式 pre-start 关联；旧 leaf 消失不能授予 parent 资格。
 
 独立 Linux 7.0/aarch64 原型建立 private mount propagation 和全部四项 memfd seal，但首次将该 memfd 绑定到 config.json 返回 EINVAL。写入和扩容返回 EPERM；改名、rootfs 与实际 runtime-consumption 窗口均未进入。原型使用广泛 root capabilities、NNP 0、seccomp 0，不代表受限 source unit 可执行。自有 helper、mount 和 VM 已关闭。随后不同的 whole-tmpfs-bundle 原生假设在写入原型或启动 VM 之前收到潜在网络安全风险拒绝通知；它仍未验证，也未换路径执行。这些结果均不资格化 immutable creator、出生 containment、parent custody 或 release。
+
+2026-10-13 在原 ACK 新建短时节点完成只读核实，没有安装 collector 或修改宿主配置。实际 PID 1 mount namespace 暴露 Linux 6.8.0-139-generic/x86_64、AppArmor enabled；运行时二进制、配置及 /var/lib/containerd 位于 rw ext4，/run/containerd 位于 rw tmpfs。观察到的固定二进制和配置没有 immutable 属性，保存的磁盘配置声明 CDI enabled、NRI 未禁用。这些 metadata 不证明 filesystem 保护能力、运行中 runtime 实际消费的输入、受限 loaded profiles 或首次执行前约束。核实后正常释放唯一节点、实例、系统盘和密钥，原节点与 CSI 服务健康。本阶段不授予 installation、stop、unpublish 或复用资格。
 
 ## 原 task lifetime Wait
 
@@ -102,7 +115,7 @@ CREATED observation可能先于worker on-exec profile切换，不能视为本项
 
 ## 已加载 worker policy 与 admitted BIND 候选
 
-当前来源候选使用 `qwen-k2-node-source/3`，包含上述显式 retained-parent custody tuple。ARM 保留 v2 的原 image digest，以及内核中固定 `qwen-k2-worker-v1` profile 的实际测量。source 配置与经审阅 Java node 配置必需 `workerPolicySha256`，其值为经审阅 packed policy artifact 在内核导出后的 digest。profile 名称、磁盘文件或 operator 断言不能代替该测量。旧 v1/v2 journal 保留为早期有界测试的历史证据，当前 reader 拒绝它们；改标签或补合成 parent 字段不能建立 v3 evidence。v3 contract fixture 明确是合成协议输入，不是实际 parent 测量或 birth record。
+当前来源候选使用 `qwen-k2-node-source/4`，包含上述显式 retained-parent custody tuple。ARM 保留 v2 的原 image digest，以及内核中固定 `qwen-k2-worker-v1` profile 的实际测量。source 配置与经审阅 Java node 配置必需 `workerPolicySha256`，其值为经审阅 packed policy artifact 在内核导出后的 digest。profile 名称、磁盘文件或 operator 断言不能代替该测量。旧 v1/v2/v3 journal 保留为早期有界测试的历史证据，当前 reader 拒绝它们；改标签或补合成 parent 字段不能建立 v4 evidence。v3/v4 contract fixture 明确是合成协议输入，不是实际 parent 测量或 birth record。
 
 固定 Linux reader 通过内核明确的 magic link 进入 `/sys/kernel/security/apparmor/policy`，随后持续持有实际 AppArmor filesystem root。普通 profile entry 在该根下打开，不跟随任意 symlink。读取并验证 profile 明确的 `raw_data` link，仅接受指向同一根 `raw_data` 子树的相对引用。同一经审阅 packed bundle 同时包含固定 worker/source profile，两者唯一当前 entry 必须指向同一导出 raw object；source 实际 label 必须为 `qwen-k2-source-v1 (enforce)`，避免仅 source profile 名称代替其实际 policy bytes。持续持有导出字节 descriptor，对完整有界解压 blob 求 hash，并在读取前后核对两者当前 profile link、mode、namespace/load revision 和 object identity。重读已持有旧 blob 不能建立当前 policy。内核 signed-long revision 使用 `Long.MAX_VALUE` 内的 canonical decimal string，load revision 不得大于 namespace revision，ABI 限制为 v5 至 v9；kernel device/inode 保留完整无符号范围。固定 proc/sys anchors 与当前线程 namespace descriptors 均核对实际内核 filesystem 类型。打开内核 raw snapshot 前先核导出尺寸；完整 snapshot 和 kernel raw SHA 均须等于经审阅 artifact。持续持有的 revision stream 只读一次，后续必须返回 EAGAIN，不能重新打开来恢复 custody。
 

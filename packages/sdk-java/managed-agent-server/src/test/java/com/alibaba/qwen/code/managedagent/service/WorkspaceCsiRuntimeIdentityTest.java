@@ -347,10 +347,12 @@ class WorkspaceCsiRuntimeIdentityTest {
     @Test
     void evidencePodToleratesOnlyTheIsolatedNodeAndStandardNoExecuteDefaults() throws ReflectiveOperationException {
         privateRequest();
+        var selectedRuntime = new java.util.concurrent.atomic.AtomicReference<Object>();
         api.changeCreatedPod = pod -> {
             var spec = nested(pod, "spec");
             assertThat(spec.get("schedulingGates")).isEqualTo(List.of(Map.of("name", "qwen-code.io/k2-source-ready")));
             assertThat(spec.get("serviceAccountName")).isEqualTo("qwen-k2-worker");
+            selectedRuntime.set(spec.get("runtimeClassName"));
             assertThat(nested(spec, "securityContext").get("appArmorProfile"))
                     .isEqualTo(Map.of("type", "Localhost", "localhostProfile", "qwen-k2-worker-v1"));
             spec.put("serviceAccount", "qwen-k2-worker");
@@ -363,13 +365,15 @@ class WorkspaceCsiRuntimeIdentityTest {
         try (var provider = evidenceProvider()) {
             provider.reserveResource(original);
             assertThat(join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null))).isNotNull();
+            assertThat(selectedRuntime.get()).isEqualTo("qwen-k2-runc-v1");
             assertThat(nested(api.objects.get("pods"), "spec")).doesNotContainKey("schedulingGates");
+            assertThat(nested(api.objects.get("pods"), "spec").get("runtimeClassName")).isEqualTo("qwen-k2-runc-v1");
             assertThat(attestations).hasValue(2);
         }
     }
 
     @ParameterizedTest
-    @CsvSource({"missing-account", "foreign-account", "foreign-alias", "missing-profile", "unconfined", "foreign-profile", "extra-profile-field", "container-override", "legacy-unconfined", "legacy-foreign", "static-source", "image-pull"})
+    @CsvSource({"missing-account", "foreign-account", "foreign-alias", "missing-profile", "unconfined", "foreign-profile", "extra-profile-field", "container-override", "legacy-unconfined", "legacy-foreign", "static-source", "image-pull", "missing-runtime", "foreign-runtime", "invalid-runtime"})
     void evidencePodRefusesChangedAccountOrConfinement(String mutation) throws ReflectiveOperationException {
         privateRequest();
         api.changeCreatedPod = pod -> {
@@ -389,6 +393,9 @@ class WorkspaceCsiRuntimeIdentityTest {
                 case "legacy-foreign" -> nested(pod, "metadata").put("annotations", Map.of("container.apparmor.security.beta.kubernetes.io/runtime", "localhost/foreign"));
                 case "static-source" -> nested(pod, "metadata").put("annotations", Map.of("kubernetes.io/config.source", "file"));
                 case "image-pull" -> spec.put("imagePullSecrets", List.of(Map.of("name", "foreign")));
+                case "missing-runtime" -> spec.remove("runtimeClassName");
+                case "foreign-runtime" -> spec.put("runtimeClassName", "default");
+                case "invalid-runtime" -> spec.put("runtimeClassName", List.of("qwen-k2-runc-v1"));
                 default -> throw new AssertionError(mutation);
             }
         };
@@ -397,6 +404,37 @@ class WorkspaceCsiRuntimeIdentityTest {
             refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
             assertThat(attestations).hasValue(0);
             assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+            assertThat(storage.inspect(registration).phase()).isEqualTo("RESERVED");
+        }
+    }
+
+    @Test
+    void ordinaryCsiPodRejectsInjectedEvidenceRuntimeClass() {
+        api.changeCreatedPod = pod -> nested(pod, "spec").put("runtimeClassName", "qwen-k2-runc-v1");
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(attestations).hasValue(0);
+            assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"missing", "changed"})
+    void evidencePodRejectsChangedRuntimeClassOnRetainedObservation(String mutation) throws ReflectiveOperationException {
+        privateRequest();
+        try (var provider = evidenceProvider()) {
+            provider.reserveResource(original);
+            var handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            api.observePod = pod -> {
+                if (mutation.equals("missing")) {
+                    nested(pod, "spec").remove("runtimeClassName");
+                } else {
+                    nested(pod, "spec").put("runtimeClassName", "default");
+                }
+            };
+            assertThat(join(provider.reconcile(original.getRequest(), original.getProvisionSeed(), handle, null)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.CONFLICT);
             assertThat(storage.inspect(registration).phase()).isEqualTo("RESERVED");
         }
     }

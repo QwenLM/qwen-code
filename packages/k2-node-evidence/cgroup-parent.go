@@ -8,6 +8,10 @@ import (
 
 const parentCoverage = "retained-pod-parent/1"
 
+func sameTerminalCustody(current, stopped custodyObservation) bool {
+	return current == stopped && current.Terminal && !current.Populated
+}
+
 var podCgroupUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 func originalPodParent(path, podUID, containerID string) (string, error) {

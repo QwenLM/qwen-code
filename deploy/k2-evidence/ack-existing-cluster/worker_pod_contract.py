@@ -11,6 +11,7 @@ SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding='utf-8'))['fields']
 GATE = 'qwen-code.io/k2-source-ready'
 ACCOUNT = 'qwen-k2-worker'
 PROFILE = 'qwen-k2-worker-v1'
+RUNTIME_CLASS = 'qwen-k2-runc-v1'
 
 
 def unique_object(pairs):
@@ -119,7 +120,8 @@ def worker_spec(plan, node, gated):
     }
     spec = {
         'restartPolicy': 'Never', 'automountServiceAccountToken': False, 'enableServiceLinks': False,
-        'serviceAccountName': ACCOUNT, 'nodeSelector': {'kubernetes.io/os': 'linux'},
+        'serviceAccountName': ACCOUNT, 'runtimeClassName': RUNTIME_CLASS,
+        'nodeSelector': {'kubernetes.io/os': 'linux'},
         'securityContext': {'runAsNonRoot': True, 'runAsUser': 1000, 'runAsGroup': 1000,
                             'fsGroup': 1000, 'seccompProfile': {'type': 'RuntimeDefault'},
                             'appArmorProfile': {'type': 'Localhost', 'localhostProfile': PROFILE}},

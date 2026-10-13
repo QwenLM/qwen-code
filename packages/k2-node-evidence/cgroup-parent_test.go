@@ -5,6 +5,37 @@ import (
 	"testing"
 )
 
+func TestTerminalCustodyRefusesChangedIdentityAndLiveDescendants(t *testing.T) {
+	stopped := custodyObservation{PID: 123, StartTicks: 456, CgroupDevice: 1, CgroupInode: 2, Coverage: parentCoverage, ParentDevice: 1, ParentInode: 3, Terminal: true}
+	if !sameTerminalCustody(stopped, stopped) {
+		t.Fatal("unchanged terminal custody refused")
+	}
+	for name, change := range map[string]func(*custodyObservation){
+		"PID":           func(c *custodyObservation) { c.PID++ },
+		"start":         func(c *custodyObservation) { c.StartTicks++ },
+		"leaf-device":   func(c *custodyObservation) { c.CgroupDevice++ },
+		"leaf-inode":    func(c *custodyObservation) { c.CgroupInode++ },
+		"parent-device": func(c *custodyObservation) { c.ParentDevice++ },
+		"parent-inode":  func(c *custodyObservation) { c.ParentInode++ },
+		"coverage":      func(c *custodyObservation) { c.Coverage = "retained-leaf/1" },
+		"descendant":    func(c *custodyObservation) { c.Populated = true },
+		"pidfd-live":    func(c *custodyObservation) { c.Terminal = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			current := stopped
+			change(&current)
+			if sameTerminalCustody(current, stopped) {
+				t.Fatal("accepted changed custody")
+			}
+		})
+	}
+	for _, invalid := range []custodyObservation{{Terminal: true, Populated: true}, {Terminal: false}} {
+		if sameTerminalCustody(invalid, invalid) {
+			t.Fatal("equal observations supplied live custody")
+		}
+	}
+}
+
 func TestOriginalPodParentSupportsExactCgroupfsAndSystemdLayouts(t *testing.T) {
 	uid := "6c6c7d4b-a1eb-4a16-8a4c-b1c208824d83"
 	cid := strings.Repeat("a", 64)

@@ -24,9 +24,9 @@ class CsiNodeSourceJournalTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Test
-    void consumesV3ProtocolFixtureWithoutChangingBodyOrder() throws Exception {
+    void consumesV4ProtocolFixtureWithoutChangingBodyOrder() throws Exception {
         Fixture fixture = fixture();
-        assertEquals("ef8ff2ef7fe3456d08f45837c4258b92181674dc6a569fa79523e1fde2f84c6f",
+        assertEquals("55a8055953e68d4c451fc1c4a75e960d9a08d345cd8da613ff12d9b9a610c6f8",
                 CsiNativeActivationProof.sha256(fixture.bytes()));
         var stream = CsiNodeSourceJournal.read(fixture.bytes(), fixture.head());
         assertEquals(fixture.head(), stream.head());
@@ -111,6 +111,26 @@ class CsiNodeSourceJournalTest {
     @Test
     void rejectsHashValidDifferentUnpublishCaller() throws Exception {
         rejects(8, r -> ((ObjectNode) r.path("caller")).put("pid", 12345));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {8, 9})
+    void rejectsHashValidUnpublishWithoutFreshCustody(int index) throws Exception {
+        rejects(index, r -> r.remove(List.of("custody", "runtime")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {8, 9})
+    void rejectsHashValidUnpublishWithLiveDescendant(int index) throws Exception {
+        rejects(index, r -> ((ObjectNode) r.path("custody")).put("populated", true));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {8, 9})
+    void rejectsHashValidUnpublishWithChangedTerminalIdentity(int index) throws Exception {
+        rejects(index, r -> ((ObjectNode) r.path("custody")).put("parentInode", 999));
+        rejects(index, r -> ((ObjectNode) r.path("custody")).put("terminal", false));
+        rejects(index, r -> ((ObjectNode) r.path("runtime")).put("exitedAtNano", 999));
     }
 
     @Test
@@ -245,7 +265,7 @@ class CsiNodeSourceJournalTest {
 
     @Test
     void historicalLeafFormatsCannotGrantParentCoverage() throws Exception {
-        for (String version : List.of("v1", "v2")) {
+        for (String version : List.of("v1", "v2", "v3")) {
             try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-" + version + ".fixture.json")) {
                 var value = JSON.readTree(input);
                 byte[] bytes = Base64.getDecoder().decode(value.path("bytesBase64").textValue());
@@ -304,7 +324,7 @@ class CsiNodeSourceJournalTest {
     }
 
     private static Fixture fixture() throws Exception {
-        try (var input = CsiNodeSourceJournalTest.class.getResourceAsStream("/contracts/k2-node-source-v3.fixture.json")) {
+        try (var input = CsiNodeSourceJournalTest.class.getResourceAsStream("/contracts/k2-node-source-v4.fixture.json")) {
             JsonNode value = JSON.readTree(input);
             return new Fixture(Base64.getDecoder().decode(value.path("bytesBase64").textValue()),
                     new CsiNodeSourceJournal.Cursor(value.path("head").path("sequence").longValue(),

@@ -43,14 +43,9 @@ final class JdbcCsiRetirementSeal {
                 String encoded = row.getString("identity_json");
                 require(encoded != null && encoded.length() <= 256 * 1024
                         && encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 256 * 1024);
-                Identity identity = JSON.readValue(encoded, Identity.class);
-                require(original.state() == RuntimeBindingRecord.State.DRAINING && original.draining()
-                        && identity.operationId().equals(UUID.fromString(identity.operationId()).toString())
-                        && identity.operationId().equals(row.getString("retirement_id"))
-                        && "DRAINING".equals(identity.phase()) && identity.phase().equals(row.getString("phase"))
-                        && identity.physicalKey().matches("[0-9a-f]{64}")
-                        && identity.physicalKey().equals(row.getString("physical_key"))
-                        && identity.sealedBindingVersion() > 0 && identity.sealedBindingVersion() <= original.version());
+                require(original.state() == RuntimeBindingRecord.State.DRAINING && original.draining());
+                Identity identity = identity(encoded, original, row.getString("retirement_id"),
+                        row.getString("physical_key"), row.getString("phase"));
                 require(!row.next());
                 verifyAssociation(connection, original, identity);
                 return identity.sealedBindingVersion();
@@ -60,47 +55,63 @@ final class JdbcCsiRetirementSeal {
         }
     }
 
+    static long readHistorical(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            byte[] frozenBytes, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
+        read.requireHistorical(connection);
+        require(frozenBytes != null && frozenBytes.length > 0 && frozenBytes.length <= 32 * 1024 * 1024);
+        try (var statement = read.statement(connection,
+                "SELECT retirement_id, physical_key, phase, identity_json, progress_format, progress_version,"
+                        + " progress_stage, settlement_deadline_ms, frozen_request_bytes, frozen_request_sha256"
+                        + " FROM managed_workspace_csi_retirement WHERE binding_id = ? AND runtime_generation = ?")) {
+            statement.setString(1, original.bindingId());
+            statement.setLong(2, original.generation());
+            try (var row = statement.executeQuery()) {
+                require(row.next() && "qwen-csi-application-retirement/1".equals(row.getString("progress_format"))
+                        && row.getLong("progress_version") == 4 && "DRAINED".equals(row.getString("progress_stage")));
+                String encoded = row.getString("identity_json");
+                require(encoded != null && encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 256 * 1024);
+                Identity identity = identity(encoded, original, row.getString("retirement_id"),
+                        row.getString("physical_key"), row.getString("phase"));
+                require(original.draining() && (original.state() == RuntimeBindingRecord.State.DRAINING
+                        || original.state() == RuntimeBindingRecord.State.RELEASED)
+                        && row.getLong("settlement_deadline_ms") == Math.addExact(Instant.parse(identity.startedAt()).toEpochMilli(), 300000L));
+                byte[] saved;
+                try (var input = row.getBinaryStream("frozen_request_bytes")) {
+                    require(input != null);
+                    saved = input.readNBytes(32 * 1024 * 1024 + 1);
+                }
+                require(java.util.Arrays.equals(frozenBytes, saved)
+                        && CsiNativeActivationProof.sha256(saved).equals(row.getString("frozen_request_sha256")));
+                var frozen = JSON.valueToTree(ManagedCsiFilesProtocol.parse(saved, 32 * 1024 * 1024));
+                require("qwen-csi-application-frozen/1".equals(frozen.path("format").textValue())
+                        && identity.operationId().equals(frozen.path("retirementId").textValue())
+                        && original.bindingId().equals(frozen.path("bindingId").textValue())
+                        && original.request().requestKey().equals(frozen.path("requestKey").textValue())
+                        && CsiNativeActivationProof.number(frozen.get("sealedBindingVersion")) == identity.sealedBindingVersion()
+                        && !row.next());
+                verifyImmutableAssociation(connection, original, identity, read);
+                return identity.sealedBindingVersion();
+            }
+        } catch (IOException | IllegalArgumentException | NullPointerException | java.time.format.DateTimeParseException
+                | ArithmeticException error) {
+            throw unavailable();
+        }
+    }
+
+    private static Identity identity(String encoded, JdbcCsiFilesRetirementGuard.Original original,
+            String retirement, String physical, String phase) throws IOException {
+        Identity identity = JSON.readValue(encoded, Identity.class);
+        require(identity.operationId().equals(UUID.fromString(identity.operationId()).toString())
+                && identity.operationId().equals(retirement) && "DRAINING".equals(identity.phase()) && identity.phase().equals(phase)
+                && identity.physicalKey().matches("[0-9a-f]{64}") && identity.physicalKey().equals(physical)
+                && identity.sealedBindingVersion() > 0 && identity.sealedBindingVersion() <= original.version());
+        return identity;
+    }
+
     private static void verifyAssociation(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             Identity identity) throws SQLException, IOException {
+        verifyImmutableAssociation(connection, original, identity, JdbcCsiActivationAdmission.JournalRead.LIVE);
         Reservation reservation = identity.reservation();
-        require("RESERVED".equals(reservation.phase()) && CsiOwnershipRevision.reserved(reservation.revision())
-                && reservation.reservationId().equals(UUID.fromString(reservation.reservationId()).toString())
-                && original.bindingId().equals(reservation.bindingId())
-                && original.generation() == reservation.runtimeGeneration()
-                && identity.leaseDigest().matches("[0-9a-f]{64}"));
-        Instant.parse(identity.startedAt());
-        try (PreparedStatement statement = statement(connection,
-                "SELECT provisioner_kind, provision_request_id, resource_handle_version, resource_handle_json,"
-                        + " runtime_instance_id, runtime_lease_id, runtime_epoch, attestation_generation"
-                        + " FROM qwen_runtime_binding WHERE binding_id = ? FOR UPDATE")) {
-            statement.setString(1, original.bindingId());
-            try (var row = statement.executeQuery()) {
-                require(row.next() && identity.resourceHandleKind().equals(row.getString("provisioner_kind"))
-                        && identity.resourceHandleVersion() > 0
-                        && identity.resourceHandleVersion() == row.getInt("resource_handle_version")
-                        && JSON.readTree(identity.resourceHandleJson()).equals(JSON.readTree(row.getString("resource_handle_json")))
-                        && identity.runtimeInstanceId().equals(row.getString("runtime_instance_id"))
-                        && identity.leaseId().equals(row.getString("runtime_lease_id"))
-                        && identity.epoch() > 0 && identity.epoch() == row.getLong("runtime_epoch")
-                        && identity.attestationGeneration() > 0
-                        && identity.attestationGeneration() == row.getLong("attestation_generation")
-                        && reservation.provisionRequestId().equals(row.getString("provision_request_id")));
-                require(!row.next());
-            }
-        }
-        try (PreparedStatement statement = statement(connection,
-                "SELECT tenant_id, storage_id, physical_key, registration_revision"
-                        + " FROM managed_workspace_csi_registration WHERE alias_key = ? FOR UPDATE")) {
-            statement.setString(1, reservation.registrationKey());
-            try (var row = statement.executeQuery()) {
-                require(row.next() && original.request().getScope().getTenantId().equals(row.getString("tenant_id"))
-                        && original.request().getStorageId().equals(row.getString("storage_id"))
-                        && identity.physicalKey().equals(row.getString("physical_key"))
-                        && reservation.registrationRevision() > 0
-                        && reservation.registrationRevision() == row.getLong("registration_revision"));
-                require(!row.next());
-            }
-        }
         try (PreparedStatement statement = statement(connection,
                 "SELECT storage_kind, csi_phase, csi_revision, csi_reservation_id, csi_registration_key,"
                         + " csi_registration_revision, binding_id, runtime_generation, csi_provision_request_id"
@@ -116,6 +127,49 @@ final class JdbcCsiRetirementSeal {
                         && original.bindingId().equals(row.getString("binding_id"))
                         && original.generation() == row.getLong("runtime_generation")
                         && Objects.equals(reservation.provisionRequestId(), row.getString("csi_provision_request_id")));
+                require(!row.next());
+            }
+        }
+    }
+
+    private static void verifyImmutableAssociation(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            Identity identity, JdbcCsiActivationAdmission.JournalRead read) throws SQLException, IOException {
+        Reservation reservation = identity.reservation();
+        require("RESERVED".equals(reservation.phase()) && CsiOwnershipRevision.reserved(reservation.revision())
+                && reservation.reservationId().equals(UUID.fromString(reservation.reservationId()).toString())
+                && original.bindingId().equals(reservation.bindingId())
+                && original.generation() == reservation.runtimeGeneration()
+                && identity.leaseDigest().matches("[0-9a-f]{64}"));
+        Instant.parse(identity.startedAt());
+        try (PreparedStatement statement = read.statement(connection,
+                "SELECT provisioner_kind, provision_request_id, resource_handle_version, resource_handle_json,"
+                        + " runtime_instance_id, runtime_lease_id, runtime_epoch, attestation_generation"
+                        + " FROM qwen_runtime_binding WHERE binding_id = ?")) {
+            statement.setString(1, original.bindingId());
+            try (var row = statement.executeQuery()) {
+                require(row.next() && identity.resourceHandleKind().equals(row.getString("provisioner_kind"))
+                        && identity.resourceHandleVersion() > 0
+                        && identity.resourceHandleVersion() == row.getInt("resource_handle_version")
+                        && JSON.readTree(identity.resourceHandleJson()).equals(JSON.readTree(row.getString("resource_handle_json")))
+                        && identity.runtimeInstanceId().equals(row.getString("runtime_instance_id"))
+                        && identity.leaseId().equals(row.getString("runtime_lease_id"))
+                        && identity.epoch() > 0 && identity.epoch() == row.getLong("runtime_epoch")
+                        && identity.attestationGeneration() > 0
+                        && identity.attestationGeneration() == row.getLong("attestation_generation")
+                        && reservation.provisionRequestId().equals(row.getString("provision_request_id")));
+                require(!row.next());
+            }
+        }
+        try (PreparedStatement statement = read.statement(connection,
+                "SELECT tenant_id, storage_id, physical_key, registration_revision"
+                        + " FROM managed_workspace_csi_registration WHERE alias_key = ?")) {
+            statement.setString(1, reservation.registrationKey());
+            try (var row = statement.executeQuery()) {
+                require(row.next() && original.request().getScope().getTenantId().equals(row.getString("tenant_id"))
+                        && original.request().getStorageId().equals(row.getString("storage_id"))
+                        && identity.physicalKey().equals(row.getString("physical_key"))
+                        && reservation.registrationRevision() > 0
+                        && reservation.registrationRevision() == row.getLong("registration_revision"));
                 require(!row.next());
             }
         }

@@ -79,6 +79,31 @@ public final class JdbcCsiExecutionAdmission {
         head.requireCurrentTime(connection);
     }
 
+    static void verifyHistoricalReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.TerminalProof proof, long ceiling, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
+        read.requireHistorical(connection);
+        require(ceiling > 0 && ceiling <= original.version());
+        var prefix = proof.predecessorPrefix();
+        var members = CsiNativeToolReservation.complete(connection, original, prefix,
+                CsiNativeToolReservation.inventory(connection, original, read), false, 0, 0, read);
+        long revision;
+        try (var statement = read.statement(connection,
+                "SELECT journal_revision FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?")) {
+            statement.setString(1, original.request().getScope().getTenantId());
+            statement.setString(2, original.request().getIsolationKey());
+            try (var row = statement.executeQuery()) {
+                require(row.next());
+                revision = Math.subtractExact(row.getLong(1), 1L);
+                require(revision > 1 && !row.next());
+            }
+        }
+        for (var member : members) {
+            grant(connection, original, member, prefix, revision, ceiling, read);
+        }
+        verifyReceiptMembers(prefix, members);
+        read.requireHistorical(connection);
+    }
+
     static List<ToolExecutionRecord> verifyColdReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
         var members = receiptMembers(connection, original, head, head.prefix(), true);
@@ -120,6 +145,11 @@ public final class JdbcCsiExecutionAdmission {
         for (var member : members) {
             grant(connection, original, member, head);
         }
+        verifyReceiptMembers(prefix, members);
+        return members;
+    }
+
+    private static void verifyReceiptMembers(CsiNativeActivationProof.Prefix prefix, List<ToolExecutionRecord> members) {
         for (var entry : prefix.receipts().entrySet()) {
             var execution = members.stream().filter(member -> entry.getKey().equals(member.getExecutionCallId()))
                     .findFirst().orElseThrow(JdbcCsiExecutionAdmission::unavailable);
@@ -129,7 +159,6 @@ public final class JdbcCsiExecutionAdmission {
                     && same(execution.getResult(), map(entry.getValue().body().path("envelope")))
                     && execution.getExecutionStatus().equals(entry.getValue().body().path("envelope").path("executionStatus").textValue()));
         }
-        return members;
     }
 
     static void requireDispatch(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
@@ -250,10 +279,15 @@ public final class JdbcCsiExecutionAdmission {
 
     private static Map<String, Object> grant(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             ToolExecutionRecord execution, JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
+        return grant(connection, original, execution, head.prefix(), head.revision(), null, JdbcCsiActivationAdmission.JournalRead.LIVE);
+    }
+
+    private static Map<String, Object> grant(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            ToolExecutionRecord execution, CsiNativeActivationProof.Prefix prefix, long revision, Long historicalCeiling,
+            JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
         String saved;
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT execution_call_id, native_authorization_json FROM qwen_tool_execution WHERE execution_call_id_hash = ? FOR UPDATE")) {
-            statement.setQueryTimeout(10);
+        try (PreparedStatement statement = read.statement(connection,
+                "SELECT execution_call_id, native_authorization_json FROM qwen_tool_execution WHERE execution_call_id_hash = ?")) {
             statement.setString(1, JdbcRepositorySupport.valueKey(execution.getExecutionCallId()));
             try (ResultSet row = statement.executeQuery()) {
                 require(row.next() && execution.getExecutionCallId().equals(row.getString(1)));
@@ -262,16 +296,80 @@ public final class JdbcCsiExecutionAdmission {
             }
         }
         if (execution.getAuthorizedDispatchGeneration() == null) {
+            return map(grantHeader(original, execution, prefix, null, saved));
+        }
+        Long ceiling = read == JdbcCsiActivationAdmission.JournalRead.LIVE
+                ? JdbcCsiRetirementSeal.lock(connection, original) : historicalCeiling;
+        require(read == JdbcCsiActivationAdmission.JournalRead.LIVE || ceiling != null && ceiling > 0 && ceiling <= original.version());
+        var value = grantHeader(original, execution, prefix, ceiling, saved);
+        var checkpoint = dispatchCheckpoint(connection, original, revision, (String) execution.getReference().get("batchId"), read);
+        var pinned = context(connection, original, null, read);
+        return grantTail(execution, prefix, revision, value, checkpoint, pinned);
+    }
+
+    /** Validates retained data only; checkpoint uniqueness, member closure and owner reads belong to the caller. */
+    public static Map<String, Object> verifyHistoricalGrant(JdbcCsiFilesRetirementGuard.Original original,
+            ToolExecutionRecord execution, CsiNativeActivationProof.Prefix prefix, long maximumRevision, long ceiling,
+            String saved, DispatchCheckpoint checkpoint, Map<String, Object> pinnedContext) {
+        require(original != null && original.request() != null && maximumRevision > 0
+                && JdbcCsiFilesRetirementGuard.isProfile(original.request().getScope())
+                && ceiling > 0 && ceiling <= original.version());
+        var value = grantHeader(original, execution, prefix, ceiling, saved);
+        if (value.isNull()) {
+            require(checkpoint == null && pinnedContext == null);
+            return null;
+        }
+        return grantTail(execution, prefix, maximumRevision, value, checkpoint, pinnedContext);
+    }
+
+    /** Data membership only; complete scoped rows and resource associations must be established by the reader. */
+    public static void verifyHistoricalMembers(JdbcCsiFilesRetirementGuard.Original original,
+            CsiNativeActivationProof.Prefix prefix, List<ToolExecutionRecord> members,
+            java.util.function.Function<JsonNode, byte[]> resourceReader) {
+        CsiNativeToolReservation.verifyHistoricalMembers(original, prefix, members, resourceReader);
+        verifyReceiptMembers(prefix, members);
+    }
+
+    /** Decodes the caller's already bounded complete row; this method performs no SQL or admission. */
+    public static ToolExecutionRecord readHistoricalMember(ResultSet row) throws SQLException {
+        var member = JdbcToolExecutionRepository.mapExecution(row);
+        JsonNode reference = CsiNativeActivationProof.readObject(CsiNativeActivationProof.utf8(row.getString("reference_json")));
+        require(same(reference, member.getReference()));
+        String result = row.getString("result_json");
+        if (result != null) {
+            require(same(CsiNativeActivationProof.readObject(CsiNativeActivationProof.utf8(result)), member.getResult()));
+        }
+        return member;
+    }
+
+    /** Reconstructs grant context data; the caller must separately validate the original handle and installed owner. */
+    public static Map<String, Object> historicalGrantContext(RuntimeProvisionRequest original,
+            com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding installed, JsonNode handle) {
+        require(original != null && installed != null && handle != null && handle.isObject()
+                && handle.path("profileIdentity").isObject() && handle.path("context").isObject());
+        String session = original.getIsolationKey();
+        return Map.of("identity", map(handle.path("profileIdentity")), "context", map(handle.path("context")),
+                "installedContext", ManagedContextProtocol.installation(original,
+                        java.util.UUID.nameUUIDFromBytes(session.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString(), session, installed));
+    }
+
+    private static JsonNode grantHeader(JdbcCsiFilesRetirementGuard.Original original, ToolExecutionRecord execution,
+            CsiNativeActivationProof.Prefix prefix, Long ceiling, String saved) {
+        require(original != null && execution != null && prefix != null
+                && original.bindingId().equals(execution.getBindingId())
+                && original.generation() == execution.getRuntimeGeneration()
+                && original.request().getIsolationKey().equals(execution.getHarnessSessionId())
+                && original.request().getIsolationKey().equals(execution.getRuntimeSessionId()));
+        if (execution.getAuthorizedDispatchGeneration() == null) {
             require(saved == null && execution.getAuthorizedBindingVersion() == null
                     && execution.getState() != ToolExecutionRecord.State.EXECUTING
                     && execution.getState() != ToolExecutionRecord.State.CANCEL_REQUESTED
                     && execution.getState() != ToolExecutionRecord.State.UNKNOWN);
-            return null;
+            return JSON.nullNode();
         }
         require(saved != null && execution.getAuthorizedBindingVersion() != null
                 && execution.getAuthorizedDispatchGeneration() == execution.getDispatchGeneration()
                 && execution.getAuthorizedBindingVersion() > 0 && execution.getAuthorizedBindingVersion() <= original.version());
-        Long ceiling = JdbcCsiRetirementSeal.lock(connection, original);
         require(ceiling == null || execution.wasDispatchAuthorizedBefore(ceiling));
         JsonNode value = CsiNativeActivationProof.readObject(CsiNativeActivationProof.utf8(saved));
         CsiNativeActivationProof.closed(value, java.util.Set.of("protocolVersion", "runtimeBindingId", "bindingGeneration", "authorizedBindingVersion",
@@ -283,19 +381,29 @@ public final class JdbcCsiExecutionAdmission {
                 && execution.getExecutionCallId().equals(value.path("executionCallId").textValue())
                 && Long.toString(execution.getDispatchGeneration()).equals(value.path("dispatchGeneration").textValue())
                 && same(map(value.path("executionReference")), execution.getReference())
-                && canonical(value.path("preparedRef")).equals(canonical(preparedRef(head.prefix(), execution))));
-        var intent = head.prefix().intents().get(execution.getExecutionCallId());
+                && canonical(value.path("preparedRef")).equals(canonical(preparedRef(prefix, execution))));
+        var intent = prefix.intents().get(execution.getExecutionCallId());
         CsiNativeActivationProof.closed(value.path("intent"), java.util.Set.of("revision", "sequence"));
         require(intent != null && number(value.path("intent").get("revision")) == intent.revision()
                 && number(value.path("intent").get("sequence")) == intent.sequence());
-        var checkpoint = dispatchCheckpoint(connection, original, head, (String) execution.getReference().get("batchId"));
+        return value;
+    }
+
+    private static Map<String, Object> grantTail(ToolExecutionRecord execution, CsiNativeActivationProof.Prefix prefix,
+            long maximumRevision, JsonNode value, DispatchCheckpoint checkpoint, Map<String, Object> pinned) {
+        require(checkpoint != null && checkpoint.ref() != null && !checkpoint.ref().isNull()
+                && maximumRevision > 0 && checkpoint.revision() <= maximumRevision
+                && pinned != null && pinned.keySet().equals(java.util.Set.of("identity", "context", "installedContext")));
+        var intent = prefix.intents().get(execution.getExecutionCallId());
         require(number(value.get("authorizationRevision")) == checkpoint.revision()
                 && number(value.get("authorizationSequence")) == checkpoint.sequence()
                 && same(map(value.path("checkpointRef")), map(checkpoint.ref()))
                 && intent.revision() < checkpoint.revision() && intent.sequence() < checkpoint.sequence());
-        var pinned = context(connection, original, null);
+        var frozen = prefix.fileHistory() == null ? null
+                : prefix.fileHistory().batches().get((String) execution.getReference().get("batchId"));
+        require(frozen == null || frozen.preparedSequence() < checkpoint.sequence());
         for (String field : List.of("identity", "context", "installedContext")) {
-            require(same(value.path(field), JSON.valueToTree(pinned.get(field))));
+            require(pinned.get(field) != null && same(value.path(field), JSON.valueToTree(pinned.get(field))));
         }
         return map(value);
     }
@@ -304,8 +412,10 @@ public final class JdbcCsiExecutionAdmission {
         String batchId = (String) execution.getReference().get("batchId");
         var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
         if (frozen == null) {
-            require("read_file".equals(prefix.batches().get(batchId).batch().calls()
-                    .get(((Number) execution.getReference().get("ordinal")).intValue()).name()));
+            var batch = prefix.batches().get(batchId);
+            long ordinal = number(JSON.valueToTree(execution.getReference().get("ordinal")));
+            require(batch != null && ordinal < batch.batch().calls().size()
+                    && "read_file".equals(batch.batch().calls().get((int) ordinal).name()));
             return JSON.nullNode();
         }
         require(frozen.preparedRef() != null && frozen.preparedSequence() > frozen.intentSequence()
@@ -314,16 +424,21 @@ public final class JdbcCsiExecutionAdmission {
         return frozen.preparedRef();
     }
 
-    private record DispatchCheckpoint(long revision, long sequence, JsonNode ref) {
+    /** Data extracted from the unique original dispatch checkpoint; not an admission capability. */
+    public record DispatchCheckpoint(long revision, long sequence, JsonNode ref) {
     }
 
     private static DispatchCheckpoint dispatchCheckpoint(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JdbcCsiActivationAdmission.NativeHead head, String batchId) throws SQLException {
+        return dispatchCheckpoint(connection, original, head.revision(), batchId, JdbcCsiActivationAdmission.JournalRead.LIVE);
+    }
+
+    private static DispatchCheckpoint dispatchCheckpoint(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            long maximumRevision, String batchId, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
         DispatchCheckpoint result = null;
-        try (PreparedStatement statement = connection.prepareStatement(
+        try (PreparedStatement statement = read.statement(connection,
                 "SELECT * FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                        + " AND workspace_id = ? AND operation = 'commitCheckpoint' ORDER BY journal_revision FOR UPDATE")) {
-            statement.setQueryTimeout(10);
+                        + " AND workspace_id = ? AND operation = 'commitCheckpoint' ORDER BY journal_revision")) {
             statement.setString(1, original.request().getScope().getTenantId());
             statement.setString(2, original.request().getIsolationKey());
             statement.setString(3, original.request().getScope().getWorkspaceId());
@@ -333,14 +448,14 @@ public final class JdbcCsiExecutionAdmission {
                         continue;
                     }
                     long revision = rows.getLong("journal_revision");
-                    require(revision <= head.revision());
+                    require(revision <= maximumRevision);
                     var record = CsiNativeActivationProof.records(rows.getBytes("record_bytes")).stream()
                             .filter(value -> "system".equals(value.path("type").textValue())
                                     && "managed_session_event_v1".equals(value.path("subtype").textValue())
                                     && "checkpoint.committed".equals(value.path("managedSession").path("kind").textValue()))
                             .findFirst().orElseThrow(JdbcCsiExecutionAdmission::unavailable);
                     JsonNode ref = record.path("managedSession").path("payload").path("stateRef");
-                    JsonNode state = CsiNativeActivationProof.readObject(JdbcCsiActivationAdmission.resource(connection, original, ref, revision));
+                    JsonNode state = CsiNativeActivationProof.readObject(JdbcCsiActivationAdmission.resource(connection, original, ref, revision, read));
                     boolean contains = false;
                     boolean allInProgress = true;
                     for (JsonNode item : state.path("tools").path("items")) {
@@ -362,11 +477,15 @@ public final class JdbcCsiExecutionAdmission {
 
     private static Map<String, Object> context(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             RuntimeBindingRecord binding) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
+        return context(connection, original, binding, JdbcCsiActivationAdmission.JournalRead.LIVE);
+    }
+
+    private static Map<String, Object> context(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            RuntimeBindingRecord binding, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
+        try (PreparedStatement statement = read.statement(connection,
                 "SELECT s.tenant_id, s.workspace_id, s.workspace_generation, s.workspace_storage_id, s.cwd_relative, s.context_config_ref, s.context_revision,"
                         + " b.resource_handle_version, b.resource_handle_json FROM managed_agent_session s JOIN qwen_runtime_binding b ON b.binding_id = ?"
-                        + " WHERE s.tenant_id = ? AND s.session_id = ? FOR UPDATE")) {
-            statement.setQueryTimeout(10);
+                        + " WHERE s.tenant_id = ? AND s.session_id = ?")) {
             statement.setString(1, original.bindingId());
             statement.setString(2, original.request().getScope().getTenantId());
             statement.setString(3, original.request().getIsolationKey());
@@ -380,10 +499,7 @@ public final class JdbcCsiExecutionAdmission {
                     require(row.getInt("resource_handle_version") == WorkspaceCsiRuntimeIdentity.FILES_AUTHORITY_VERSION
                             || row.getInt("resource_handle_version") == WorkspaceCsiRuntimeIdentity.FILES_FINALIZATION_VERSION);
                     var handle = CsiNativeActivationProof.readObject(CsiNativeActivationProof.utf8(row.getString("resource_handle_json")));
-                    return Map.of("identity", map(handle.path("profileIdentity")), "context", map(handle.path("context")),
-                            "installedContext", ManagedContextProtocol.installation(original.request(),
-                                    java.util.UUID.nameUUIDFromBytes(original.request().getIsolationKey().getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString(),
-                                    original.request().getIsolationKey(), installed));
+                    return historicalGrantContext(original.request(), installed, handle);
                 }
                 return CsiNativeReadbackProtocol.bindRequest(WorkspaceCsiRuntimeIdentity.boot(binding), original.request(), installed,
                         java.util.UUID.randomUUID().toString());
@@ -392,6 +508,7 @@ public final class JdbcCsiExecutionAdmission {
     }
 
     private static Map<String, Object> map(JsonNode value) {
+        require(value != null && (value.isObject() || value.isNull()));
         if (value.isNull()) {
             return null;
         }

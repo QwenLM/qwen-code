@@ -34,6 +34,64 @@ class CsiNativeTextProofTest {
             transaction(1), request(1), original, writer, genesis.definitionDigest(), null, reader);
 
     @Test
+    void sharedInputBlocksPreserveTheNativeArrayGrammar() throws Exception {
+        var ref = java.util.stream.StreamSupport.stream(fixture.path("originalResources").spliterator(), false)
+                .filter(value -> value.path("ref").path("kind").asText().equals("managed-input")).findFirst().orElseThrow().path("ref");
+        byte[] bytes = reader.apply(ref);
+        assertEquals(JSON.readTree(bytes), CsiNativeActivationProof.inputBlocks(bytes));
+        for (String invalid : List.of("{}", "[]", "null", "[null]", "[{\"type\":\"image\",\"text\":\"x\"}]",
+                "[{\"type\":\"text\",\"text\":\"\"}]", "[{\"type\":\"text\",\"text\":1}]",
+                "[{\"type\":\"text\",\"text\":\"x\",\"extra\":true}]", "[{\"type\":\"text\",\"text\":\"x\",\"text\":\"y\"}]",
+                "[{\"type\":\"text\",\"text\":\"x\"}] []")) {
+            assertThrows(RuntimeBrokerException.class, () -> CsiNativeActivationProof.inputBlocks(invalid.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        }
+        assertThrows(RuntimeBrokerException.class, () -> CsiNativeActivationProof.inputBlocks(new byte[] {(byte) 0xff}));
+        assertThrows(RuntimeBrokerException.class, () -> CsiNativeActivationProof.inputBlocks(new byte[65537]));
+    }
+
+    @Test
+    void acceptsTheOriginalUncommittedTerminalCandidateAgainstTheSettledPrefix() {
+        var proof = prepared(request(32));
+        assertEquals(41, proof.predecessorSequence());
+        assertEquals(42, proof.terminalSequence());
+        assertEquals("fc17e89d-c50c-4b55-b69d-aa58659e7242", proof.lastRecordUuid());
+        assertEquals(CsiNativeActivationProof.terminal(records(32), request(32), original, genesis, activation,
+                prefix(32), 41, "941bb2c6-c5a2-4571-8856-6e8820365fa9",
+                request(31).path("commitDigest").textValue(), reader), proof);
+    }
+
+    @Test
+    void refusesUncommittedCandidateFramingAndResourceConflicts() {
+        for (String field : List.of("expectedJournalRevision", "expectedCommittedSequence", "recordCount")) {
+            ObjectNode changed = request(32).deepCopy();
+            changed.put(field, changed.path(field).longValue() + 1);
+            rejected(() -> prepared(changed));
+        }
+        for (String field : List.of("recordDigest", "recordBytesBase64", "workspaceId")) {
+            ObjectNode changed = request(32).deepCopy();
+            changed.put(field, "different");
+            rejected(() -> prepared(changed));
+        }
+        for (String field : List.of("resourceId", "kind", "digest", "bytesBase64")) {
+            ObjectNode changed = request(32).deepCopy();
+            ((ObjectNode) changed.path("resources").get(0)).put(field, "different");
+            rejected(() -> prepared(changed));
+        }
+        ObjectNode missing = request(32).deepCopy();
+        missing.putArray("resources");
+        rejected(() -> prepared(missing));
+        ObjectNode duplicate = request(32).deepCopy();
+        ((com.fasterxml.jackson.databind.node.ArrayNode) duplicate.path("resources"))
+                .add(duplicate.path("resources").get(0).deepCopy());
+        rejected(() -> prepared(duplicate));
+    }
+
+    private CsiNativeActivationProof.TerminalProof prepared(JsonNode metadata) {
+        return CsiNativeActivationProof.preparedTerminal(metadata, original, genesis, activation, prefix(32), 32, 41,
+                "941bb2c6-c5a2-4571-8856-6e8820365fa9", request(31).path("commitDigest").textValue());
+    }
+
+    @Test
     void acceptsUntouchedFiveTurnPrefixWithRefusalFractionalUsageAndChunkedMessage() {
         assertEquals(33, fixture.path("requests").size());
         assertEquals(46, bodies.size());

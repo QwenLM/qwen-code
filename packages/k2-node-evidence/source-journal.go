@@ -18,7 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const journalVersion = "qwen-k2-node-source/3"
+const journalVersion = "qwen-k2-node-source/4"
 const maxRecordBytes = 64 << 10
 const maxJournalBytes = 64 << 20
 const maxJournalRecords = 65536
@@ -187,9 +187,9 @@ func validateBody(b journalBody) error {
 	case "ORIGINAL_STOPPED":
 		wantBegin, wantPublish, wantCustody, wantIntent = true, true, true, true
 	case "UNPUBLISH_BEGIN":
-		wantPublish, wantStop = true, true
+		wantPublish, wantStop, wantCustody = true, true, true
 	case "UNPUBLISH_OK":
-		wantBegin, wantPublish, wantStop = true, true, true
+		wantBegin, wantPublish, wantStop, wantCustody = true, true, true, true
 	default:
 		return errors.New("unknown source record kind")
 	}
@@ -205,13 +205,14 @@ func validateBody(b journalBody) error {
 	}
 	if wantCustody {
 		c := b.Custody
+		terminal := b.Kind != "CUSTODY_OPEN"
 		if !bounded(s.ContainerID) || c.PID == 0 || c.StartTicks == 0 || c.CgroupInode == 0 || c.Coverage != parentCoverage ||
 			c.ParentDevice != c.CgroupDevice || c.ParentInode == 0 || c.ParentInode == c.CgroupInode ||
-			(b.Kind == "ORIGINAL_STOPPED" && (c.Populated || !c.Terminal)) {
+			(terminal && (c.Populated || !c.Terminal)) || (!terminal && (!c.Populated || c.Terminal)) {
 			return errors.New("invalid original custody observation")
 		}
 		r := b.Runtime
-		if r.Version != "qwen-k2-runtime-read/1" || r.ArmID != s.ArmID || r.PodUID != s.PodUID || r.ContainerID != s.ContainerID || r.PID != c.PID || !hashString(r.ImageDigest) || !hashString(r.SandboxID) || (b.Kind == "ORIGINAL_STOPPED" && (r.State != "stopped" || r.ExitedAtNano <= 0)) || (b.Kind == "CUSTODY_OPEN" && (r.State != "created" && r.State != "running" || c.Terminal || !c.Populated)) {
+		if r.Version != "qwen-k2-runtime-read/1" || r.ArmID != s.ArmID || r.PodUID != s.PodUID || r.ContainerID != s.ContainerID || r.PID != c.PID || !hashString(r.ImageDigest) || !hashString(r.SandboxID) || (terminal && (r.State != "stopped" || r.ExitedAtNano <= 0)) || (!terminal && (r.State != "created" && r.State != "running" || r.ExitedAtNano != 0)) {
 			return errors.New("invalid original runtime observation")
 		}
 	}

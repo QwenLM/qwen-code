@@ -1156,7 +1156,8 @@ public final class CsiNativeActivationProof {
         }
     }
 
-    private static JsonNode messageBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
+    /** Reassembles the declared message format; the reader must enforce the resource owner's scope. */
+    public static JsonNode messageBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
         if ("managed-message".equals(ref.path("kind").textValue())) {
             byte[] bytes = reference(ref, "managed-message", resources);
             require(bytes.length <= 64 * 1024);
@@ -1439,13 +1440,9 @@ public final class CsiNativeActivationProof {
         }
         byte[] inputBytes = reference(payload.path("contentRef"), "managed-input", resources);
         require(inputBytes.length <= 64 * 1024 && sha256(inputBytes).equals(text(metadata, "contentDigest")));
-        JsonNode blocks = readJson(inputBytes);
-        require(blocks != null && blocks.isArray() && !blocks.isEmpty());
+        JsonNode blocks = inputBlocks(inputBytes);
         List<String> texts = new ArrayList<>();
         for (JsonNode block : blocks) {
-            closed(block, Set.of("type", "text"));
-            require("text".equals(text(block, "type")) && block.path("text").isTextual()
-                    && !block.path("text").textValue().isEmpty());
             texts.add(block.path("text").textValue());
         }
         byte[] admissionBytes = reference(payload.path("admissionRef"), "managed-admission", resources);
@@ -1633,6 +1630,45 @@ public final class CsiNativeActivationProof {
         return transaction.events().stream().anyMatch(event -> "activation.changed".equals(event.path("kind").textValue()));
     }
 
+    /** Validates the uncommitted candidate against an already verified original predecessor. */
+    public static TerminalProof preparedTerminal(JsonNode metadata, RuntimeProvisionRequest original,
+            Genesis genesis, Activation activation, Prefix prefix, long previousRevision,
+            long previousSequence, String previousUuid, String previousCommitDigest) {
+        require(original != null && original.getScope().getWorkspaceId().equals(text(metadata, "workspaceId"))
+                && previousRevision > 1 && previousRevision < 4096
+                && number(metadata.get("expectedJournalRevision")) == previousRevision
+                && number(metadata.get("expectedCommittedSequence")) == previousSequence);
+        JsonNode candidates = metadata.path("resources");
+        require(candidates.isArray() && candidates.size() == 1);
+        JsonNode candidate = candidates.get(0);
+        closed(candidate, Set.of("resourceId", "kind", "schemaVersion", "byteLength", "digest", "bytesBase64"));
+        byte[] resourceBytes = canonicalBase64(candidate, "bytesBase64", 16 * 1024);
+        byte[] raw = canonicalBase64(metadata, "recordBytesBase64", 128 * 1024);
+        require(sha256(raw).equals(text(metadata, "recordDigest")));
+        var records = records(raw);
+        require(records.size() == 2 && number(metadata.get("recordCount")) == records.size());
+        return terminal(records, metadata, original, genesis, activation, prefix, previousSequence,
+                previousUuid, previousCommitDigest, ref -> {
+                    for (String field : List.of("resourceId", "kind", "schemaVersion", "byteLength", "digest")) {
+                        require(canonical(ref.path(field)).equals(canonical(candidate.path(field))));
+                    }
+                    return resourceBytes;
+                });
+    }
+
+    private static byte[] canonicalBase64(JsonNode value, String field, int limit) {
+        String encoded = text(value, field);
+        require(encoded.length() <= ((limit + 2) / 3) * 4);
+        try {
+            byte[] bytes = java.util.Base64.getDecoder().decode(encoded);
+            require(bytes.length > 0 && bytes.length <= limit
+                    && java.util.Base64.getEncoder().encodeToString(bytes).equals(encoded));
+            return bytes;
+        } catch (IllegalArgumentException malformed) {
+            throw invalid();
+        }
+    }
+
     /** Decodes facts from a validated, unmodified parser continuation; grants no live authority. */
     public static TerminalProof terminal(List<JsonNode> records, JsonNode metadata,
             RuntimeProvisionRequest original, Genesis genesis, Activation previous, Prefix prefix,
@@ -1680,6 +1716,18 @@ public final class CsiNativeActivationProof {
                 && previousUuid.equals(text(boundary, "lastRecordUuid")));
         return new TerminalProof(previous, prefix, ref, previousSequence, previousUuid, previousCommitDigest,
                 previousSequence + 1, transaction.lastRecordUuid());
+    }
+
+    public static JsonNode inputBlocks(byte[] bytes) {
+        require(bytes != null && bytes.length > 0 && bytes.length <= 64 * 1024);
+        JsonNode blocks = readJson(bytes);
+        require(blocks != null && blocks.isArray() && !blocks.isEmpty());
+        for (JsonNode block : blocks) {
+            closed(block, Set.of("type", "text"));
+            require("text".equals(text(block, "type")) && block.path("text").isTextual()
+                    && !block.path("text").textValue().isEmpty());
+        }
+        return blocks;
     }
 
     public static JsonNode readObject(byte[] bytes) {

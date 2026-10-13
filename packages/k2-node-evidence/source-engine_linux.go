@@ -188,6 +188,17 @@ func (s *nodeSource) requestStop(ctx context.Context, request stopRequest) (jour
 	return r, nil
 }
 
+func (s *nodeSource) verifyStopped(ctx context.Context, original *originalSource) (custodyObservation, error) {
+	if original.blocked || original.custody == nil || original.stop == nil || original.stop.Custody == nil || s.gateway.verify(ctx) != nil {
+		return custodyObservation{}, s.block(original)
+	}
+	current, err := original.custody.observe()
+	if err != nil || !sameTerminalCustody(current, *original.stop.Custody) || s.gateway.verify(ctx) != nil {
+		return custodyObservation{}, s.block(original)
+	}
+	return current, nil
+}
+
 func (s *nodeSource) poll(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -199,7 +210,11 @@ func (s *nodeSource) poll(ctx context.Context) {
 		_ = s.block(original)
 		return
 	}
-	if original.bound == nil || original.stop != nil {
+	if original.bound == nil {
+		return
+	}
+	if original.stop != nil {
+		_, _ = s.verifyStopped(ctx, original)
 		return
 	}
 	runtime, err := s.gateway.observe(ctx, original.scope.ArmID)

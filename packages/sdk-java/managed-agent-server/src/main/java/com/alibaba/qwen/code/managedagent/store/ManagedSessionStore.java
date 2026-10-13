@@ -1202,6 +1202,14 @@ public class ManagedSessionStore {
         }
     }
 
+    void requireCsiHistoricalCredential(String tenant, String workspace, String session, String token, String retainedHash) {
+        requireCredential(tenant, workspace, session, token);
+        String presented = tokenHash(token);
+        if (retainedHash == null || !retainedHash.matches("[0-9a-f]{64}") || !secureEquals(retainedHash, presented)) {
+            throw nativeReadConflict();
+        }
+    }
+
     TerminalCandidate preflightCsiTerminal(java.sql.Connection target,
             com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Authority authority,
             String writerToken, byte[] exactBody, JdbcRuntimeBindingRepository bindings) throws SQLException {
@@ -1302,6 +1310,12 @@ public class ManagedSessionStore {
         }
     }
 
+    static CommitTransactionRequest validateCsiTerminalBytes(byte[] bytes) {
+        var request = csiTerminalRequest(bytes);
+        validateCommit(request);
+        return request;
+    }
+
     private void commitResources(String scopeKey, String tenantId,
             String sessionId, CommitTransactionRequest request,
             long revision, Timestamp now,
@@ -1361,7 +1375,7 @@ public class ManagedSessionStore {
         }
     }
 
-    private ValidatedCommit validateCommit(
+    private static ValidatedCommit validateCommit(
             CommitTransactionRequest request) {
         validateStableId(request.transactionId(), "transactionId");
         validateText(request.operation(), "operation", MAX_TEXT_BYTES);

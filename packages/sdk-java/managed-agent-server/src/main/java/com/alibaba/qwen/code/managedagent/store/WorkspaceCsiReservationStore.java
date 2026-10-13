@@ -334,17 +334,24 @@ public final class WorkspaceCsiReservationStore {
 
     private void verifyRetirement(Retirement intent, WorkspaceCsiRegistration registration,
             RuntimeBindingRecord binding, Reservation holder) {
+        requireRetainedIdentity(json, intent, registration, binding);
         Reservation original = intent.reservation();
-        if (original == null || !"RESERVED".equals(original.phase()) || !CsiOwnershipRevision.reserved(original.revision())
-                || !matchesHolder(registration, binding, original)
-                || !"DRAINING".equals(holder.phase()) || holder.revision() != nextRevision(original.revision())
+        if (!"DRAINING".equals(holder.phase()) || holder.revision() != nextRevision(original.revision())
                 || !holder.equals(new Reservation("DRAINING", nextRevision(original.revision()),
                         original.reservationId(), original.registrationKey(), original.registrationRevision(),
                         original.bindingId(), original.runtimeGeneration(), original.provisionRequestId()))
-                || binding.getState() != RuntimeBindingRecord.State.DRAINING || !binding.isDrainRequested()
-                || intent.sealedBindingVersion() <= 0 || binding.getVersion() < intent.sealedBindingVersion()
-                || !intent.physicalKey().equals(registration.physicalKey())
-                || !intent.equals(snapshot(intent.operationId(), registration, binding, original,
+                || binding.getState() != RuntimeBindingRecord.State.DRAINING || !binding.isDrainRequested()) {
+            throw unavailable();
+        }
+    }
+
+    static void requireRetainedIdentity(ObjectMapper json, Retirement intent, WorkspaceCsiRegistration registration,
+            RuntimeBindingRecord binding) {
+        if (json == null || intent == null || registration == null || binding == null || intent.reservation() == null
+                || !"RESERVED".equals(intent.reservation().phase()) || !CsiOwnershipRevision.reserved(intent.reservation().revision())
+                || !matchesHolder(registration, binding, intent.reservation()) || intent.sealedBindingVersion() <= 0
+                || binding.getVersion() < intent.sealedBindingVersion() || !intent.physicalKey().equals(registration.physicalKey())
+                || !intent.equals(snapshot(json, intent.operationId(), registration, binding, intent.reservation(),
                         intent.sealedBindingVersion(), intent.startedAt()))) {
             throw unavailable();
         }
@@ -359,6 +366,11 @@ public final class WorkspaceCsiReservationStore {
 
     private Retirement snapshot(String operationId, WorkspaceCsiRegistration registration,
             RuntimeBindingRecord binding, Reservation reservation, long version, String startedAt) {
+        return snapshot(json, operationId, registration, binding, reservation, version, startedAt);
+    }
+
+    private static Retirement snapshot(ObjectMapper json, String operationId, WorkspaceCsiRegistration registration,
+            RuntimeBindingRecord binding, Reservation reservation, long version, String startedAt) {
         var handle = binding.getResourceHandle();
         var lease = binding.getLease();
         try {
@@ -370,13 +382,13 @@ public final class WorkspaceCsiReservationStore {
                     handle == null ? null : handle.getKind(), handle == null ? null : handle.getVersion(),
                     handle == null ? null : json.writeValueAsString(handle.getValue()),
                     lease == null ? null : lease.getRuntimeInstanceId(), lease == null ? null : lease.getLeaseId(),
-                    lease == null ? null : lease.getEpoch(), leaseDigest(lease), binding.getAttestationGeneration(), startedAt);
+                    lease == null ? null : lease.getEpoch(), leaseDigest(json, lease), binding.getAttestationGeneration(), startedAt);
         } catch (JsonProcessingException | java.time.format.DateTimeParseException error) {
             throw unavailable();
         }
     }
 
-    private String leaseDigest(com.alibaba.qwen.code.runtimebroker.RuntimeLease lease) {
+    private static String leaseDigest(ObjectMapper json, com.alibaba.qwen.code.runtimebroker.RuntimeLease lease) {
         if (lease == null) {
             return null;
         }

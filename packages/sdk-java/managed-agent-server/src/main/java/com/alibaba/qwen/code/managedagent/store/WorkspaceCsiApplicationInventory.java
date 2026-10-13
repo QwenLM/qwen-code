@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -24,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
@@ -43,14 +45,21 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TimeZone;
 import java.util.TreeSet;
+import java.util.concurrent.TimeUnit;
 
 /** Bounded current rows; caller fences and the native terminal proof remain required. */
 final class WorkspaceCsiApplicationInventory {
     static final int MAX_ROWS = 4096;
     static final int MAX_BYTES = 32 * 1024 * 1024;
+    private static final Set<String> CONTEXT_TABLES = Set.of("managed_agent_definition", "managed_agent_definition_command",
+            "managed_workspace_access", "managed_workspace_default", "managed_workspace_registry", "qwen_managed_channel_instance",
+            "qwen_runtime_placement_guard", "qwen_tool_publication_tenant");
     private static final ObjectMapper JSON = new ObjectMapper()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+    // This companion is outside the persisted application inventory codec.
+    private static final Declaration PHYSICAL = declaration("managed_workspace_csi_physical", "retirement_id",
+            "retirement_id:CHAR,binding_id:VARCHAR,physical_key:CHAR,record_version:BIGINT,record_bytes:LONGBLOB,record_sha256:CHAR");
     private static final List<Declaration> CATALOGUE = List.of(
             declaration("managed_agent_action", "tenant_id,session_id,action_id",
                     "tenant_id:VARCHAR,session_id:VARCHAR,action_id:VARCHAR,state:VARCHAR,options_json:LONGTEXT,"
@@ -521,6 +530,843 @@ final class WorkspaceCsiApplicationInventory {
         return inventory.snapshot();
     }
 
+    static List<Blocker> validateHistoricalBaseline(JdbcCsiFilesRetirementGuard.Original actual,
+            WorkspaceCsiReservationStore.Retirement intent, Snapshot baseline) {
+        requireEncoded(actual != null && actual.draining() && actual.generation() == 1 && intent != null
+                && baseline != null && baseline.blockers().isEmpty()
+                && (actual.state() == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.DRAINING
+                        || actual.state() == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.RELEASED));
+        baseline = restoreCanonical(baseline.bytes());
+        var saved = WorkspaceCsiApplicationImage.sole(baseline, "qwen_runtime_binding");
+        requireEncoded(saved.number("record_version") != null && saved.number("record_version") >= intent.sealedBindingVersion()
+                && Objects.equals(saved.number("first_activation_journal_revision"), 2L)
+                && actual.version() == (actual.state() == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.RELEASED
+                        ? Math.addExact(saved.number("record_version"), 1L) : saved.number("record_version")));
+        WorkspaceCsiApplicationImage.expected(baseline, com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.SETTLING,
+                null, null, null);
+        // Only the saved-row validators run here; no discover, membership lookup or SQL is invoked.
+        var validation = new Inspection(null, actual, intent);
+        var references = originalReferences(actual, intent, baseline);
+        for (Table table : baseline.tables()) {
+            for (Row row : table.rows()) {
+                if (row.membership() == Membership.OTHER) {
+                    if (savedOriginalReference(table.name(), row, references)) {
+                        validation.block(table.name(), key(row), "original_row_hidden_as_other");
+                    }
+                    continue;
+                }
+                if (CONTEXT_TABLES.contains(table.name()) != (row.membership() == Membership.CONTEXT)) {
+                    validation.block(table.name(), key(row), "invalid_historical_membership");
+                }
+                validation.tables.get(table.name()).put(key(row), row);
+                if (row.membership() == Membership.ORIGINAL) {
+                    validation.expand(table.name(), row);
+                }
+            }
+        }
+        validation.validate();
+        return List.copyOf(validation.blockers);
+    }
+
+    private static Map<String, Set<String>> originalReferences(JdbcCsiFilesRetirementGuard.Original actual,
+            WorkspaceCsiReservationStore.Retirement intent, Snapshot baseline) {
+        Set<String> executions = new LinkedHashSet<>();
+        Set<String> executionHashes = new LinkedHashSet<>();
+        Set<String> idempotencyHashes = new LinkedHashSet<>();
+        for (Row row : baseline.table("qwen_tool_execution").rows()) {
+            if (row.membership() == Membership.ORIGINAL && actual.bindingId().equals(row.text("binding_id"))) {
+                executions.add(row.text("execution_call_id"));
+                requireEncoded(digest(row.text("execution_call_id")).equals(row.text("execution_call_id_hash"))
+                        && digest(row.text("idempotency_key")).equals(row.text("idempotency_key_hash")));
+                executionHashes.add(row.text("execution_call_id_hash"));
+                idempotencyHashes.add(row.text("idempotency_key_hash"));
+            }
+        }
+        String session = actual.request().getIsolationKey();
+        String tenant = actual.request().getScope().getTenantId();
+        Set<String> scopes = new LinkedHashSet<>();
+        scopes.add(ManagedSessionStore.sessionScopeKey(tenant, session));
+        scopes.add(ManagedToolResultStore.scope(tenant, session));
+        try {
+            scopes.add(hash(JSON.writeValueAsBytes(List.of(tenant, actual.request().getScope().getWorkspaceId(), session))));
+        } catch (IOException encoding) {
+            throw new IllegalArgumentException("Invalid original publication scope", encoding);
+        }
+        var references = new LinkedHashMap<>(Map.of(
+                "session", Set.of(session), "binding", Set.of(actual.bindingId()),
+                "request", Set.of(actual.request().requestKey()), "retirement", Set.of(intent.operationId()),
+                "reservation", Set.of(intent.reservation().reservationId()),
+                "provision", Set.of(intent.reservation().provisionRequestId()), "execution", Set.copyOf(executions),
+                "scopedSession", Set.copyOf(scopes), "sessionKey", Set.of(hash(utf8(session)), JdbcRuntimeBindingRepository.harnessDrainKey(session))));
+        references.put("executionHash", Set.copyOf(executionHashes));
+        references.put("publicationExecutionHash", executions.stream().map(value -> hash(utf8(value)))
+                .collect(java.util.stream.Collectors.toUnmodifiableSet()));
+        references.put("executionIdempotencyHash", Set.copyOf(idempotencyHashes));
+        Set<String> reads = new LinkedHashSet<>();
+        for (Row row : baseline.table("qwen_csi_resource_read").rows()) {
+            if (row.membership() == Membership.ORIGINAL && actual.bindingId().equals(row.text("binding_id"))) {
+                String id = row.text("read_id");
+                requireEncoded(java.util.UUID.fromString(id).toString().equals(id)
+                        && actual.request().requestKey().equals(row.text("request_key"))
+                        && actual.request().getIsolationKey().equals(row.text("session_id"))
+                        && Objects.equals(row.number("runtime_generation"), actual.generation()));
+                reads.add(id);
+            }
+        }
+        references.put("resourceRead", Set.copyOf(reads));
+        return Collections.unmodifiableMap(references);
+    }
+
+    private static boolean savedOriginalReference(String table, Row row, Map<String, Set<String>> references) {
+        for (var field : row.fields().entrySet()) {
+            if (field.getValue().isNull() || field.getValue().kind().binary()) {
+                continue;
+            }
+            String namespace = typedReferenceNamespace(table, field.getKey());
+            if (namespace != null && references.getOrDefault(namespace, Set.of()).contains(field.getValue().text())) {
+                return true;
+            }
+            if (field.getKey().endsWith("_json") || "artifact_refs".equals(field.getKey())) {
+                JsonNode value = parse(field.getValue().bytes());
+                requireEncoded(value != null);
+                if (savedJsonReference(value, references, 0,
+                        "managed_workspace_csi_retirement".equals(table) && "identity_json".equals(field.getKey()))) {
+                    return true;
+                }
+            }
+        }
+        if ("qwen_managed_session_resource".equals(table) && "managed-tool-input".equals(row.text("kind"))) {
+            JsonNode wrapper = parse(row.binary("inline_bytes"));
+            WorkspaceCsiApplicationJson.closed(wrapper, Set.of("harnessSessionId", "runtimeSessionId", "payloadJson"));
+            requireEncoded(wrapper.path("payloadJson").isTextual());
+            JsonNode payload = parse(wrapper.path("payloadJson").textValue());
+            requireEncoded(payload != null);
+            return savedJsonReference(wrapper, references, 0, false) || savedJsonReference(payload, references, 0, false);
+        }
+        return false;
+    }
+
+    private static boolean savedJsonReference(JsonNode value, Map<String, Set<String>> references, int depth, boolean identity) {
+        requireEncoded(depth <= 64);
+        if (value.isObject()) {
+            var fields = value.fields();
+            while (fields.hasNext()) {
+                var field = fields.next();
+                if (field.getValue().isTextual()) {
+                    if (globalReference(field.getKey(), field.getValue().textValue(), references)) {
+                        return true;
+                    }
+                    if (identity && depth == 0 && "resourceHandleJson".equals(field.getKey())) {
+                        JsonNode nested = parse(field.getValue().textValue());
+                        requireEncoded(nested != null);
+                        if (savedJsonReference(nested, references, depth + 1, false)) {
+                            return true;
+                        }
+                    }
+                }
+                if (savedJsonReference(field.getValue(), references, depth + 1, false)) {
+                    return true;
+                }
+            }
+        } else if (value.isArray()) {
+            for (JsonNode item : value) {
+                if (savedJsonReference(item, references, depth + 1, false)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean globalReference(String field, String value, Map<String, Set<String>> references) {
+        String namespace = referenceNamespace(field);
+        return namespace != null && references.getOrDefault(namespace, Set.of()).contains(value);
+    }
+
+    private static String referenceNamespace(String field) {
+        return switch (field) {
+            case "session_id", "parent_session_id", "root_session_id", "child_session_id", "harness_session_id",
+                    "runtime_session_id", "runtime_instance_id", "isolation_key", "sessionId", "harnessSessionId",
+                    "runtimeSessionId", "runtimeInstanceId", "parentSessionId", "rootSessionId", "childSessionId" -> "session";
+            case "binding_id", "active_binding_id", "bindingId", "runtimeBindingId" -> "binding";
+            case "request_key", "runtime_request_key", "requestKey" -> "request";
+            case "retirement_id", "retirementId" -> "retirement";
+            case "reservation_id", "csi_reservation_id", "reservationId" -> "reservation";
+            case "provision_request_id", "csi_provision_request_id", "provisionRequestId" -> "provision";
+            case "execution_call_id", "blocked_execution_call_id", "executionCallId" -> "execution";
+            case "execution_call_id_hash" -> "executionHash";
+            case "read_id", "readId" -> "resourceRead";
+            case "session_scope_key", "scope_key", "sessionScopeKey", "scopeKey" -> "scopedSession";
+            case "session_key", "harness_key", "runtime_session_key", "sessionKey", "harnessKey" -> "sessionKey";
+            default -> null;
+        };
+    }
+
+    private static String typedReferenceNamespace(String table, String field) {
+        if ("qwen_tool_execution".equals(table) && "idempotency_key_hash".equals(field)) {
+            return "executionIdempotencyHash";
+        }
+        if ("qwen_output_read_lease".equals(table) && "lease_id".equals(field)) {
+            return "resourceRead";
+        }
+        if ("managed_agent_tool_result".equals(table) && "execution_key".equals(field)) {
+            return "executionHash";
+        }
+        if ("qwen_tool_publication".equals(table) && "execution_key".equals(field)) {
+            return "publicationExecutionHash";
+        }
+        return referenceNamespace(field);
+    }
+
+    /** Fixed-key component; historical application inspection additionally audits candidate references. */
+    static Snapshot readHistoricalKeys(Connection target, Snapshot expected) throws SQLException {
+        return historicalScan(target, expected, Map.of(), System.nanoTime());
+    }
+
+    record HistoricalOwner(Row binding, Row retirement) {
+    }
+
+    static HistoricalOwner readHistoricalOwner(Connection target, String retirementId, long started) throws SQLException {
+        return readHistoricalOwner(new HistoricalScan(target, started), retirementId);
+    }
+
+    static HistoricalOwner readHistoricalOwner(HistoricalScan read, String retirementId) throws SQLException {
+        requireEncoded(read != null && !read.imageRead);
+        return historicalOwner(read, retirementId);
+    }
+
+    static HistoricalOwner readForeignOwner(HistoricalScan read, Row carrier) throws SQLException {
+        requireEncoded(read != null && read.imageRead && read.frozenReader != null && carrier != null);
+        var result = historicalOwner(read, carrier.text("retirement_id"));
+        requireEncoded(Arrays.equals(result.retirement().bytes(), carrier.bytes()));
+        return result;
+    }
+
+    private static HistoricalOwner historicalOwner(HistoricalScan read, String retirementId) throws SQLException {
+        requireEncoded(retirementId != null
+                && java.util.UUID.fromString(retirementId).toString().equals(retirementId));
+        historyRemaining(read.started);
+        var retirement = CATALOGUE.stream().filter(table -> table.name().equals("managed_workspace_csi_retirement")).findFirst().orElseThrow();
+        var retirements = read.query(retirement, "retirement_id = ?", List.of(new Cell(Kind.VARCHAR, utf8(retirementId))));
+        requireEncoded(read.blockers.isEmpty() && retirements.size() == 1);
+        Row saved = retirements.getFirst();
+        requireEncoded(saved.text("binding_id") != null
+                && java.util.UUID.fromString(saved.text("binding_id")).toString().equals(saved.text("binding_id")));
+        var binding = CATALOGUE.stream().filter(table -> table.name().equals("qwen_runtime_binding")).findFirst().orElseThrow();
+        var bindings = read.query(binding, "binding_id = ?", List.of(new Cell(Kind.VARCHAR, utf8(saved.text("binding_id")))));
+        requireEncoded(read.blockers.isEmpty() && bindings.size() == 1);
+        historyRemaining(read.started);
+        return new HistoricalOwner(bindings.getFirst(), saved);
+    }
+
+    /** Own keys and strong roots only; never starts a nested carrier scan or changes the parent roots. */
+    static void auditForeignOwner(HistoricalScan read, Snapshot expected, JdbcCsiFilesRetirementGuard.Original original,
+            WorkspaceCsiReservationStore.Retirement intent) throws SQLException {
+        requireEncoded(read != null && read.imageRead && read.frozenReader != null && expected != null);
+        expected = restoreCanonical(expected.bytes());
+        requireEncoded(expected.blockers().isEmpty()
+                && expected.tables().stream().flatMap(table -> table.rows().stream()).noneMatch(row -> row.membership() == Membership.OTHER));
+        var ownReferences = originalReferences(original, intent, expected);
+        for (Declaration declaration : CATALOGUE) {
+            readFixed(read, declaration, expected.table(declaration.name()).rows(), ownReferences);
+        }
+        requireEncoded(read.blockers.isEmpty());
+    }
+
+    static void requireForeignPhysicalAbsent(HistoricalScan read, String retirement, String binding, String physical) throws SQLException {
+        requireEncoded(readForeignPhysical(read, retirement, binding, physical).isEmpty());
+    }
+
+    static List<Row> readForeignPhysical(HistoricalScan read, String retirement, String binding, String physical) throws SQLException {
+        requireEncoded(read != null && read.imageRead && read.frozenReader != null);
+        var companions = read.query(PHYSICAL, "retirement_id = ? OR binding_id = ? OR physical_key = ?",
+                List.of(new Cell(Kind.CHAR, utf8(retirement)), new Cell(Kind.VARCHAR, utf8(binding)), new Cell(Kind.CHAR, utf8(physical))));
+        requireEncoded(read.blockers.isEmpty());
+        return companions;
+    }
+
+    static void verifyForeignProgress(HistoricalScan read, Row companion, JsonNode expectedPlan,
+            WorkspaceCsiNodeSourceStore.Association source) {
+        requireEncoded(read != null && read.imageRead && read.frozenReader != null && companion != null && expectedPlan != null
+                && source != null);
+        for (String field : List.of("retirement_id", "binding_id", "physical_key")) {
+            String name = switch (field) {
+                case "retirement_id" -> "retirementId";
+                case "binding_id" -> "bindingId";
+                default -> "physicalKey";
+            };
+            requireEncoded(Objects.equals(companion.text(field), expectedPlan.path(name).textValue()));
+        }
+        requireEncoded(companion.number("record_version") != null);
+        var progress = WorkspaceCsiPhysicalProgress.restore(companion.number("record_version"), companion.binary("record_bytes"),
+                companion.text("record_sha256"), expectedPlan, source);
+        if (physicalReference(progress, source, read.references, read.started)) {
+            read.block(PHYSICAL.name(), companion, "extra_historical_reference");
+        }
+        requireEncoded(read.blockers.isEmpty());
+    }
+
+    private static boolean physicalReference(WorkspaceCsiPhysicalProgress progress, WorkspaceCsiNodeSourceStore.Association source,
+            Map<String, Set<String>> references, long started) {
+        historyRemaining(started);
+        WorkspaceCsiNodeSourceStore.validate(source);
+        requireEncoded("PUBLISHED".equals(source.phase()));
+        var value = WorkspaceCsiApplicationJson.object(progress.bytes(), WorkspaceCsiPhysicalProgress.LIMIT);
+        JsonNode configuration = JSON.valueToTree(source.configuration());
+        if (savedJsonReference(value, references, 0, false) || savedJsonReference(configuration, references, 0, false)
+                || savedJsonReference(WorkspaceCsiApplicationJson.object(progress.planBytes(), 64 * 1024), references, 0, false)) {
+            return true;
+        }
+        for (JsonNode attempt : value.path("attempts")) {
+            historyRemaining(started);
+            var request = WorkspaceCsiApplicationJson.object(WorkspaceCsiApplicationJson.base64(attempt.path("requestBase64"), 4096), 4096);
+            if (savedJsonReference(request, references, 0, false)) {
+                return true;
+            }
+            if (!attempt.path("statusCode").isNull()) {
+                byte[] reply = attempt.path("responseBase64").textValue().isEmpty() ? new byte[0]
+                        : WorkspaceCsiApplicationJson.base64(attempt.path("responseBase64"), 1024 * 1024);
+                if (reply.length > 0 && savedJsonReference(WorkspaceCsiApplicationJson.object(reply, 1024 * 1024), references, 0, false)) {
+                    return true;
+                }
+            }
+        }
+        var evidence = progress.latestEvidence();
+        if (evidence != null) {
+            var active = evidence.stream().observations().getLast();
+            requireEncoded(source.configuration().scope().armId().equals(active.scope().armId()));
+            // The source decoder closes every record; all declared owner references are in its validated scope.
+            if (savedJsonReference(JSON.valueToTree(active.scope()), references, 0, false)) {
+                return true;
+            }
+        }
+        historyRemaining(started);
+        return false;
+    }
+
+    static WorkspaceCsiNodeSourceStore.Association publishedSource(Snapshot image) {
+        Row row = WorkspaceCsiApplicationImage.sole(image, "managed_workspace_csi_source");
+        var configuration = WorkspaceCsiNodeSourceStore.decode(row.text("configuration_json"), WorkspaceCsiNodeSourceStore.Configuration.class);
+        var result = new WorkspaceCsiNodeSourceStore.Association(row.text("binding_id"), row.number("runtime_generation"),
+                row.text("physical_key"), row.text("reservation_id"), row.number("reservation_revision"), configuration,
+                row.text("phase"), row.number("record_version"), HistoricalScan.source(row, "arm"), row.text("pod_uid"),
+                row.text("gated_spec_sha256"), HistoricalScan.source(row, "bound"), HistoricalScan.source(row, "publication"));
+        WorkspaceCsiNodeSourceStore.validate(result);
+        requireEncoded("PUBLISHED".equals(result.phase()));
+        return result;
+    }
+
+    /** The known foreign domain is a fully proved DRAINED owner with its sole validated progress record. */
+    static Snapshot auditPhysicalCandidates(HistoricalScan read, Snapshot current) throws SQLException {
+        requireEncoded(read != null && read.imageRead && read.frozenReader != null && current != null
+                && current.blockers().isEmpty() && !read.references.isEmpty());
+        for (Row companion : read.query(PHYSICAL, "1 = 1", List.of())) {
+            try {
+                if (savedOriginalReference(PHYSICAL.name(), companion, read.references)) {
+                    read.block(PHYSICAL.name(), companion, "unsupported_original_physical_outcome");
+                    continue;
+                }
+                var owner = historicalOwner(read, companion.text("retirement_id"));
+                requireEncoded(Objects.equals(companion.text("binding_id"), owner.binding().text("binding_id"))
+                        && Objects.equals(companion.text("physical_key"), owner.retirement().text("physical_key"))
+                        && "DRAINED".equals(owner.retirement().text("progress_stage"))
+                        && Objects.equals(owner.retirement().number("progress_version"), 4L));
+                read.carrier("managed_workspace_csi_retirement", owner.retirement());
+            } catch (RuntimeException invalid) {
+                read.block(PHYSICAL.name(), companion, "unsupported_historical_physical_owner");
+            }
+        }
+        historyRemaining(read.started);
+        return new Snapshot(current.tables(), read.blockers, read.count, read.bytes);
+    }
+
+    /** Candidate references are inspected without expanding the fixed original image. */
+    static Snapshot readHistoricalReferencedKeys(Connection target, Snapshot expected,
+            JdbcCsiFilesRetirementGuard.Original original, WorkspaceCsiReservationStore.Retirement intent, long started) throws SQLException {
+        return readHistoricalReferencedKeys(new HistoricalScan(target, started), expected, original, intent);
+    }
+
+    static Snapshot readHistoricalReferencedKeys(HistoricalScan read, Snapshot expected,
+            JdbcCsiFilesRetirementGuard.Original original, WorkspaceCsiReservationStore.Retirement intent) throws SQLException {
+        requireEncoded(expected != null && original != null && original.request() != null && original.generation() == 1 && intent != null
+                && original.bindingId().equals(WorkspaceCsiApplicationImage.sole(expected, "qwen_runtime_binding").text("binding_id")));
+        expected = restoreCanonical(expected.bytes());
+        var binding = WorkspaceCsiApplicationImage.sole(expected, "qwen_runtime_binding");
+        requireEncoded(original.request().requestKey().equals(binding.text("request_key"))
+                && original.request().getIsolationKey().equals(binding.text("isolation_key"))
+                && original.request().getScope().getTenantId().equals(binding.text("tenant_id"))
+                && original.request().getScope().getWorkspaceId().equals(binding.text("workspace_id"))
+                && Objects.equals(binding.number("runtime_generation"), original.generation())
+                && intent.reservation() != null && original.bindingId().equals(intent.reservation().bindingId())
+                && Objects.equals(intent.reservation().runtimeGeneration(), original.generation()));
+        return historicalScan(read, expected, originalReferences(original, intent, expected));
+    }
+
+    private static Snapshot historicalScan(Connection target, Snapshot expected, Map<String, Set<String>> references,
+            long started) throws SQLException {
+        return historicalScan(new HistoricalScan(target, started), expected, references);
+    }
+
+    static Snapshot historicalScan(HistoricalScan read, Snapshot expected, Map<String, Set<String>> references) throws SQLException {
+        requireEncoded(read != null && !read.imageRead && expected != null && references != null);
+        expected = restoreCanonical(expected.bytes());
+        requireEncoded(expected.blockers().isEmpty() && expected.table("managed_workspace_execution_lease").rows().isEmpty()
+                && expected.tables().stream().flatMap(table -> table.rows().stream()).noneMatch(row -> row.membership() == Membership.OTHER));
+        var pinnedReferences = new LinkedHashMap<String, Set<String>>();
+        references.forEach((namespace, values) -> pinnedReferences.put(namespace, Set.copyOf(values)));
+        read.references = Map.copyOf(pinnedReferences);
+        read.imageRead = true;
+        references = read.references;
+        List<Table> tables = new ArrayList<>();
+        for (Declaration declaration : CATALOGUE) {
+            var wanted = expected.table(declaration.name()).rows();
+            Map<String, Row> fixed = new LinkedHashMap<>();
+            wanted.forEach(row -> requireEncoded(fixed.put(key(row), row) == null));
+            var current = readFixed(read, declaration, wanted, references);
+            if (!references.isEmpty()) {
+                var carriers = declaration.columns().stream().filter(column -> structured(column.name())
+                        || column.kind() == Kind.MEDIUMBLOB || column.kind() == Kind.LONGBLOB
+                        || "object_key".equals(column.name())).map(column -> column.name() + " IS NOT NULL").toList();
+                if (!carriers.isEmpty()) {
+                    var candidates = read.query(declaration, String.join(" OR ", carriers), List.of());
+                    // Manifests establish coverage before any independently fetched message part is accepted.
+                    if ("qwen_managed_session_resource".equals(declaration.name())) {
+                        for (Row row : candidates) {
+                            if (!fixed.containsKey(key(row)) && "managed-message-chunks".equals(row.text("kind"))) {
+                                read.carrier(declaration.name(), row);
+                            }
+                        }
+                    }
+                    for (Row row : candidates) {
+                        if (!fixed.containsKey(key(row))) {
+                            if (!"qwen_managed_session_resource".equals(declaration.name())
+                                    || !"managed-message-chunks".equals(row.text("kind"))) {
+                                read.carrier(declaration.name(), row);
+                            }
+                        }
+                    }
+                }
+            }
+            tables.add(new Table(declaration.name(), declaration.columns(), declaration.keys(), current));
+        }
+        historyRemaining(read.started);
+        return new Snapshot(tables, read.blockers, read.count, read.bytes);
+    }
+
+    private static List<Row> readFixed(HistoricalScan read, Declaration declaration, List<Row> wanted,
+            Map<String, Set<String>> references) throws SQLException {
+        Map<String, Row> fixed = new LinkedHashMap<>();
+        wanted.forEach(row -> requireEncoded(fixed.put(key(row), row) == null));
+        List<String> predicates = new ArrayList<>();
+        List<Cell> parameters = new ArrayList<>();
+        String tuple = "(" + String.join(" AND ", declaration.keys().stream().map(column -> column + " = ?").toList()) + ")";
+        for (Row row : wanted) {
+            predicates.add(tuple);
+            parameters.addAll(row.key());
+        }
+        for (Column column : declaration.columns()) {
+            String namespace = typedReferenceNamespace(declaration.name(), column.name());
+            var identities = namespace == null ? Set.<String>of() : references.getOrDefault(namespace, Set.of());
+            if (!identities.isEmpty()) {
+                predicates.add(column.name() + " IN (" + String.join(",", Collections.nCopies(identities.size(), "?")) + ")");
+                identities.stream().sorted().forEach(value -> parameters.add(new Cell(column.kind(), utf8(value))));
+            }
+        }
+        List<Row> current = new ArrayList<>();
+        for (Row row : read.query(declaration, predicates.isEmpty() ? "1 = 0" : String.join(" OR ", predicates), parameters)) {
+            Row pinned = fixed.get(key(row));
+            if (pinned == null) {
+                read.block(declaration.name(), row, "extra_historical_reference");
+                continue;
+            }
+            Row projected = pinned.membership() == Membership.CONTEXT ? WorkspaceCsiPhysicalHistoryImage.context(declaration.name(), row)
+                    : row.withMembership(Membership.ORIGINAL);
+            current.add(projected);
+            if (!Arrays.equals(projected.bytes, pinned.bytes)) {
+                read.block(declaration.name(), row, "historical_row_changed");
+            }
+        }
+        current.sort(WorkspaceCsiApplicationInventory::compareKeys);
+        if (current.size() != wanted.size()) {
+            read.blockers.add(new Blocker(declaration.name(), null, "missing_historical_key"));
+        }
+        return current;
+    }
+
+    private static boolean structured(String field) {
+        return field.endsWith("_json") || "artifact_refs".equals(field);
+    }
+
+    @FunctionalInterface
+    interface FrozenOwnerReader {
+        Snapshot read(HistoricalScan scan, Row carrier) throws SQLException;
+    }
+
+    static final class HistoricalScan {
+        final Connection connection;
+        final long started;
+        private Map<String, Set<String>> references = Map.of();
+        private boolean imageRead;
+        private final Map<String, Map<String, Row>> seen = new LinkedHashMap<>();
+        private final List<Blocker> blockers = new ArrayList<>();
+        private final Set<String> messageParts = new LinkedHashSet<>();
+        private final Map<String, com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord> nativeMembers = new LinkedHashMap<>();
+        private final FrozenOwnerReader frozenReader;
+        private int count;
+        private long bytes;
+        private boolean overflow;
+
+        HistoricalScan(Connection connection, long started) throws SQLException {
+            this(connection, started, null);
+        }
+
+        HistoricalScan(Connection connection, long started, FrozenOwnerReader frozenReader) throws SQLException {
+            requireEncoded(connection != null && !connection.getAutoCommit() && connection.isReadOnly()
+                    && connection.getTransactionIsolation() == Connection.TRANSACTION_REPEATABLE_READ);
+            historyRemaining(started);
+            this.connection = connection;
+            this.started = started;
+            this.frozenReader = frozenReader;
+        }
+
+        private List<Row> query(Declaration declaration, String predicate, List<Cell> parameters) throws SQLException {
+            return query(declaration, predicate, parameters, false);
+        }
+
+        List<com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord> originalExecutions(JdbcCsiFilesRetirementGuard.Original original)
+                throws SQLException {
+            requireEncoded(!imageRead);
+            return executions(original);
+        }
+
+        List<com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord> foreignExecutions(JdbcCsiFilesRetirementGuard.Original original)
+                throws SQLException {
+            requireEncoded(imageRead && frozenReader != null);
+            return executions(original);
+        }
+
+        private List<com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord> executions(JdbcCsiFilesRetirementGuard.Original original)
+                throws SQLException {
+            requireEncoded(original != null && original.request() != null
+                    && JdbcCsiFilesRetirementGuard.isProfile(original.request().getScope()));
+            var declaration = CATALOGUE.stream().filter(table -> table.name().equals("qwen_tool_execution")).findFirst().orElseThrow();
+            var current = query(declaration, "binding_id = ? OR harness_session_id = ? OR runtime_session_id = ?",
+                    List.of(new Cell(Kind.VARCHAR, utf8(original.bindingId())),
+                            new Cell(Kind.VARCHAR, utf8(original.request().getIsolationKey())),
+                            new Cell(Kind.VARCHAR, utf8(original.request().getIsolationKey()))), true);
+            requireEncoded(blockers.isEmpty());
+            return current.stream().map(row -> {
+                var member = nativeMembers.get(key(row));
+                requireEncoded(member != null);
+                return member;
+            }).toList();
+        }
+
+        private List<Row> query(Declaration declaration, String predicate, List<Cell> parameters, boolean decodeMembers) throws SQLException {
+            historyRemaining(started);
+            if (overflow) {
+                return List.of();
+            }
+            var result = new ArrayList<Row>();
+            String sql = "SELECT t.* FROM " + declaration.name() + " t WHERE " + predicate + " ORDER BY "
+                    + String.join(",", declaration.keys()) + " LIMIT " + (MAX_ROWS + 1);
+            try (var statement = connection.prepareStatement(sql)) {
+                statement.setQueryTimeout(historyRemaining(started));
+                statement.setFetchSize("MySQL".equals(connection.getMetaData().getDatabaseProductName()) ? Integer.MIN_VALUE : 1);
+                int parameter = 1;
+                for (Cell cell : parameters) {
+                    historicalParameter(statement, parameter++, cell);
+                }
+                try (var rows = statement.executeQuery()) {
+                    if (!schema(rows.getMetaData(), declaration)) {
+                        blockers.add(new Blocker(declaration.name(), null, "schema_drift"));
+                        return List.of();
+                    }
+                    while (rows.next()) {
+                        historyRemaining(started);
+                        var decoded = decodeRow(rows, declaration);
+                        if (decoded.blocker() != null) {
+                            blockers.add(new Blocker(declaration.name(), null, decoded.blocker()));
+                            overflow = "byte_limit".equals(decoded.blocker());
+                            break;
+                        }
+                        Row row = decoded.row();
+                        var table = seen.computeIfAbsent(declaration.name(), ignored -> new LinkedHashMap<>());
+                        Row previous = table.get(key(row));
+                        if (previous != null) {
+                            if (!Arrays.equals(previous.bytes, row.bytes)) {
+                                block(declaration.name(), row, "historical_candidate_changed");
+                            }
+                        } else {
+                            if (count == MAX_ROWS || bytes + row.bytes.length > MAX_BYTES) {
+                                block(declaration.name(), row, count == MAX_ROWS ? "row_limit" : "byte_limit");
+                                overflow = true;
+                                break;
+                            }
+                            count++;
+                            bytes += row.bytes.length;
+                            table.put(key(row), row);
+                        }
+                        if (decodeMembers && !nativeMembers.containsKey(key(row))) {
+                            try {
+                                nativeMembers.put(key(row), com.alibaba.qwen.code.runtimebroker.JdbcCsiExecutionAdmission.readHistoricalMember(rows));
+                            } catch (RuntimeException malformed) {
+                                block(declaration.name(), row, "invalid_historical_execution");
+                            }
+                        }
+                        result.add(row);
+                    }
+                }
+            } catch (SQLException unavailable) {
+                blockers.add(new Blocker(declaration.name(), null, "query_unavailable"));
+            }
+            return result;
+        }
+
+        private void block(String table, Row row, String code) {
+            blockers.add(new Blocker(table, key(row), code));
+        }
+
+        private void carrier(String table, Row row) throws SQLException {
+            historyRemaining(started);
+            try {
+                if (savedOriginalReference(table, row, references)) {
+                    block(table, row, "extra_historical_reference");
+                    return;
+                }
+                if ("managed_workspace_csi_source".equals(table)) {
+                    var configuration = WorkspaceCsiNodeSourceStore.decode(row.text("configuration_json"), WorkspaceCsiNodeSourceStore.Configuration.class);
+                    var association = new WorkspaceCsiNodeSourceStore.Association(row.text("binding_id"), row.number("runtime_generation"),
+                            row.text("physical_key"), row.text("reservation_id"), row.number("reservation_revision"), configuration,
+                            row.text("phase"), row.number("record_version"), source(row, "arm"), row.text("pod_uid"),
+                            row.text("gated_spec_sha256"), source(row, "bound"), source(row, "publication"));
+                    WorkspaceCsiNodeSourceStore.validate(association);
+                } else if ("managed_workspace_csi_retirement".equals(table)) {
+                    if (frozenReader == null) {
+                        block(table, row, "unsupported_historical_payload");
+                        return;
+                    }
+                    var baseline = frozenReader.read(this, row);
+                    for (Table saved : baseline.tables()) {
+                        for (Row value : saved.rows()) {
+                            if (value.membership() == Membership.ORIGINAL && savedOriginalReference(saved.name(), value, references)) {
+                                block(table, row, "extra_historical_reference");
+                            }
+                        }
+                    }
+                    JsonNode envelope = WorkspaceCsiApplicationJson.object(row.binary("frozen_request_bytes"), MAX_BYTES);
+                    JsonNode body = WorkspaceCsiApplicationJson.object(WorkspaceCsiApplicationJson.base64(
+                            envelope.path("commitBodyBase64"), 128 * 1024), 128 * 1024);
+                    var active = new ArrayList<JsonNode>(List.of(envelope, body,
+                            WorkspaceCsiApplicationJson.object(WorkspaceCsiApplicationJson.base64(
+                                    envelope.path("preCutObservationBase64"), com.alibaba.qwen.code.runtimebroker.CsiFileFinalizeProtocol.RESPONSE_LIMIT),
+                                    com.alibaba.qwen.code.runtimebroker.CsiFileFinalizeProtocol.RESPONSE_LIMIT)));
+                    active.addAll(CsiNativeActivationProof.records(WorkspaceCsiApplicationJson.base64(body.path("recordBytesBase64"), 128 * 1024)));
+                    for (String field : List.of("cut_bytes", "finalize_receipt_bytes")) {
+                        if (row.binary(field) != null) {
+                            active.add(WorkspaceCsiApplicationJson.object(row.binary(field), MAX_BYTES));
+                        }
+                    }
+                    if (active.stream().anyMatch(value -> savedJsonReference(value, references, 0, false))) {
+                        block(table, row, "extra_historical_reference");
+                    }
+                } else if ("qwen_managed_session_journal_tx".equals(table)) {
+                    byte[] raw = payload(row, "record_bytes", "record_digest", 8 * 1024 * 1024);
+                    requireEncoded("identity".equals(row.text("record_encoding")));
+                    var records = CsiNativeActivationProof.records(raw);
+                    for (JsonNode record : records) {
+                        requireEncoded(row.text("session_id").equals(record.path("sessionId").textValue()));
+                        if (savedJsonReference(record, references, 0, false)) {
+                            block(table, row, "extra_historical_reference");
+                        }
+                    }
+                } else if ("qwen_managed_session_resource".equals(table)) {
+                    nativeResource(row);
+                } else if ("qwen_tool_publication_object".equals(table)) {
+                    publicationObject(row);
+                } else if (row.fields().values().stream().anyMatch(cell -> !cell.isNull()
+                        && (cell.kind() == Kind.MEDIUMBLOB || cell.kind() == Kind.LONGBLOB))
+                        || row.text("object_key") != null) {
+                    block(table, row, "unsupported_historical_payload");
+                }
+            } catch (RuntimeException malformed) {
+                block(table, row, "invalid_historical_payload");
+            }
+            historyRemaining(started);
+        }
+
+        private void nativeResource(Row row) {
+            requireEncoded(ManagedSessionStore.sessionScopeKey(row.text("tenant_id"), row.text("session_id"))
+                    .equals(row.text("session_scope_key")) && Objects.equals(row.number("schema_version"), 1L)
+                    && "MYSQL_INLINE".equals(row.text("storage_kind")) && row.text("object_key") == null
+                    && row.text("object_version_id") == null && row.text("encryption_key_id") == null
+                    && Set.of("PUBLISHED", "REFERENCED").contains(row.text("state")));
+            byte[] raw = payload(row, "inline_bytes", "sha256", 8 * 1024 * 1024);
+            String kind = row.text("kind");
+            if ("managed-message-part".equals(kind)) {
+                requireEncoded(messageParts.contains(key(row)));
+                return;
+            }
+            JsonNode value;
+            if ("managed-message-chunks".equals(kind)) {
+                Set<String> consumed = new LinkedHashSet<>();
+                value = CsiNativeActivationProof.messageBody(resourceRef(row), ref -> {
+                    historyRemaining(started);
+                    var parts = seen.getOrDefault("qwen_managed_session_resource", Map.of()).values().stream()
+                            .filter(part -> row.text("session_scope_key").equals(part.text("session_scope_key"))
+                                    && ref.path("resourceId").textValue().equals(part.text("resource_id"))).toList();
+                    requireEncoded(parts.size() == 1);
+                    Row part = parts.getFirst();
+                    for (String field : List.of("tenant_id", "workspace_id", "session_id", "session_scope_key")) {
+                        requireEncoded(Objects.equals(row.text(field), part.text(field)));
+                    }
+                    requireEncoded(Objects.equals(part.text("kind"), ref.path("kind").textValue())
+                            && Objects.equals(part.number("schema_version"), ref.path("schemaVersion").longValue())
+                            && Objects.equals(part.number("byte_length"), ref.path("byteLength").longValue())
+                            && Objects.equals(part.text("sha256"), ref.path("digest").textValue())
+                            && "MYSQL_INLINE".equals(part.text("storage_kind"))
+                            && part.text("object_key") == null && part.text("object_version_id") == null
+                            && part.text("encryption_key_id") == null && Set.of("PUBLISHED", "REFERENCED").contains(part.text("state")));
+                    byte[] bytes = payload(part, "inline_bytes", "sha256", 8 * 1024 * 1024);
+                    if ("managed-message-part".equals(part.text("kind"))) {
+                        consumed.add(key(part));
+                    }
+                    return bytes;
+                });
+                messageParts.addAll(consumed);
+            } else if ("managed-message".equals(kind)) {
+                value = CsiNativeActivationProof.messageBody(resourceRef(row), ignored -> raw);
+            } else if ("managed-input".equals(kind)) {
+                value = CsiNativeActivationProof.inputBlocks(raw);
+            } else if (Set.of("managed-activation-boundary", "managed-activation-install", "managed-admission",
+                    "managed-checkpoint", "managed-definition", "managed-file_history", "managed-hosted-model-route",
+                    "managed-hosted-model-usage", "managed-root",
+                    "managed-tool-definition", "managed-tool-input", "managed-tool-outcome", "managed-turn-result").contains(kind)) {
+                value = CsiNativeActivationProof.readObject(raw);
+            } else {
+                block("qwen_managed_session_resource", row, "unsupported_historical_payload");
+                return;
+            }
+            if (savedJsonReference(value, references, 0, false)) {
+                block("qwen_managed_session_resource", row, "extra_historical_reference");
+            }
+        }
+
+        private static JsonNode resourceRef(Row row) {
+            return JSON.createObjectNode().put("resourceId", row.text("resource_id")).put("kind", row.text("kind"))
+                    .put("schemaVersion", row.number("schema_version")).put("byteLength", row.number("byte_length"))
+                    .put("digest", row.text("sha256"));
+        }
+
+        private void publicationObject(Row row) {
+            var owners = seen.getOrDefault("qwen_tool_publication", Map.of()).values().stream()
+                    .filter(owner -> Objects.equals(row.text("scope_key"), owner.text("scope_key"))
+                            && Objects.equals(row.text("publication_id"), owner.text("publication_id"))).toList();
+            requireEncoded(owners.size() == 1);
+            Row owner = owners.getFirst();
+            requireEncoded(ToolPublicationDataStore.scope(owner.text("tenant_id"), owner.text("workspace_id"), owner.text("session_id"))
+                    .equals(row.text("scope_key")));
+            JsonNode binding = ToolPublicationContract.parseBytes("binding", owner.binary("binding_json"));
+            requireEncoded(ToolPublicationContract.bindingDigest(binding).equals(owner.text("binding_digest"))
+                    && hash(utf8(binding.path("executionCallId").textValue())).equals(owner.text("execution_key"))
+                    && row.text("publication_id").equals(binding.path("publicationId").textValue())
+                    && owner.text("tenant_id").equals(binding.path("sessionKey").path("tenantId").textValue())
+                    && owner.text("workspace_id").equals(binding.path("sessionKey").path("workspaceId").textValue())
+                    && owner.text("session_id").equals(binding.path("sessionKey").path("sessionId").textValue()));
+            String kind = row.text("resource_kind");
+            String slot = row.text("slot_key");
+            boolean opaque = kind == null && slot.matches("segment:(stdout|stderr):(?:0|[1-9][0-9]{0,4})")
+                    || "managed-tool-result-content".equals(kind) && slot.matches("content:[a-z0-9_-]{1,128}");
+            if (opaque && kind == null) {
+                requireEncoded(Integer.parseInt(slot.substring(slot.lastIndexOf(':') + 1)) < 65536);
+            }
+            requireEncoded(row.number("byte_length") != null && row.number("byte_length") >= 0
+                    && row.number("byte_length") <= 16 * 1024 * 1024 && row.text("sha256") != null
+                    && row.text("sha256").matches("[0-9a-f]{64}")
+                    && Objects.equals(row.text("resource_id"), kind == null ? null : "result-"
+                            + hash(utf8(row.text("scope_key") + ":" + row.text("publication_id") + ":" + slot)).substring(0, 32)));
+            if (row.text("object_key") != null) {
+                requireEncoded(row.binary("inline_bytes") == null && row.text("object_key").equals("managed-tool-results/"
+                        + row.text("scope_key") + "/" + row.text("publication_id") + "/" + hash(utf8(slot))));
+                if (!opaque) {
+                    block("qwen_tool_publication_object", row, "unsupported_historical_payload");
+                }
+                return;
+            }
+            byte[] raw = row.binary("inline_bytes");
+            requireEncoded(raw != null && Objects.equals(row.number("byte_length"), (long) raw.length)
+                    && hash(raw).equals(row.text("sha256")));
+            if (opaque) {
+                return;
+            }
+            JsonNode value;
+            if ("managed-tool-result-page".equals(kind) && slot.matches("page:(stdout|stderr):(?:0|[1-9][0-9]{0,4})")) {
+                value = ToolPublicationContract.parseToolResult("page", raw, 256 * 1024);
+                requireEncoded(slot.equals("page:" + value.path("streamId").textValue() + ":" + value.path("firstOrdinal").longValue()));
+            } else if ("managed-tool-result-manifest".equals(kind) && "manifest:1".equals(slot)) {
+                value = ToolPublicationContract.parseToolResult("manifest", raw, 64 * 1024);
+                requireEncoded(value.path("revision").longValue() == 1);
+            } else if ("managed-tool-terminal".equals(kind) && "terminal".equals(slot)) {
+                value = ToolPublicationContract.parseToolResult("result", raw, 2 * 1024 * 1024);
+            } else if ("managed-tool-outcome".equals(kind) && "admission".equals(slot)) {
+                value = WorkspaceCsiApplicationJson.object(raw, 2 * 1024 * 1024);
+                WorkspaceCsiApplicationJson.closed(value, Set.of("schemaVersion", "decision", "envelope", "history", "manifestRef"));
+                requireEncoded(value.path("schemaVersion").isIntegralNumber() && value.path("schemaVersion").longValue() == 1
+                        && ToolPublicationDataStore.validAdmissionHistory(value.path("history")));
+                JsonNode envelope = ToolPublicationContract.parseToolResult("result", WorkspaceCsiApplicationJson.encode(value.path("envelope")), 2 * 1024 * 1024);
+                requireEncoded(value.path("manifestRef").equals(envelope.path("capture").path("manifest"))
+                        && ("complete".equals(envelope.path("capture").path("captureStatus").textValue()) ? "committed" : "blocked")
+                                .equals(value.path("decision").textValue()));
+            } else {
+                block("qwen_tool_publication_object", row, "unsupported_historical_payload");
+                return;
+            }
+            if (savedJsonReference(value, references, 0, false)) {
+                block("qwen_tool_publication_object", row, "extra_historical_reference");
+            }
+        }
+
+        private static byte[] payload(Row row, String field, String digest, int limit) {
+            byte[] raw = row.binary(field);
+            requireEncoded(raw != null && raw.length > 0 && raw.length <= limit
+                    && Objects.equals(row.number("byte_length"), (long) raw.length) && hash(raw).equals(row.text(digest)));
+            return raw;
+        }
+
+        private static com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal.Evidence source(Row row, String field) {
+            byte[] raw = row.binary(field + "_bytes");
+            if (raw == null) {
+                requireEncoded(row.number(field + "_sequence") == null && row.text(field + "_hash") == null);
+                return null;
+            }
+            requireEncoded(raw.length > 0 && raw.length <= WorkspaceCsiNodeSourceStore.EVIDENCE_LIMIT);
+            return com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal.verify(raw,
+                    new com.alibaba.qwen.code.runtimebroker.CsiNodeSourceJournal.Cursor(row.number(field + "_sequence"), row.text(field + "_hash")));
+        }
+    }
+
+    private static int historyRemaining(long started) {
+        long left = TimeUnit.SECONDS.toNanos(10) - (System.nanoTime() - started);
+        requireEncoded(left > 0);
+        return (int) Math.max(1, TimeUnit.NANOSECONDS.toSeconds(left));
+    }
+
+    private static void historicalParameter(PreparedStatement statement, int index, Cell cell) throws SQLException {
+        requireEncoded(!cell.isNull());
+        if (cell.kind().binary()) {
+            statement.setBytes(index, cell.bytes());
+        } else if (cell.kind().integral()) {
+            statement.setLong(index, cell.number());
+        } else if (cell.kind() == Kind.BOOLEAN) {
+            statement.setBoolean(index, cell.bool());
+        } else if (cell.kind() == Kind.DATETIME || cell.kind() == Kind.TIMESTAMP) {
+            statement.setTimestamp(index, java.sql.Timestamp.from(Instant.parse(cell.text())),
+                    Calendar.getInstance(TimeZone.getTimeZone("UTC")));
+        } else {
+            statement.setString(index, cell.text());
+        }
+    }
+
     static Snapshot restoreCanonical(byte[] bytes) {
         if (bytes == null || bytes.length == 0 || bytes.length > MAX_BYTES) {
             throw new IllegalArgumentException("Invalid persisted CSI inventory");
@@ -646,6 +1492,88 @@ final class WorkspaceCsiApplicationInventory {
         if (!valid) {
             throw new IllegalArgumentException("Invalid persisted CSI inventory");
         }
+    }
+
+    private record DecodedRow(Row row, String blocker) {
+    }
+
+    private static DecodedRow decodeRow(ResultSet result, Declaration declaration) throws SQLException {
+        var fields = new LinkedHashMap<String, Cell>();
+        long total = 0;
+        try {
+            for (int index = 0; index < declaration.columns().size(); index++) {
+                Column column = declaration.columns().get(index);
+                byte[] bytes;
+                if (column.kind().binary()) {
+                    try (InputStream input = result.getBinaryStream(index + 1)) {
+                        bytes = input == null ? null : input.readNBytes(MAX_BYTES + 1);
+                    }
+                } else if (column.kind().integral()) {
+                    long number = result.getLong(index + 1);
+                    bytes = result.wasNull() ? null : utf8(Long.toString(number));
+                } else if (column.kind() == Kind.BOOLEAN) {
+                    String value = result.getString(index + 1);
+                    if (value != null && !Set.of("0", "1", "TRUE", "FALSE", "true", "false").contains(value)) {
+                        return new DecodedRow(null, "invalid_boolean");
+                    }
+                    bytes = value == null ? null : utf8(value.equals("1") || value.equalsIgnoreCase("true") ? "true" : "false");
+                } else if (column.kind() == Kind.DATETIME || column.kind() == Kind.TIMESTAMP) {
+                    var value = result.getTimestamp(index + 1, Calendar.getInstance(TimeZone.getTimeZone("UTC")));
+                    bytes = value == null ? null : utf8(value.toInstant().toString());
+                } else {
+                    try (Reader reader = result.getCharacterStream(index + 1)) {
+                        if (reader == null) {
+                            bytes = null;
+                        } else {
+                            var text = new StringBuilder();
+                            char[] part = new char[4096];
+                            int count;
+                            while ((count = reader.read(part)) != -1) {
+                                if (text.length() + count > MAX_BYTES) {
+                                    return new DecodedRow(null, "byte_limit");
+                                }
+                                text.append(part, 0, count);
+                            }
+                            bytes = utf8(text.toString());
+                        }
+                    }
+                }
+                total += bytes == null ? 0 : bytes.length;
+                if (total > MAX_BYTES) {
+                    return new DecodedRow(null, "byte_limit");
+                }
+                fields.put(column.name(), new Cell(column.kind(), bytes));
+            }
+        } catch (IOException exception) {
+            return new DecodedRow(null, "row_bytes_unavailable");
+        }
+        List<Cell> key = declaration.keys().stream().map(fields::get).toList();
+        if (key.stream().anyMatch(value -> value == null || value.isNull())) {
+            return new DecodedRow(null, "invalid_primary_key");
+        }
+        byte[] bytes = encode(out -> {
+            out.writeInt(fields.size());
+            for (var entry : fields.entrySet()) {
+                write(out, entry.getKey());
+                write(out, entry.getValue().kind.name());
+                write(out, entry.getValue().bytes);
+            }
+        });
+        return new DecodedRow(new Row(key, fields, bytes, Membership.ORIGINAL), null);
+    }
+
+    private static boolean schema(ResultSetMetaData metadata, Declaration declaration) throws SQLException {
+        if (metadata.getColumnCount() != declaration.columns().size()) {
+            return false;
+        }
+        for (int index = 0; index < declaration.columns().size(); index++) {
+            Column column = declaration.columns().get(index);
+            if (!column.name().equals(metadata.getColumnName(index + 1).toLowerCase(Locale.ROOT))
+                    || !column.kind().accepts(metadata.getColumnType(index + 1))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private record Declaration(String name, List<String> keys, List<Column> columns) {
@@ -822,89 +1750,12 @@ final class WorkspaceCsiApplicationInventory {
         }
 
         private Row read(ResultSet result, Declaration declaration) throws SQLException {
-            var fields = new LinkedHashMap<String, Cell>();
-            long total = 0;
-            try {
-                for (int index = 0; index < declaration.columns().size(); index++) {
-                    Column column = declaration.columns().get(index);
-                    byte[] bytes;
-                    if (column.kind().binary()) {
-                        try (InputStream input = result.getBinaryStream(index + 1)) {
-                            bytes = input == null ? null : input.readNBytes(MAX_BYTES + 1);
-                        }
-                    } else if (column.kind().integral()) {
-                        long number = result.getLong(index + 1);
-                        bytes = result.wasNull() ? null : utf8(Long.toString(number));
-                    } else if (column.kind() == Kind.BOOLEAN) {
-                        String value = result.getString(index + 1);
-                        if (value != null && !Set.of("0", "1", "TRUE", "FALSE", "true", "false").contains(value)) {
-                            block(declaration.name(), null, "invalid_boolean");
-                            return null;
-                        }
-                        bytes = value == null ? null : utf8(value.equals("1") || value.equalsIgnoreCase("true") ? "true" : "false");
-                    } else if (column.kind() == Kind.DATETIME || column.kind() == Kind.TIMESTAMP) {
-                        var value = result.getTimestamp(index + 1, Calendar.getInstance(TimeZone.getTimeZone("UTC")));
-                        bytes = value == null ? null : utf8(value.toInstant().toString());
-                    } else {
-                        try (Reader reader = result.getCharacterStream(index + 1)) {
-                            if (reader == null) {
-                                bytes = null;
-                            } else {
-                                var text = new StringBuilder();
-                                char[] part = new char[4096];
-                                int count;
-                                while ((count = reader.read(part)) != -1) {
-                                    if (text.length() + count > MAX_BYTES) {
-                                        overflow = true;
-                                        block(declaration.name(), null, "byte_limit");
-                                        return null;
-                                    }
-                                    text.append(part, 0, count);
-                                }
-                                bytes = utf8(text.toString());
-                            }
-                        }
-                    }
-                    total += bytes == null ? 0 : bytes.length;
-                    if (total > MAX_BYTES) {
-                        overflow = true;
-                        block(declaration.name(), null, "byte_limit");
-                        return null;
-                    }
-                    fields.put(column.name(), new Cell(column.kind(), bytes));
-                }
-            } catch (IOException exception) {
-                block(declaration.name(), null, "row_bytes_unavailable");
-                return null;
+            DecodedRow decoded = decodeRow(result, declaration);
+            if (decoded.blocker() != null) {
+                overflow |= "byte_limit".equals(decoded.blocker());
+                block(declaration.name(), null, decoded.blocker());
             }
-            List<Cell> key = declaration.keys().stream().map(fields::get).toList();
-            if (key.stream().anyMatch(value -> value == null || value.isNull())) {
-                block(declaration.name(), null, "invalid_primary_key");
-                return null;
-            }
-            byte[] bytes = encode(out -> {
-                out.writeInt(fields.size());
-                for (var entry : fields.entrySet()) {
-                    write(out, entry.getKey());
-                    write(out, entry.getValue().kind.name());
-                    write(out, entry.getValue().bytes);
-                }
-            });
-            return new Row(key, fields, bytes, Membership.ORIGINAL);
-        }
-
-        private boolean schema(ResultSetMetaData metadata, Declaration declaration) throws SQLException {
-            if (metadata.getColumnCount() != declaration.columns().size()) {
-                return false;
-            }
-            for (int index = 0; index < declaration.columns().size(); index++) {
-                Column column = declaration.columns().get(index);
-                if (!column.name().equals(metadata.getColumnName(index + 1).toLowerCase(Locale.ROOT))
-                        || !column.kind().accepts(metadata.getColumnType(index + 1))) {
-                    return false;
-                }
-            }
-            return true;
+            return decoded.row();
         }
 
         private Query predicate(String table) {
@@ -1003,9 +1854,7 @@ final class WorkspaceCsiApplicationInventory {
         }
 
         private Membership membership(String table, Row row) throws SQLException {
-            if (Set.of("managed_agent_definition", "managed_agent_definition_command", "managed_workspace_access",
-                    "managed_workspace_default", "managed_workspace_registry", "qwen_managed_channel_instance",
-                    "qwen_runtime_placement_guard", "qwen_tool_publication_tenant").contains(table)) {
+            if (CONTEXT_TABLES.contains(table)) {
                 return Membership.CONTEXT;
             }
             if (table.equals("qwen_managed_automation_command")) {

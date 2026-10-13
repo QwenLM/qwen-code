@@ -405,7 +405,7 @@ class WorkspaceCsiNodeSourceStoreTest {
 
     private void prepareProtocolFixture() throws Exception {
         byte[] raw;
-        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v3.fixture.json")) {
+        try (var input = getClass().getResourceAsStream("/contracts/k2-node-source-v4.fixture.json")) {
             raw = Base64.getDecoder().decode(json.readTree(input).path("bytesBase64").textValue());
         }
         var input = ByteBuffer.wrap(raw);
@@ -621,6 +621,27 @@ class WorkspaceCsiNodeSourceStoreTest {
         assertThat(decoded.node().identity().runtimeStart()).isEqualTo(max);
         assertThat(decoded.node().identity().pluginStart()).isEqualTo(max);
         assertThat(store.inspect(binding.getBindingId()).configuration()).isEqualTo(configuration);
+    }
+
+    @Test
+    void sourceConfigurationRejectsMissingNullFloatingAndStringIdentityNumbers() throws Exception {
+        publishedAssociation();
+        var encoded = (ObjectNode) json.readTree(json.writeValueAsString(configuration));
+        for (String fault : java.util.List.of("missing", "null", "float", "string")) {
+            var altered = encoded.deepCopy();
+            var identity = (ObjectNode) altered.path("node").path("identity");
+            switch (fault) {
+                case "missing" -> identity.remove("runtimePid");
+                case "null" -> identity.putNull("runtimePid");
+                case "float" -> identity.put("runtimePid", 1.5);
+                case "string" -> identity.put("runtimePid", "1");
+                default -> throw new AssertionError(fault);
+            }
+            assertThatThrownBy(() -> WorkspaceCsiNodeSourceStore.decode(altered.toString(), WorkspaceCsiNodeSourceStore.Configuration.class))
+                    .isInstanceOf(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class)
+                    .hasMessage("The original CSI node source association is unavailable.");
+        }
+        assertThat(WorkspaceCsiNodeSourceStore.decode(encoded.toString(), WorkspaceCsiNodeSourceStore.Configuration.class)).isEqualTo(configuration);
     }
 
     @ParameterizedTest

@@ -24,6 +24,11 @@ public final class WorkspaceCsiNodeSourceStore {
     public static final int EVIDENCE_LIMIT = 1024 * 1024;
     private static final JsonMapper JSON = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
+            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
+            .disable(com.fasterxml.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     private final JdbcTemplate jdbc;
     private final JdbcRuntimeBindingRepository bindings;

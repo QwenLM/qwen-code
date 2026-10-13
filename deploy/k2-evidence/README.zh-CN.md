@@ -110,4 +110,4 @@ processes、mounts、cgroups、临时路径和 VM 均已关闭。Runtime/CSI bac
 明示为协议夹具，LSM 为 unconfined；这些结果不资格化实际 ACK runtime/plugin/
 driver 接线、受限 LSM、admission、物理释放或卷复用，也不资格化改变后的当前 source unit 或 v2 reader。原 `openat2` 失败单独保留。
 
-当前 source 强制要求 `workerPolicySha256`，代表同时包含固定 worker/source profiles 的经审阅完整 packed bundle。v3 ARM 保存实际加载策略测量和原镜像，BIND 保存实际 admitted gated-spec digest/resourceVersion；启动和持续操作在测量缺失或变化时 fail closed。强制 source confinement、节点实际 enforce/lock、source 专用 disconnected exporter prefix 和完整 birth confinement 仍需具体 native 资格化及安装批准。代码只读策略，这些交付物不会设置节点级锁。
+当前 source 强制要求 `workerPolicySha256`，代表同时包含固定 worker/source profiles 的经审阅完整 packed bundle。v4 ARM 保存实际加载策略测量和原镜像，BIND 保存实际 admitted gated-spec digest/resourceVersion；启动和持续操作在测量缺失或变化时 fail closed。强制 source confinement、节点实际 enforce/lock、source 专用 disconnected exporter prefix 和完整 birth confinement 仍需具体 native 资格化及安装批准。代码只读策略，这些交付物不会设置节点级锁。

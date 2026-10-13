@@ -4,6 +4,7 @@ import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.di
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.map;
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.name;
 import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.require;
+import static com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.text;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiNodeSourceStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
@@ -18,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 /** One reviewed node, armed before CREATE and bound durably before the scheduler gate opens. */
@@ -68,13 +70,14 @@ public final class WorkspaceCsiNodeEvidence implements AutoCloseable {
 
     public Map<String, Object> bindAndOpen(RuntimeBindingRecord original,
             WorkspaceCsiReservationStore.Reservation reservation, Map<String, Object> pod, Runnable admitted) {
-        admitted.run();
+        verifyNode(admitted);
         var association = requireAssociation(original, "ARMED");
         var metadata = map(pod.get("metadata"));
         var spec = map(pod.get("spec"));
         require(metadata.get("deletionTimestamp") == null && metadata.get("ownerReferences") == null
                 && registration.namespace().equals(metadata.get("namespace"))
                 && name(original.getProvisionSeed()).equals(metadata.get("name")) && !spec.containsKey("nodeName")
+                && KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS.equals(spec.get("runtimeClassName"))
                 && affinity().equals(spec.get("affinity")) && List.of(Map.of("name", KubernetesHttpRuntimeClient.CSI_SOURCE_GATE)).equals(spec.get("schedulingGates")));
         String uid = (String) metadata.get("uid");
         String version = (String) metadata.get("resourceVersion");
@@ -166,6 +169,15 @@ public final class WorkspaceCsiNodeEvidence implements AutoCloseable {
                 .filter(value -> "Ready".equals(value.get("type"))).toList();
         require(ready.size() == 1 && "True".equals(ready.getFirst().get("status")));
         admitted.run();
+        var runtime = api.getCluster("runtimeclasses", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS).toCompletableFuture().join();
+        admitted.run();
+        require(runtime != null && runtime.keySet().equals(Set.of("apiVersion", "kind", "metadata", "handler"))
+                && "node.k8s.io/v1".equals(runtime.get("apiVersion")) && "RuntimeClass".equals(runtime.get("kind"))
+                && KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS.equals(runtime.get("handler")));
+        var runtimeMetadata = map(runtime.get("metadata"));
+        require(KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS.equals(runtimeMetadata.get("name"))
+                && runtimeMetadata.get("deletionTimestamp") == null && runtimeMetadata.get("deletionGracePeriodSeconds") == null);
+        require(text(runtimeMetadata, "uid", 36).matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
     }
 
     @Override

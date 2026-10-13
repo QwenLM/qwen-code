@@ -137,14 +137,22 @@ class KubernetesHttpRuntimeClientTest {
             assertEquals("/apis/admissionregistration.k8s.io/v1/" + resource + "/workspace.one", path.get());
             assertEquals("GET", method.get());
         }
+        client.getCluster("runtimeclasses", KubernetesHttpRuntimeClient.CSI_RUNTIME_CLASS).toCompletableFuture().join();
+        assertEquals("/apis/node.k8s.io/v1/runtimeclasses/qwen-k2-runc-v1", path.get());
+        assertEquals("GET", method.get());
         status.set(404);
         assertNull(client.getCluster("persistentvolumes", "absent").toCompletableFuture().join());
+        assertNull(client.getCluster("runtimeclasses", "absent").toCompletableFuture().join());
         int original = calls.get();
         for (String name : new String[] {"../pv", ".", "pv..name", "pv?name", "pv/name", "x".repeat(254)}) {
             assertThrows(IllegalArgumentException.class, () -> client.getCluster("persistentvolumes", name));
         }
         assertThrows(IllegalArgumentException.class, () -> client.getCluster("namespaces", "namespace.with.dots"));
         assertThrows(IllegalArgumentException.class, () -> client.getCluster("clusterroles", "admin"));
+        assertThrows(IllegalArgumentException.class, () -> client.getCluster("runtimeclasses", "runtime.with.dots"));
+        assertThrows(IllegalArgumentException.class, () -> client.get("runtimeclasses", "runtimes", "qwen-k2-runc-v1"));
+        assertThrows(IllegalArgumentException.class,
+                () -> client.create("runtimeclasses", "runtimes", Map.of("kind", "RuntimeClass")));
         assertThrows(IllegalArgumentException.class,
                 () -> client.create("persistentvolumeclaims", "runtimes", Map.of("kind", "PersistentVolumeClaim")));
         assertThrows(IllegalArgumentException.class,

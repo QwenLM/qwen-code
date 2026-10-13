@@ -357,24 +357,40 @@ public final class WorkspaceCsiApplicationStore {
 
     private JsonNode envelope(Locked locked) {
         var authority = locked.authority();
-        JsonNode value = WorkspaceCsiApplicationJson.object(authority.frozenBytes(), WorkspaceCsiApplicationInventory.MAX_BYTES);
+        return savedEnvelope(locked.binding(), locked.context(), authority.retirementId(),
+                authority.sealedBindingVersion(), authority.frozenBytes());
+    }
+
+    static JsonNode savedEnvelope(RuntimeBindingRecord binding, ContextBinding context, String retirement,
+            long ceiling, byte[] frozenBytes) {
+        JsonNode value = WorkspaceCsiApplicationJson.object(frozenBytes, WorkspaceCsiApplicationInventory.MAX_BYTES);
         WorkspaceCsiApplicationJson.closed(value, ENVELOPE_FIELDS);
+        byte[] body = WorkspaceCsiApplicationJson.base64(value.path("commitBodyBase64"), 128 * 1024);
+        var terminal = ManagedSessionStore.validateCsiTerminalBytes(body);
         require("qwen-csi-application-frozen/1".equals(value.path("format").textValue())
-                && authority.retirementId().equals(value.path("retirementId").textValue())
-                && authority.original().bindingId().equals(value.path("bindingId").textValue())
-                && authority.original().request().requestKey().equals(value.path("requestKey").textValue())
-                && value.path("sealedBindingVersion").isIntegralNumber() && value.path("sealedBindingVersion").longValue() == authority.sealedBindingVersion()
-                && WorkspaceCsiRuntimeIdentity.digest(WorkspaceCsiRuntimeIdentity.boot(locked.binding())).equals(value.path("bootSha256").textValue())
-                && hash(savedBody(authority)).equals(value.path("preparedCommitSha256").textValue()));
+                && retirement.equals(value.path("retirementId").textValue())
+                && binding.getBindingId().equals(value.path("bindingId").textValue())
+                && binding.getRequest().requestKey().equals(value.path("requestKey").textValue())
+                && ceiling > 0 && ceiling <= binding.getVersion()
+                && value.path("sealedBindingVersion").isIntegralNumber() && value.path("sealedBindingVersion").longValue() == ceiling
+                && WorkspaceCsiRuntimeIdentity.digest(WorkspaceCsiRuntimeIdentity.boot(binding)).equals(value.path("bootSha256").textValue())
+                && hash(body).equals(value.path("preparedCommitSha256").textValue())
+                && binding.getRequest().getScope().getWorkspaceId().equals(terminal.workspaceId()));
         var observation = WorkspaceCsiApplicationJson.base64(value.path("preCutObservationBase64"), CsiFileFinalizeProtocol.RESPONSE_LIMIT);
         require(hash(observation).equals(value.path("preCutObservationSha256").textValue()));
-        var expected = workerRequest(locked, "observe", hash(savedBody(authority)), null, null);
+        var expected = workerRequest(binding, context, retirement, "observe", hash(body), null, null);
         require(WorkspaceCsiApplicationJson.object(WorkspaceCsiApplicationJson.encode(expected), CsiFileFinalizeProtocol.REQUEST_LIMIT)
                 .equals(value.path("workerObserveRequest")));
         CsiFileFinalizeProtocol.response(observation, expected);
-        var baseline = WorkspaceCsiApplicationImage.baseline(authority.frozenBytes());
-        require(WorkspaceCsiApplicationImage.sole(baseline, "qwen_managed_session_journal_head").text("lease_token_hash")
-                .equals(value.path("writerTokenSha256").textValue()));
+        var baseline = WorkspaceCsiApplicationImage.baseline(frozenBytes);
+        var head = WorkspaceCsiApplicationImage.sole(baseline, "qwen_managed_session_journal_head");
+        require(head.text("lease_token_hash").equals(value.path("writerTokenSha256").textValue())
+                && terminal.writerId().equals(head.text("writer_id")) && terminal.writerGeneration() == head.number("writer_generation")
+                && terminal.expectedJournalRevision() == head.number("journal_revision")
+                && terminal.expectedCommittedSequence() == head.number("committed_sequence")
+                && java.util.Objects.equals(terminal.previousCommitDigest(), head.text("last_commit_digest")));
+        var prepared = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, binding.getRequest(), body);
+        WorkspaceCsiApplicationWorkerMatch.verify(baseline, prepared, observation, expected);
         return value;
     }
 
@@ -383,13 +399,18 @@ public final class WorkspaceCsiApplicationStore {
     }
 
     private static Map<String, Object> workerRequest(Locked locked, String action, String prepared, String frozen, String cut) {
+        return workerRequest(locked.binding(), locked.context(), locked.authority().retirementId(), action, prepared, frozen, cut);
+    }
+
+    static Map<String, Object> workerRequest(RuntimeBindingRecord binding, ContextBinding context, String retirement,
+            String action, String prepared, String frozen, String cut) {
         var operation = new LinkedHashMap<String, Object>();
         operation.put("operation", action);
-        operation.put("retirementId", locked.authority().retirementId());
+        operation.put("retirementId", retirement);
         operation.put("preparedCommitSha256", prepared);
         operation.put("frozenRequestSha256", frozen);
         operation.put("cutSha256", cut);
-        return CsiFileFinalizeProtocol.request(locked.binding(), locked.context(), operation);
+        return CsiFileFinalizeProtocol.request(binding, context, operation);
     }
 
     private static Map<String, Object> operation(Map<String, Object> request) {

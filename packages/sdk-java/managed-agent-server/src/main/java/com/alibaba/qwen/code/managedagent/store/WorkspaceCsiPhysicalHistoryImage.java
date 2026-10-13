@@ -26,13 +26,20 @@ final class WorkspaceCsiPhysicalHistoryImage {
     private WorkspaceCsiPhysicalHistoryImage() { }
 
     static Snapshot expected(Snapshot drained) {
-        var released = WorkspaceCsiPhysicalReleaseImage.expected(drained);
-        var parent = WorkspaceCsiApplicationImage.sole(released, "managed_agent_session");
+        return project(WorkspaceCsiPhysicalReleaseImage.expected(drained), true);
+    }
+
+    static Snapshot owner(Snapshot stage) {
+        return project(stage, false);
+    }
+
+    private static Snapshot project(Snapshot stage, boolean excludeHolder) {
+        var parent = WorkspaceCsiApplicationImage.sole(stage, "managed_agent_session");
         require(parent.text("tenant_id") != null && parent.text("workspace_id") != null);
         List<Table> tables = new ArrayList<>();
-        for (Table table : released.tables()) {
+        for (Table table : stage.tables()) {
             List<Row> rows = new ArrayList<>();
-            if (!"managed_workspace_execution_lease".equals(table.name())) {
+            if (!excludeHolder || !"managed_workspace_execution_lease".equals(table.name())) {
                 for (Row row : table.rows()) {
                     if (row.membership() == Membership.ORIGINAL) {
                         rows.add(row);
@@ -41,10 +48,7 @@ final class WorkspaceCsiPhysicalHistoryImage {
                             && (!"managed_workspace_registry".equals(table.name())
                                     || parent.text("workspace_id").equals(row.text("workspace_id")))) {
                         require(row.membership() == Membership.CONTEXT);
-                        Map<String, byte[]> values = new LinkedHashMap<>();
-                        row.fields().forEach((name, cell) -> values.put(name,
-                                CONTEXT.get(table.name()).contains(name) ? cell.bytes() : null));
-                        rows.add(WorkspaceCsiApplicationInventory.expectedRow(table.name(), values, Membership.CONTEXT));
+                        rows.add(context(table.name(), row));
                     }
                 }
             }
@@ -66,5 +70,13 @@ final class WorkspaceCsiPhysicalHistoryImage {
                 && parent.cell("workspace_policy_ref").equals(registry.cell("policy_ref"))
                 && "ACTIVE".equals(registry.text("state")));
         return result;
+    }
+
+    static Row context(String table, Row row) {
+        require(CONTEXT.containsKey(table));
+        Map<String, byte[]> values = new LinkedHashMap<>();
+        row.fields().forEach((name, cell) -> values.put(name,
+                CONTEXT.get(table).contains(name) ? cell.bytes() : null));
+        return WorkspaceCsiApplicationInventory.expectedRow(table, values, Membership.CONTEXT);
     }
 }

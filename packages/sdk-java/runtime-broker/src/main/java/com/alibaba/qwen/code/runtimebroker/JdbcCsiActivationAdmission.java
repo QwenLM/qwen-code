@@ -11,7 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-/** Consumes native CSI activation history only on the already-held original parent. */
+/** Shared native CSI journal semantics for live admission and read-only historical inspection. */
 public final class JdbcCsiActivationAdmission {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int MAX_HISTORY = 4096;
@@ -270,20 +270,9 @@ public final class JdbcCsiActivationAdmission {
         WorkspaceCsiRuntimeIdentity.boot(binding);
         requireHistoryIdentity(connection, original, head.prefix(), bindings);
         var history = history(connection, original, head.revision(), head.sequence(), head.digest(), head.activation().workerId());
-        require(metadata.path("expectedJournalRevision").isIntegralNumber()
-                && metadata.path("expectedJournalRevision").longValue() == head.revision()
-                && metadata.path("expectedCommittedSequence").isIntegralNumber()
-                && metadata.path("expectedCommittedSequence").longValue() == head.sequence());
-        var candidates = metadata.path("resources");
-        require(candidates.isArray() && candidates.size() == 1);
-        JsonNode candidate = candidates.get(0);
-        CsiNativeActivationProof.closed(candidate,
-                java.util.Set.of("resourceId", "kind", "schemaVersion", "byteLength", "digest", "bytesBase64"));
-        String resourceId = CsiNativeActivationProof.id(candidate, "resourceId");
-        require(candidate.path("bytesBase64").isTextual());
-        byte[] resourceBytes = java.util.Base64.getDecoder().decode(candidate.path("bytesBase64").textValue());
-        require(resourceBytes.length > 0 && resourceBytes.length <= 16 * 1024
-                && java.util.Base64.getEncoder().encodeToString(resourceBytes).equals(candidate.path("bytesBase64").textValue()));
+        var proof = CsiNativeActivationProof.preparedTerminal(metadata, original.request(), history.genesis(),
+                history.activation(), history.prefix(), head.revision(), head.sequence(), history.lastUuid(), head.digest());
+        String resourceId = CsiNativeActivationProof.id(proof.boundaryRef(), "resourceId");
         try (var statement = statement(connection,
                 "SELECT resource_id FROM qwen_managed_session_resource WHERE resource_id = ?"
                         + " AND ((tenant_id = ? AND session_id = ?) OR session_scope_key = ?) FOR UPDATE")) {
@@ -296,17 +285,6 @@ public final class JdbcCsiActivationAdmission {
                 require(!row.next());
             }
         }
-        var records = CsiNativeActivationProof.records(java.util.Base64.getDecoder().decode(
-                CsiNativeActivationProof.text(metadata, "recordBytesBase64")));
-        require(records.size() == 2);
-        var proof = CsiNativeActivationProof.terminal(records, metadata, original.request(), history.genesis(),
-                history.activation(), history.prefix(), head.sequence(), history.lastUuid(), head.digest(), ref -> {
-                    for (String field : List.of("resourceId", "kind", "schemaVersion", "byteLength", "digest")) {
-                        require(CsiNativeActivationProof.canonical(ref.path(field))
-                                .equals(CsiNativeActivationProof.canonical(candidate.path(field))));
-                    }
-                    return resourceBytes;
-                });
         JdbcCsiExecutionAdmission.verifyReceipts(connection, original, head, history.prefix(), 0, 0);
         long now = authority.requireCurrentTime(connection);
         require(head.writerExpiresAt() > now && head.activationExpiresAt() > now);
@@ -526,6 +504,11 @@ public final class JdbcCsiActivationAdmission {
 
     private static History activeHistoryThrough(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             long expectedRevision, long expectedSequence, String expectedDigest, String writerId) throws SQLException {
+        return activeHistoryThrough(connection, original, expectedRevision, expectedSequence, expectedDigest, writerId, JournalRead.LIVE);
+    }
+
+    private static History activeHistoryThrough(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            long expectedRevision, long expectedSequence, String expectedDigest, String writerId, JournalRead read) throws SQLException {
         require(connection != null && !connection.getAutoCommit() && writerId != null && expectedRevision >= 0
                 && expectedRevision <= MAX_HISTORY);
         long revision = 0;
@@ -539,9 +522,9 @@ public final class JdbcCsiActivationAdmission {
         CsiNativeActivationProof.Activation activation = null;
         while (true) {
             int count = 0;
-            try (PreparedStatement statement = statement(connection,
+            try (PreparedStatement statement = read.statement(connection,
                     "SELECT * FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                            + " AND journal_revision > ? AND journal_revision <= ? ORDER BY journal_revision LIMIT 100 FOR UPDATE")) {
+                            + " AND journal_revision > ? AND journal_revision <= ? ORDER BY journal_revision LIMIT 100")) {
                 statement.setString(1, original.request().getScope().getTenantId());
                 statement.setString(2, original.request().getIsolationKey());
                 statement.setLong(3, revision);
@@ -565,7 +548,7 @@ public final class JdbcCsiActivationAdmission {
                             CsiNativeActivationProof.uuid(rows.getString("writer_id"));
                             firstWriterId = rows.getString("writer_id");
                             genesis = CsiNativeActivationProof.genesis(parsed, original.request(),
-                                    ref -> resource(connection, original, ref, rowRevision));
+                                    ref -> resource(connection, original, ref, rowRevision, read));
                             lastUuid = genesis.lastRecordUuid();
                         } else {
                             require(rows.getLong("first_sequence") == sequence + 1
@@ -582,11 +565,11 @@ public final class JdbcCsiActivationAdmission {
                                 }
                                 activation = CsiNativeActivationProof.activation(transaction, metadata, original.request(),
                                         rows.getString("writer_id"), genesis.definitionDigest(), activation,
-                                        ref -> resource(connection, original, ref, rowRevision));
+                                        ref -> resource(connection, original, ref, rowRevision, read));
                             } else {
                                 prefix = CsiNativeActivationProof.advance(transaction, metadata,
                                         original.request(), rows.getString("writer_id"), genesis, activation, rowRevision - 1, sequence, prefix,
-                                        ref -> resource(connection, original, ref, rowRevision));
+                                        ref -> resource(connection, original, ref, rowRevision, read));
                             }
                             lastUuid = transaction.lastRecordUuid();
                         }
@@ -605,9 +588,9 @@ public final class JdbcCsiActivationAdmission {
                 && (activation != null || revision == 0 || writerId.equals(firstWriterId))
                 && (activation == null ? original.firstActivationJournalRevision() == null
                         : Objects.equals(original.firstActivationJournalRevision(), 2L)));
-        try (PreparedStatement statement = statement(connection,
+        try (PreparedStatement statement = read.statement(connection,
                 "SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head"
-                        + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
+                        + " WHERE tenant_id = ? AND session_id = ?")) {
             statement.setString(1, original.request().getScope().getTenantId());
             statement.setString(2, original.request().getIsolationKey());
             try (ResultSet row = statement.executeQuery()) {
@@ -622,7 +605,24 @@ public final class JdbcCsiActivationAdmission {
         authority.requireConnection(connection);
         require(authority.stage() == JdbcCsiApplicationRetirement.Stage.CUT
                 || authority.stage() == JdbcCsiApplicationRetirement.Stage.DRAINED);
-        JsonNode frozen = JSON.valueToTree(ManagedCsiFilesProtocol.parse(authority.frozenBytes(), 32 * 1024 * 1024));
+        return terminalHistory(connection, authority.original(), authority.frozenBytes(), JournalRead.LIVE);
+    }
+
+    public static CsiNativeActivationProof.TerminalProof readHistoricalTerminal(Connection connection,
+            RuntimeBindingRecord binding, byte[] frozenBytes) throws SQLException {
+        var read = new JournalRead(System.nanoTime());
+        read.requireHistorical(connection);
+        var original = JdbcCsiFilesRetirementGuard.readHistoricalBinding(connection, binding);
+        long ceiling = JdbcCsiRetirementSeal.readHistorical(connection, original, frozenBytes, read);
+        var result = terminalHistory(connection, original, frozenBytes, read);
+        JdbcCsiExecutionAdmission.verifyHistoricalReceipts(connection, original, result, ceiling, read);
+        read.requireHistorical(connection);
+        return result;
+    }
+
+    private static CsiNativeActivationProof.TerminalProof terminalHistory(Connection connection,
+            JdbcCsiFilesRetirementGuard.Original original, byte[] frozenBytes, JournalRead read) throws SQLException {
+        JsonNode frozen = JSON.valueToTree(ManagedCsiFilesProtocol.parse(frozenBytes, 32 * 1024 * 1024));
         require(frozen.path("commitBodyBase64").isTextual());
         byte[] body = java.util.Base64.getDecoder().decode(frozen.path("commitBodyBase64").textValue());
         require(java.util.Base64.getEncoder().encodeToString(body).equals(frozen.path("commitBodyBase64").textValue())
@@ -631,14 +631,13 @@ public final class JdbcCsiActivationAdmission {
         long predecessorRevision = CsiNativeActivationProof.number(metadata.get("expectedJournalRevision"));
         long predecessorSequence = CsiNativeActivationProof.number(metadata.get("expectedCommittedSequence"));
         require(predecessorRevision > 1 && predecessorRevision < MAX_HISTORY);
-        var original = authority.original();
         var predecessor = activeHistoryThrough(connection, original, predecessorRevision, predecessorSequence,
-                CsiNativeActivationProof.text(metadata, "previousCommitDigest"), CsiNativeActivationProof.text(metadata, "writerId"));
+                CsiNativeActivationProof.text(metadata, "previousCommitDigest"), CsiNativeActivationProof.text(metadata, "writerId"), read);
         byte[] raw = java.util.Base64.getDecoder().decode(CsiNativeActivationProof.text(metadata, "recordBytesBase64"));
         CsiNativeActivationProof.TerminalProof proof;
-        try (var statement = statement(connection,
+        try (var statement = read.statement(connection,
                 "SELECT * FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                        + " AND journal_revision = ? FOR UPDATE")) {
+                        + " AND journal_revision = ?")) {
             statement.setString(1, original.request().getScope().getTenantId());
             statement.setString(2, original.request().getIsolationKey());
             statement.setLong(3, predecessorRevision + 1);
@@ -659,13 +658,13 @@ public final class JdbcCsiActivationAdmission {
                 proof = CsiNativeActivationProof.terminal(CsiNativeActivationProof.records(raw), metadata,
                         original.request(), predecessor.genesis(), predecessor.activation(), predecessor.prefix(),
                         predecessorSequence, predecessor.lastUuid(), predecessor.digest(),
-                        ref -> resource(connection, original, ref, predecessorRevision + 1));
+                        ref -> resource(connection, original, ref, predecessorRevision + 1, read));
                 require(!row.next());
             }
         }
-        requireNoJournalTail(connection, original, predecessorRevision + 1);
-        try (var statement = statement(connection,
-                "SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
+        requireNoJournalTail(connection, original, predecessorRevision + 1, read);
+        try (var statement = read.statement(connection,
+                "SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?")) {
             statement.setString(1, original.request().getScope().getTenantId());
             statement.setString(2, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {
@@ -688,9 +687,14 @@ public final class JdbcCsiActivationAdmission {
 
     private static void requireNoJournalTail(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             long revision) throws SQLException {
-        try (var statement = statement(connection,
+        requireNoJournalTail(connection, original, revision, JournalRead.LIVE);
+    }
+
+    private static void requireNoJournalTail(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            long revision, JournalRead read) throws SQLException {
+        try (var statement = read.statement(connection,
                 "SELECT journal_revision FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                        + " AND journal_revision > ? LIMIT 1 FOR UPDATE")) {
+                        + " AND journal_revision > ? LIMIT 1")) {
             statement.setString(1, original.request().getScope().getTenantId());
             statement.setString(2, original.request().getIsolationKey());
             statement.setLong(3, revision);
@@ -777,12 +781,17 @@ public final class JdbcCsiActivationAdmission {
 
     static byte[] resource(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JsonNode ref, long revision) {
-        try (PreparedStatement statement = statement(connection,
+        return resource(connection, original, ref, revision, JournalRead.LIVE);
+    }
+
+    static byte[] resource(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JsonNode ref, long revision, JournalRead read) {
+        try (PreparedStatement statement = read.statement(connection,
                 "SELECT r.* FROM qwen_managed_session_resource r JOIN qwen_managed_session_resource_ref x"
                         + " ON r.session_scope_key = x.session_scope_key AND r.resource_id = x.resource_id"
                         + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.resource_id = ?"
                         + " AND x.journal_revision = ? AND x.tenant_id = ? AND x.workspace_id = ?"
-                        + " AND x.session_id = ? AND r.session_scope_key = ? FOR UPDATE")) {
+                        + " AND x.session_id = ? AND r.session_scope_key = ?")) {
             statement.setString(1, original.request().getScope().getTenantId());
             statement.setString(2, original.request().getIsolationKey());
             statement.setString(3, ref.path("resourceId").textValue());
@@ -795,6 +804,8 @@ public final class JdbcCsiActivationAdmission {
             try (ResultSet row = statement.executeQuery()) {
                 require(row.next() && original.request().getScope().getWorkspaceId().equals(row.getString("workspace_id"))
                         && "REFERENCED".equals(row.getString("state")) && "MYSQL_INLINE".equals(row.getString("storage_kind"))
+                        && row.getString("object_key") == null && row.getString("object_version_id") == null
+                        && row.getString("encryption_key_id") == null
                         && ref.path("kind").textValue().equals(row.getString("kind"))
                         && row.getLong("schema_version") == ref.path("schemaVersion").longValue()
                         && row.getLong("byte_length") == ref.path("byteLength").longValue()
@@ -810,10 +821,15 @@ public final class JdbcCsiActivationAdmission {
 
     static byte[] frozenResource(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JsonNode ref, long intentSequence) throws SQLException {
-        try (PreparedStatement statement = statement(connection,
+        return frozenResource(connection, original, ref, intentSequence, JournalRead.LIVE);
+    }
+
+    static byte[] frozenResource(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JsonNode ref, long intentSequence, JournalRead read) throws SQLException {
+        try (PreparedStatement statement = read.statement(connection,
                 "SELECT journal_revision FROM qwen_managed_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                         + " AND workspace_id = ? AND first_sequence = ? AND last_sequence = ?"
-                        + " AND event_count = 1 AND operation = 'commitFileHistory' FOR UPDATE")) {
+                        + " AND event_count = 1 AND operation = 'commitFileHistory'")) {
             statement.setString(1, original.request().getScope().getTenantId());
             statement.setString(2, original.request().getIsolationKey());
             statement.setString(3, original.request().getScope().getWorkspaceId());
@@ -823,7 +839,7 @@ public final class JdbcCsiActivationAdmission {
                 require(row.next());
                 long revision = row.getLong(1);
                 require(!row.next());
-                return resource(connection, original, ref, revision);
+                return resource(connection, original, ref, revision, read);
             }
         }
     }
@@ -832,6 +848,31 @@ public final class JdbcCsiActivationAdmission {
         PreparedStatement statement = connection.prepareStatement(sql);
         statement.setQueryTimeout(10);
         return statement;
+    }
+
+    record JournalRead(long started) {
+        static final JournalRead LIVE = new JournalRead(0);
+
+        void requireHistorical(Connection connection) throws SQLException {
+            require(started != 0 && connection != null && !connection.getAutoCommit() && connection.isReadOnly()
+                    && connection.getTransactionIsolation() == Connection.TRANSACTION_REPEATABLE_READ
+                    && System.nanoTime() - started < java.util.concurrent.TimeUnit.SECONDS.toNanos(10));
+        }
+
+        PreparedStatement statement(Connection connection, String sql) throws SQLException {
+            if (started == 0) {
+                return JdbcCsiActivationAdmission.statement(connection, sql + " FOR UPDATE");
+            }
+            requireHistorical(connection);
+            var result = connection.prepareStatement(sql);
+            long remaining = java.util.concurrent.TimeUnit.SECONDS.toNanos(10) - (System.nanoTime() - started);
+            if (remaining <= 0) {
+                result.close();
+                require(false);
+            }
+            result.setQueryTimeout(Math.toIntExact(Math.max(1, (remaining + 999999999L) / 1000000000L)));
+            return result;
+        }
     }
 
     private static void require(boolean condition) {

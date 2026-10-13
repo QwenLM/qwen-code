@@ -20,6 +20,13 @@ final class WorkspaceCsiApplicationJson {
             .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(64)
                     .maxStringLength(32 * 1024 * 1024).maxNumberLength(16).build()).build())
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+    private static final ObjectMapper TYPED = JSON.copy()
+            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
+            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
+            .disable(com.fasterxml.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS);
 
     private WorkspaceCsiApplicationJson() {
     }
@@ -42,6 +49,15 @@ final class WorkspaceCsiApplicationJson {
         Set<String> actual = new HashSet<>();
         value.fieldNames().forEachRemaining(actual::add);
         require(actual.equals(fields));
+    }
+
+    static <T> T typedObject(byte[] bytes, int limit, Class<T> type) {
+        JsonNode value = object(bytes, limit);
+        try {
+            return TYPED.treeToValue(value, type);
+        } catch (IOException malformed) {
+            throw new IllegalArgumentException("Invalid saved CSI application object", malformed);
+        }
     }
 
     static byte[] base64(JsonNode value, int limit) {
