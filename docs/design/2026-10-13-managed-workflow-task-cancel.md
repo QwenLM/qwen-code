@@ -40,6 +40,7 @@ Checked at `d28bc60d73` (Flyway V68, contract `1.44.0`):
 - `info.version`: `1.44.0` → `1.45.0`.
 - `info.description` gains: "v1.45 extends public task cancel to workflow tasks (the H4f follow-up of the workflow runtime): a workflow task in pending, running, waiting or degraded, in an active Session, advertises cancel; its cancel rides the same durable task_cancel operation as a child agent's, and the result relay stops the workflow child through its own Turn's abort."
 - `TaskActionCapability`'s description: "cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent and 1.45 for workflow, tasks of those kinds in pending, running, waiting or degraded, in an active Session); …" — the rest unchanged.
+- The generated WebShell types are regenerated in the same change (`npm run generate:managed-agent-api` in `packages/web-shell`): the `TaskActionCapability` JSDoc syncs from the description, with no shape change. The parity gate `managed-agent-api.test.ts` compares the generated file against a fresh render of the contract and fails otherwise — regenerate on any contract text edit.
 - Nothing else: no route, shape, code or status change.
 
 ## Validation

@@ -40,6 +40,7 @@
 - `info.version`：`1.44.0` → `1.45.0`。
 - `info.description` 增加：「v1.45 extends public task cancel to workflow tasks (the H4f follow-up of the workflow runtime): a workflow task in pending, running, waiting or degraded, in an active Session, advertises cancel; its cancel rides the same durable task_cancel operation as a child agent's, and the result relay stops the workflow child through its own Turn's abort.」
 - `TaskActionCapability` 的 description：「cancel: the cancel route accepts a new command for this task (since 1.40 for child_agent and 1.45 for workflow, tasks of those kinds in pending, running, waiting or degraded, in an active Session); …」—— 其余不变。
+- 生成的 WebShell 类型在同一变更中重新生成（在 `packages/web-shell` 跑 `npm run generate:managed-agent-api`）：`TaskActionCapability` 的 JSDoc 随 description 同步，无形状变化。一致性门禁 `managed-agent-api.test.ts` 会把生成文件与契约的即时渲染逐字节比较，不一致即失败 —— 任何契约文本改动都要重新生成。
 - 没有其他：无路由、形状、错误码或状态变化。
 
 ## 验证
