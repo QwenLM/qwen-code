@@ -793,9 +793,16 @@ jobs:
           ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           GH_TOKEN: '${{ github.token }}'
           FEED_TAG: '${{ env.DESKTOP_FEED_TAG }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.tag }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
         run: |
           set -euo pipefail
+          # The README links here, so every stable publish rewrites the page title
+          # and notes to name the current release rather than the assets below.
+          title="Qwen Code Desktop latest (v$RELEASE_VERSION)"
+          notes="$(printf '%s\n\n%s' \
+            "Download Qwen Code Desktop v$RELEASE_VERSION for macOS, Windows, and Linux: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
+            'This release is the stable auto-update feed. Files attached here serve the auto-updater; download installers from the link above.')"
           feed_assets=(release-assets/desktop-latest.json)
           if [ "$ELECTRON_BRIDGE" = 'true' ]; then
             shopt -s nullglob
@@ -838,8 +845,11 @@ jobs:
               exit 0
             fi
             gh release upload "$FEED_TAG" "${feed_assets[@]}" --clobber
+            # Page text is cosmetic; it must not fail the job that gates the OSS mirror.
+            gh release edit "$FEED_TAG" --title "$title" --notes "$notes" --latest=false ||
+              echo "::warning::Could not update the $FEED_TAG release title and notes; the feed itself was published."
           else
-            gh release create "$FEED_TAG" "${feed_assets[@]}" --title 'Qwen Code Desktop latest' --notes 'Stable desktop updater feed.' --latest=false
+            gh release create "$FEED_TAG" "${feed_assets[@]}" --title "$title" --notes "$notes" --latest=false
           fi
 
       - name: 'Publish release summary'

@@ -227,18 +227,3 @@ export function sessionCommandReplyFromBytes(
 export const MANAGED_SESSION_COMMAND_RUNTIME_LIMITS = Object.freeze({
   maxPerRun: 256,
 } as const);
-
-/**
- * Whether an outbox entry still owes its relay pass — the unfinished set of
- * the per-sender ordering: planned or accepting. An `accepted` entry is
- * finished for the relay (the parked call consumes it itself), and a
- * finished entry (`rejected`, `cancelled`, `unknown` or `consumed`) never
- * displaces a later command of the same sender.
- */
-export function isUnfinishedCommand(command: SessionCommand): boolean {
-  const state = command.run.delivery?.state;
-  return (
-    command.direction === 'outbound' &&
-    (state === 'planned' || state === 'accepting')
-  );
-}

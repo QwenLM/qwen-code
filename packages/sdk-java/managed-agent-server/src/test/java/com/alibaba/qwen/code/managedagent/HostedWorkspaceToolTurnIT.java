@@ -242,7 +242,10 @@ class HostedWorkspaceToolTurnIT {
             if (faults) {
                 var metadata = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
                 System.out.println((shellOutput || providerControl ? "FG6F_DATABASE " : sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
-                assertThat(metadata.toString().toLowerCase()).containsAnyOf("mysql", "mariadb");
+                try (var connection = jdbc.getDataSource().getConnection()) {
+                    assertThat(connection.getMetaData().getDatabaseProductName())
+                            .containsAnyOf("MySQL", "MariaDB");
+                }
             }
             ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
             var sessions = new ArrayList<Map<String, Object>>();
