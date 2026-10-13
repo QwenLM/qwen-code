@@ -132,6 +132,37 @@ class WorkspaceCsiSessionGuardTest {
     }
 
     @Test
+    void journalTransportRefusesOriginalWriterAdmissionWithoutChangingOwnership() {
+        ready();
+        var before = jdbc.queryForMap("SELECT * FROM qwen_runtime_binding");
+        var ownership = reservations.inspect(registration);
+        var transport = org.mockito.Mockito.mock(JournalEventTransport.class);
+        journal.setJournalEventTransport(transport);
+        assertApiCode(() -> transaction.execute(status -> acquire()), "csi_journal_transport_unsupported");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_head", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_tx", Integer.class)).isZero();
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_runtime_binding"))
+                .usingRecursiveComparison().isEqualTo(before);
+        assertThat(reservations.inspect(registration)).isEqualTo(ownership);
+        org.mockito.Mockito.verifyNoInteractions(transport);
+    }
+
+    @Test
+    void journalTransportRefusesRenewalOfAnAlreadyAdmittedOriginalWriter() {
+        ready();
+        transaction.execute(status -> acquire());
+        var before = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head");
+        var transport = org.mockito.Mockito.mock(JournalEventTransport.class);
+        journal.setJournalEventTransport(transport);
+        assertApiCode(() -> transaction.execute(status -> journal.renewWriter("tenant", sessionId, TOKEN,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", 1, 60_000L))),
+                "csi_journal_transport_unsupported");
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head"))
+                .usingRecursiveComparison().isEqualTo(before);
+        org.mockito.Mockito.verifyNoInteractions(transport);
+    }
+
+    @Test
     void drainRefusesAdmissionAndAcquireCompletionWhileOriginalWriterRenewalRemainsPossible() {
         ready();
         var runtime = bindings.admitSession(sessions, candidate(sessionId));

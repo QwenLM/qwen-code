@@ -75,6 +75,8 @@ class ManagedSessionStoreCredentialTest {
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
         when(jdbc.getDataSource()).thenReturn(new JdbcDataSource());
         ManagedSessionStore store = new ManagedSessionStore(jdbc);
+        JournalEventTransport transport = mock(JournalEventTransport.class);
+        store.setJournalEventTransport(transport);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getSessionStore().setBindingKey(KEY);
         WriterCredentialPolicy policy = new WriterCredentialPolicy(properties);
@@ -93,7 +95,7 @@ class ManagedSessionStoreCredentialTest {
             assertThatThrownBy(() -> store.requireCsiHistoricalCredential("tenant", "workspace", "session", foreign, hash))
                     .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("writer_credential_invalid"));
         }
-        verifyNoInteractions(jdbc);
+        verifyNoInteractions(jdbc, transport);
     }
 
     @Test

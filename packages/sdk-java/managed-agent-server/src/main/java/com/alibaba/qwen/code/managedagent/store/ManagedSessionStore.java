@@ -1317,6 +1317,7 @@ public class ManagedSessionStore {
         var scope = authority.original().request().getScope();
         String session = authority.original().request().getIsolationKey();
         requireCredential(scope.getTenantId(), scope.getWorkspaceId(), session, writerToken);
+        requireCsiJournalIsolation();
         HeadRow head = requireHeadForUpdate(scope.getTenantId(), session);
         requireHeadScope(head, scope.getTenantId(), scope.getWorkspaceId(), session);
         requireCsiWriter(authority.original(), head);
@@ -1349,6 +1350,7 @@ public class ManagedSessionStore {
         String session = original.request().getIsolationKey();
         validateScope(tenant, request.workspaceId(), session);
         requireCredential(tenant, request.workspaceId(), session, writerToken);
+        requireCsiJournalIsolation();
         validateCommit(request);
         HeadRow head = requireHeadForUpdate(tenant, session);
         requireHeadScope(head, tenant, request.workspaceId(), session);
@@ -1770,9 +1772,19 @@ public class ManagedSessionStore {
             JdbcRuntimeBindingRepository.lockPlacementDomain(target, tenantId, 10);
             ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
             var original = JdbcCsiFilesRetirementGuard.lockManagedSession(target, tenantId, sessionId);
+            if (original != null) {
+                requireCsiJournalIsolation();
+            }
             return original == null ? null : new CsiContinuation(original,
                     com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationProgress.lock(target, original));
         });
+    }
+
+    private void requireCsiJournalIsolation() {
+        if (journalEventTransport != null) {
+            throw conflict("csi_journal_transport_unsupported",
+                    "The private CSI lane requires an isolated journal without an event transport.");
+        }
     }
 
     private void requireCsiCurrentTime(CsiContinuation continuation) {

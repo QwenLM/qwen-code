@@ -64,6 +64,8 @@ Binding-only control writer 先发现 identity，再在原 binding lock 前进�
 
 ## 完整当前库存
 
+首条私有路径也不支持已安装的 JournalEventTransport。通用 commit 在 SQL 提交后发布 native CSI record，异步外部发送不持有原退役屏障。Private CREATE 和原 request resolve 同时拒绝已启用配置及已安装 port，包括 flag 关闭但安装 custom port 的情况。安装此 port 时，私有 live Session Store 访问与 application retirement 必须在授予 writer authority 或修改 journal/progress 前拒绝；普通 after-commit publication 和 replay 行为保持不变。Retained 只读历史凭据检查不依赖此 live port。Port 缺席只是部署前提，不能证明既往或在途 broker record 已消失；不能仅关闭 flag 就资格化曾向该 transport 发布的 scope。
+
 使用有界、显式原 schema catalogue，不写反射全数据库 framework。每张表明确独立 discovery predicate、sorted key、supported values 或 any-row BLOCKED、producer 与 empty-set insertion fence。Aggregate current evidence 的 MAX_ROWS=4096、MAX_BYTES=32 MiB；超限、不明 association 阻断。以 raw original Session/binding/harness/runtime identity 与独立派生 scope hash 做 OR discovery，不只查 live state、不用隐藏损坏/孤儿 child 的 parent inner join。
 
 接受集合覆盖原 Session/creation/config/request pin；registration/holder/intent/slot/binding/control fence；唯一原 logical Runtime Session；全部 execution/native authorization/result/receipt/message/file-history membership；whole journal 与全部 resource/ref；全部 publication operation/object/seal/unmatched ACK；每条 V66 native read；output read lease、PUT attempt、output retirement/retention/quarantine/GC 字段；不支持的 extension/task/action/automation occurrence+command/child/channel/recovery/migration history。正常 private CREATE 的 exact command/scope、值为零的 consumer progress、唯一 session.created public event 是有效创建事实，不授予任意 public history 权限。不支持 secondary row 或 configured provider/MCP/Hook/Shell/approval 阻断首条路径。Global definition 必须 pin 或明确不相关，不虚构 empty collection。

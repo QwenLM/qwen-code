@@ -46,6 +46,8 @@ import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestFactory;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -120,6 +122,43 @@ class WorkspaceCsiSessionMainTest {
         assertThat(count("managed_workspace_create_command")).isEqualTo(1);
         assertThat(count("managed_agent_consumer_progress")).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT event_type FROM managed_agent_event", String.class)).isEqualTo("session.created");
+    }
+
+    @Test
+    void configuredJournalTransportRefusesPrivateMainCreateBeforeAnyWrites() {
+        var before = allTables();
+        properties.getEventTransport().setEnabled(true);
+        assertJournalTransportRefusal(() -> create(request("transport-create")));
+        assertThat(allTables()).isEqualTo(before);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void configuredOrInstalledJournalTransportRefusesPrivateCreateAndExistingResolve(boolean configured) {
+        var original = create(request("original"));
+        var before = allTables();
+        properties.getEventTransport().setEnabled(configured);
+        var managed = store();
+        var transport = mock(JournalEventTransport.class);
+        if (!configured) {
+            managed.setJournalEventTransport(transport);
+        }
+        var transaction = new TransactionTemplate(manager);
+        assertJournalTransportRefusal(() -> transaction.execute(status -> managed.insertCsiSessionCommand(
+                registration, "actor", "transport-create", "request-digest", null, null,
+                new WorkspaceSelection("workspace", "."))));
+        assertThat(allTables()).isEqualTo(before);
+        assertJournalTransportRefusal(() -> transaction.execute(status -> managed.requireCsiRequest(
+                registration, original.sessionId())));
+        assertThat(allTables()).isEqualTo(before);
+        org.mockito.Mockito.verifyNoInteractions(transport);
+    }
+
+    private static void assertJournalTransportRefusal(org.assertj.core.api.ThrowableAssert.ThrowingCallable operation) {
+        assertThatThrownBy(operation).isInstanceOfSatisfying(ApiException.class, error -> {
+            assertThat(error.getCode()).isEqualTo("csi_journal_transport_unsupported");
+            assertThat(error.getStatus()).isEqualTo(org.springframework.http.HttpStatus.CONFLICT);
+        });
     }
 
     @Test
