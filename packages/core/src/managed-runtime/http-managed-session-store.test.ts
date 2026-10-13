@@ -249,6 +249,59 @@ describe('HTTP Managed Session store', () => {
     return { stores, session };
   }
 
+  it.each([undefined, 1, 2])(
+    'requires Store acknowledgement before a bounded retraction (version=%s)',
+    async (version) => {
+      const server = new FakeManagedSessionStore();
+      server.supportedStorageVersion = version;
+      const { session } = await bootStoresAndSession(server);
+      try {
+        const before = server.commits.length;
+        const commit = session.authority.appendExecutionEvent(
+          {
+            operation: 'assistantRetract',
+            commandId: 'bounded',
+            sessionKey: SESSION_KEY,
+            contentDigest: 'a'.repeat(64),
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: 'bounded',
+            sessionKey: SESSION_KEY,
+            kind: 'message.retracted',
+            occurredAt: Date.now(),
+            subject: {
+              type: 'activation',
+              scopeId: session.activation.activationId,
+              ...session.activation,
+            },
+            payload: {
+              messageId: 'message',
+              turnId: 'turn',
+              fromSequence: 1,
+              sourceBootId: 'boot',
+              sourceEventEpoch: 'epoch',
+              throughSequence: 1,
+            },
+          }),
+          { class: 'harness', activation: session.activation },
+        );
+        if (version === 2) {
+          await commit;
+          expect(server.commits.length).toBe(before + 1);
+        } else {
+          await expect(commit).rejects.toThrow(
+            'does not support Hosted recovery storage version 2',
+          );
+          expect(server.commits.length).toBe(before);
+        }
+      } finally {
+        await session.close().catch(() => undefined);
+      }
+    },
+  );
+
   // A committed message body must be the reader-facing record the cold
   // projection will replay: the commit-time fence refuses anything else.
   const MESSAGE_BODY = Buffer.from(
@@ -327,6 +380,9 @@ describe('HTTP Managed Session store', () => {
         const headers = new Headers(init?.headers);
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+        expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
+          '2',
+        );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);
         return jsonResponse(request);
@@ -1485,9 +1541,18 @@ describe('HTTP Managed Session store', () => {
     const referencedResources = server.commits.at(-1)!['resources'] as Array<{
       resourceId: string;
     }>;
+    // The settled Turn carries the checkpoint, the checkpoint's own api
+    // history dependency, and the payload-referenced result record a cold
+    // projection replays.
     expect(
       referencedResources.map(({ resourceId }) => resourceId).sort(),
-    ).toEqual([checkpointRef.resourceId, turnResultRef.resourceId].sort());
+    ).toEqual(
+      [
+        checkpointRef.resourceId,
+        historyRef.resourceId,
+        turnResultRef.resourceId,
+      ].sort(),
+    );
     const snapshotResources = new Map<
       string,
       {
@@ -3018,7 +3083,7 @@ describe('HTTP Managed Session store', () => {
 
   it.each([
     ['recoveryStatus', 'BLOCKED_RESOURCE'],
-    ['storageVersion', 2],
+    ['storageVersion', 3],
     ['state', 'SEALED'],
     ['writerGeneration', 2],
     ['compactedThroughRevision', 1],
@@ -3033,7 +3098,7 @@ describe('HTTP Managed Session store', () => {
       await expect(journal.read()).resolves.toBeDefined();
       server.headOverrides[key] = value;
       await expect(journal.read()).rejects.toThrow(
-        /not readable by this v1 writer/,
+        /not readable by this writer/,
       );
       await session.close();
     },
@@ -3446,6 +3511,7 @@ describe('HTTP Managed Session store', () => {
 });
 
 class FakeManagedSessionStore {
+  supportedStorageVersion: number | undefined = 2;
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
   readonly headOverrides: Record<string, unknown> = {};
@@ -3551,7 +3617,10 @@ class FakeManagedSessionStore {
         ...this.pageOverrides,
       });
     }
-    if (suffix === '/transactions:commit') {
+    if (
+      suffix === '/transactions:commit' ||
+      suffix === '/transactions:commit-v2'
+    ) {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       this.commits.push(body);
       const resources = body['resources'] as Array<Record<string, unknown>>;
@@ -3670,6 +3739,9 @@ class FakeManagedSessionStore {
 
   private grant(): Record<string, unknown> {
     return {
+      ...(this.supportedStorageVersion === undefined
+        ? {}
+        : { supportedStorageVersion: this.supportedStorageVersion }),
       writerGeneration: this.writerGeneration,
       leaseUntil: this.leaseUntil,
       journalRevision: this.transactions.length,
@@ -3790,5 +3862,64 @@ describe('collectNestedResourceRefs', () => {
         Buffer.from('{"text":"<task-notification />"}', 'utf8'),
       ),
     ).toEqual([]);
+  });
+
+  it('closes over the page envelopes a result manifest names (#13856)', () => {
+    // The gap the B2 rig arm proved: the walker traversed checkpoints and
+    // records but never the manifest → page hop, so a staged page envelope
+    // never reached the commit's resource closure and the Artifact's read
+    // chain 404'd on it.
+    const pageRef = closureRef('managed-tool-result-page', 'page-envelope');
+    const manifestRef = closureRef('managed-tool-result-manifest', 'manifest');
+    const manifest = Buffer.from(
+      JSON.stringify({
+        toolResult: 'managed-tool-result/1',
+        type: 'manifest',
+        tenantId: 'tenant',
+        sessionId: 'session',
+        turnId: 'turn',
+        executionCallId: 'execution',
+        callId: 'call',
+        invocationDigest: `sha256:${'a'.repeat(64)}`,
+        bindingGeneration: '1',
+        captureId: 'capture',
+        revision: 1,
+        executionStatus: 'success',
+        exitCode: 0,
+        signal: null,
+        captureScope: 'process_pipes',
+        capturePolicy: 'complete_required',
+        captureStatus: 'complete',
+        captureReason: null,
+        upstreamTruncated: false,
+        contents: [
+          {
+            streamId: 'stdout',
+            role: 'stdout',
+            mimeType: 'application/octet-stream',
+            state: 'sealed',
+            byteLength: 3,
+            digest: 'b'.repeat(64),
+            missingRanges: [],
+            body: {
+              pages: [{ ref: pageRef, segmentCount: 1, byteLength: 3 }],
+            },
+          },
+          {
+            streamId: 'stderr',
+            role: 'stderr',
+            mimeType: 'application/octet-stream',
+            state: 'sealed',
+            byteLength: 0,
+            digest: 'c'.repeat(64),
+            missingRanges: [],
+            body: { pages: [] },
+          },
+        ],
+      }),
+      'utf8',
+    );
+    const nested = collectNestedResourceRefs(manifestRef, manifest);
+    expect(nested).toEqual([pageRef]);
   });
 });

@@ -749,6 +749,20 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             return post(lease, ManagedShellProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
                     .thenApply(bytes -> ManagedShellProtocol.response(bytes, session, immutable));
         }
+        if (ManagedMonitorProtocol.isOperation(immutable)) {
+            ManagedMonitorProtocol.validateSession(session, immutable);
+            Map<String, Object> body = Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable);
+            byte[] encoded;
+            try {
+                encoded = encodeToolRequest(body, 16 * 1024);
+            } catch (IllegalArgumentException tooLarge) {
+                throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                        "Runtime Monitor operation exceeds its size limit.", false);
+            }
+            return post(lease, ManagedMonitorProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                    .thenApply(bytes -> ManagedMonitorProtocol.response(bytes, session, immutable));
+        }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
         // Workspace context reads the Session's files directly, as file history
         // does: neither needs a provider Session acquired first.
@@ -1146,7 +1160,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                 case "managed_runtime_provider_invalid", "managed_runtime_tool_invalid" -> 400;
                 case "managed_runtime_identity_conflict", "managed_context_unavailable",
                         "managed_context_conflict", "managed_runtime_provider_operation_failed",
-                        "managed_runtime_provider_incompatible" -> 409;
+                        "managed_runtime_provider_incompatible", "managed_runtime_owner_hold_pending" -> 409;
                 case "managed_runtime_provider_too_large" -> 413;
                 case "managed_runtime_provider_unsupported" -> 501;
                 default -> 0;
