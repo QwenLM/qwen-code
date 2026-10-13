@@ -10,7 +10,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import type { Config } from '../config/config.js';
-import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { ApprovalMode } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import {
