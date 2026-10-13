@@ -251,6 +251,105 @@ describe('TrajectoryPanel', () => {
     );
   });
 
+  it('updates one execution through terminal state without refreshing or moving history', async () => {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, {
+      sessionId: 's',
+      scope: 'scope',
+      epoch: 'epoch',
+      events: [],
+      incomplete: false,
+    });
+    store.ingest(owner, { v: 1, type: 'replay_complete', data: {} });
+    const getSessionTranscriptPage = vi.fn(async () => page(REAL_EVENTS));
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage },
+      's',
+      'scope',
+    );
+    const container = await render(loader, store);
+    const history = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-rows"]',
+    )!;
+    history.scrollTop = 240;
+    act(() => history.dispatchEvent(new Event('scroll', { bubbles: true })));
+    const totals = container.querySelector(
+      '[data-testid="trajectory-totals"]',
+    )!.textContent;
+    const lifecycle = {
+      v: 1,
+      kind: 'request',
+      phase: 'started',
+      executionId: 'new',
+      sessionId: 's',
+      promptId: 'p',
+      model: 'new-model',
+      startedAt: Date.now(),
+    };
+    const event = (value: object, id: number): DaemonEvent => ({
+      v: 1,
+      id,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: { executionLifecycle: value },
+      },
+    });
+    await act(async () => store.ingest(owner, event(lifecycle, 1)));
+    let rows = container.querySelectorAll<HTMLElement>(
+      '[data-testid="trajectory-execution-row"]',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.dataset.status).toBe('running');
+    const key = rows[0]!.dataset.executionKey;
+    await act(async () => rows[0]!.click());
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]')!
+        .textContent,
+    ).toContain('new-model');
+    await act(async () =>
+      store.ingest(
+        owner,
+        event(
+          {
+            ...lifecycle,
+            phase: 'ended',
+            endedAt: lifecycle.startedAt + 50,
+            durationMs: 50,
+            outcome: 'success',
+          },
+          2,
+        ),
+      ),
+    );
+    rows = container.querySelectorAll<HTMLElement>(
+      '[data-testid="trajectory-execution-row"]',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.dataset.executionKey).toBe(key);
+    expect(rows[0]!.dataset.status).toBe('success');
+    expect(
+      container.querySelector('[data-testid="trajectory-inspector"]')!
+        .textContent,
+    ).toContain('Succeeded');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Close details"]')!
+        .click(),
+    );
+    expect(document.activeElement).toBe(
+      container.querySelector(
+        '[data-testid="trajectory-executions"] [role="grid"]',
+      ),
+    );
+    expect(getSessionTranscriptPage).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-testid="trajectory-totals"]')!.textContent,
+    ).toBe(totals);
+    expect(history.scrollTop).toBe(240);
+  });
+
   it('shows the matched live request lifecycle in recorded details', async () => {
     const lifecycle = {
       v: 1,
