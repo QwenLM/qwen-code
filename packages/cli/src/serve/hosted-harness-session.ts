@@ -2090,6 +2090,7 @@ async function verifyWorkspaceRestore(
         // H4e-b1: the lead's team roster and board.
         'team_state',
         'team_task',
+        'team_plan',
         // H4e-b3: member command ledgers — the outbox entries, the
         // lead's inbound receipts, and the replies they carry.
         'session_command',

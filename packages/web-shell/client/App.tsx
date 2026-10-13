@@ -20,7 +20,10 @@ import { useWebShellNavigation } from './navigation';
 import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
-import { isSessionWriterBlockedCode } from './daemon/session/session-context';
+import {
+  isSessionWriterBlockedCode,
+  sessionContextKey,
+} from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import {
@@ -5973,7 +5976,11 @@ export function App({
         kind: 'trajectory',
         title: t('trajectory.title'),
         sessionId: sourceSessionId,
-        loadPage: createTrajectoryPageLoader(workspace.client, sourceSessionId),
+        loadPage: createTrajectoryPageLoader(
+          workspace.client,
+          sourceSessionId,
+          sessionContextKey(connection.sessionContext),
+        ),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -5986,7 +5993,12 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t, workspace.client],
+    [
+      getDefaultReviewPanelWidth,
+      t,
+      workspace.client,
+      connection.sessionContext,
+    ],
   );
   const openContextUsagePanel = useCallback(
     (
@@ -6613,6 +6625,34 @@ export function App({
       artifactPanelStateBySessionRef.current.delete(nextSessionId);
       artifactPanelStateBySessionRef.current.set(nextSessionId, currentState);
     };
+    const retainCurrentTrajectory = () => {
+      const retainedTabs = artifactPanelTabsRef.current.filter(
+        (tab) =>
+          previousSessionId === nextSessionId &&
+          trajectoryAvailable &&
+          tab.kind === 'trajectory' &&
+          tab.loadPage ===
+            createTrajectoryPageLoader(
+              workspace.client,
+              tab.sessionId,
+              sessionContextKey(connection.sessionContext),
+            ),
+      );
+      setArtifactPanelTabs(
+        retainedTabs.map((tab) =>
+          tab.kind === 'trajectory'
+            ? { ...tab, historyGapRevision: (tab.historyGapRevision ?? 0) + 1 }
+            : tab,
+        ),
+      );
+      setActiveArtifactPanelTabId(
+        retainedTabs.some(
+          (tab) => tab.id === activeArtifactPanelTabIdRef.current,
+        )
+          ? activeArtifactPanelTabIdRef.current
+          : null,
+      );
+    };
     if (connection.loadingTranscript) {
       saveCurrentState();
       artifactPanelRestoredSessionKeyRef.current = undefined;
@@ -6623,8 +6663,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (connection.status !== 'connected') {
@@ -6637,8 +6676,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
     if (artifactsLoading) {
@@ -6651,8 +6689,7 @@ export function App({
       setArtifactPanelRestoring(shouldOpen);
       setSuppressArtifactDockOpenAnimation(shouldOpen);
       setArtifactPanelOpen(shouldOpen);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
+      retainCurrentTrajectory();
       return;
     }
 
@@ -6903,6 +6940,7 @@ export function App({
                     loadPage: createTrajectoryPageLoader(
                       workspace.client,
                       tab.sessionId,
+                      sessionContextKey(connection.sessionContext),
                     ),
                   };
                 }
@@ -6954,12 +6992,13 @@ export function App({
       const desiredActiveTabId =
         savedState?.activeTabId ?? persisted?.activeTabId ?? null;
       const tabsOpenedDuringRestore = artifactPanelTabsRef.current;
-      const newlyOpenedIds = new Set(
-        tabsOpenedDuringRestore.map((tab) => tab.id),
+      const openedById = new Map(
+        tabsOpenedDuringRestore.map((tab) => [tab.id, tab]),
       );
+      const restoredIds = new Set(mergedRestoredTabs.map((tab) => tab.id));
       const candidateTabs = [
-        ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
-        ...tabsOpenedDuringRestore,
+        ...mergedRestoredTabs.map((tab) => openedById.get(tab.id) ?? tab),
+        ...tabsOpenedDuringRestore.filter((tab) => !restoredIds.has(tab.id)),
       ];
       const mergedTabs = candidateTabs.filter(
         (tab) =>
@@ -7027,6 +7066,7 @@ export function App({
     };
   }, [
     artifactsLoading,
+    connection.sessionContext,
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,

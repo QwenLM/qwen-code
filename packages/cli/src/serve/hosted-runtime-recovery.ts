@@ -477,6 +477,10 @@ async function answerAbandonedTurnCalls(input: {
       call.name === 'send_message'
         ? sentMessageText(input, functionCallId, callKey)
         : undefined;
+    const planDecision =
+      call.name === 'team_plan_approval'
+        ? await input.teams?.planDecisionEvidence(callKey)
+        : undefined;
     // A member's board call shares the team tools' names, but once its
     // outbound committed (H4e-b3) it is a command: answered by its own
     // journal, never as a call that never ran — that would leave the
@@ -491,7 +495,11 @@ async function answerAbandonedTurnCalls(input: {
             callId: functionCallId,
           });
     let parts: Part[];
-    if (
+    if (planDecision !== undefined) {
+      parts = convertToFunctionResponse(call.name, functionCallId, [
+        { text: planDecision },
+      ]);
+    } else if (
       commandId !== undefined &&
       input.commands!.command(commandId) !== undefined
     ) {
@@ -528,6 +536,7 @@ async function answerAbandonedTurnCalls(input: {
         (uncommitted === 'none' ||
           (uncommitted === 'hosted' &&
             !HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
+            call.name !== 'team_plan_approval' &&
             call.name !== 'send_message' &&
             !(
               (call.name === 'agent' || call.name === 'workflow') &&
@@ -1187,7 +1196,9 @@ export async function fillParkedRoundCommandGaps(input: {
         name,
         callId,
         [],
-        ['task_list', 'task_create', 'task_update'].includes(name)
+        ['task_list', 'task_create', 'task_update', 'exit_plan_mode'].includes(
+          name,
+        )
           ? sessionCommandEvidenceText('planned')
           : input.gapText,
       );

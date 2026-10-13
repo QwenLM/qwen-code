@@ -20,17 +20,19 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const isHosted = (className) => /^Hosted.*IT$/.test(className);
+const isGate = (className) => /^Hosted.*Gate$/.test(className);
 const [family, ...modules] = process.argv.slice(2);
 const optIn = family === 'o4-mysql' || family === 'o4-oss';
 const inFamily = new Map([
   ['hosted', isHosted],
   ['non-hosted', (className) => /IT$/.test(className) && !isHosted(className)],
+  ['hosted-gates', isGate],
   ['o4-mysql', (className) => className === 'O4MySqlGate'],
   ['o4-oss', (className) => className === 'O4OssGate'],
 ]).get(family);
 if (!inFamily || modules.length === 0) {
   console.error(
-    'usage: node scripts/check-failsafe-reports.js hosted|non-hosted|o4-mysql|o4-oss <maven-module-dir>...',
+    'usage: node scripts/check-failsafe-reports.js hosted|non-hosted|hosted-gates|o4-mysql|o4-oss <maven-module-dir>...',
   );
   process.exit(2);
 }
