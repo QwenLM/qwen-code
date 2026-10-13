@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Part } from '@google/genai';
+import { getToolResponseDisplayText } from '../utils/generateContentResponseUtilities.js';
 import type { RecordToolResultOptions } from '../services/chatRecordingService.js';
 import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import type { GoalTurnPermit } from './goal-protocol.js';
@@ -31,7 +33,9 @@ export interface GoalToolResultRequest {
  *
  * `get_goal` and `update_goal` are stamped as `goal_runtime` instead: they are
  * the Goal's own bookkeeping, and a catalog that cited its own reads as proof
- * would be circular.
+ * would be circular. Scripts and aggregate wrappers are `execution_output`:
+ * they can repeat model-authored claims, so only separately recorded original
+ * observations attest external facts.
  *
  * Every site that records tool results during a Goal turn routes through
  * here -- the interactive scheduler, both TUI recording paths, headless, and
@@ -39,6 +43,7 @@ export interface GoalToolResultRequest {
  */
 export function goalToolResultProvenance(
   request: GoalToolResultRequest,
+  responseParts?: Part[],
 ): RecordToolResultOptions | undefined {
   const { goalContext } = request;
   if (!goalContext) return undefined;
@@ -57,11 +62,50 @@ export function goalToolResultProvenance(
     typeof toolName === 'string' ? toolName.toLowerCase() : toolName;
   if (
     lowerToolName === ToolNames.GET_GOAL ||
-    lowerToolName === ToolNames.UPDATE_GOAL
+    lowerToolName === ToolNames.UPDATE_GOAL ||
+    (requestName === ToolNames.TOOL_SEARCH &&
+      discoversOnlyGoalTools(responseParts))
   ) {
     return { goalContext: { ...goalContext }, provenance: 'goal_runtime' };
   }
+  if (
+    lowerToolName === ToolNames.EXEC ||
+    lowerToolName === ToolNames.AGENT ||
+    lowerToolName === ToolNames.ADVISOR ||
+    lowerToolName === ToolNames.WORKFLOW ||
+    // The thread tools are gone, but transcripts recorded before their removal
+    // still carry thread_read results, and those restate another participant's
+    // recorded text -- the wrapper class, not an original observation.
+    lowerToolName === 'thread_read'
+  ) {
+    return { goalContext: { ...goalContext }, provenance: 'execution_output' };
+  }
   return { goalContext: { ...goalContext } };
+}
+
+function discoversOnlyGoalTools(responseParts: Part[] | undefined): boolean {
+  const output = getToolResponseDisplayText(responseParts);
+  // Only the complete schema block and Code Mode call hint are bookkeeping.
+  // Missing, unavailable or truncated capabilities remain external facts.
+  const schemas = output?.match(
+    /^<functions>\n([\s\S]+)\n<\/functions>(?:\n\nCall these tools through exec using tools\.<jsName>\(args\) and the required parameters above\.)?$/,
+  )?.[1];
+  if (!schemas) return false;
+  const goalTools = new Set<string>([
+    ToolNames.GET_GOAL,
+    ToolNames.UPDATE_GOAL,
+    ToolNames.PROPOSE_GOAL,
+  ]);
+  return schemas.split('\n').every((schema) => {
+    const match = schema.match(/^<function>(.*)<\/function>$/);
+    if (!match) return false;
+    try {
+      const { name } = JSON.parse(match[1]!) as Record<string, unknown>;
+      return typeof name === 'string' && goalTools.has(name);
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -75,11 +119,15 @@ export function goalToolResultProvenance(
 export function ambientGoalToolResultProvenance(
   toolName: string,
   args?: Record<string, unknown>,
+  responseParts?: Part[],
 ): RecordToolResultOptions | undefined {
   const goalContext = goalTurnContext.getStore();
-  return goalToolResultProvenance({
-    name: toolName,
-    ...(args ? { args } : {}),
-    ...(goalContext ? { goalContext } : {}),
-  });
+  return goalToolResultProvenance(
+    {
+      name: toolName,
+      ...(args ? { args } : {}),
+      ...(goalContext ? { goalContext } : {}),
+    },
+    responseParts,
+  );
 }

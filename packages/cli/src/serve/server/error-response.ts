@@ -420,18 +420,20 @@ export function sendBridgeError(
   if (err instanceof StandaloneSessionServiceError) {
     const status = err.capacity
       ? 503
-      : err.code === 'invalid_request'
-        ? 400
-        : err.code === 'standalone_session_not_found'
-          ? 404
-          : err.code === 'standalone_creation_outcome_unknown' ||
-              err.code === 'standalone_creation_rolled_back' ||
-              err.code === 'standalone_session_operation_failed' ||
-              err.code === 'transcript_deletion_failed' ||
-              err.code === 'transcript_deletion_outcome_unknown' ||
-              err.code === 'working_directory_recovery_failed'
-            ? 500
-            : 409;
+      : err.code === 'managed_engine_quarantined'
+        ? 503
+        : err.code === 'invalid_request'
+          ? 400
+          : err.code === 'standalone_session_not_found'
+            ? 404
+            : err.code === 'standalone_creation_outcome_unknown' ||
+                err.code === 'standalone_creation_rolled_back' ||
+                err.code === 'standalone_session_operation_failed' ||
+                err.code === 'transcript_deletion_failed' ||
+                err.code === 'transcript_deletion_outcome_unknown' ||
+                err.code === 'working_directory_recovery_failed'
+              ? 500
+              : 409;
     if (status === 500) {
       const safeError = err.creationDiagnostic
         ? Object.assign(new Error(err.message), {
@@ -1071,6 +1073,22 @@ export function sendBridgeError(
       if (kind === 'session_writer_unavailable') {
         res.status(503).json({
           error: SESSION_WRITER_ERROR_MESSAGES[kind],
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'managed_engine_quarantined') {
+        // A temporary refusal while a Runtime worker's stop is unproven:
+        // the reason travels in the message, and 503 says "retry later",
+        // never the resume-conflict 409 the engine selector's errors take.
+        recordExpectedBridgeError(
+          err instanceof Error ? err : new Error(errorMessage(err)),
+          ctx,
+          daemonLog,
+        );
+        res.status(503).json({
+          error: errorMessage(err),
           code: kind,
           errorKind: kind,
         });

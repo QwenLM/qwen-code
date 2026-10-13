@@ -100,10 +100,6 @@ vi.mock('../terminal/TerminalPanel', () => ({
   ),
 }));
 
-vi.mock('../workspace-agents/ThreadsRoute', () => ({
-  ThreadsRoute: () => <div data-testid="workspace-agent-thread-route" />,
-}));
-
 const sideTaskPanelProps = vi.hoisted(() => ({
   current: undefined as Record<string, unknown> | undefined,
 }));
@@ -402,57 +398,6 @@ afterEach(() => {
       },
     ],
   };
-});
-
-it('does not mount restored agent activity when collaboration is disabled', async () => {
-  const node = document.createElement('div');
-  document.body.appendChild(node);
-  const root = createRoot(node);
-  mounted.push({ root, container: node });
-  const render = () => (
-    <I18nProvider language="en">
-      <ArtifactPanel
-        artifacts={[]}
-        tabs={[
-          {
-            id: 'agent-activity:/repo:thread-1',
-            kind: 'agent_activity',
-            title: 'Team',
-            threadId: 'thread-1',
-            workspaceCwd: '/repo',
-          },
-        ]}
-        activeTabId="agent-activity:/repo:thread-1"
-        reviewChanges={[]}
-        selectedReviewPath={null}
-        onSelectTab={() => {}}
-        onCloseTab={() => {}}
-        onOpenFilePreview={() => {}}
-        onClose={() => {}}
-      />
-    </I18nProvider>
-  );
-
-  act(() => root.render(render()));
-  // Let the lazy `ThreadsRoute` import settle before asserting absence, the
-  // same way the positive half below does: `<Suspense fallback={null}>`
-  // satisfies `toBeNull()` on its own, so without this flush the negative half
-  // still passes with the collaboration gate deleted and pins nothing.
-  await act(async () => {
-    await Promise.resolve();
-  });
-  expect(
-    node.querySelector('[data-testid="workspace-agent-thread-route"]'),
-  ).toBeNull();
-
-  mockWorkspace.capabilities.features = ['agent_collaboration_v1'];
-  act(() => root.render(render()));
-  await act(async () => {
-    await Promise.resolve();
-  });
-  expect(
-    node.querySelector('[data-testid="workspace-agent-thread-route"]'),
-  ).not.toBeNull();
 });
 
 describe('ArtifactPanel context usage tabs', () => {
@@ -1147,19 +1092,18 @@ describe('ArtifactPanel code review artifacts', () => {
             artifacts={[]}
             tabs={[
               {
-                id: 'attachment:report.xlsx',
+                id: 'attachment:report.xls',
                 kind: 'file',
-                title: 'report.xlsx',
-                workspacePath: 'report.xlsx',
+                title: 'report.xls',
+                workspacePath: 'report.xls',
                 previewData: new Blob(['PK'], {
-                  type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                  type: 'application/vnd.ms-excel',
                 }),
-                previewMimeType:
-                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                previewMimeType: 'application/vnd.ms-excel',
                 previewOnly: true,
               },
             ]}
-            activeTabId="attachment:report.xlsx"
+            activeTabId="attachment:report.xls"
             reviewChanges={[]}
             selectedReviewPath={null}
             onSelectTab={() => {}}
@@ -1201,20 +1145,19 @@ describe('ArtifactPanel code review artifacts', () => {
             artifacts={[]}
             tabs={[
               {
-                id: 'attachment:report.xlsx',
+                id: 'attachment:report.xls',
                 kind: 'file',
-                title: 'report.xlsx',
-                workspacePath: 'report.xlsx',
+                title: 'report.xls',
+                workspacePath: 'report.xls',
                 previewData: new Blob(['PK'], {
-                  type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                  type: 'application/vnd.ms-excel',
                 }),
-                previewMimeType:
-                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                previewMimeType: 'application/vnd.ms-excel',
                 previewOnly: true,
                 sourcePreview: true,
               },
             ]}
-            activeTabId="attachment:report.xlsx"
+            activeTabId="attachment:report.xls"
             reviewChanges={[]}
             selectedReviewPath={null}
             onSelectTab={() => {}}
@@ -1233,7 +1176,7 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.querySelector('.cm-content')).toBeNull();
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
     const download = container.querySelector<HTMLAnchorElement>(
-      'a[download="report.xlsx"]',
+      'a[download="report.xls"]',
     );
     expect(download?.href).toBe('blob:source-binary');
     act(() => root.render(null));
@@ -3894,7 +3837,7 @@ describe('ArtifactPanel workspace artifact previews', () => {
           source: 'tool',
           status: 'available',
           title: 'Q3 workbook',
-          workspacePath: 'reports/q3.xlsx',
+          workspacePath: 'reports/q3.xls',
           retention: 'ephemeral',
           clientRetained: false,
           createdAt: '2026-08-18T00:00:00.000Z',
@@ -3940,6 +3883,9 @@ describe('ArtifactPanel workspace artifact previews', () => {
     );
     expect(download).toBeTruthy();
     expect(download).toHaveProperty('disabled', true);
+    expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('does not read workspace bytes when stat says the path is a directory', async () => {

@@ -17,6 +17,11 @@
  */
 
 import {
+  createToolLifecycle,
+  type ToolLifecycleEvent,
+  type ToolExecutionStatus,
+} from '../../telemetry/tool-lifecycle.js';
+import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
   type HookExecutionOwner,
@@ -118,8 +123,8 @@ import type {
 } from './agent-events.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
-import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import { canonicalToolName, ToolNames } from '../../tools/tool-names.js';
+import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { getToolExposure, ToolMode } from '../../tools/code-mode.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
@@ -144,6 +149,7 @@ import {
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
   isToolExcludedForCurrentContext,
+  matchesAgentToolBlocklist,
   toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
 
@@ -383,8 +389,10 @@ Important Rules:
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
   }
 
-  // Context files (QWEN.md + output-language.md) keep the subagent aligned
-  // with project conventions; the volatile auto-memory section stays last.
+  // Context files and memory policy keep the subagent aligned. The policy
+  // promises the changing legacy catalog at the request tail: LlmChat appends
+  // it for in-process runs, and peer-process executors (codex/ACP) must
+  // append `getAutoMemoryContext()` themselves.
   return assembleSystemPrompt({
     base: finalPrompt,
     contextFiles: runtimeContext.getUserMemory(),
@@ -692,11 +700,6 @@ export class AgentCore {
       toolRegistry.isPermissionDeferred?.(name) === true &&
       toolRegistry.isDeferredAndHidden?.(name) === true;
 
-    const isDisallowed = (name: string): boolean =>
-      this.toolConfig?.disallowedTools?.some((pattern) =>
-        matchesToolPattern(pattern, name),
-      ) === true;
-
     if (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly) {
       const stringTools =
         this.toolConfig?.tools.filter(
@@ -724,7 +727,7 @@ export class AgentCore {
               (inheritsCodeModeBindings &&
                 getToolExposure(name) === 'code-mode-callable')) &&
             !isExcluded(name) &&
-            !isDisallowed(name) &&
+            !this.isToolDisallowedByAgentConfig(name, toolRegistry) &&
             this.isToolExecutionAllowed(name),
         );
       if (
@@ -750,11 +753,14 @@ export class AgentCore {
           (tool) =>
             !isExcluded(tool.name) &&
             !isHiddenByEagerAllowList(tool.name) &&
-            (!tool.name || !isDisallowed(tool.name)),
+            (!tool.name ||
+              !this.isToolDisallowedByAgentConfig(tool.name, toolRegistry)),
         ),
       );
       return declarations.filter(
-        (declaration) => !declaration.name || !isDisallowed(declaration.name),
+        (declaration) =>
+          !declaration.name ||
+          !this.isToolDisallowedByAgentConfig(declaration.name, toolRegistry),
       );
     }
 
@@ -838,13 +844,10 @@ export class AgentCore {
 
     // Apply disallowedTools blocklist (supports MCP server-level patterns).
     if (this.toolConfig?.disallowedTools?.length) {
-      const disallowed = this.toolConfig.disallowedTools;
-      return toolsList.filter((t) => {
-        if (!t.name) return true;
-        return !disallowed.some((pattern) =>
-          matchesToolPattern(pattern, t.name!),
-        );
-      });
+      return toolsList.filter(
+        (t) =>
+          !t.name || !this.isToolDisallowedByAgentConfig(t.name, toolRegistry),
+      );
     }
 
     return toolsList;
@@ -1772,6 +1775,13 @@ export class AgentCore {
     currentRound: number;
     durationMs?: number;
   }): void {
+    const lifecycle =
+      canonicalToolName(params.name) === ToolNames.TODO_WRITE
+        ? undefined
+        : createToolLifecycle(this.runtimeContext, params.callId, params.name, {
+            subagentId: this.subagentId,
+            persist: false,
+          }).finish('error', 'not_started');
     this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
       subagentId: this.subagentId,
       round: params.currentRound,
@@ -1790,6 +1800,7 @@ export class AgentCore {
       round: params.currentRound,
       callId: params.callId,
       name: params.name,
+      lifecycle,
       success: false,
       error: params.errorMessage,
       responseParts: params.responseParts,
@@ -1842,12 +1853,21 @@ export class AgentCore {
    * must be enforced here too, symmetrically to the execution allowlist
    * re-check (round-6 review, R6-8).
    */
-  private isToolDisallowedByAgentConfig(toolName: string): boolean {
+  private isToolDisallowedByAgentConfig(
+    toolName: string,
+    toolRegistry?: ToolRegistry,
+  ): boolean {
     const disallowed = this.toolConfig?.disallowedTools;
     if (!disallowed?.length) {
       return false;
     }
-    return disallowed.some((pattern) => matchesToolPattern(pattern, toolName));
+    const registry = toolRegistry ?? this.runtimeContext.getToolRegistry();
+    return matchesAgentToolBlocklist(
+      disallowed,
+      toolName,
+      registry.getPermissionAliases?.(toolName),
+      registry.getMcpToolIdentity?.(toolName),
+    );
   }
 
   /**
@@ -2181,6 +2201,29 @@ export class AgentCore {
     // Build scheduler
     let resolveBatch: (() => void) | null = null;
     const emittedCallIds = new Set<string>();
+    const toolLifecycles = new Map<
+      string,
+      ReturnType<typeof createToolLifecycle>
+    >();
+    const executionResults = new Map<
+      string,
+      { status: ToolExecutionStatus; durationMs: number }
+    >();
+    const startedLifecycles = new Set<string>();
+    const publishLifecycle = (
+      callId: string,
+      lifecycle: ToolLifecycleEvent | undefined,
+    ) => {
+      if (!lifecycle) return;
+      this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+        subagentId: this.subagentId,
+        round: currentRound,
+        callId,
+        outputChunk: '',
+        lifecycle,
+        timestamp: Date.now(),
+      });
+    };
     // pidMap: callId → PTY PID, populated by onToolCallsUpdate when a shell
     // tool spawns a PTY. Shared with outputUpdateHandler via closure so the
     // PID is included in TOOL_OUTPUT_UPDATE events for interactive shell support.
@@ -2301,6 +2344,24 @@ export class AgentCore {
     };
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
+      onToolExecutionStarted: (callId, epoch) => {
+        startedLifecycles.add(callId);
+        publishLifecycle(
+          callId,
+          toolLifecycles
+            .get(callId)
+            ?.start(epoch, executionRequestByCallId.get(callId)?.name),
+        );
+      },
+      onToolExecutionSettled: (callId, status, durationMs) => {
+        executionResults.set(callId, { status, durationMs });
+        if (emittedCallIds.has(callId)) {
+          publishLifecycle(
+            callId,
+            toolLifecycles.get(callId)?.finish('cancelled', status, durationMs),
+          );
+        }
+      },
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
       // `declaredToolNames` is the batch's own list, computed above from the
       // `toolsList` sent to the model. See `CoreToolSchedulerOptions.hasSkillTool`
@@ -2342,12 +2403,28 @@ export class AgentCore {
           // Record stats
           this.recordToolCallStats(toolName, success, duration, errorMessage);
 
+          const execution = executionResults.get(call.request.callId);
+          const lifecycle =
+            startedLifecycles.has(call.request.callId) && !execution
+              ? undefined
+              : toolLifecycles
+                  .get(call.request.callId)
+                  ?.finish(
+                    call.status === 'cancelled'
+                      ? 'cancelled'
+                      : success
+                        ? 'success'
+                        : 'error',
+                    execution?.status ?? 'not_started',
+                    execution?.durationMs,
+                  );
           // Emit tool result event
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
             subagentId: this.subagentId,
             round: currentRound,
             callId: call.request.callId,
             name: toolName,
+            lifecycle,
             success,
             error: errorMessage,
             responseParts: call.response.responseParts,
@@ -2570,6 +2647,15 @@ export class AgentCore {
           : {}),
       };
 
+      if (canonicalToolName(toolName) !== ToolNames.TODO_WRITE) {
+        toolLifecycles.set(
+          callId,
+          createToolLifecycle(this.runtimeContext, callId, toolName, {
+            subagentId: this.subagentId,
+            persist: false,
+          }),
+        );
+      }
       if (canonicalToolName(toolName) === ToolNames.TOOL_CALL) {
         pendingToolCallStarts.add(callId);
       } else {
@@ -2625,11 +2711,22 @@ export class AgentCore {
             responseParts,
           });
 
+          const execution = executionResults.get(req.callId);
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
             subagentId: this.subagentId,
             round: currentRound,
             callId: req.callId,
             name: toolName,
+            lifecycle:
+              startedLifecycles.has(req.callId) && !execution
+                ? undefined
+                : toolLifecycles
+                    .get(req.callId)
+                    ?.finish(
+                      'cancelled',
+                      execution?.status ?? 'not_started',
+                      execution?.durationMs,
+                    ),
             success: false,
             error: errorMessage,
             responseParts,
@@ -2970,6 +3067,7 @@ export class AgentCore {
     emitter.on(
       AgentEventType.TOOL_OUTPUT_UPDATE,
       (event: AgentToolOutputUpdateEvent) => {
+        if (event.lifecycle) return;
         this.liveOutputs.set(event.callId, event.outputChunk);
         if (event.pid !== undefined) {
           this.shellPids.set(event.callId, event.pid);

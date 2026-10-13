@@ -202,6 +202,7 @@ export interface GoalTurnPermit extends GoalExpectedVersion {
 export type GoalEvidenceProofKind =
   | 'user_input'
   | 'delivered_output'
+  | 'execution_output'
   | 'external_fact';
 
 export function isGoalEvidenceProofKind(
@@ -210,6 +211,7 @@ export function isGoalEvidenceProofKind(
   return (
     value === 'user_input' ||
     value === 'delivered_output' ||
+    value === 'execution_output' ||
     value === 'external_fact'
   );
 }

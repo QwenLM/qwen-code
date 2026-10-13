@@ -1,5 +1,7 @@
 import {
   DAEMON_ERROR_KINDS,
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
   type DaemonErrorKind,
   type DaemonPermissionTranscriptBlock,
   type DaemonShellTranscriptBlock,
@@ -14,6 +16,7 @@ import {
   type DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { SchemaValidator } from '@qwen-code/qwen-code-core';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
 import type { ExportSessionData } from './types.js';
 import exportTranscriptDocumentV1Schema from './export-transcript-document-v1.schema.json' with { type: 'json' };
@@ -136,6 +139,13 @@ export type ExportPermissionResolutionV1 =
   | 'expired'
   | 'resolved';
 
+/**
+ * The workspace agent that wrote a user or assistant block: an agent's reply
+ * (`agent_message`) or a message it posted into the session.
+ */
+export interface ExportTranscriptAuthorV1 {
+  name: string;
+}
 type ExportTextTranscriptBlockBaseV1 = Pick<
   DaemonTextTranscriptBlock,
   | Exclude<ExportBlockBaseKeys, 'kind'>
@@ -145,10 +155,15 @@ type ExportTextTranscriptBlockBaseV1 = Pick<
   | 'parentToolCallId'
 > & { streaming?: false };
 type ExportTextTranscriptBlockV1 =
-  | (ExportTextTranscriptBlockBaseV1 & { kind: 'user' | 'thought' })
+  | (ExportTextTranscriptBlockBaseV1 & { kind: 'thought' })
+  | (ExportTextTranscriptBlockBaseV1 & {
+      kind: 'user';
+      author?: ExportTranscriptAuthorV1;
+    })
   | (ExportTextTranscriptBlockBaseV1 & {
       kind: 'assistant';
       usage?: DaemonTextTranscriptBlock['usage'];
+      author?: ExportTranscriptAuthorV1;
     });
 type ExportToolTranscriptBlockV1 = Pick<
   DaemonToolTranscriptBlock,
@@ -389,15 +404,20 @@ function applyRecordExportPolicy(
       type === 'system' &&
       typeof subtype === 'string' &&
       VISIBLE_SYSTEM_RECORD_SUBTYPES.has(subtype);
+    const internalCodeModeToolResult = isInternalCodeModeToolResult(record);
     const visible =
       type === 'user' ||
       type === 'assistant' ||
-      type === 'tool_result' ||
+      (type === 'tool_result' && !internalCodeModeToolResult) ||
       acceptedSystemSubtype;
-    if (visible || type === 'system') {
+    if (visible || type === 'system' || internalCodeModeToolResult) {
       projectionRecords.push(record);
       const uuid = record['uuid'];
-      if (visible && typeof uuid === 'string') visibleRecordIds.add(uuid);
+      // The internal result projects no block of its own, but the replay
+      // machine stamps its uuid on the history-gap notice, which must survive.
+      if ((visible || internalCodeModeToolResult) && typeof uuid === 'string') {
+        visibleRecordIds.add(uuid);
+      }
       if (type === 'system' && !acceptedSystemSubtype) {
         diagnostics.add('record_internal_excluded', 'info');
       }
@@ -417,6 +437,12 @@ const VISIBLE_SYSTEM_RECORD_SUBTYPES = new Set([
   'realtime_message',
   'goal_state',
   'goal_runtime',
+  // Session multi-agent records are `type: 'user'`, so the gate above already
+  // admits them; listed so the set names every visible subtype. Replay
+  // projects their display text (an agent reply as an assistant block), and
+  // the block carries its agent as `author`.
+  'agent_mention',
+  'agent_message',
 ]);
 
 function sanitizeBlock(
@@ -452,11 +478,20 @@ function sanitizeBlock(
         );
         budget.markContentLoss();
       }
+      const authorName =
+        block.kind === 'thought' || block.parentToolCallId
+          ? undefined
+          : parseQwenAgentMessageMeta(
+              block.meta?.[QWEN_AGENT_MESSAGE_META_KEY],
+            )?.author?.name.trim();
       return {
         ...common,
         kind: block.kind,
         text,
         streaming: false,
+        ...(authorName
+          ? { author: { name: budget.label(authorName, 128) } }
+          : {}),
         ...(block.collapsed ? { collapsed: true } : {}),
         ...(block.parentToolCallId
           ? {
@@ -1402,6 +1437,15 @@ function assertSemanticSafety(value: Record<string, unknown>): void {
       return;
     }
     if (!isRecord(entry)) return;
+    if (
+      key === 'author' &&
+      !(
+        isSafeLabel(entry['name'], 128) &&
+        isSafePresentationLabel(entry['name'], 128)
+      )
+    ) {
+      throw new ExportTranscriptDocumentError('invalid_block');
+    }
     if (
       (entry['kind'] === 'status' || entry['kind'] === 'error') &&
       entry['code'] !== undefined &&

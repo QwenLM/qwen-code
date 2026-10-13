@@ -11812,6 +11812,85 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('carries the terminal frame originator on the settlement', async () => {
+    // The composer's take-back of a cancelled prompt recognises its own turn
+    // by this stamp when the cancel cut the admission response short, so the
+    // envelope's `originatorClientId` must survive into the settlement.
+    const terminalGate = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-settle-originator',
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      })),
+      events: async function* stampedTerminal(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          terminalGate.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 11,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-1',
+          originatorClientId: 'client-submitter',
+          data: { promptId: 'prompt-1', stopReason: 'cancelled' },
+        } satisfies DaemonEvent;
+        await new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+      },
+    });
+    sdkMocks.sessions.push(session);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+
+    let prompt: Promise<unknown> | undefined;
+    await act(async () => {
+      prompt = requireActions(actions).sendPrompt('hello');
+      await flushPromises();
+    });
+    await act(async () => {
+      terminalGate.resolve();
+      await flushPromises();
+    });
+    const pending = prompt;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ stopReason: 'cancelled' });
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-originator',
+        promptId: 'prompt-1',
+        originatorClientId: 'client-submitter',
+        outcome: 'cancelled',
+        stopReason: 'cancelled',
+      },
+    ]);
+  });
+
   it('withholds the live settlement while a journal repair targets the same prompt', async () => {
     // The load arms a live-journal repair for `prompt-live` and the same
     // prompt's terminal then arrives on the live stream. Publishing there
@@ -16758,6 +16837,55 @@ describe('DaemonSessionProvider', () => {
       expect(session.submitPrompt).not.toHaveBeenCalled();
     },
   );
+
+  it('refreshes recovery after a rewind drops the interrupted turn', async () => {
+    const rewind = createDeferred<void>();
+    const initial = {
+      v: 1 as const,
+      sessionId: 'session-1',
+      workspaceCwd: '/mock-workspace',
+      state: {},
+      recovery: { kind: 'interrupted_prompt' as const, canContinue: true },
+    };
+    const clean = { kind: 'clean' as const, canContinue: false };
+    const context = vi
+      .fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValue({ ...initial, recovery: clean });
+    const session = createMockSession({
+      context,
+      lastEventId: 10,
+      async *events(opts) {
+        await rewind.promise;
+        yield {
+          v: 1,
+          id: 11,
+          type: 'session_rewound',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'session-1########2',
+            targetTurnIndex: 1,
+          },
+        };
+        yield* createIdleEvents()(opts);
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(connection?.context?.recovery).toEqual(initial.recovery);
+    expect(context).toHaveBeenCalledOnce();
+    await act(async () => {
+      rewind.resolve();
+      await flushPromises();
+    });
+    expect(context).toHaveBeenCalledTimes(2);
+    expect(connection?.context?.recovery).toEqual(clean);
+  });
 
   it.each(['stream_end', 'transport_error'] as const)(
     'ignores recovery reads from a previous subscription after %s',
@@ -23562,6 +23690,95 @@ describe('DaemonSessionProvider', () => {
           for (const event of cancelled) event.resolve();
           await flushPromises();
         });
+      }
+    },
+  );
+
+  it.each(['approval', 'question', 'no observer'] as const)(
+    'flushes pending action projections only for a notification observer (%s)',
+    async (kind) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      const gate = createDeferred<void>();
+      const consumed = createDeferred<void>();
+      const notify = vi.fn();
+      const session = createMockSession({
+        sessionId: 'action-projection',
+        async *events(opts) {
+          yield {
+            v: 1,
+            type: 'replay_complete',
+            data: { sessionId: 'action-projection' },
+          };
+          await gate.promise;
+          yield {
+            v: 1,
+            type: 'permission_request',
+            data: {
+              sessionId: 'action-projection',
+              requestId: 'pending-action',
+              toolCall:
+                kind === 'question'
+                  ? {
+                      _meta: { toolName: 'ask_user_question' },
+                      rawInput: { questions: [{ question: 'Choose?' }] },
+                    }
+                  : { name: 'Bash', input: { command: 'echo hello' } },
+              options: [
+                { optionId: 'allow_once', label: 'Allow', kind: 'allow_once' },
+              ],
+            },
+          };
+          consumed.resolve();
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let store: DaemonTranscriptStore | undefined;
+      function Harness() {
+        store = useDaemonTranscriptStore();
+        return null;
+      }
+      await renderWithProvider(
+        <Harness />,
+        { autoConnect: true },
+        kind === 'no observer'
+          ? undefined
+          : createTurnNotificationObserver(notify),
+      );
+      vi.useFakeTimers();
+      try {
+        await act(async () => {
+          gate.resolve();
+          await consumed.promise;
+          await flushPromises();
+        });
+        if (kind === 'no observer') {
+          expect(
+            store!
+              .getSnapshot()
+              .blocks.some((block) => block.kind === 'permission'),
+          ).toBe(false);
+          act(() => vi.advanceTimersByTime(16));
+          expect(
+            store!
+              .getSnapshot()
+              .blocks.some((block) => block.kind === 'permission'),
+          ).toBe(true);
+        } else {
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ outcome: kind }),
+          );
+          expect(
+            store!
+              .getSnapshot()
+              .blocks.some((block) => block.kind === 'permission'),
+          ).toBe(true);
+        }
+      } finally {
+        vi.useRealTimers();
       }
     },
   );

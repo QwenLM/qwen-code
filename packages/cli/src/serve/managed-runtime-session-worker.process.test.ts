@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import {
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -23,11 +25,19 @@ import type { BridgeExecutionEngine } from '@qwen-code/acp-bridge/bridgeOptions'
 import type { AcpChannel, ChannelFactory } from '@qwen-code/acp-bridge/channel';
 import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
+import { getProjectHash } from '@qwen-code/qwen-code-core/utils/paths.js';
 import {
   createAcpSessionBridge,
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import { createManagedEngineChannelFactory } from './managed-engine-channel-factory.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { localManagedSessionKey } from '@qwen-code/qwen-code-core/utils/sessionStorageUtils.js';
+import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import type { HarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { testInternals } from './managed-runtime-ledger.js';
 
 // Real `qwen --acp` children and their Runtime workers, run from source
 // through tsx; workspace packages resolve to their sources too.
@@ -294,6 +304,41 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     }
   }
 
+  /** The durable outcome behind the newest tool.receipt on these log lines. */
+  async function readLatestOutcome(
+    lines: Array<{
+      managedSession?: {
+        kind?: string;
+        payload?: { toolOutcomeRef?: ManagedSessionDurableRef };
+      };
+    }>,
+    sessionId: string,
+  ): Promise<{ executionStatus: string }> {
+    const sessionKey = localManagedSessionKey(workspace, sessionId);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: path.join(root, 'runtime'),
+      sessionKey,
+    });
+    const refs = lines
+      .filter((line) => line.managedSession?.kind === 'tool.receipt')
+      .map((line) => line.managedSession!.payload!.toolOutcomeRef!);
+    const envelope = JSON.parse(
+      (await resources.read(refs[refs.length - 1]! as never)).toString(),
+    ) as { result?: { executionStatus?: string } };
+    return { executionStatus: envelope.result?.executionStatus ?? 'unknown' };
+  }
+
+  /** The session's Managed Session log, as the child left it. */
+  async function readManagedLog(sessionId: string): Promise<string> {
+    const transcript = new SessionService(workspace, {
+      runtimeBaseDir: path.join(root, 'runtime'),
+    }).getSessionTranscriptPath(sessionId);
+    return waitFor(async () => {
+      const text = await readFile(transcript, 'utf8').catch(() => undefined);
+      return text !== undefined && text.length > 0 ? text : undefined;
+    });
+  }
+
   /** A shell command that records the worker's pid, command and parent. */
   function recordWorker(file: string, then = ''): Record<string, unknown> {
     return {
@@ -381,6 +426,57 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     // Closing the session stops its worker before the session ends.
     await bridge!.closeSession(sessionId);
     expect(isAlive(worker.pid)).toBe(false);
+
+    // Every call's evidence is durable: admitted before dispatch, settled as
+    // it ended, and the batch closed behind it before the model continued.
+    const log = await readManagedLog(sessionId);
+    const count = (needle: string) => log.split(needle).length - 1;
+    expect(count('"tool.intent"')).toBe(4);
+    expect(count('"tool.receipt"')).toBe(4);
+    expect(count('"durable_wait"')).toBeGreaterThanOrEqual(1);
+    expect(count('"turn_complete"')).toBeGreaterThanOrEqual(1);
+
+    // The batch closed behind the results: a consumed turn_settled
+    // checkpoint names every call settled with its outcome.
+    const checkpointRefs = log
+      .split('\n')
+      .filter(Boolean)
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            managedSession?: { kind?: string; payload?: { stateRef?: never } };
+          },
+      )
+      .filter((line) => line.managedSession?.kind === 'checkpoint.committed')
+      .map((line) => line.managedSession!.payload!.stateRef!);
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: path.join(root, 'runtime'),
+      sessionKey: localManagedSessionKey(workspace, sessionId),
+    });
+    const checkpoints: HarnessCheckpointV1[] = [];
+    for (const ref of checkpointRefs) {
+      // parse, not JSON.parse: the decoded body must satisfy the schema, so
+      // a renamed or dropped field fails here rather than passing vacuously.
+      checkpoints.push(parseHarnessCheckpointV1(await resources.read(ref)));
+    }
+    const closed = checkpoints
+      .reverse()
+      .find(
+        (checkpoint) =>
+          checkpoint.continuation.phase === 'turn_settled' &&
+          Array.isArray(checkpoint.tools?.items),
+      );
+    const closedItems = closed?.tools?.items;
+    expect(closedItems).toBeDefined();
+    expect(closedItems!.length).toBe(4);
+    expect(
+      closedItems!.every(
+        (item) =>
+          item.state === 'settled' &&
+          item.consumed === true &&
+          item.outcomeRef !== null,
+      ),
+    ).toBe(true);
   }, 120_000);
 
   it('starts no worker for a session that calls no tool', async () => {
@@ -431,6 +527,27 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     // The worker settled the call only after the command stopped.
     expect(isAlive(sleepPid)).toBe(false);
     expect(isAlive(worker.pid)).toBe(true);
+    // The cancellation settled as a receipt too, and its outcome says how
+    // the call ended — read from the outcome itself, not a substring.
+    const cancelledLog = await readManagedLog(sessionId);
+    expect(cancelledLog).toContain('"tool.intent"');
+    expect(cancelledLog).toContain('"tool.receipt"');
+    const outcome = await readLatestOutcome(
+      cancelledLog
+        .split('\n')
+        .filter(Boolean)
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              managedSession?: {
+                kind?: string;
+                payload?: { toolOutcomeRef?: ManagedSessionDurableRef };
+              };
+            },
+        ),
+      sessionId,
+    );
+    expect(outcome.executionStatus).toBe('cancelled');
 
     // The same worker serves the session's next call.
     const nextOut = path.join(workspace, 'next.txt');
@@ -477,6 +594,12 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
       !isAlive(worker.pid) && !isAlive(sleepPid) ? true : undefined,
     );
     await expect(running).rejects.toThrow();
+    // M5c.3's first half: the worker's disconnect-driven close swept its
+    // ledger too — the file is gone with the groups it named, not left
+    // behind for a later child's startup sweep.
+    await waitFor(async () =>
+      (await managedRuntimeLedgerFiles()).length === 0 ? true : undefined,
+    );
   }, 120_000);
 
   it('blocks the session when a call outcome cannot be learned', async () => {
@@ -518,5 +641,191 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     turns.push({ text: 'SHOULD_NOT_RUN' });
     await expect(prompt(sessionId)).rejects.toMatchObject(unknownOutcome);
     expect(modelRequests).toHaveLength(requestsBefore);
+
+    // The durable form of the block: admitted before dispatch, never settled,
+    // and the log answers nothing for it.
+    const blockedLog = await readManagedLog(sessionId);
+    expect(blockedLog).toContain('"tool.intent"');
+    expect(blockedLog).not.toContain('"tool.receipt"');
+    expect(blockedLog).toContain('"durable_wait"');
+  }, 120_000);
+
+  /** The ledger files any worker of this project left behind. */
+  async function managedRuntimeLedgerFiles(): Promise<string[]> {
+    const found: string[] = [];
+    const tmpRoot = path.join(root, 'runtime', 'tmp');
+    for (const entry of await readdir(tmpRoot).catch(() => [] as string[])) {
+      const directory = path.join(tmpRoot, entry, 'managed-runtime');
+      for (const file of await readdir(directory).catch(() => [] as string[])) {
+        found.push(path.join(directory, file));
+      }
+    }
+    return found;
+  }
+
+  it('sweeps the worker ledger when the worker is killed mid-call', async () => {
+    const sessionId = await newSession();
+    const shellOut = path.join(workspace, 'shell.txt');
+    const sleeper = path.join(workspace, 'sleeper.pid');
+    turns.push({
+      toolCalls: [
+        {
+          name: 'run_shell_command',
+          args: recordWorker(
+            shellOut,
+            `; echo $$ > ${JSON.stringify(sleeper)}; exec sleep 120` +
+              ' # intentional-sleep: hold the worker Shell for the crash witness',
+          ),
+        },
+      ],
+    });
+    const running = prompt(sessionId);
+    void running.catch(() => undefined);
+    const worker = await readWorker(shellOut);
+    const sleepPid = Number(
+      await waitFor(
+        async () =>
+          (await readFile(sleeper, 'utf8').catch(() => '')).trim() || undefined,
+      ),
+    );
+    strayPids.push(sleepPid);
+
+    // While the Shell runs, its process group is durable on disk: the ledger
+    // names it for whoever must sweep after a crash.
+    const ledgerDuringRun = await waitFor(async () => {
+      const files = await managedRuntimeLedgerFiles();
+      return files.length > 0
+        ? files.map((file) => path.basename(file))
+        : undefined;
+    });
+
+    // Mid-call, the worker dies; answering for the call is impossible.
+    process.kill(worker.pid, 'SIGKILL');
+    await expect(running).rejects.toMatchObject({
+      data: { errorKind: 'managed_runtime_outcome_unknown' },
+    });
+
+    // The ledger is swept: the worker's truth is gone once its groups are.
+    expect(ledgerDuringRun).toHaveLength(1);
+    await waitFor(async () => {
+      const files = await managedRuntimeLedgerFiles();
+      return files.length === 0 ? true : undefined;
+    });
+  }, 120_000);
+
+  it('sweeps a stale worker ledger and its orphan group when the next child starts', async () => {
+    // First, prove the engine boots and prompts over a clean ledger dir.
+    const sessionId = await newSession();
+    turns.push({ text: 'DONE' });
+    expect((await prompt(sessionId)).stopReason).toBe('end_turn');
+
+    // Debris left by a child and worker that both died: a ledger naming a
+    // dead worker and a live orphaned Shell group that holds it.
+    const orphan = spawn('sleep', ['300'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    orphan.unref();
+    orphan.on('exit', () => undefined);
+    if (orphan.pid === undefined) throw new Error('spawn failed');
+    strayPids.push(orphan.pid);
+    const ledgerDir = path.join(
+      root,
+      'runtime',
+      'tmp',
+      getProjectHash(workspace),
+      'managed-runtime',
+    );
+    await mkdir(ledgerDir, { recursive: true });
+    const workFile = path.join(ledgerDir, 'orphan-worker.json');
+    testInternals.writeLedgerDocument(
+      workFile,
+      {
+        pid: 42424242,
+        pgid: 42424242,
+        hostPid: 42424243,
+        incarnation: 'incarnation-9',
+        startedAt: Date.now(),
+      },
+      [
+        {
+          pgid: orphan.pid,
+          callId: 'call-orphan',
+          startedAt: Date.now(),
+        },
+      ],
+    );
+
+    // Nothing currently alive will deal with it, and the bridge goes down.
+    await bridge!.shutdown();
+    bridge = undefined;
+    expect(existsSync(workFile)).toBe(true);
+    expect(isAlive(orphan.pid)).toBe(true);
+
+    // The next engine's first environment proves the ledger's truth before
+    // any new Managed work runs.
+    const sourceEnv: NodeJS.ProcessEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith('VITEST')),
+    );
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No address');
+    Object.assign(sourceEnv, {
+      HOME: root,
+      QWEN_HOME: path.join(root, 'config'),
+      QWEN_RUNTIME_DIR: path.join(root, 'runtime'),
+      QWEN_CLI_ENTRY: CLI_ENTRY,
+      NODE_OPTIONS: `--import ${TSX_LOADER}`,
+      TSX_TSCONFIG_PATH: CLI_TSCONFIG,
+      OPENAI_API_KEY: 'm5-fixture-key',
+      OPENAI_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+      NO_PROXY: '127.0.0.1,localhost',
+      no_proxy: '127.0.0.1,localhost',
+      NO_COLOR: '1',
+    });
+    bridge = createAcpSessionBridge({
+      boundWorkspace: workspace,
+      sessionScope: 'thread',
+      channelIdleTimeoutMs: 0,
+      initializeTimeoutMs: 60_000,
+      executionEngines: {
+        legacy: createSpawnChannelFactory({
+          sourceEnv,
+          processRegistry: registry,
+        }),
+        managed: createManagedEngineChannelFactory({
+          sourceEnv,
+          processRegistry: registry,
+        }),
+        select: () => 'managed',
+      },
+    });
+    const restartedSessionId = await newSession();
+    // The next engine runs a real tool call while the stale sweep may still
+    // be pending: fresh Managed work is genuinely admitted inside that
+    // window.
+    turns.push(
+      {
+        toolCalls: [
+          {
+            name: 'read_file',
+            args: { file_path: path.join(workspace, 'written-by-test.txt') },
+          },
+        ],
+      },
+      { text: 'DONE' },
+    );
+    await writeFile(path.join(workspace, 'written-by-test.txt'), 'seed\n');
+    const restarted = await prompt(restartedSessionId);
+    expect(restarted.stopReason).toBe('end_turn');
+    // The debris is gone — its groups were swept by the new child's sweep
+    // of its stale ledgers, and the live restarted worker's own ledger is
+    // allowed to exist while its session stays open. The sweep is
+    // fire-and-forget, so both postconditions are polled, not sampled once.
+    await waitFor(async () =>
+      (await managedRuntimeLedgerFiles()).includes(workFile) ? undefined : true,
+    );
+    await waitFor(() => (!isAlive(orphan.pid!) ? true : undefined));
+    await bridge!.closeSession(restartedSessionId);
+    expect(await managedRuntimeLedgerFiles()).toEqual([]);
   }, 120_000);
 });

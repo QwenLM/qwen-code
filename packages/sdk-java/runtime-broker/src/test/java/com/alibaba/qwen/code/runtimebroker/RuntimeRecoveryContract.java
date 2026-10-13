@@ -200,6 +200,103 @@ final class RuntimeRecoveryContract {
         assertThrows(IllegalArgumentException.class, () -> bare.withRecoveryEvidence(foreign, null, Instant.now()));
     }
 
+    /**
+     * Contract for the release decision's outcomes (#13183 item 1). Every leg
+     * is single-threaded, so this pins the state machine and the refusals,
+     * not the atomicity itself: the evidence that the no-active-execution
+     * check and the RELEASING transition commit as one decision under the
+     * Session row lock is the cross-process race in
+     * {@code Issue13183AdversarialTest}.
+     */
+    static void verifyBeginSessionRelease(RuntimeBindingRepository bindings,
+            RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, String prefix) {
+        // A READY session with no executions transitions, once.
+        Fixture ready = new Fixture(bindings, sessions, executions,
+                prefix + "-ready");
+        RuntimeSessionRecord releasing = bindings.beginSessionRelease(
+                sessions, executions, ready.session);
+        assertEquals(RuntimeSessionRecord.State.RELEASING,
+                releasing.getState());
+        assertEquals(ready.session.getVersion() + 1, releasing.getVersion());
+        // Already RELEASING hands the current record back.
+        assertEquals(releasing.getVersion(), bindings.beginSessionRelease(
+                sessions, executions, releasing).getVersion());
+        // A stale snapshot loses.
+        assertNull(bindings.beginSessionRelease(sessions, executions,
+                ready.session));
+
+        // An active execution blocks the transition and nothing moves.
+        Fixture busy = new Fixture(bindings, sessions, executions,
+                prefix + "-busy");
+        busy.prepare("call");
+        RuntimeBrokerException busyFailure = assertThrows(
+                RuntimeBrokerException.class, () -> bindings
+                        .beginSessionRelease(sessions, executions,
+                                busy.session));
+        assertEquals("runtime_session_busy", busyFailure.getCode());
+        assertEquals(RuntimeSessionRecord.State.READY,
+                sessions.findById(busy.session.getSession().getScope(),
+                        busy.session.getRuntimeSessionId()).getState());
+
+        // The predicate is session-scoped, not binding-scoped: a sibling
+        // session on the same binding, with no execution of its own, still
+        // releases while the busy one stays refused. Widening it to the
+        // binding would make every healthy session on a busy binding
+        // unreleasable, and a single-session fixture cannot tell.
+        RuntimeSessionRecord siblingAcquiring = bindings.admitSession(sessions,
+                new RuntimeSessionRecord(new RuntimeSession(busy.id + "-harness",
+                        busy.session.getRuntimeSessionId() + "-sibling",
+                        "bootstrap", busy.binding.getRequest().getScope()),
+                        busy.binding.getBindingId(),
+                        busy.binding.getGeneration(),
+                        RuntimeSessionRecord.State.ACQUIRING, 0,
+                        Instant.now()));
+        RuntimeSessionRecord sibling = sessions.compareAndSet(
+                siblingAcquiring, siblingAcquiring.withState(
+                        RuntimeSessionRecord.State.READY, Instant.now()));
+        assertEquals(RuntimeSessionRecord.State.RELEASING,
+                bindings.beginSessionRelease(sessions, executions, sibling)
+                        .getState());
+        assertEquals("runtime_session_busy", assertThrows(
+                RuntimeBrokerException.class, () -> bindings
+                        .beginSessionRelease(sessions, executions,
+                                busy.session)).getCode());
+
+        // ACQUIRING transitions (a broker that died mid-acquire).
+        Fixture acquiring = new Fixture(bindings, sessions, executions,
+                prefix + "-acquiring");
+        RuntimeSessionRecord backToAcquiring = sessions.compareAndSet(
+                acquiring.session, acquiring.session.withState(
+                        RuntimeSessionRecord.State.ACQUIRING, Instant.now()));
+        assertEquals(RuntimeSessionRecord.State.RELEASING,
+                bindings.beginSessionRelease(sessions, executions,
+                        backToAcquiring).getState());
+
+        // A terminal session is refused.
+        Fixture failedFixture = new Fixture(bindings, sessions, executions,
+                prefix + "-failed");
+        RuntimeSessionRecord failedSession = sessions.compareAndSet(
+                failedFixture.session, failedFixture.session.withState(
+                        RuntimeSessionRecord.State.FAILED, Instant.now()));
+        RuntimeBrokerException notReady = assertThrows(
+                RuntimeBrokerException.class, () -> bindings
+                        .beginSessionRelease(sessions, executions,
+                                failedSession));
+        assertEquals("runtime_session_not_ready", notReady.getCode());
+
+        // RELEASED hands the current record back.
+        Fixture toRelease = new Fixture(bindings, sessions, executions,
+                prefix + "-released");
+        RuntimeSessionRecord released = bindings.completeSessionRelease(
+                sessions, bindings.beginSessionRelease(sessions, executions,
+                        toRelease.session));
+        assertEquals(RuntimeSessionRecord.State.RELEASED, released.getState());
+        assertEquals(RuntimeSessionRecord.State.RELEASED,
+                bindings.beginSessionRelease(sessions, executions, released)
+                        .getState());
+    }
+
     static RuntimeRecoveryEvidence evidence(RuntimeBindingRecord binding, RuntimeRecoveryEvidence.Fact fact) {
         RuntimeProvisionSeed seed = binding.getProvisionSeed();
         return new RuntimeRecoveryEvidence(UUID.randomUUID().toString(), fact, "deterministic-test-supervisor",

@@ -15,6 +15,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 public final class ToolPublicationCollector {
     private static final Logger LOG = LoggerFactory.getLogger(ToolPublicationCollector.class);
     private static final long CLAIM_MILLIS = 60_000;
+    private static final long PROTECTED_RECHECK_MILLIS = Duration.ofHours(24).toMillis();
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final ToolPublicationRetentionStore retention;
@@ -118,7 +119,11 @@ public final class ToolPublicationCollector {
                     Duration grace = properties.getToolPublication().getDeletionGrace();
                     var observed = retention.candidate(row, grace);
                     if (observed.blocker() != null) {
-                        long next = now + CLAIM_MILLIS;
+                        long next = now + switch (observed.blocker()) {
+                            case "legacy_write_evidence_missing", "quarantined", "not_accepted_complete",
+                                    "recovery_protected" -> PROTECTED_RECHECK_MILLIS;
+                            default -> CLAIM_MILLIS;
+                        };
                         if ("grace_period".equals(observed.blocker())) {
                             long retiredAt = jdbc.queryForObject("SELECT retired_at FROM qwen_output_session_retirement"
                                             + " WHERE tenant_key = ? AND session_key = ?", Long.class,

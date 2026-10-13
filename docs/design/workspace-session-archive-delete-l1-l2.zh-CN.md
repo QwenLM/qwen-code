@@ -2,6 +2,8 @@
 
 [English](workspace-session-archive-delete-l1-l2.md) | [简体中文](workspace-session-archive-delete-l1-l2.zh-CN.md)
 
+本设计保留 L1/L2 与可靠 close 的原有协议。新接纳的 ACTIVE files 会话 close/delete 采用 [L3 设计](workspace-session-active-delete-l3.zh-CN.md)：close 仅运行 SessionEnd，delete 顺序运行 SessionEnd 与 SessionDelete，先提交 Hook 证据再永久停机。CLOSED/ARCHIVED 的 L2 删除仍不依赖 Harness；升级前接纳的 operation 按原版本恢复。
+
 ## 1. 状态与基线
 
 实现完成并已同步 main，2026-10-02，分支 `codex/workspace-session-l1-l2`。本文覆盖

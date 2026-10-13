@@ -50,6 +50,15 @@ export const OWNED_MANAGED_RUNTIME_ROUTES = Object.freeze([
     responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
     cacheControl: 'no-store',
   }),
+  Object.freeze({
+    key: 'acknowledge',
+    method: 'POST',
+    path: '/internal/managed-runtime/v2/acknowledge',
+    protocolVersion: 2,
+    requestBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
+    responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
+    cacheControl: 'no-store',
+  }),
 ] as const);
 
 export type OwnedManagedRuntimeRoute =

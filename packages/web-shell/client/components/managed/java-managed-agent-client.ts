@@ -177,11 +177,63 @@ export class JavaManagedAgentClient {
     return this.post('/actions/query', request, signal);
   }
 
+  listTasks(
+    request: Schemas['WebShellTaskQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellTaskPage']>(
+      '/tasks/query',
+      request,
+      signal,
+    );
+  }
+
+  getTask(request: Schemas['WebShellTaskGetRequest'], signal?: AbortSignal) {
+    return this.post<Schemas['WebShellTask']>('/tasks/get', request, signal);
+  }
+
+  listTaskEvents(
+    request: Schemas['WebShellTaskEventQueryRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellTaskEventPage']>(
+      '/tasks/events/query',
+      request,
+      signal,
+    );
+  }
+
+  cancelTask(
+    request: Schemas['WebShellTaskCancelRequest'],
+    signal?: AbortSignal,
+  ) {
+    return this.post<Schemas['WebShellCommandOperation']>(
+      '/tasks/cancel',
+      request,
+      signal,
+    );
+  }
+
   respondAction(
     request: Schemas['WebShellActionRespondRequest'],
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellCommandOperation']> {
     return this.post('/actions/respond', request, signal);
+  }
+
+  /** Reads an operation's latest durable status; polling is not a replay. */
+  queryOperation(
+    request: Schemas['WebShellOperationRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellOperation']> {
+    return this.post('/operations/query', request, signal);
+  }
+
+  changeCwd(
+    request: Schemas['WebShellChangeCwdRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellCwdOperation']> {
+    return this.post('/sessions/cwd/change', request, signal);
   }
 
   getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {
@@ -362,6 +414,8 @@ export class JavaManagedAgentClient {
   async *streamEvents(
     request: Schemas['WebShellStreamRequest'],
     signal?: AbortSignal,
+    onOpen?: () => void,
+    onAlive?: () => void,
   ): AsyncGenerator<JavaAgentEvent | JavaAgentResyncRequired> {
     const response = await this.request(
       '/events/stream',
@@ -376,6 +430,10 @@ export class JavaManagedAgentClient {
         'Managed Agent event stream is unavailable',
       );
     }
+    // The response headers are back and the body is attached: the stream
+    // is established even when it then idles on heartbeats, which never
+    // decode into events.
+    onOpen?.();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -410,7 +468,14 @@ export class JavaManagedAgentClient {
         const hasContent = frame
           .split(/\r?\n/)
           .some((line) => line && !line.startsWith(':'));
-        if (!hasContent) return undefined; // heartbeat or comment
+        if (!hasContent) {
+          // A complete heartbeat or comment frame is the server answering:
+          // on an idle Session it is the only sign of life the stream
+          // gives. A trailing fragment is a mid-frame disconnect, never a
+          // complete frame, so it does not count.
+          if (!trailing) onAlive?.();
+          return undefined;
+        }
         if (!trailing) {
           // A mid-stream frame with id/event lines but no data line is
           // malformed server output, not a heartbeat: count it as corrupt

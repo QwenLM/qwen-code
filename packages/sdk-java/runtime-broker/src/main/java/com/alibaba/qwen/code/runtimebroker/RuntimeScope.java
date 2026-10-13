@@ -10,10 +10,26 @@ public final class RuntimeScope {
     private final String canonicalCwd;
     private final String capabilityDigest;
     private final String isolationClass;
+    private final RuntimeLifecycleAuthority lifecycleAuthority;
+
+    public RuntimeLifecycleAuthority getLifecycleAuthority() {
+        return lifecycleAuthority;
+    }
+
+    public RuntimeScope withLifecycleAuthority(RuntimeLifecycleAuthority authority) {
+        return new RuntimeScope(tenantId, workspaceId, workspaceGeneration,
+                canonicalCwd, capabilityDigest, isolationClass, authority);
+    }
 
     public RuntimeScope(String tenantId, String workspaceId,
             String workspaceGeneration, String canonicalCwd,
             String capabilityDigest, String isolationClass) {
+        this(tenantId, workspaceId, workspaceGeneration, canonicalCwd, capabilityDigest, isolationClass, null);
+    }
+
+    private RuntimeScope(String tenantId, String workspaceId, String workspaceGeneration,
+            String canonicalCwd, String capabilityDigest, String isolationClass, RuntimeLifecycleAuthority authority) {
+        this.lifecycleAuthority = authority;
         this.tenantId = BrokerValues.requireId(tenantId, "tenantId");
         this.workspaceId = BrokerValues.requireId(workspaceId, "workspaceId");
         this.workspaceGeneration = BrokerValues.requireId(

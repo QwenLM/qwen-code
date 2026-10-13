@@ -6,6 +6,8 @@ Status: development-only spike under review, following [issue #11704](https://gi
 
 This document records the Phase 1 baseline. The [Phase 2 connection-profile design](mobile-connection-profiles.md) supersedes the single-profile and plaintext native-storage sections below; other production prerequisites still apply.
 
+Scoped native document selection is now implemented. The [native file-selection design](mobile-file-selection.md) supersedes the file-chooser follow-up below.
+
 ## Problem and Goals
 
 Use the existing daemon-served Web Shell in an Android WebView, with no second native session UI and no locally bundled H5. Establish a buildable native bootstrap and a precise origin boundary before adding production credentials or background connectivity.

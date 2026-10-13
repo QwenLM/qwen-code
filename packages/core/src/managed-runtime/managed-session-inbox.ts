@@ -12,6 +12,7 @@ import type {
   ManagedActivationFence,
   ManagedActivationOutcome,
 } from './managed-activation-store.js';
+import { MANAGED_SESSION_LIMITS } from './managed-session-records.js';
 
 export type ManagedSessionJsonValue =
   | null
@@ -137,7 +138,6 @@ type InboxEvent =
 type JsonObject = Record<string, unknown>;
 
 const DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
-const MAX_JSON_DEPTH = 64;
 const MAX_IDENTITY_BYTES = 512;
 
 function object(value: unknown, name: string): JsonObject {
@@ -212,9 +212,9 @@ function canonicalJson(
   seen: WeakSet<object>,
   depth = 0,
 ): ManagedSessionJsonValue {
-  if (depth > MAX_JSON_DEPTH) {
+  if (depth > MANAGED_SESSION_LIMITS.maxJsonDepth) {
     throw new Error(
-      `payload exceeds the maximum JSON depth of ${MAX_JSON_DEPTH}.`,
+      `payload exceeds the maximum JSON depth of ${MANAGED_SESSION_LIMITS.maxJsonDepth}.`,
     );
   }
   if (

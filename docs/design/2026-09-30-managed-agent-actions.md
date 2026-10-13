@@ -84,6 +84,9 @@ pinned mode as `approvalMode`; a Harness from before D6a omits it.
 | `default`   | `read_file`                          | `write_file`, `edit` and `run_shell_command` |
 | `auto-edit` | `read_file`, `write_file` and `edit` | `run_shell_command`                          |
 
+The `/2` search profiles additionally pre-approve `glob` under `default` and
+`auto-edit`; see [the search profile](2026-10-01-hosted-workspace-search-profile.md).
+
 Each mode lists what it pre-approves, so a tool added to a profile later is
 asked about until someone lists it. The file profile that Java selects today,
 `hosted-workspace-files/1`, has no shell tool, so `auto-edit` asks nothing
@@ -148,7 +151,7 @@ call ID and the tool name are published as the Action's `optionsRef` resource
 before the request is committed, so Java can project the Action without asking
 the Harness. The authority records only `tool_call` as the source, so the
 function call ID lives in that resource; it names a call that the committed
-assistant message carries. The public Action shows no tool arguments.
+assistant message carries. Version 1 public Actions show no tool arguments. The [Java-first input preview rollout](2026-10-04-hosted-action-input-preview.md) accepts version 2 options with an input reference and exposes a requested native tool's exact input up to 8192 UTF-8 bytes, with truncation and full-length metadata. Deploy that reader before a Harness emits version 2. Native write content is visible within the bound to Session readers; MCP internal grants are not previewed. General redaction remains separate.
 
 The approval timeout is part of the Session definition, set from the create
 request with a default of 10 minutes, from 1 second to 24 hours.
@@ -261,6 +264,33 @@ the Hosted prompt ID when a matching Java Turn exists.
   Action stays `requested`, for example on a recovery-blocked Session, the
   operation stays `running`. The WebShell request gains `requestId`.
 
+#### Approval delivery recovery
+
+A dispatcher can lose its attachment cache while the Harness still holds a
+Workspace Session's pending approval. The approval worker uses the existing
+passive attachment protocol to recover that reference even when
+`verified-workspace-recovery-enabled` is `false`. It still checks the current
+Action-response execution authority and mount before delivery. The Harness
+still verifies the writer boot, tenant, Workspace, Store address, frozen tool
+profile and approval mode. Mutable grant or registry refusal remains retryable;
+structural binding or storage mismatch remains terminal. This does not enable
+broader cold Workspace recovery or change the default recovery configuration.
+If passive loading creates a runtime snapshot, its pending recovery marker
+remains fenced by the writer boot. The worker renews its claimed operation
+while attachment recovery or approval delivery is in flight, so a slow load
+does not let another replica take over an otherwise healthy delivery.
+
+A replica whose Harness connector is unavailable accepts and persists valid
+responses through the same public routes, but does not scan or dispatch
+requested Actions for delivery. It leaves their claim and retry schedule
+untouched so an enabled dispatcher sharing the database can deliver them.
+It can still settle responses whose journal projection already proves a
+final Action, without claiming or calling the Harness. The public and WebShell
+approval integration flow clears the connector cache before each answer and
+requires the original operation to complete with one decision and the expected
+file effect; coordinator regressions check that a disabled connector never
+claims or schedules an answer and can settle a journal-proven final response.
+
 ### 6.3 Checks
 
 - Reads keep the other Session reads' checks.
@@ -274,7 +304,7 @@ the Hosted prompt ID when a matching Java Turn exists.
   Sessions default to `yolo`. Owner checks use the existing creator record
   without adding grants or owners. Unknown creators fail closed.
 - `allow` and `deny` are stable option IDs. Actions expose both revisions, the
-  function call ID, tool name and expiry. Arguments come from Items. Only one
+  function call ID, tool name and expiry. Version 1 arguments are not projected to Items; version 2 can supply the bounded Action input preview described above. Only one
   Hosted approval is pending per Turn; list returns requested Actions, newest
   first, without locally expiring them.
 

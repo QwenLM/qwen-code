@@ -40,7 +40,7 @@ function module(name, sources, reports = {}, properties = '') {
   for (const [className, [ran, skipped]] of Object.entries(reports)) {
     const cases = [
       ...Array(ran).fill(
-        '<testcase name="passes"><system-out><![CDATA[log: <skipped/>]]></system-out></testcase>',
+        '<testcase name="passes"><system-out><![CDATA[log: <skipped/><failure/><error/>]]></system-out></testcase>',
       ),
       ...Array(skipped).fill(
         '<testcase name="skips"><skipped message="disabled"/></testcase>',
@@ -62,6 +62,23 @@ function check(...args) {
 }
 
 describe('check-failsafe-reports', () => {
+  it.each([
+    ['o4-mysql', 'O4MySqlGate', 'failure'],
+    ['o4-mysql', 'O4MySqlGate', 'error'],
+    ['o4-oss', 'O4OssGate', 'failure'],
+    ['o4-oss', 'O4OssGate', 'error'],
+  ])('rejects %s %s %s even with Maven failure-ignore', (family, gate, tag) => {
+    const className = `com.example.${gate}`;
+    const dir = module('failed', [className]);
+    writeFileSync(
+      join(dir, 'target', 'failsafe-reports', `TEST-${className}.xml`),
+      `<testsuite name="${className}" tests="1" failures="${tag === 'failure' ? 1 : 0}" errors="${tag === 'error' ? 1 : 0}" skipped="0"><properties><property name="maven.test.failure.ignore" value="true"/></properties><testcase name="fails"><${tag} message="failed"/></testcase></testsuite>`,
+    );
+    const result = check(family, dir);
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('skipped or failed gate case');
+  });
+
   it.each([
     ['o4-mysql', 'O4MySqlGate'],
     ['o4-oss', 'O4OssGate'],

@@ -109,7 +109,7 @@ The attachment limit remains 8 MiB. If an upload expires or the daemon restarts,
 - **Trackpad scrolling in tmux changes prompt history instead of scrolling the conversation**
   - **Issue:** In a tmux session, trackpad or wheel scrolling may cycle through previous prompts, similar to pressing `Up Arrow` or `Down Arrow`.
   - **Cause:** tmux can translate wheel gestures into plain arrow-key sequences. Those sequences are indistinguishable from real arrow-key presses by the time qwen-code receives them.
-  - **Solution:** If screen reader mode is disabled, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+  - **Solution:** If screen reader mode is disabled, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). To hand plain `Up Arrow` / `Down Arrow` to the viewport while the composer is empty, set `ui.arrowKeysScrollTranscript` to `true`; input history is then reachable with `Ctrl+P` / `Ctrl+N`. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
 
 - **Right-click does nothing, links do not open, or text cannot be selected in the terminal**
   - **Issue:** Native right-click context menus, OSC 8 hyperlink clicks, and terminal-native text selection stop working while Qwen Code is running.
@@ -124,6 +124,18 @@ The attachment limit remains 8 MiB. If an upload expires or the daemon restarts,
   - `QWEN_CODE_IDE_SERVER_PORT`
 - If running in a container, verify `host.docker.internal` resolves. Otherwise, map the host appropriately.
 - Reinstall the companion with `/ide install` and use “Qwen Code: Run” in the Command Palette to verify it launches.
+
+## Connection resets on some networks (TLS-stack-selective middleboxes)
+
+- **Issue:** On some carrier or enterprise networks, HTTPS connections to API endpoints are reset (TCP RST) immediately after the TLS ClientHello. Qwen Code keeps retrying (`ECONNRESET` is a retryable transport error) until the budget is exhausted, then surfaces a generic connection error — while `curl`, Python, and other tools work fine on the same machine and network at the same moment.
+- **Cause:** Some middleboxes filter connections by TLS ClientHello fingerprint and reset those emitted by particular TLS stack generations. On affected links, OpenSSL 3.0-era stacks and Electron/BoringSSL (used by the VS Code extension and the daemon) are reset, while OpenSSL 3.5-generation stacks — including current Node.js builds — connect normally.
+- **Solution:** Make the connection with a 3.5-generation TLS stack:
+  - **CLI:** use an up-to-date build of a supported Node.js line (current Node 22/24/25 builds all ship a 3.5-generation OpenSSL). Older builds of the same major may still be on an affected generation — update rather than pin to an old minor.
+  - **VS Code extension / daemon:** the extension runs on Electron's TLS stack and cannot change it client-side. Run a small local relay — a local process on a 3.5-generation stack — and point Qwen Code at it via the model base URL override (the custom endpoint in `settings.json`, or `--openaiBaseUrl` for the CLI), so the TLS egress happens with the newer stack.
+- **How to distinguish this from a flaky network:**
+  - the reset is deterministic — every attempt fails immediately, across retries, and does not recover over time;
+  - on the same machine and moment, other TLS stacks succeed against the same endpoint;
+  - pinning TLS versions or changing DNS resolution does not help.
 
 ## Exit Codes
 

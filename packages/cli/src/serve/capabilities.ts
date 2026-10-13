@@ -21,6 +21,13 @@ export interface ServeProtocolVersions {
 export interface ServeCapabilityDescriptor {
   since: ServeProtocolVersion;
   /**
+   * Marks this tag as part of the hosted persona's curated wire set
+   * (`hostedPersonaServeFeatures`). Declared only here, in the registry:
+   * the persona adds a tag by setting this field, never by editing a list
+   * at the route.
+   */
+  hostedPersona?: boolean;
+  /**
    * Sub-mode names supported by this capability, when the feature has
    * more than one operating mode and clients benefit from feature-
    * detecting the active set. Optional — baseline tags (always-on,
@@ -35,7 +42,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   daemon_update: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
-  hosted_harness_private_v1: { since: 'v1' },
+  hosted_harness_private_v1: { since: 'v1', hostedPersona: true },
+  // The Hosted Harness can open journals containing message.delta records;
+  // a control plane refuses older Harness builds at negotiation instead of
+  // failing every Session open (G3).
+  managed_session_journal_delta_v1: { since: 'v1', hostedPersona: true },
   session_startup_config: { since: 'v1' },
   session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
@@ -70,6 +81,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // older daemon without it leaves them on the legacy client-fallback
   // behavior. Client-generated message ids make retries idempotent.
   session_mid_turn_message_query: { since: 'v1' },
+  // `POST /session/:id/mid-turn-messages/send-now` asks the agent to deliver
+  // the queued mid-turn messages now, cutting a streaming model response
+  // short instead of waiting for its next tool boundary, unless that response
+  // has started a tool call.
+  session_mid_turn_send_now: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
@@ -124,7 +140,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
   workspace_agent_generate: { since: 'v1' },
-  // Persistent workspace Agents collaborating on shared task threads
+  // Persistent workspace Agents answering @-mentions in chat sessions
   // (`/workspaces/:workspace/agent/*`). Conditional on the
   // `experimental.agentCollaboration` opt-in. Whether the routes exist at all
   // is settled at daemon startup, but the tag is recomputed per response, so a
@@ -245,8 +261,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_voice: { since: 'v1' },
   workspace_voice_transcription: { since: 'v1', modes: ['batch'] },
   // Inspect bound workspace trust and request local operator action.
-  // Remote clients cannot directly write trustedFolders.json.
+  // Recording the decision itself is the separate grant tag below.
   workspace_trust: { since: 'v1' },
+  // Record the bound workspace as trusted in the local trusted-folders file.
+  // This is the recovery path for Web Shell / Desktop clients, which cannot
+  // render the terminal-only folder-trust prompt (#13130). The route sits
+  // behind the strict mutation gate, so a caller already holds operator
+  // authority over this daemon, and it has no revoke counterpart.
+  // Advertised only where trust hot-reload applies the decision to the running
+  // runtime without a daemon restart.
+  workspace_trust_grant: { since: 'v1' },
   // Workspace trust policy changes rebuild the affected runtime generation
   // without restarting the daemon. V2 trust status exposes convergence.
   workspace_trust_hot_reload: { since: 'v1' },
@@ -697,6 +721,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['hosted_harness_private_v1', (toggles) => toggles.hostedHarness === true],
+  [
+    'managed_session_journal_delta_v1',
+    (toggles) => toggles.hostedHarness === true,
+  ],
   ['require_auth', (toggles) => toggles.requireAuth === true],
   [
     'agent_collaboration_v1',
@@ -772,6 +800,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
   [
     'workspace_trust_hot_reload',
+    (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
+  ],
+  [
+    'workspace_trust_grant',
     (toggles) => toggles.workspaceTrustHotReloadAvailable === true,
   ],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
@@ -911,6 +943,22 @@ function isFeatureAvailableInProtocol(
 
 export function getRegisteredServeFeatures(): ServeFeature[] {
   return [...SERVE_FEATURES];
+}
+
+/** The hosted persona's curated tag set: exactly the registry entries
+ * carrying `hostedPersona`, filtered to the current protocol. Membership
+ * is a curation fact declared once — in the registry — so adding a tag to
+ * the persona is a registry edit, and a second or third list cannot
+ * exist to drift. */
+export function hostedPersonaServeFeatures(): ServeFeature[] {
+  return SERVE_FEATURES.filter((feature) => {
+    if (!isFeatureAvailableInProtocol(feature, SERVE_PROTOCOL_VERSION))
+      return false;
+    const entry = SERVE_CAPABILITY_REGISTRY[feature] as
+      | { hostedPersona?: boolean }
+      | undefined;
+    return entry?.hostedPersona === true;
+  });
 }
 
 export function getAdvertisedServeFeatures(
