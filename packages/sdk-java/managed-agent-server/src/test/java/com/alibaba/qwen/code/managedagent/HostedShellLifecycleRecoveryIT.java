@@ -427,6 +427,7 @@ class HostedShellLifecycleRecoveryIT {
             properties.put(prefix + "session-store.workspace-id", "unused-global-workspace");
             properties.put(prefix + "session-store.writer-lease-duration", "8s");
             properties.put(prefix + "dispatch.lease-duration", "5s");
+            properties.put(prefix + "dispatch.lease-renew-interval", "1s");
             properties.put(prefix + "dispatch.retry-initial-delay", "500ms");
             properties.put(prefix + "dispatch.retry-max-delay", "1s");
             properties.put(prefix + "harness.enabled", true);
