@@ -19827,6 +19827,314 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
+  it('preserves the named store failure on session status when automatic bare-load recovery cannot settle', async () => {
+    // The automatic bare-load resume drives the turn entirely inside
+    // startHostedRecoveredTurn — it routes through neither the prompt
+    // route nor a manual continue. A publication Session parked mid-round
+    // resumes by itself on the next bare load: the owned Runtime sibling
+    // is answered from its records, so the model only owes the final
+    // answer. The answer succeeds, but the turn.settled journal batch
+    // dies once with a simulated exhausted 503 — resumed.catch then
+    // records the named failure in memory, surfaced by /session/:id/status
+    // (#13800 R4 P2).
+    domainEnablement.childRun = true;
+    try {
+      const key = {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      };
+      const resources = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+      const manifest = await resources.publish(
+        'managed-tool-result-manifest',
+        Buffer.from(
+          JSON.stringify({
+            toolResult: 'managed-tool-result/1',
+            type: 'manifest',
+            tenantId: key.tenantId,
+            sessionId: SESSION_ID,
+            turnId: PROMPT_ID,
+            executionCallId: 'shell-execution',
+            callId: 'model-shell-call',
+            invocationDigest: 'digest',
+            bindingGeneration: '1',
+            captureId: randomUUID(),
+            revision: 1,
+            executionStatus: 'success',
+            exitCode: 0,
+            signal: null,
+            captureScope: 'process_pipes',
+            capturePolicy: 'complete_required',
+            captureStatus: 'complete',
+            captureReason: null,
+            upstreamTruncated: false,
+            contents: ['stdout', 'stderr'].map((streamId) => ({
+              streamId,
+              role: streamId,
+              mimeType: 'application/octet-stream',
+              state: 'sealed',
+              byteLength: 0,
+              digest: createHash('sha256').update('').digest('hex'),
+              missingRanges: [],
+              body: { pages: [] },
+            })),
+          }),
+        ),
+      );
+      const envelope = {
+        executionStatus: 'success' as const,
+        responseParts: [{ text: 'hi' }],
+        capture: {
+          manifest,
+          captureStatus: 'complete' as const,
+          captureReason: null,
+          previewTruncated: false,
+          deliveryStatus: 'pending' as const,
+        },
+      };
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'binding-1',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        },
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'prepareV3').mockResolvedValue({
+        executionCallId: 'shell-execution',
+        runtimeBindingId: 'binding-1',
+        bindingGeneration: '1',
+      });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'executeV3').mockResolvedValue(
+        envelope,
+      );
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'acknowledgeV3',
+      ).mockResolvedValue();
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'registerPublisher',
+      ).mockResolvedValue('1');
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      state.publicationRequest.mockImplementation(
+        async (
+          resourceStore: LocalManagedSessionResourceStore,
+          route: string,
+          body: unknown,
+        ) => {
+          if (route === '/grants') return { state: 'OPEN' };
+          if (route === '/receipts/verify') return body;
+          if (route.endsWith('/finished')) return { result: envelope };
+          if (route.endsWith('/admissions/prepare'))
+            return resourceStore.publish(
+              'managed-tool-outcome',
+              Buffer.from(JSON.stringify(body)),
+            );
+          throw new Error('Unexpected publication route ' + route);
+        },
+      );
+      const first = await app(true);
+      const created = await headers(supertest(first).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        captureBytes: 1024 * 1024,
+      });
+      expect(created.status).toBe(200);
+      const clientId = created.body.clientId as string;
+      const originalWrite = ManagedSessionRecordSink.prototype.write;
+      let killed = false;
+      vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+        async function (this: ManagedSessionRecordSink, item) {
+          if (
+            !killed &&
+            item.type === 'tool_result' &&
+            JSON.stringify(item.message).includes('"task_create"')
+          ) {
+            killed = true;
+            throw new Error('Harness killed');
+          }
+          return originalWrite.call(this, item);
+        },
+      );
+      const teamCall = [
+        {
+          name: 'team_create',
+          callId: 'call-0',
+          args: { team_name: 'review' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        },
+      ];
+      const batch = [
+        {
+          name: 'run_shell_command',
+          callId: 'model-shell-call',
+          args: { command: 'printf hi' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        },
+        {
+          name: 'task_create',
+          callId: 'call-2',
+          args: { subject: 'Audit the auth module', description: 'd' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        },
+        // A team call after the crash point never runs: it commits nothing.
+        {
+          name: 'task_create',
+          callId: 'call-3',
+          args: { subject: 'Fix the auth module', description: 'f' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        },
+      ];
+      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+        await toolTurn!.declarations(signal);
+        await toolTurn!.execute(
+          teamCall,
+          teamCall.map((call) => ({
+            functionCall: {
+              id: call.callId,
+              name: call.name,
+              args: call.args,
+            },
+          })),
+          'test-model',
+          signal,
+        );
+        const answers = await toolTurn!.execute(
+          batch,
+          batch.map((call) => ({
+            functionCall: {
+              id: call.callId,
+              name: call.name,
+              args: call.args,
+            },
+          })),
+          'test-model',
+          signal,
+        );
+        void answers;
+        return { text: 'done', model: 'test-model' };
+      });
+      const prompt = [{ type: 'text', text: 'shell then sibling' }];
+      await headers(supertest(first).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(first).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: 10_000 },
+      );
+      expect(killed).toBe(true);
+      vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
+      await headers(supertest(first).delete(`/session/${SESSION_ID}`));
+      // The injection arms only once the dead Harness is gone: every
+      // journal batch around the recovery still commits — receipt
+      // recovery, Runtime sibling answers, model records — and the 503
+      // hits only the batch that carries the turn's settled event.
+      const originalAppend =
+        LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
+      const failing = vi
+        .spyOn(
+          LocalJsonlManagedSessionJournalHandle.prototype,
+          'appendTransaction',
+        )
+        .mockImplementation(async function (
+          this: LocalJsonlManagedSessionJournalHandle,
+          records: readonly unknown[],
+        ) {
+          // The settlement commit is the only batch carrying a turn.settled
+          // event: the transcript records before it commit as
+          // message.committed and the whole turn_result record itself is
+          // published as a resource, so the literal only names the terminal
+          // write.
+          if (!JSON.stringify(records).includes('"turn.settled"')) {
+            return originalAppend.call(this, records);
+          }
+          throw new ManagedSessionStoreHttpError(
+            503,
+            'synthetic-http-retry-exhaustion',
+            'synthetic 503 after HTTP retries are spent',
+          );
+        });
+      let resumed: Part[] | undefined;
+      state.model.mockImplementationOnce(async (input) => {
+        resumed = [
+          ...((input as { resumeFromToolResults?: Part[] })
+            .resumeFromToolResults ?? []),
+        ];
+        return { text: 'resumed', model: 'test-model' };
+      });
+      const second = await app(true);
+      const loaded = await headers(
+        supertest(second).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      try {
+        expect(loaded.status).toBe(200);
+        // The bare load really drove the round — the model answered
+        // against the journaled results — and only then did the
+        // settlement write die, so the status converges to the named
+        // failure rather than to a load refusal.
+        await vi.waitFor(() => expect(resumed).toBeDefined(), {
+          timeout: 10_000,
+        });
+        await vi.waitFor(
+          async () => {
+            const status = await headers(
+              supertest(second).get(`/session/${SESSION_ID}/status`),
+            ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+            expect(status.body.hasActivePrompt).toBe(false);
+            expect(status.body.recoveryBlocked).toBe(true);
+            expect(status.body.recoveryReason).toBe(
+              'managed_session_store_unavailable',
+            );
+          },
+          { timeout: 30_000 },
+        );
+      } finally {
+        failing.mockRestore();
+      }
+      // The uncertain-write constraint is preserved: the same block keeps
+      // refusing any further turn — the named failure only mirrors into
+      // memory and never claims a persisted terminal state.
+      const refusedPrompt = [{ type: 'text', text: 'hello' }];
+      const refused = await headers(
+        supertest(second).post(`/session/${SESSION_ID}/prompt`),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .send({
+          prompt: refusedPrompt,
+          promptId: '22222222-2222-4222-8222-222222222222',
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(refusedPrompt)).digest('hex')}`,
+        });
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_turn_recovery_required');
+      await headers(supertest(second).delete(`/session/${SESSION_ID}`));
+    } finally {
+      domainEnablement.childRun = true;
+    }
+  }, 30_000);
+
   it('settles the parked agent wait through the cancel route (R1-8)', async () => {
     await parkAgentWaitTurn();
     const { server, loaded } = await loadReplacement(

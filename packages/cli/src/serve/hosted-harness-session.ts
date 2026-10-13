@@ -2687,6 +2687,14 @@ async function startHostedRecoveredTurn(
   void resumed
     .catch((cause: unknown) => {
       session.blocked = true;
+      // The automatic bare-load recovery drives the turn entirely inside
+      // this helper — without routing through the prompt-route or
+      // manual-continue fallbacks that already keep the named store
+      // failure. Classify the original cause here too, so the same Session
+      // status preserves the name while its write latch stays armed
+      // (#13800 R4 P2; memory only, never a persisted terminal claim).
+      const storeFailure = namedStoreFailure(cause);
+      if (storeFailure !== undefined) session.recoveryReason = storeFailure;
       writeStderrLineSafe(
         'qwen serve: Hosted Harness recovery remained blocked: ' +
           String(cause),
