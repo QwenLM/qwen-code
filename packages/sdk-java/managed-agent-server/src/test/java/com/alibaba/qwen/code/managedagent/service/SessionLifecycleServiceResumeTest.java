@@ -1,17 +1,22 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -25,6 +30,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -97,6 +103,163 @@ class SessionLifecycleServiceResumeTest {
         assertThat(jdbc.queryForObject("SELECT phase FROM"
                         + " qwen_runtime_harness_drain", String.class))
                 .isEqualTo("LIFECYCLE_ONLY");
+    }
+
+    // A failed workspace DELETE parks the Session in DELETING, which the
+    // workspace status gate refused before the resume branch could run
+    // (review round 13, R13-2). The resume is recognized before the gate:
+    // the failed delete's protocol is pinned, the open-operation barrier
+    // still holds, and a second live lifecycle operation stays refused.
+    @Test
+    void aFailedV1DeleteResumesThroughThePublicService() {
+        ManagedAgentStore store = workspaceStore();
+        var transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        String sessionId = transactions.execute(ignored ->
+                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
+                        "digest", "qwen-code", null, null, List.of(), null,
+                        new WorkspaceSelection("workspace", ".")).sessionId());
+        // The first delete runs v1 against the ACTIVE Session and fails
+        // terminally: the Session parks in DELETING and the fence row keeps
+        // the claim released.
+        String firstOperation = store.beginWorkspaceLifecycle(TENANT,
+                sessionId, OperationKind.DELETE, "owner", "a".repeat(64),
+                "delete", "digest", true, 1).operation().operationId();
+        OperationRecord claimed = store.claimOperation(TENANT, sessionId,
+                firstOperation, "worker", Duration.ofSeconds(30))
+                .orElseThrow();
+        assertThat(store.failOperation(TENANT, sessionId, firstOperation,
+                "worker", claimed.claimGeneration(),
+                "session_lifecycle_delivery_failed")).isTrue();
+        assertThat(store.requireSession(TENANT, sessionId).status())
+                .isEqualTo("DELETING");
+
+        ManagedAgentService sessions = mock(ManagedAgentService.class);
+        when(sessions.lifecycleDigest(anyString(), anyString()))
+                .thenReturn("digest");
+        SessionLifecycleCoordinator coordinator =
+                mock(SessionLifecycleCoordinator.class);
+        when(coordinator.supportsWorkspaceLifecycle()).thenReturn(true);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        SessionLifecycleService service = new SessionLifecycleService(store,
+                sessions, new RequestDigests(), coordinator);
+        service.setRuntimeWarmer(runtimeWarmer);
+
+        var readmitted = service.admitPublic(TENANT, "owner", "delete-2",
+                sessionId, OperationKind.DELETE);
+
+        // The service computed protocol 0 for the parked Session; the store
+        // re-pins the failed delete's protocol 1, carries the failed one's
+        // original pre-operation status, and rebinds the parked fence row.
+        var operation = store.findOperation(TENANT, sessionId,
+                readmitted.id()).orElseThrow();
+        assertThat(operation.lifecycleProtocolVersion()).isEqualTo(1);
+        assertThat(operation.sessionStatusBefore()).isEqualTo("ACTIVE");
+        assertThat(jdbc.queryForObject("SELECT operation_id FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isEqualTo(readmitted.id());
+        // The resumed delete is open, so a second live lifecycle operation
+        // is still refused by the open-operation barrier.
+        assertThatThrownBy(() -> service.admitPublic(TENANT, "owner",
+                "delete-3", sessionId, OperationKind.DELETE))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("session_operation_active"));
+    }
+
+    // A settle that saved its effects moved the fence to DRAINING before
+    // the terminal fail, and failOperation only releases a LIFECYCLE_ONLY
+    // claim: the fence stayed bound to the dead operation, so the resumed
+    // close was fenced out of its own recovery with
+    // workspace_lifecycle_claim_fenced (review round 13, R13-1). The
+    // re-admission rebinds the DRAINING fence and carries the validated
+    // effects receipt, so the resumed close can finish.
+    @Test
+    void aFailedCloseWhoseEffectsReachedDrainingResumesAndFinishes() {
+        ManagedAgentStore store = workspaceStore();
+        ObjectProvider<RuntimeBindingRepository> bindings =
+                mock(ObjectProvider.class);
+        when(bindings.getIfAvailable())
+                .thenReturn(mock(RuntimeBindingRepository.class));
+        WorkspaceLifecycleStore lifecycle = new WorkspaceLifecycleStore(jdbc,
+                new ObjectMapper(), bindings);
+        store.setWorkspaceLifecycleStore(lifecycle);
+        var transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        String sessionId = transactions.execute(ignored ->
+                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
+                        "digest", "qwen-code", null, null, List.of(), null,
+                        new WorkspaceSelection("workspace", ".")).sessionId());
+        // The first close runs v1, persists its effects receipt — the fence
+        // moves to DRAINING — and only then fails terminally.
+        String firstOperation = store.beginWorkspaceLifecycle(TENANT,
+                sessionId, OperationKind.CLOSE, "owner", "a".repeat(64),
+                "close", "digest", true, 1).operation().operationId();
+        OperationRecord claimed = store.claimOperation(TENANT, sessionId,
+                firstOperation, "worker", Duration.ofSeconds(30))
+                .orElseThrow();
+        JsonNode effects = lifecycle.recoverEffects(claimed);
+        assertThat(effects.path("neverInitialized").asBoolean()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT phase FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isEqualTo("DRAINING");
+        assertThat(store.failOperation(TENANT, sessionId, firstOperation,
+                "worker", claimed.claimGeneration(),
+                "session_close_completion_unsettled")).isTrue();
+        // The terminal write could not release the DRAINING fence: it still
+        // names the dead operation.
+        assertThat(jdbc.queryForObject("SELECT operation_id FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isEqualTo(firstOperation);
+
+        ManagedAgentService sessions = mock(ManagedAgentService.class);
+        when(sessions.lifecycleDigest(anyString(), anyString()))
+                .thenReturn("digest");
+        SessionLifecycleCoordinator coordinator =
+                mock(SessionLifecycleCoordinator.class);
+        when(coordinator.supportsWorkspaceLifecycle()).thenReturn(true);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        SessionLifecycleService service = new SessionLifecycleService(store,
+                sessions, new RequestDigests(), coordinator);
+        service.setRuntimeWarmer(runtimeWarmer);
+
+        var readmitted = service.admitPublic(TENANT, "owner", "close-2",
+                sessionId, OperationKind.CLOSE);
+
+        // The parked DRAINING fence rebinds to the resumed close, and the
+        // validated effects receipt moves with it.
+        var operation = store.findOperation(TENANT, sessionId,
+                readmitted.id()).orElseThrow();
+        assertThat(operation.lifecycleProtocolVersion()).isEqualTo(1);
+        assertThat(operation.sessionStatusBefore()).isEqualTo("ACTIVE");
+        assertThat(jdbc.queryForObject("SELECT operation_id FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isEqualTo(readmitted.id());
+        assertThat(jdbc.queryForObject("SELECT phase FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isEqualTo("DRAINING");
+        assertThat(jdbc.queryForObject(
+                "SELECT lifecycle_effects_receipt_json FROM"
+                        + " managed_agent_operation WHERE operation_id = ?",
+                String.class, readmitted.id()))
+                .isEqualTo(effects.toString());
+
+        // The resumed close recovers the carried effects instead of being
+        // fenced out, and its completion verifies them and finishes.
+        OperationRecord reclaimed = store.claimOperation(TENANT, sessionId,
+                readmitted.id(), "worker", Duration.ofSeconds(30))
+                .orElseThrow();
+        JsonNode recovered = lifecycle.recoverEffects(reclaimed);
+        assertThat(recovered.path("neverInitialized").asBoolean()).isTrue();
+        assertThat(store.completeOperation(TENANT, sessionId,
+                readmitted.id(), "worker", reclaimed.claimGeneration(), true))
+                .isTrue();
+        assertThat(store.requireSession(TENANT, sessionId).status())
+                .isEqualTo("CLOSED");
+        assertThat(store.findOperation(TENANT, sessionId, readmitted.id())
+                .orElseThrow().state()).isEqualTo("COMPLETED");
     }
 
     // A store with the Workspace-files deployment flag on, plus the

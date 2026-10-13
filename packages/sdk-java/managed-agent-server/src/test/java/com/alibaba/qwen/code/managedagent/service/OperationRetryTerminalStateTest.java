@@ -111,7 +111,7 @@ class OperationRetryTerminalStateTest {
                         new ManagedAgentProperties());
         if (lifecycleProtocol == 1) {
             when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
-            when(harness.supportsLifecycle()).thenReturn(true);
+            when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(true);
             coordinator.setWorkspaceLifecycleStore(mock(
                     com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class));
         }
@@ -977,7 +977,7 @@ class OperationRetryTerminalStateTest {
         com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
                 lifecycle = mock(
                         com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class);
-        when(harness.supportsLifecycle()).thenReturn(true);
+        when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(true);
         // No durable receipt yet: the Harness is asked, and answers — then
         // the receipt write refuses.
         when(lifecycle.recoverEffects(any(OperationRecord.class)))
@@ -1161,7 +1161,7 @@ class OperationRetryTerminalStateTest {
                         null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.supportsLifecycle()).thenReturn(true);
+        when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(true);
         when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
@@ -1361,7 +1361,7 @@ class OperationRetryTerminalStateTest {
                         1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
         when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.supportsLifecycle()).thenReturn(false);
+        when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(false);
         // The refusal fired before the Harness was asked to stop, so the
         // writer lease is still live.
         when(sessionStore.hasLiveWriter("tenant", "session"))
@@ -1428,7 +1428,7 @@ class OperationRetryTerminalStateTest {
         when(harness.isAvailable()).thenReturn(true);
         // The v1 settle refuses permanently before any effects are saved:
         // this Harness speaks no lifecycle protocol.
-        when(harness.supportsLifecycle()).thenReturn(false);
+        when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(false);
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
                 .thenReturn(CompletableFuture.completedFuture(null));
 

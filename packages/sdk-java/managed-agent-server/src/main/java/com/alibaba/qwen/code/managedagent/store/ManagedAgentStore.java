@@ -1375,6 +1375,30 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
                     "The Session was not found.");
         }
+        // A terminally FAILED operation leaves the Session in the pending
+        // status, which the workspace status gate and validateOperationStart
+        // refuse forever: the Session would be un-closable and un-deletable
+        // without database surgery (review round 9, R9-3; the workspace
+        // DELETE case surfaced in review round 13, R13-2). The permitted
+        // resume is recognized before those gates, and the failed
+        // operation's protocol is pinned up front — the service computes
+        // the caller's protocol from the Session's CURRENT status, and a
+        // Session parked in the pending status by the terminal fail no
+        // longer passes the lifecycle gate, so an unpinned resume would run
+        // as protocol 0 while the parked fence row is never rebound (review
+        // round 9 re-review, R9-3). The no-open-operation guard below still
+        // runs before the insert: a Session with a live operation cannot
+        // double-close.
+        var failedBefore =
+                kind != OperationKind.ACTION_RESPONSE
+                        && kind != OperationKind.CWD_CHANGE
+                        && pendingStatus(kind).equals(session.status())
+                ? latestFailedLifecycleOperation(tenantId, sessionId, kind)
+                : Optional.<FailedLifecycleOperation>empty();
+        boolean resumed = failedBefore.isPresent();
+        if (resumed) {
+            protocolVersion = failedBefore.get().lifecycleProtocolVersion();
+        }
         if (protocolVersion < 0 || protocolVersion > 2
                 || protocolVersion != 0 && protocolVersion != WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile())) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
@@ -1395,7 +1419,7 @@ public class ManagedAgentStore implements AgentStateStore {
         if (kind == OperationKind.DELETE && List.of("CLOSED", "ARCHIVED").contains(session.status())) {
             protocolVersion = 0;
         }
-        if (session.workspace() != null) {
+        if (session.workspace() != null && !resumed) {
             if (kind == OperationKind.CLOSE || kind == OperationKind.DELETE && "ACTIVE".equals(session.status()) && WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
                 if (!supported || protocolVersion == 1 && !workspaceFilesEnabled) {
                     throw workspaceExecutionUnavailable();
@@ -1417,38 +1441,13 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         requireNoOpenOperation(tenantId, sessionId);
         String sessionStatusBefore = session.status();
-        boolean resumed = false;
-        if (kind != OperationKind.ACTION_RESPONSE
-                && kind != OperationKind.CWD_CHANGE
-                && pendingStatus(kind).equals(session.status())) {
-            // A terminally FAILED operation leaves the Session in the
-            // pending status, which validateOperationStart refuses forever:
-            // the Session would be un-closable and un-deletable without
-            // database surgery (review round 9, R9-3). With no operation
-            // open, the same kind is re-admitted — a Session with a live
-            // operation still cannot double-close, because
-            // requireNoOpenOperation above throws first. The new operation
-            // carries the failed one's original pre-operation status, so its
-            // settle runs the steps the failed attempt was owed: an
-            // ACTIVE-before close asks the Harness to stop again, and a
-            // CLOSED-before delete still makes no Runtime calls.
-            var failedBefore =
-                    latestFailedLifecycleOperation(tenantId, sessionId,
-                            kind);
-            if (failedBefore.isEmpty()) {
-                validateOperationStart(session, kind);
-            } else {
-                sessionStatusBefore = failedBefore.get().sessionStatusBefore();
-                // The failed operation's protocol, not the caller's: the
-                // service computes the caller's from the Session's CURRENT
-                // status, and a Session parked in the pending status by the
-                // terminal fail no longer passes the v1 gate — a v0 resume
-                // of a failed v1 close would insert a fresh v0 fence row
-                // while the parked v1 row is never rebound (review round 9
-                // re-review, R9-3).
-                protocolVersion = failedBefore.get().lifecycleProtocolVersion();
-                resumed = true;
-            }
+        if (resumed) {
+            // The new operation carries the failed one's original
+            // pre-operation status, so its settle runs the steps the failed
+            // attempt was owed: an ACTIVE-before close asks the Harness to
+            // stop again, and a CLOSED-before delete still makes no Runtime
+            // calls.
+            sessionStatusBefore = failedBefore.get().sessionStatusBefore();
         } else {
             validateOperationStart(session, kind);
         }
@@ -1478,16 +1477,43 @@ public class ManagedAgentStore implements AgentStateStore {
         if (resumed && WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
             // failOperation kept the fence row and released the dead
             // operation's claim on it, so the re-admitted operation rebinds
-            // the row rather than inserting a duplicate.
+            // the row rather than inserting a duplicate. The release only
+            // reaches a fence still LIFECYCLE_ONLY: once effects were saved
+            // the fence moved to DRAINING with the dead operation still
+            // named, and a rebind limited to the LIFECYCLE_ONLY shape
+            // matches nothing — every later claim check reads the fence as
+            // another operation's and refuses with
+            // workspace_lifecycle_claim_fenced (review round 13, R13-1).
+            // Both parked shapes rebind here: the claim-released
+            // LIFECYCLE_ONLY row, and the DRAINING row that still names the
+            // failed operation whose validated effects the resume inherits.
             jdbc.update("UPDATE qwen_runtime_harness_drain SET"
                             + " operation_id = ? WHERE tenant_key = ? AND"
                             + " harness_key = ? AND tenant_id = ? AND"
-                            + " harness_session_id = ? AND phase ="
-                            + " 'LIFECYCLE_ONLY' AND operation_id IS NULL",
+                            + " harness_session_id = ? AND (phase ="
+                            + " 'LIFECYCLE_ONLY' AND operation_id IS NULL OR"
+                            + " phase = 'DRAINING' AND operation_id = ?)",
                     operationId,
                     JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
                     JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
-                    tenantId, sessionId);
+                    tenantId, sessionId, failedBefore.get().operationId());
+            // The effects the failed operation validated stay valid for its
+            // resume: the receipt moves to the new operation with them, and
+            // verification reads the hook-execution namespace from the
+            // receipt's own operation id.
+            String carriedEffects = jdbc.queryForObject(
+                    "SELECT lifecycle_effects_receipt_json FROM"
+                            + " managed_agent_operation WHERE tenant_id = ?"
+                            + " AND session_id = ? AND operation_id = ?",
+                    String.class, tenantId, sessionId,
+                    failedBefore.get().operationId());
+            if (carriedEffects != null) {
+                jdbc.update("UPDATE managed_agent_operation SET"
+                                + " lifecycle_effects_receipt_json = ? WHERE"
+                                + " tenant_id = ? AND session_id = ? AND"
+                                + " operation_id = ?",
+                        carriedEffects, tenantId, sessionId, operationId);
+            }
         } else if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
@@ -4038,21 +4064,22 @@ public class ManagedAgentStore implements AgentStateStore {
      * under — both re-pinned by a resumed admission. */
     private Optional<FailedLifecycleOperation> latestFailedLifecycleOperation(
             String tenantId, String sessionId, OperationKind kind) {
-        var rows = jdbc.query("SELECT session_status_before,"
+        var rows = jdbc.query("SELECT operation_id, session_status_before,"
                         + " lifecycle_protocol_version FROM"
                         + " managed_agent_operation WHERE tenant_id = ?"
                         + " AND session_id = ? AND operation_kind = ? AND"
                         + " state = 'FAILED' ORDER BY updated_at DESC,"
                         + " created_at DESC LIMIT 1",
                 (result, row) -> new FailedLifecycleOperation(
-                        result.getString(1), result.getInt(2)),
+                        result.getString(1), result.getString(2),
+                        result.getInt(3)),
                 tenantId, sessionId, kind.name());
         return rows.isEmpty() ? Optional.empty()
                 : Optional.of(rows.getFirst());
     }
 
-    private record FailedLifecycleOperation(String sessionStatusBefore,
-            int lifecycleProtocolVersion) {
+    private record FailedLifecycleOperation(String operationId,
+            String sessionStatusBefore, int lifecycleProtocolVersion) {
     }
 
     // One lifecycle change at a time: a pending rename or unarchive command
