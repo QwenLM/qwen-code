@@ -144,6 +144,35 @@ async function emptyHooks() {
         for (const region of [1, 2, 3, 4, 5, 6, 11, 12, 15, 40]) {
           await act(async () => ready.resize(width, region + 60));
           await act(async () => ready.waitForVisualIdle());
+          if (width === 40 && region === 15) {
+            const sb = all(ready.renderer.root).find(
+              (n): n is ScrollBoxRenderable => n instanceof ScrollBoxRenderable,
+            );
+            assert(sb, 'missing empty scrollbox');
+            const seen = { event: false, 'settings.json': false };
+            for (let top = 0; top <= sb.scrollHeight; top++) {
+              sb.scrollTo(top);
+              await ready.renderOnce();
+              summary(ready, region);
+              const frame = ready.captureCharFrame();
+              for (const word of Object.keys(seen))
+                seen[word as keyof typeof seen] ||= frame.includes(word);
+            }
+            console.log(
+              JSON.stringify({
+                case: 'empty-word-boundaries',
+                event,
+                width,
+                region,
+                seen,
+                frame: ready.captureCharFrame(),
+              }),
+            );
+            assert(
+              Object.values(seen).every(Boolean),
+              'empty 40x15: event/settings.json must be visible as complete words',
+            );
+          }
           console.log(
             JSON.stringify({
               case: 'empty-hooks',
@@ -322,8 +351,10 @@ async function main() {
                 ),
               ].map((k) => [k, false]),
             );
+            let settingsWordSeen = false;
             const scan = () => {
               const f = setup.captureCharFrame();
+              settingsWordSeen ||= f.includes('settings.json');
               for (const k of Object.keys(seen))
                 seen[k as keyof typeof seen] ||= f.includes(k);
             };
@@ -348,6 +379,21 @@ async function main() {
                 .map(([k]) => k)
                 .join('')}`,
             );
+            if (width === 29 && region === 15) {
+              console.log(
+                JSON.stringify({
+                  case: 'detail-word-boundaries',
+                  width,
+                  region,
+                  settingsWordSeen,
+                  frame: setup.captureCharFrame(),
+                }),
+              );
+              assert(
+                settingsWordSeen,
+                'detail 29x15: settings.json must be visible as a complete word',
+              );
+            }
             if (region === 40) {
               const press = async (key: string) => {
                 await act(async () => setup.mockInput.pressKey(key));

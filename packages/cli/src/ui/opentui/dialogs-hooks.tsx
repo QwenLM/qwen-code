@@ -82,7 +82,7 @@ function DetailText({
   return (
     <box width={width} flexDirection="column" flexShrink={0}>
       {/* Separate physical rows avoid native multiline Text losing its tail when scrolled. */}
-      {wrapAnsi(value, width, { hard: true, wordWrap: false, trim: false })
+      {wrapAnsi(value, width, { hard: true, trim: false })
         .split('\n')
         .map((line, index) => (
           <text
