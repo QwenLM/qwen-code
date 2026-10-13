@@ -190,17 +190,11 @@ export class ManagedEmailAdapter {
    */
   private registeredGeneration?: number;
   /**
-   * Consecutive instance-scoped refusal verdicts. Every determinant of
-   * each comes from the channel instance row, not the message,
-   * so a streak indicts the instance's workspace binding, not the mail:
-   * the first still drops as the poison message it may be (R3-1), and
-   * past the limit the claim is held and the poll stalls instead of
-   * destroying every inbound message behind one routine log line (R5-1).
-   * A fresh, non-replayed admission is the one proof the binding
-   * answers again, and it resets the streak.
+   * Set when the persisted refusal streak passes the limit; gates the
+   * search in poll(). In-memory only: a restart re-derives it from a
+   * persisted held claim, so an epoch change that emptied pending
+   * starts the new generation clean.
    */
-  private instanceRefusalStreak = 0;
-  /** Set when the streak passes the limit; gates the search in poll(). */
   private instanceStalled = false;
 
   constructor(options: ManagedEmailAdapterOptions) {
@@ -259,16 +253,22 @@ export class ManagedEmailAdapter {
     }
     try {
       this.state = this.store.load();
-      // The streak and the stall flag are in-memory, so a restart zeroes
-      // them: derive the stall from a persisted held claim, or the search
-      // re-opens behind it and the next instance-scoped refusal drops a
-      // fresh message as a first occurrence — the destruction the marker
-      // exists to prevent. Keyed on a claim still pending, never a
-      // persisted flag, so an epoch change that emptied pending starts
-      // the new generation's streak clean.
+      // The stall flag is in-memory, so a restart zeroes it: derive the
+      // stall from a persisted held claim, or the search re-opens behind
+      // it and the mail the stall promised to keep is admitted to its
+      // destruction. Keyed on a claim still pending, never a persisted
+      // flag, so an epoch change that emptied pending starts the new
+      // generation's stall clean.
       if (this.state?.pending.some((entry) => entry.held)) {
         this.instanceStalled = true;
-        this.instanceRefusalStreak = INSTANCE_REFUSAL_DROP_LIMIT + 1;
+        // A state file written before the streak persisted can hold a
+        // claim with no count behind it: floor the streak past the
+        // limit so the next verdict re-holds instead of dropping a
+        // fresh message as a first occurrence.
+        this.state.instanceRefusals = Math.max(
+          this.state.instanceRefusals ?? 0,
+          INSTANCE_REFUSAL_DROP_LIMIT + 1,
+        );
         this.log(
           `Managed email stopped admitting for ${this.settings.address}: the instance's workspace binding is broken. Held mail is kept; check the instance's --workspace and --actor flags.`,
         );
@@ -357,6 +357,7 @@ export class ManagedEmailAdapter {
         uidValidity,
         generation: this.state.generation + 1,
         lastUid: mailbox.uidNext - 1,
+        instanceRefusals: 0,
         pending: [],
         recent: [],
       };
@@ -364,7 +365,6 @@ export class ManagedEmailAdapter {
       // The epoch change dropped every claim the stall held, so a stall
       // that kept gating the new epoch's search would wedge the mailbox
       // with nothing left to re-probe it: the streak starts clean.
-      this.instanceRefusalStreak = 0;
       this.instanceStalled = false;
       await this.ensureRegistered(this.state);
     }
@@ -695,16 +695,21 @@ export class ManagedEmailAdapter {
     const state = this.state!;
     try {
       const admitted = await this.controlPlane.submitInbound(event);
+      // The marker of the settling claim, captured before it leaves
+      // pending: the held claim's fresh admission is the one proof the
+      // instance's workspace binding answers again, so only it resets
+      // the drop streak and lifts the stall, and the next poll's search
+      // resumes above lastUid. Any other fresh admission resolves its
+      // workspace through an existing binding row, which the broken
+      // binding never decided, and a replayed answer is the idempotent
+      // echo of an earlier admission: neither proves the binding, so
+      // neither re-grants the episode's sacrifice (R10-1).
+      const wasHeld = state.pending.some(
+        (entry) => entry.uid === uid && entry.held === true,
+      );
       state.pending = state.pending.filter((entry) => entry.uid !== uid);
-      this.persist();
-      // A fresh admission is the one proof the instance's workspace
-      // binding answers again: the drop streak resets and the stall
-      // lifts, so the next poll's search resumes above lastUid. A
-      // replayed answer is the idempotent echo of an earlier admission —
-      // the server resolves no workspace for it — so it proves nothing
-      // and resets nothing.
-      if (!admitted.replayed) {
-        this.instanceRefusalStreak = 0;
+      if (!admitted.replayed && wasHeld) {
+        state.instanceRefusals = 0;
         if (this.instanceStalled) {
           this.instanceStalled = false;
           this.log(
@@ -712,6 +717,7 @@ export class ManagedEmailAdapter {
           );
         }
       }
+      this.persist();
       if (admitted.replayed) {
         this.log(
           `Managed email event ${event.platformEventId} was already admitted as ${admitted.inputId}.`,
@@ -742,11 +748,11 @@ export class ManagedEmailAdapter {
           (status === 404 && INSTANCE_SCOPED_REFUSALS.has(String(code))))
       ) {
         if (INSTANCE_SCOPED_REFUSALS.has(String(code))) {
-          this.instanceRefusalStreak += 1;
+          state.instanceRefusals = (state.instanceRefusals ?? 0) + 1;
           const entry = state.pending.find((pending) => pending.uid === uid);
           if (
             entry?.held ||
-            this.instanceRefusalStreak > INSTANCE_REFUSAL_DROP_LIMIT
+            state.instanceRefusals > INSTANCE_REFUSAL_DROP_LIMIT
           ) {
             // Instance-scoped, so every message meets the verdict
             // identically and no retry heals it: the claim is held and
@@ -757,10 +763,10 @@ export class ManagedEmailAdapter {
             // lifts the stall once the binding answers again.
             this.pendingEvents.set(uid, event);
             if (!entry?.held) {
-              // The streak is in-memory: persist the hold with the
-              // claim, or a restart meets it with a zeroed streak and
-              // drops it as a first occurrence — destroying the mail
-              // the stall promised to keep.
+              // Persist the hold with the claim: the marker re-arms the
+              // in-memory stall flag after a restart, and the claim
+              // itself never drops while it is set — the mail the stall
+              // promised to keep.
               state.pending = state.pending.map((pendingEntry) =>
                 pendingEntry.uid === uid
                   ? { ...pendingEntry, held: true }

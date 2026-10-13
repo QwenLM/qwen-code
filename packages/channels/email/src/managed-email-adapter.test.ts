@@ -548,6 +548,60 @@ describe('managed email inbound', () => {
     expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
   });
 
+  it('bounds the workspace refusal sacrifice per episode, never re-granted by an interleaved admission (R10-1)', async () => {
+    // The streak counts CONSECUTIVE instance-scoped verdicts, but the
+    // reply-driven traffic of a real mailbox interleaves fresh
+    // admissions between the refusals: an already-bound thread's reply
+    // resolves its workspace through the existing binding row, so it
+    // admits while the binding a new route meets stays broken. If each
+    // such admission zeroed the streak, the consecutive pair the stall
+    // needs would never form and every refusal would drop as a first
+    // occurrence — destroying one message per interleave, unbounded,
+    // while the stall that exists to bound it never arms. The lift
+    // waits for the held claim's own fresh admission, the one answer
+    // that proves the binding itself answers again.
+    const lines: string[] = [];
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await adapter.connect();
+    const submit = plane.submitInbound.bind(plane);
+    // refuse (a new route meets the broken binding) -> admit fresh (a
+    // bound thread's reply short-circuits the resolution) -> refuse.
+    const script: Array<{ status: number; code: string } | undefined> = [
+      { status: 404, code: 'workspace_not_found' },
+      undefined,
+      { status: 404, code: 'workspace_not_found' },
+    ];
+    plane.submitInbound = async (event: ManagedInboundEvent) => {
+      const failure = script.shift();
+      if (failure) {
+        plane.submitAttempts += 1;
+        throw Object.assign(new Error(`HTTP ${failure.status}`), {
+          status: failure.status,
+          code: failure.code,
+        });
+      }
+      return submit(event);
+    };
+    append(raw('one', 'first'));
+    append(raw('two', 'bound-thread reply'));
+    const held = append(raw('three', 'third'));
+    await adapter.tick();
+    // The first refusal dropped as the poison message it may be (R3-1);
+    // the interleaved fresh admission re-grants nothing, so the second
+    // refusal is the consecutive pair that holds its claim and arms the
+    // stall — never a second first-occurrence drop.
+    expect(state(adapter).pending).toEqual([
+      { uid: held, eventId: `1:${held}`, held: true },
+    ]);
+    expect(
+      lines.filter((line) => line.includes('the message is skipped')),
+    ).toHaveLength(1);
+    expect(lines.some((line) => line.includes('stopped admitting'))).toBe(true);
+    expect(plane.events.map((event) => event.text)).toEqual([
+      'bound-thread reply',
+    ]);
+  });
+
   it('stalls admission on consecutive workspace_not_found refusals instead of dropping every message (R5-1)', async () => {
     // workspace_not_found is instance-scoped: every determinant of the
     // verdict comes from the channel instance row, so each inbound meets
@@ -1066,6 +1120,51 @@ describe('managed email inbound', () => {
     ]);
     expect(state(restarted).pending).toEqual([]);
     expect(state(restarted).lastUid).toBe(behind);
+  });
+
+  it('keeps the paid sacrifice across a restart, so the next refusal holds instead of dropping again (R10-1)', async () => {
+    // The sacrifice is a PER-EPISODE budget, but the streak behind it
+    // is in-memory: a restart between the paid drop and the next
+    // verdict reloads it as 0, so each process start destroys one more
+    // message while the binding stays broken — the loss the persisted
+    // held marker exists to prevent, one drop earlier. The streak
+    // persists with the state, so the restarted process resumes the
+    // episode: the next instance-scoped refusal is the consecutive
+    // pair that holds its claim and arms the stall.
+    const lines: string[] = [];
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await adapter.connect();
+    plane.submitInbound = async () => {
+      plane.submitAttempts += 1;
+      throw Object.assign(new Error('HTTP 404'), {
+        status: 404,
+        code: 'workspace_not_found',
+      });
+    };
+    append(raw('one', 'first'));
+    await adapter.tick();
+    // The episode's one sacrifice is paid: dropped visibly, nothing
+    // pending, nothing held.
+    expect(state(adapter).pending).toEqual([]);
+    expect(
+      lines.filter((line) => line.includes('the message is skipped')),
+    ).toHaveLength(1);
+    await adapter.disconnect();
+    const restarted = make({}, { log: (line: string) => lines.push(line) });
+    await restarted.connect();
+    const held = append(raw('two', 'held after the restart'));
+    await restarted.tick();
+    // The restored streak makes this refusal the second of the episode:
+    // the claim is held and the stall arms instead of paying the
+    // sacrifice again.
+    expect(state(restarted).pending).toEqual([
+      { uid: held, eventId: `1:${held}`, held: true },
+    ]);
+    expect(
+      lines.filter((line) => line.includes('the message is skipped')),
+    ).toHaveLength(1);
+    expect(lines.some((line) => line.includes('stopped admitting'))).toBe(true);
+    expect(plane.events).toEqual([]);
   });
 
   it('re-drives an unrecognized 404 as a lost answer, never dropping the mail (R3-1)', async () => {
