@@ -2668,6 +2668,10 @@ async function startHostedRecoveredTurn(
     resolveReady = resolve;
     rejectReady = reject;
   });
+  // The record reaches this callback even when its own commit later dies,
+  // so the turn's already-computed stopReason outlives the raw cause —
+  // an armed write latch reports that only as ManagedSessionWritesStoppedError.
+  let turnResult: ChatRecord | undefined;
   const resumed = executeHostedTurn(
     session,
     sessionId,
@@ -2677,7 +2681,9 @@ async function startHostedRecoveredTurn(
     abort,
     brokerOptions,
     resumeApproval || resumeModel ? undefined : resume.parts,
-    undefined,
+    (result) => {
+      turnResult = result;
+    },
     resolveReady,
     resumeApproval,
     resumeModel,
@@ -2691,11 +2697,18 @@ async function startHostedRecoveredTurn(
       // The automatic bare-load recovery drives the turn entirely inside
       // this helper — without routing through the prompt-route or
       // manual-continue fallbacks that already keep the named store
-      // failure. Classify the original cause here too, so the same Session
-      // status preserves the name while its write latch stays armed
-      // (#13800 R4 P2; memory only, never a persisted terminal claim).
+      // failure. Classify the original cause here too; when a terminal
+      // write died on the armed write latch the cause only reads back as
+      // ManagedSessionWritesStoppedError, so fall back to the stopReason
+      // the turn already computed, exactly as the prompt route does
+      // (#13800 R5 P2; memory only, never a persisted terminal claim).
       const storeFailure = namedStoreFailure(cause);
+      const recordedStopReason = (
+        turnResult?.systemPayload as { stopReason?: unknown } | undefined
+      )?.['stopReason'];
       if (storeFailure !== undefined) session.recoveryReason = storeFailure;
+      else if (recordedStopReason === 'managed_session_store_unavailable')
+        session.recoveryReason = 'managed_session_store_unavailable';
       writeStderrLineSafe(
         'qwen serve: Hosted Harness recovery remained blocked: ' +
           String(cause),
