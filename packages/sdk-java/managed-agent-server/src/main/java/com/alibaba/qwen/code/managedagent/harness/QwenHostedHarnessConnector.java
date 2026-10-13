@@ -172,11 +172,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public boolean supportsLifecycle() {
-        if (!isWorkspaceFilesAvailable()) {
-            return false;
-        }
+        return supportsLifecycle(WorkspaceToolProfiles.FILES);
+    }
+
+    @Override
+    public boolean supportsLifecycle(String profile) {
         try {
-            return client().capabilities().getLifecycleProtocolVersion() == 1;
+            return WorkspaceToolProfiles.FILES.equals(profile)
+                    ? isWorkspaceFilesAvailable() && client().capabilities().getLifecycleProtocolVersion() == 1
+                    : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
+                            && client().capabilities().getLifecycleV2Profiles().contains(profile);
         } catch (com.alibaba.qwen.code.daemon.DaemonException
                 | IllegalStateException unavailable) {
             return false;
@@ -187,7 +192,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public com.fasterxml.jackson.databind.JsonNode settleLifecycle(
             com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
         try {
-            return doSettleLifecycle(operation);
+            return doSettleLifecycle(operation, "effects");
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -195,9 +200,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private com.fasterxml.jackson.databind.JsonNode doSettleLifecycle(
-            com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+            com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation, String phase) {
         SessionRecord session = sessions.requireSession(operation.tenantId(), operation.sessionId());
-        requireShellApproval(session);
+        if (operation.lifecycleProtocolVersion() < 0 || operation.lifecycleProtocolVersion() > 2) {
+            throw new IllegalArgumentException("Unknown lifecycle protocol");
+        }
+        if (operation.lifecycleProtocolVersion() != 2) {
+            requireShellApproval(session);
+        }
         AttachmentKey key = new AttachmentKey(operation.tenantId(), operation.sessionId());
         HarnessSessionRef ref = attachments.get(key);
         if (ref == null) {
@@ -206,14 +216,38 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withChildWorkspaces(childWorkspaces)
-                    .forLifecycle(operation.operationId(), operation.claimGeneration()));
+                    .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
             attachments.put(key, ref);
         }
         var authority = Map.<String, Object>of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration());
-        var request = Map.<String, Object>of("sessionKey", Map.of("tenantId", session.tenantId(),
+        var request = new LinkedHashMap<String, Object>(Map.<String, Object>of("sessionKey", Map.of("tenantId", session.tenantId(),
                 "workspaceId", session.workspace().getWorkspaceId(), "sessionId", session.sessionId()),
-                "kind", operation.kind().name().toLowerCase(java.util.Locale.ROOT), "authority", authority);
+                "kind", operation.kind().name().toLowerCase(java.util.Locale.ROOT), "authority", authority));
+        if (operation.lifecycleProtocolVersion() == 2) {
+            request.put("protocolVersion", 2);
+            request.put("phase", phase);
+            request.put("toolProfile", session.toolProfile());
+        }
         return new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(client().settleLifecycle(ref, request));
+    }
+
+    @Override
+    public void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        runResourcePhase(operation, "prepare_resources");
+    }
+
+    @Override
+    public void settleLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        runResourcePhase(operation, "settle_resources");
+    }
+
+    private void runResourcePhase(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation, String phase) {
+        try {
+            doSettleLifecycle(operation, phase);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override
@@ -583,15 +617,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void runMessageOperation(String tenantId, String sessionId,
-            Map<String, Object> body) {
+    public Map<String, Object> runMessageOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
         try {
             // A receipt admits an input and wakes a turn in its target, and
             // the consume reconciliation reloads a Session whose wake pump
             // then runs the waiting input: both drive new work, so they take
             // the automation relay's Workspace checks. The sender's own
-            // steps are journal writes. Every verb re-attaches a Session a
-            // prior control-plane process attached, since the relay's
+            // steps are journal writes, and H4e-b3's command verbs (a body
+            // naming commandId) commit no input and never start work, so
+            // they keep the same journal admission as the sender's steps
+            // without the Workspace view. Every verb re-attaches a Session
+            // a prior control-plane process attached, since the relay's
             // ledger outlives that process.
             Object kind = body.get("kind");
             if ("stop".equals(kind)) {
@@ -599,15 +636,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 // load can adopt a new generation, which closes the old one.
                 HarnessSessionRef ref = messageStopAttachment(tenantId,
                         sessionId);
-                client().runMessageOperation(ref, body);
-                return;
+                return client().runMessageOperation(ref, body);
             }
             if ("receive".equals(kind) || "consume".equals(kind)) {
                 requireReadyForNewWork(tenantId, sessionId, false);
             }
             reattachTakenOver(tenantId, sessionId);
             HarnessSessionRef ref = attachment(tenantId, sessionId, true);
-            client().runMessageOperation(ref, body);
+            return client().runMessageOperation(ref, body);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;

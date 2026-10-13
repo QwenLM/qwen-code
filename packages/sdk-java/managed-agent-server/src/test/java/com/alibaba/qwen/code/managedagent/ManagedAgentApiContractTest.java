@@ -65,6 +65,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.service.SessionRenameCoordinator;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
@@ -101,6 +102,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.HttpMethod;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.web.bind.annotation.RequestMethod;
@@ -122,6 +124,8 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 // SSE responses are still being written when MockMvc runs its result printer.
 @AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
+// Keep background recovery from claiming the synchronous schema-check rename.
+@MockitoBean(types = SessionRenameCoordinator.class)
 class ManagedAgentApiContractTest {
     private static final String KNOWN_GAPS = "openapi/contract-known-gaps.txt";
     private static final List<String> GAP_CATEGORIES = List.of("route",

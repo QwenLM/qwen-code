@@ -1436,17 +1436,20 @@ const resultEvents = [
 
 it.each(
   resultEvents.flatMap((eventName) =>
-    [false, true].map((background) => ({ eventName, background })),
+    ['command', 'http', 'function'].flatMap((type) =>
+      [false, true].map((background) => ({ eventName, type, background })),
+    ),
   ),
 )(
-  'refuses restored $eventName command Hooks before child admission (background=$background)',
-  async ({ eventName, background }) => {
+  'refuses restored $eventName $type Hooks before child admission (background=$background)',
+  async ({ eventName, type, background }) => {
     const hooks = await restoredHooks({
       eventName,
-      config: { type: 'command' },
+      config: { type: type as 'command' | 'http' | 'function' },
     });
     const turn = createTurn(0, undefined, 'prompt', false, false, true, hooks);
     try {
+      expect(hooks.hasMountableToolResultHooks).toBe(true);
       const result = await executeAgent(
         turn,
         call({
@@ -1500,22 +1503,14 @@ it('refuses a background child on a result Hook whose matcher cannot match agent
   }
 });
 
-// The type/eligibility filter and the event filter are orthogonal, so the
-// controls exercise the five ineligible shapes on one event and the event
+// The eligibility filter and the event filter are orthogonal, so the
+// controls exercise the three ineligible shapes on one event and the event
 // filter on the single off-event row. The refusal side above already sweeps
-// all three result events.
+// every non-prompt type across all three result events.
 const admissionControls: Array<
   Pick<ManagedHookDescriptor, 'eventName' | 'config'> &
     Partial<ManagedHookDescriptor>
 > = [
-  {
-    eventName: HookEventName.PostToolUse,
-    config: { type: 'http' as const },
-  },
-  {
-    eventName: HookEventName.PostToolUse,
-    config: { type: 'function' as const },
-  },
   {
     eventName: HookEventName.PostToolUse,
     config: { type: HookType.Prompt, prompt: 'check' },

@@ -468,6 +468,40 @@ describe('WorkflowRunner', () => {
     }
   });
 
+  // The pinned-script host (the managed workflow child) runs only the bytes
+  // its pin examined: every nested resolution is refused — by name, through
+  // an alias, or through the global — whatever the lexical scan missed.
+  it('refuses every nested resolution for a launch that pinned its script', async () => {
+    const nested = savedWorkflow(
+      'audit',
+      '/saved/audit.js',
+      "return 'nested';",
+    );
+    for (const script of [
+      "return await workflow('audit');",
+      "const w = workflow; return await w('audit');",
+      "return await globalThis.workflow('audit');",
+    ]) {
+      const { config } = configWithRegistry();
+      stubStorage(config, await makeStorageRoot());
+      resolveSavedWorkflowScriptMock.mockReset();
+      resolveSavedWorkflowScriptMock.mockResolvedValue(nested);
+
+      const handle = await startRun(config, {
+        script,
+        dispatch: unused,
+        refuseNestedWorkflows: true,
+      });
+      const settlement = await handle.completion;
+
+      expect(settlement.ok).toBe(false);
+      expect(!settlement.ok && settlement.message).toContain(
+        'workflow(): nested workflow runs are unavailable here; this run executes only its pinned script.',
+      );
+      expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
+    }
+  });
+
   it('leaves a malformed nested ref to the resolver under the restriction', async () => {
     const { config } = await storedConfig();
     resolveSavedWorkflowScriptMock.mockReset();
