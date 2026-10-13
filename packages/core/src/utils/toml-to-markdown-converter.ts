@@ -76,7 +76,11 @@ ${prompt}
  */
 export function isTomlFormat(content: string): boolean {
   try {
-    toml.parse(content);
+    // Strip one leading BOM so this detector agrees with
+    // `convertTomlToMarkdown`, which accepts BOM-prefixed files. Otherwise the
+    // natural `if (isTomlFormat(c)) convertTomlToMarkdown(c)` pair would skip a
+    // command a Windows editor saved with a BOM.
+    toml.parse(content.replace(/^\uFEFF/, ''));
     return true;
   } catch {
     return false;
