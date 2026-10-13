@@ -274,6 +274,22 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void unicodeBlankCreateTitleIsCoercedToUntitled() throws Exception {
+        // A NBSP-only title must coerce to untitled on create, matching the
+        // rename route's blankness predicate; otherwise the server stores a
+        // value it later refuses to accept back on PATCH (validRenameTitle).
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, "tenant-nbsp-create")
+                        .header("Authorization", "Bearer ignored-by-design")
+                        .header("Idempotency-Key", "create-key-nbsp")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\","
+                                + "\"metadata\":{\"title\":\"\\u00a0\"}}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.metadata.title").doesNotExist());
+    }
+
+    @Test
     void createsReplaysAndStreamsATenantScopedTurn() throws Exception {
         String tenant = "tenant-create";
         String body = """

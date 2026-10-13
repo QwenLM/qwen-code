@@ -117,10 +117,8 @@ public class ManagedAgentService {
     }
 
     private boolean supportsClose(SessionRecord session) {
-        return session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
-                && store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
-                && harness.supportsLifecycle();
+        return session.workspace() == null || runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
+                && harness.supportsLifecycle(session.toolProfile());
     }
 
     private boolean hasActions(SessionRecord session) {
@@ -941,8 +939,10 @@ public class ManagedAgentService {
     private static boolean retention(SessionRecord session,
             Set<String> closed) {
         return session.workspace() == null
-                || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
-                        && closed.contains(session.sessionId());
+                || closed.contains(session.sessionId())
+                        && (!WorkspaceToolProfiles.isShellOrMcp(session.toolProfile())
+                                || WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2
+                                        && List.of("CLOSED", "ARCHIVED").contains(session.status()));
     }
 
     private PublicSession publicSession(SessionRecord session) {
@@ -1095,9 +1095,8 @@ public class ManagedAgentService {
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
-        return retention || session.workspace() != null && !WorkspaceToolProfiles.isPublicShell(session.toolProfile())
-                && store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
+        return retention || session.workspace() != null && runtimeWarmer != null
+                && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(session.toolProfile());
     }
 
     private Boolean foregroundShell(SessionRecord session) {
@@ -1754,6 +1753,11 @@ public class ManagedAgentService {
     // Harness client's own cap, the only downstream bound that cannot be
     // worked around — plus the control-character rule. A title the API
     // accepts must stay writable through every path.
+    private static boolean unicodeBlank(String title) {
+        return title.codePoints().allMatch(character -> Character.isWhitespace(character)
+                || Character.isSpaceChar(character) || character == 0xfeff);
+    }
+
     private static String validTitle(String title) {
         if (title == null) {
             return null;
@@ -1767,13 +1771,11 @@ public class ManagedAgentService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
                     "Title must not contain control characters.");
         }
-        return title.isBlank() ? null : title;
+        return unicodeBlank(title) ? null : title;
     }
 
     private static String validRenameTitle(String title) {
-        if (title == null
-                || title.codePoints().allMatch(character -> Character.isWhitespace(character)
-                        || Character.isSpaceChar(character) || character == 0xfeff)) {
+        if (title == null || unicodeBlank(title)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
                     "Title must contain 1-256 characters.");
         }
