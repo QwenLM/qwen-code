@@ -418,11 +418,12 @@ const DECLARATION_KEPT_GRAPHEME_CHAR =
 
 /**
  * Channel display text comes from the authenticated worker or an explicit
- * submission declaration. It never grants channel-turn classification. Every
- * other source echoes its prompt content verbatim. Single source of truth for
- * the echo and pending-entry text so their `''`/undefined semantics cannot
- * drift apart. The durable record is stamped separately from the worker value
- * alone (`recordedDisplayText` in `sendPrompt`): a caller declaration is
+ * submission declaration on a worker-attested channel session. It never
+ * grants channel-turn classification. Every other source echoes its prompt
+ * content verbatim. Single source of truth for the echo and pending-entry
+ * text so their `''`/undefined semantics cannot drift apart. The durable
+ * record is stamped separately from the worker value alone
+ * (`recordedDisplayText` in `sendPrompt`): a caller declaration is
  * display-only and must never reach the recorded display text, which
  * downstream consumers read as model input (auto-title generation,
  * cross-session `@session` references).
@@ -765,6 +766,18 @@ interface SessionEntry {
   /** Immutable creator attribution, persisted in the transcript when present. */
   sourceType?: string;
   sourceId?: string;
+  /**
+   * Daemon-verified channel origin. Set when a worker-classified turn is
+   * admitted on this session: the bridge strips a caller-forged
+   * classification key from request metadata and re-arms it only from the
+   * trusted context flag, which the daemon prompt route sets only after
+   * verifying the channel-worker token — so the latch cannot be
+   * self-assigned. Caller declarations (`submittedPrompt`) project display
+   * text only on attested channel sessions; a self-labeled `channel`
+   * session keeps content-derived display. Live-only: a restored session is
+   * re-attested by the worker's next relay turn.
+   */
+  channelWorkerAttested?: boolean;
   managedConversationBinding?: {
     expectation: BridgeConversationDirectoryExpectation;
     released: boolean;
@@ -11077,6 +11090,15 @@ export function createSessionControlPlane(
         }
       }
       const submittedPrompt = context?.submittedPrompt;
+      // A worker-classified turn attests the session's channel origin: the
+      // classification key is stripped from caller metadata and re-armed
+      // only from the trusted context flag, which the daemon prompt route
+      // sets only after verifying the channel-worker token. Self-labeled
+      // `channel` sessions never receive one, so their declarations keep
+      // content-derived display.
+      if (context?.channelPrompt === true) {
+        entry.channelWorkerAttested = true;
+      }
       // Cheap eligibility discards run before the caller-controlled
       // neutralization scan, so a non-channel session or an ineligible
       // request never pays for it on this synchronous admission path. The
@@ -11088,6 +11110,7 @@ export function createSessionControlPlane(
       // keeps content-derived display.
       const declarationEligible =
         entry.sourceType === 'channel' &&
+        entry.channelWorkerAttested === true &&
         context?.channelPrompt !== true &&
         req.prompt.some((block) => isRecord(block) && block['type'] === 'text');
       const rawDeclaration =

@@ -17123,12 +17123,35 @@ describe('createAcpSessionBridge', () => {
 
     it('projects declared Channel text without granting worker classification', async () => {
       const promptGate = deferred<PromptResponse>();
-      const handle = makeChannel({ promptImpl: () => promptGate.promise });
+      // The first, worker-classified turn settles immediately and attests
+      // the session's channel origin; the declaration turn stays gated.
+      let firstTurn = true;
+      const handle = makeChannel({
+        promptImpl: () => {
+          if (firstTurn) {
+            firstTurn = false;
+            return { stopReason: 'end_turn' };
+          }
+          return promptGate.promise;
+        },
+      });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
         sourceType: 'channel',
       });
+      // Declarations project only on a worker-attested channel session; the
+      // unattested case keeps content-derived display (see the attestation
+      // test above).
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'worker relay' }],
+        },
+        undefined,
+        { channelPrompt: true },
+      );
       const abort = new AbortController();
       const userChunks: unknown[] = [];
       const events = bridge.subscribeEvents(session.sessionId, {
@@ -17159,11 +17182,11 @@ describe('createAcpSessionBridge', () => {
         { submittedPrompt },
       );
 
-      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(2));
       expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
         { text: submittedPrompt, state: 'running' },
       ]);
-      expect(handle.agent.promptCalls[0]).toMatchObject({
+      expect(handle.agent.promptCalls[1]).toMatchObject({
         prompt: [
           { type: 'text', text: 'internal channel instructions' },
           { type: 'text', text: submittedPrompt },
@@ -17175,10 +17198,10 @@ describe('createAcpSessionBridge', () => {
       // The declaration projects the live echo and pending entry only; the
       // recorded display text stays content-derived so a caller declaration
       // never becomes model input downstream (auto-title, `@session`).
-      expect(handle.agent.promptCalls[0]?._meta).not.toHaveProperty(
+      expect(handle.agent.promptCalls[1]?._meta).not.toHaveProperty(
         'qwen.daemon.promptDisplayText',
       );
-      expect(handle.agent.promptCalls[0]?._meta).not.toHaveProperty(
+      expect(handle.agent.promptCalls[1]?._meta).not.toHaveProperty(
         'qwen.channel.prompt',
       );
 
@@ -17193,7 +17216,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('neutralizes unsafe controls in a declared Channel display projection', async () => {
+    it('keeps content-derived display for a declaration on a channel session without worker attestation', async () => {
       const promptGate = deferred<PromptResponse>();
       const handle = makeChannel({ promptImpl: () => promptGate.promise });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
@@ -17201,6 +17224,87 @@ describe('createAcpSessionBridge', () => {
         workspaceCwd: WS_A,
         sourceType: 'channel',
       });
+      const abort = new AbortController();
+      const userChunks: unknown[] = [];
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const drain = (async () => {
+        for await (const event of events) {
+          if (event.type !== 'session_update') continue;
+          const update = (
+            event.data as {
+              update?: { sessionUpdate?: string; content?: unknown };
+            }
+          ).update;
+          if (update?.sessionUpdate === 'user_message_chunk') {
+            userChunks.push(update.content);
+          }
+        }
+      })();
+      // The `channel` source label is caller-chosen and no worker-classified
+      // turn has been admitted on this session, so the declaration must not
+      // project: co-observers keep the text the model actually receives.
+      const promptPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'real text the model receives' }],
+        },
+        undefined,
+        { submittedPrompt: 'displayed but never sent' },
+      );
+
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+        { text: 'real text the model receives', state: 'running' },
+      ]);
+      promptGate.resolve({ stopReason: 'end_turn' });
+      await promptPromise;
+      abort.abort();
+      await drain;
+      expect(userChunks).toEqual([
+        { type: 'text', text: 'real text the model receives' },
+      ]);
+      // Only the display projection is gated: the declaration still reaches
+      // the child verbatim as hook provenance.
+      expect(handle.agent.promptCalls[0]).toMatchObject({
+        _meta: { 'qwen.daemon.submittedPrompt': 'displayed but never sent' },
+      });
+      await bridge.shutdown();
+    });
+
+    it('neutralizes unsafe controls in a declared Channel display projection', async () => {
+      const promptGate = deferred<PromptResponse>();
+      // The first, worker-classified turn settles immediately and attests
+      // the session's channel origin; the declaration turn stays gated.
+      let firstTurn = true;
+      const handle = makeChannel({
+        promptImpl: () => {
+          if (firstTurn) {
+            firstTurn = false;
+            return { stopReason: 'end_turn' };
+          }
+          return promptGate.promise;
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      // Declarations project only on a worker-attested channel session; the
+      // unattested case keeps content-derived display (see the attestation
+      // test above).
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'worker relay' }],
+        },
+        undefined,
+        { channelPrompt: true },
+      );
       const abort = new AbortController();
       const events = bridge.subscribeEvents(session.sessionId, {
         signal: abort.signal,
@@ -17243,16 +17347,16 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
         { text: sanitizedDeclaration, state: 'running' },
       ]);
-      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(2));
       // The neutralized declaration projects the live echo and pending
       // entry but is never stamped into the recorded display text.
       expect(
-        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.promptDisplayText'],
+        handle.agent.promptCalls[1]?._meta?.['qwen.daemon.promptDisplayText'],
       ).toBeUndefined();
       // The provenance key keeps the raw declaration for hooks; only the
       // display projection is neutralized.
       expect(
-        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.submittedPrompt'],
+        handle.agent.promptCalls[1]?._meta?.['qwen.daemon.submittedPrompt'],
       ).toBe(submittedPrompt);
 
       promptGate.resolve({ stopReason: 'end_turn' });
@@ -17263,12 +17367,35 @@ describe('createAcpSessionBridge', () => {
 
     it('keeps grapheme joiners intact in a declared Channel display projection', async () => {
       const promptGate = deferred<PromptResponse>();
-      const handle = makeChannel({ promptImpl: () => promptGate.promise });
+      // The first, worker-classified turn settles immediately and attests
+      // the session's channel origin; the declaration turn stays gated.
+      let firstTurn = true;
+      const handle = makeChannel({
+        promptImpl: () => {
+          if (firstTurn) {
+            firstTurn = false;
+            return { stopReason: 'end_turn' };
+          }
+          return promptGate.promise;
+        },
+      });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
         sourceType: 'channel',
       });
+      // Declarations project only on a worker-attested channel session; the
+      // unattested case keeps content-derived display (see the attestation
+      // test above).
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'worker relay' }],
+        },
+        undefined,
+        { channelPrompt: true },
+      );
       const abort = new AbortController();
       const userChunks: unknown[] = [];
       const events = bridge.subscribeEvents(session.sessionId, {
@@ -17306,7 +17433,7 @@ describe('createAcpSessionBridge', () => {
         { submittedPrompt },
       );
 
-      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(2));
       expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
         { text: submittedPrompt, state: 'running' },
       ]);

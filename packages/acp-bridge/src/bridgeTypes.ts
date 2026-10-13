@@ -1319,7 +1319,8 @@ export interface BridgeClientRequestContext {
   /**
    * Original text explicitly declared by a supported submission producer.
    * Caller-controlled: transport routes forward it from request `_meta`. On a
-   * `sourceType: 'channel'` session a nonblank, control-neutralized
+   * worker-attested `sourceType: 'channel'` session — one that has admitted
+   * a worker-classified turn — a nonblank, control-neutralized
    * declaration becomes the turn's live display projection (pending entry,
    * user echo, and the warm turn-status prompt text derived from the pending
    * entry) when no worker projection is supplied; it never reaches the
