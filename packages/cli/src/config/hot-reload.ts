@@ -104,7 +104,7 @@ export function recomputeMcpGating(
   // Preserve `[]` (deny-all); only an absent key yields `undefined` (allow-all).
   const settingsAllowed = settings.merged.mcp?.allowed?.filter(Boolean);
   const settingsExcluded = settings.merged.mcp?.excluded?.filter(Boolean);
-  const excluded = bootExcluded
+  const excluded = bootExcluded?.length
     ? [...new Set([...(settingsExcluded ?? []), ...bootExcluded])]
     : settingsExcluded;
   let allowed = settingsAllowed;

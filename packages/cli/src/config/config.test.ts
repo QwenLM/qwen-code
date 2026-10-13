@@ -5043,6 +5043,28 @@ describe('loadCliConfig with disable-mcp-server', () => {
     expect(config.isMcpServerDisabled('server3')).toBe(true);
   });
 
+  it('trims and de-duplicates names before storing them', async () => {
+    const argv = {
+      ...(await parseArguments()),
+      disableMcpServer: [' server1 ', 'server1', '', 'server2'],
+    };
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.getCliExcludedMcpServerNames()).toEqual([
+      'server1',
+      'server2',
+    ]);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+  });
+
+  it('supports glob patterns', async () => {
+    process.argv = ['node', 'script.js', '--disable-mcp-server', 'server*'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.isMcpServerDisabled('server1')).toBe(true);
+    expect(config.isMcpServerDisabled('server3')).toBe(true);
+    expect(config.isMcpServerDisabled('other')).toBe(false);
+  });
+
   it('takes one name per occurrence and leaves a trailing prompt positional', async () => {
     process.argv = [
       'node',

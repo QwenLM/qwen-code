@@ -2206,7 +2206,9 @@ export async function loadCliConfig(
   }
   // Like `--allowed-mcp-server-names`, an explicit per-invocation argument:
   // applies in every mode, on top of either branch above.
-  const cliExcludedMcpServerNames = argv.disableMcpServer?.filter(Boolean);
+  const cliExcludedMcpServerNames = argv.disableMcpServer
+    ? [...new Set(argv.disableMcpServer.map((n) => n.trim()).filter(Boolean))]
+    : undefined;
   if (cliExcludedMcpServerNames?.length) {
     excludedMcpServers = new Set([
       ...(excludedMcpServers ?? []),
