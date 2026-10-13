@@ -110,6 +110,15 @@ ACP history rollback carries each entry's `rewindId` through JSON and removes
 that transport metadata before restoring model content. Existing clients
 already echo the history array, so no new option or client-side counter is needed.
 
+Raw ACP snapshot indexes remain file-history positions, including holes from
+retry-only snapshots. The HTTP bridge projects the ordered eligible list to
+displayed user-turn positions for its catalog, rewind result, and notification.
+Before mutation, it resolves the requested snapshot ID in that session's list
+and rechecks session ownership/closing after the read. Requests still send the
+canonical snapshot ID; raw ACP numeric rewind is unchanged. No new payload
+field or frontend identity match is needed: daemon-admitted prompt IDs are a
+different identity space from snapshot IDs.
+
 Acceptance requires the same legacy fixture to cut at its source record,
 identified turns to keep resolving, unlinked/ambiguous targets to refuse, and
 resume/compression plus both live Ink and ACP entrances to obey these rules.

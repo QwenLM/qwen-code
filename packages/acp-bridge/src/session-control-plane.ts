@@ -200,6 +200,7 @@ import { withTimeout } from './with-timeout.js';
 import { parseBackgroundNotificationTurn } from './bridgeTypes.js';
 import type {
   BackgroundNotificationTurn,
+  RewindSnapshotInfo,
   BridgeSession,
   BridgeSpawnRequest,
   BridgeRestoreSessionRequest,
@@ -15459,10 +15460,18 @@ export function createSessionControlPlane(
       // asking whether a rewind landed must not be told the turn is still
       // there while the bridge is holding that very rewind in its queue.
       await entry.rewindTail;
-      return requestSessionStatus(
-        sessionId,
-        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
-      );
+      const result = await requestSessionStatus<{
+        snapshots: RewindSnapshotInfo[];
+      }>(sessionId, SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots);
+      return {
+        ...result,
+        // ACP positions include retry-only snapshots; HTTP consumers count
+        // displayed user turns instead.
+        snapshots: result.snapshots.map((snapshot, turnIndex) => ({
+          ...snapshot,
+          turnIndex,
+        })),
+      };
     },
 
     async rewindSession(sessionId, req, context) {
@@ -15511,6 +15520,20 @@ export function createSessionControlPlane(
         if (entry.closing) {
           throw new SessionNotFoundError(sessionId, 'The session is closing');
         }
+        // Read before mutation, without waiting on our own rewindTail.
+        const { snapshots } = await requestSessionStatus<{
+          snapshots: RewindSnapshotInfo[];
+        }>(sessionId, SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots);
+        if (
+          byId.get(sessionId) !== entry ||
+          isClosingOrAuthorizingClose(entry)
+        ) {
+          throw new SessionNotFoundError(sessionId, 'The session is closing');
+        }
+        const targetTurnIndex = snapshots.findIndex(
+          (snapshot) => snapshot.promptId === req.promptId,
+        );
+        if (targetTurnIndex < 0) throw new InvalidRewindTargetError(sessionId);
         let response: Record<string, unknown>;
         try {
           // ACP cannot cancel a rewind after dispatch. Keep the queue until
@@ -15548,7 +15571,6 @@ export function createSessionControlPlane(
         entry.enrichedTerminalPromptIds.clear();
         entry.rewindGeneration += 1;
 
-        const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
         const filesChanged = (response['filesChanged'] as string[]) ?? [];
         const filesFailed = (response['filesFailed'] as string[]) ?? [];
         const artifactSnapshot = restoredArtifactSnapshotFromState(

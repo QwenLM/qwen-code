@@ -6468,6 +6468,9 @@ describe('createAcpSessionBridge', () => {
               }
               return {};
             }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
+            }
             expect(method).toBe('qwen/control/session/rewind');
             return {
               targetTurnIndex: 0,
@@ -6553,6 +6556,9 @@ describe('createAcpSessionBridge', () => {
               }
               return {};
             }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
+            }
             expect(method).toBe('qwen/control/session/rewind');
             return {
               targetTurnIndex: 0,
@@ -6609,6 +6615,9 @@ describe('createAcpSessionBridge', () => {
                 persistedSnapshots.push(params['payload']);
               }
               return {};
+            }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
             }
             expect(method).toBe('qwen/control/session/rewind');
             return {
@@ -6676,6 +6685,9 @@ describe('createAcpSessionBridge', () => {
                 persistedSnapshots.push(params['payload']);
               }
               return {};
+            }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
             }
             expect(method).toBe('qwen/control/session/rewind');
             return {
@@ -6826,6 +6838,9 @@ describe('createAcpSessionBridge', () => {
                 throw new Error('disk full');
               }
               return {};
+            }
+            if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
             }
             expect(method).toBe('qwen/control/session/rewind');
             return {
@@ -18700,6 +18715,9 @@ describe('createAcpSessionBridge', () => {
         const firstGate = deferred<void>();
         const handle = makeChannel({
           extMethodImpl: async (method) => {
+            if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
+            }
             const operation =
               method === SERVE_CONTROL_EXT_METHODS.sessionBranch
                 ? 'branch'
@@ -18748,6 +18766,130 @@ describe('createAcpSessionBridge', () => {
       },
     );
 
+    it.each([1, 2])(
+      'uses displayed rewind positions for raw snapshot position %i',
+      async (rawPosition) => {
+        const snapshots = [
+          { promptId: 'session########0', turnIndex: 0 },
+          { promptId: 'session########2', turnIndex: rawPosition },
+        ];
+        const handle = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+              return { snapshots };
+            }
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+              return {
+                targetTurnIndex: rawPosition,
+                filesChanged: [],
+                filesFailed: [],
+              };
+            }
+            return {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const abort = new AbortController();
+        const rewoundEvent = (async () => {
+          for await (const event of bridge.subscribeEvents(session.sessionId, {
+            signal: abort.signal,
+          })) {
+            if (event.type === 'session_rewound') return event;
+          }
+          return undefined;
+        })();
+        try {
+          expect(
+            (await bridge.getRewindSnapshots(session.sessionId)).snapshots,
+          ).toEqual([snapshots[0], { ...snapshots[1], turnIndex: 1 }]);
+          await expect(
+            bridge.rewindSession(session.sessionId, {
+              promptId: 'session########2',
+              rewindFiles: false,
+            }),
+          ).resolves.toMatchObject({ targetTurnIndex: 1 });
+          await expect(rewoundEvent).resolves.toMatchObject({
+            data: { promptId: 'session########2', targetTurnIndex: 1 },
+          });
+          expect(handle.agent.extMethodCalls).toContainEqual({
+            method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+            params: {
+              sessionId: session.sessionId,
+              promptId: 'session########2',
+              rewindFiles: false,
+            },
+          });
+          expect(snapshots[1].turnIndex).toBe(rawPosition);
+        } finally {
+          abort.abort();
+          await bridge.shutdown();
+        }
+      },
+    );
+
+    it('rejects an unlisted rewind target before mutating history', async () => {
+      const handle = makeChannel({
+        extMethodImpl: () => ({ snapshots: [] }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      try {
+        await expect(
+          bridge.rewindSession(session.sessionId, { promptId: 'missing' }),
+        ).rejects.toMatchObject({
+          name: 'InvalidRewindTargetError',
+        });
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({
+            method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+          }),
+        );
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('rejects a rewind when the session closes during snapshot lookup', async () => {
+      const started = deferred<void>();
+      const catalog = deferred<Record<string, unknown>>();
+      const closeGate = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            started.resolve();
+            return catalog.promise;
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            return closeGate.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const rewind = bridge.rewindSession(session.sessionId, {
+        promptId: 'prompt-1',
+      });
+      await started.promise;
+      const close = bridge.closeSession(session.sessionId);
+      catalog.resolve({ snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] });
+      try {
+        await expect(rewind).rejects.toBeInstanceOf(SessionNotFoundError);
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({
+            method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+          }),
+        );
+      } finally {
+        closeGate.resolve({});
+        await close;
+        await bridge.shutdown();
+      }
+    });
+
     it('answers the snapshot listing only after a rewind queued behind a branch has run', async () => {
       const tracked = new Set<string>([
         SERVE_CONTROL_EXT_METHODS.sessionBranch,
@@ -18756,6 +18898,7 @@ describe('createAcpSessionBridge', () => {
       ]);
       const calls: string[] = [];
       const branchGate = deferred<void>();
+      let rewound = false;
       const handle = makeChannel({
         extMethodImpl: async (method) => {
           if (tracked.has(method)) calls.push(method);
@@ -18764,12 +18907,17 @@ describe('createAcpSessionBridge', () => {
             return { newSessionId: 'branch-session', title: 'Branch' };
           }
           if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            rewound = true;
             return { targetTurnIndex: 1, filesChanged: [], filesFailed: [] };
           }
           if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
-            // What the agent lists once the rewind has truncated.
             return {
-              snapshots: [{ promptId: 'session########0', turnIndex: 0 }],
+              snapshots: [
+                { promptId: 'session########0', turnIndex: 0 },
+                ...(!rewound
+                  ? [{ promptId: 'session########1', turnIndex: 1 }]
+                  : []),
+              ],
             };
           }
           return {};
@@ -18809,6 +18957,7 @@ describe('createAcpSessionBridge', () => {
       });
       expect(calls).toEqual([
         SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
         SERVE_CONTROL_EXT_METHODS.sessionRewind,
         SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
       ]);
@@ -18816,13 +18965,19 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('still answers the snapshot listing after an admitted rewind failed', async () => {
+      let rewindAttempted = false;
       const handle = makeChannel({
         extMethodImpl: async (method) => {
           if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            rewindAttempted = true;
             throw new Error('rewind blew up');
           }
           if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
-            return { snapshots: [] };
+            return {
+              snapshots: rewindAttempted
+                ? []
+                : [{ promptId: 'session########1', turnIndex: 0 }],
+            };
           }
           return {};
         },
@@ -18838,6 +18993,7 @@ describe('createAcpSessionBridge', () => {
           promptId: 'session########1',
         }),
       ).rejects.toThrow();
+      expect(rewindAttempted).toBe(true);
       await expect(
         bridge.getRewindSnapshots(session.sessionId),
       ).resolves.toEqual({ snapshots: [] });
@@ -18979,6 +19135,16 @@ describe('createAcpSessionBridge', () => {
         const gate = deferred<void>();
         const handle = makeChannel({
           extMethodImpl: async (calledMethod) => {
+            if (
+              calledMethod === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots
+            ) {
+              return {
+                snapshots: [
+                  { promptId: 'earlier', turnIndex: 0 },
+                  { promptId: 'prompt-1', turnIndex: 1 },
+                ],
+              };
+            }
             if (calledMethod !== method) return {};
             started.resolve();
             await gate.promise;
@@ -19023,6 +19189,9 @@ describe('createAcpSessionBridge', () => {
         const started = deferred<void>();
         const handle = makeChannel({
           extMethodImpl: (candidate) => {
+            if (candidate === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
+            }
             if (candidate !== method) return {};
             started.resolve();
             return new Promise(() => {});
@@ -19058,6 +19227,9 @@ describe('createAcpSessionBridge', () => {
       async ({ method, invoke }) => {
         const handle = makeChannel({
           extMethodImpl: (candidate) => {
+            if (candidate === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
+            }
             if (candidate === method) throw new Error('mutation failed');
             return {};
           },
@@ -19068,6 +19240,9 @@ describe('createAcpSessionBridge', () => {
         const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
         await expect(invoke(bridge, session.sessionId)).rejects.toThrow();
+        expect(handle.agent.extMethodCalls).toContainEqual(
+          expect.objectContaining({ method }),
+        );
         await expect(
           bridge.sendPrompt(session.sessionId, {
             sessionId: session.sessionId,
@@ -21106,6 +21281,9 @@ describe('createAcpSessionBridge', () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
         extMethodImpl: async (method) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            return { snapshots: [{ promptId: 'target', turnIndex: 0 }] };
+          }
           if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
             lookupStarted = true;
             return lookup.promise;
@@ -21152,6 +21330,9 @@ describe('createAcpSessionBridge', () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
         extMethodImpl: async (method) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            return { snapshots: [{ promptId: 'target', turnIndex: 0 }] };
+          }
           if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
             if (rewound) {
               return { v: 1, sessionId: 'ignored', turnResult: null };
@@ -21676,6 +21857,9 @@ describe('createAcpSessionBridge', () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
         extMethodImpl: (method) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            return { snapshots: [{ promptId: 'target', turnIndex: 0 }] };
+          }
           if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
             return { v: 1, sessionId: 'ignored', turnResult: null };
           }
@@ -21701,6 +21885,11 @@ describe('createAcpSessionBridge', () => {
       await expect(
         bridge.rewindSession(session.sessionId, { promptId: 'target' }),
       ).rejects.toThrow();
+      expect(handle.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        }),
+      );
       await expect(
         bridge.getSessionTurnStatus(
           session.sessionId,
