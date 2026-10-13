@@ -51,11 +51,21 @@ Classified by which identity the site actually needs.
 | `packages/core/src/code-mode/host-client.ts` (`hostCommand`) | code-mode host child (`host.js` / bundled `codeModeHost.js`; dev: `--import tsx host.ts`) | yes |
 | `packages/core/src/sandbox/file-worker-client.ts` | sandbox file-worker child (`sandboxAsset('file-worker')`) | yes |
 | `packages/core/src/hooks/hookRunner.ts` (surviving-hook supervisor) | `spawn(--input-type=commonjs --eval SUPERVISOR …)`, detached | yes |
+| `packages/core/src/hooks/hook-command-cgroup.ts` (`launch`) | cgroup-v2 launcher child (`--input-type=commonjs --eval LAUNCHER …`) running the hook under its delegated unit | not yet (S3) — Linux only (cgroup v2 platform guard) |
+| `packages/core/src/sandbox/bwrap-execution.ts` (`executeBwrap`) | stages the interpreter (`realpathSync(process.execPath)`) into the bubblewrap allowlist; the relay spawns the JS relay under it | not yet (S3) — Linux only (bubblewrap) |
+| `packages/core/src/sandbox/landlock-execution.ts` (`executeLandlock`) | stages the interpreter into the landlock allowlist; the relay spawns the JS relay under it | not yet (S3) — Linux only (landlock LSM) |
 | `packages/core/src/utils/getPty.ts` (`loadPty`) | Bun detection for the PTY gate (PTY disabled under Bun today — **S2 replaces this branch with a real backend**) | detection via `isBunRuntime()` |
 | `packages/cli/src/config/mem0-settings.ts` (`bundledMem0Server`) | bundled mem0 MCP child; identity check `server.command !== process.execPath` | not yet; must migrate with its identity check together (S3) |
 | `packages/core/src/agents/arena/ArenaManager.ts` | (also) worker-side in-process runtime | launcher-shaped, see above |
 | `packages/cli/src/serve/pem-certificate-blocks.ts` | helper child spawn | not yet (S3 sweep) |
 | `packages/cli/src/commands/review/test-efficacy.ts` | spawns vitest via `process.execPath` (dev-tooling path) | intentionally not; host-tool identity |
+
+Rows marked `not yet` are owned by the **S3 migration sweep** (V8/GC/TLS/env
+compatibility stage), which uses this table as its checklist. The
+cgroup/bwrap/landlock rows are **Linux-only** mechanisms (platform-guarded or
+inert on macOS/Windows), so their migration is validated against the Linux
+targets of the platform matrix; the mem0 and pem rows apply on every
+platform.
 
 ### Update / install identity (must stay host-Node)
 

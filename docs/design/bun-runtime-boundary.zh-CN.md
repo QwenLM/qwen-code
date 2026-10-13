@@ -40,11 +40,16 @@
 | `packages/core/src/code-mode/host-client.ts`（`hostCommand`） | code-mode host 子进程（`host.js` / 内置 `codeModeHost.js`；dev 为 `--import tsx host.ts`） | 是 |
 | `packages/core/src/sandbox/file-worker-client.ts` | sandbox file-worker 子进程（`sandboxAsset('file-worker')`） | 是 |
 | `packages/core/src/hooks/hookRunner.ts`（幸存 hook 监督进程） | `spawn(--input-type=commonjs --eval SUPERVISOR …)`，detached | 是 |
+| `packages/core/src/hooks/hook-command-cgroup.ts`（`launch`） | cgroup v2 launcher 子进程（`--input-type=commonjs --eval LAUNCHER …`），在 hook 的受托单元内运行 | 暂未（S3）—— 仅 Linux（cgroup v2 平台守卫） |
+| `packages/core/src/sandbox/bwrap-execution.ts`（`executeBwrap`） | 将解释器（`realpathSync(process.execPath)`）纳入 bubblewrap allowlist；relay 在其下启动 JS relay | 暂未（S3）—— 仅 Linux（bubblewrap） |
+| `packages/core/src/sandbox/landlock-execution.ts`（`executeLandlock`） | 将解释器纳入 landlock allowlist；relay 在其下启动 JS relay | 暂未（S3）—— 仅 Linux（landlock LSM） |
 | `packages/core/src/utils/getPty.ts`（`loadPty`） | PTY 门控的 Bun 检测（当前 Bun 下 PTY 禁用 —— **S2 用真实后端替换此分支**） | 检测走 `isBunRuntime()` |
 | `packages/cli/src/config/mem0-settings.ts`（`bundledMem0Server`） | 内置 mem0 MCP 子进程；身份判断 `server.command !== process.execPath` | 暂未；须与其身份判断一起迁移（S3） |
 | `packages/core/src/agents/arena/ArenaManager.ts` | （另）worker 侧 in-process 运行时 | launcher 形态，见上表 |
 | `packages/cli/src/serve/pem-certificate-blocks.ts` | 辅助子进程 spawn | 暂未（S3 清扫） |
 | `packages/cli/src/commands/review/test-efficacy.ts` | 经 `process.execPath` 启动 vitest（开发工具路径） | 有意不接入；保持宿主工具身份 |
+
+标注"暂未"的行由 **S3 迁移清扫**（V8/GC/TLS/env 兼容阶段）负责，该表即其检查清单。cgroup/bwrap/landlock 三行是**仅 Linux** 机制（macOS/Windows 上有平台守卫或不生效），其迁移须对照平台矩阵中的 Linux target 验证；mem0 与 pem 两行适用于所有平台。
 
 ### 更新 / 安装身份（必须保持宿主 Node）
 
