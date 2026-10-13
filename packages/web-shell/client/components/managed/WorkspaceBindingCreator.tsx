@@ -90,10 +90,12 @@ export function WorkspaceBindingCreator({
   provider,
   clientId,
   onCreated,
+  onAbandoned,
 }: {
   provider: ManagedAgentProvider;
   clientId: string;
   onCreated: (sessionId: string) => void;
+  onAbandoned?: () => void;
 }) {
   const { t } = useI18n();
   const binding = provider.workspaceBinding!;
@@ -404,7 +406,7 @@ export function WorkspaceBindingCreator({
       {!loading && supported && !items.length && !error && (
         <p role="status">{t('managed.workspaceEmpty')}</p>
       )}
-      {pending ? (
+      {pending && !busy ? (
         <div className="space-y-2 text-sm">
           <p>{t('managed.workspaceUncertain')}</p>
           <p>
@@ -433,13 +435,18 @@ export function WorkspaceBindingCreator({
                 updatePending(undefined);
                 acceptedCommit.current = undefined;
                 if (initial) editor.current?.setText(initial.text);
+                onAbandoned?.();
               }}
             >
               {t('managed.workspaceAbandon')}
             </Button>
           </div>
           <p className="text-muted-foreground">
-            {t('managed.workspaceAbandonWarning')}
+            {t(
+              pending.input.length > 0
+                ? 'managed.workspaceAbandonInputWarning'
+                : 'managed.workspaceAbandonWarning',
+            )}
           </p>
         </div>
       ) : !directInput ? (

@@ -726,6 +726,7 @@ function ManagedSessionsContent({
                 setListRevision((current) => current + 1);
                 onSelectSession(createdId);
               }}
+              onAbandoned={() => setListRevision((current) => current + 1)}
             />
           ) : (
             <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { undo } from '@codemirror/commands';
+import { EditorView } from '@codemirror/view';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
@@ -1379,6 +1380,28 @@ describe('useComposerCore paste', () => {
     expect.soft(event.defaultPrevented).toBe(false);
     expect.soft(latest!.pastedFiles).toEqual([]);
     expect.soft(latest!.getText()).toBe('');
+  });
+
+  it('keeps "!" and "?" typed into a focused Managed composer literal', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    const view = EditorView.findFromDOM(
+      document.querySelector<HTMLElement>('.cm-content')!,
+    )!;
+    for (const key of ['!', '?']) {
+      const handled = view.state
+        .facet(EditorView.inputHandler)
+        .some((handler) =>
+          handler(view, 0, 0, key, () =>
+            view.state.update({ changes: { from: 0, insert: key } }),
+          ),
+        );
+      expect({ key, handled }).toEqual({ key, handled: false });
+      expect(latest!.shellMode).toBe(false);
+    }
   });
 
   it('keeps Managed bang input literal and cannot enter the global Shell history mode', async () => {

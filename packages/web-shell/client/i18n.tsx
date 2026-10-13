@@ -250,6 +250,8 @@ const EN: Messages = {
   'managed.workspaceAbandon': 'Abandon local confirmation',
   'managed.workspaceAbandonWarning':
     'The original empty session may still exist. Abandoning this record does not delete it.',
+  'managed.workspaceAbandonInputWarning':
+    'A session with this input may already exist or be running. Abandoning this record does not cancel it. Sending it again starts a new request and may repeat its effects.',
   'managed.workspaceSwitchTitle': 'Switch Workspace?',
   'managed.workspaceSwitchDescription':
     'Switching resets the relative directory to the Workspace root.',
@@ -4541,6 +4543,8 @@ const ZH: Messages = {
   'managed.workspaceAbandon': '放弃本地确认记录',
   'managed.workspaceAbandonWarning':
     '原空会话可能已经存在；放弃记录不会删除服务端会话。',
+  'managed.workspaceAbandonInputWarning':
+    '包含该输入的会话可能已存在或仍在运行；放弃记录不会取消它。再次发送会开启新请求，可能重复执行。',
   'managed.workspaceSwitchTitle': '切换工作区？',
   'managed.workspaceSwitchDescription': '切换后相对目录将重置为工作区根目录。',
   'managed.workspaceKeep': '保留原选择',

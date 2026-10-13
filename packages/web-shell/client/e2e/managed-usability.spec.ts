@@ -148,3 +148,112 @@ for (const width of [1280, 390]) {
     ).toBe(true);
   });
 }
+
+test('abandoning an unconfirmed first input warns about execution and refreshes Sessions @smoke', async ({
+  page,
+}) => {
+  let admitted: JavaAgentSession | undefined;
+  const requests: Record<string, unknown>[] = [];
+  const errors: string[] = [];
+  const unexpected: string[] = [];
+  let queries = 0;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  page.on('pageerror', (error) => errors.push(error.message));
+  const workspace = {
+    workspaceId: 'ws-a',
+    displayName: 'Project A',
+    canCreateSession: true,
+    state: 'active',
+  };
+  await page.route('**/api/agent/web-shell/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const body = route.request().postDataJSON();
+    if (path.endsWith('/sessions/query')) {
+      queries++;
+      return route.fulfill({
+        json: { data: admitted ? [admitted] : [], hasMore: false },
+      });
+    }
+    if (path.endsWith('/workspaces/query'))
+      return route.fulfill({
+        json: {
+          data: [workspace],
+          hasMore: false,
+          capabilities: { workspaceBinding: true },
+        },
+      });
+    if (path.endsWith('/workspaces/get'))
+      return route.fulfill({ json: workspace });
+    if (path.endsWith('/sessions/create')) {
+      requests.push(body);
+      admitted = {
+        sessionId: 'orphan-session',
+        title: 'Possibly admitted task',
+        agentId: body.agentId,
+        status: 'active',
+        createdAt: 1,
+        updatedAt: 1,
+        lastSequence: 0,
+        workspace: { ...body.workspace, contextRevision: 1, state: 'ready' },
+        capabilities: {
+          actions: false,
+          artifacts: false,
+          tasks: false,
+          workspaceTurns: true,
+        },
+      };
+      await held;
+      return route.abort('failed');
+    }
+    unexpected.push(path);
+    return route.fulfill({
+      status: 500,
+      json: { error: `Unexpected request: ${path}` },
+    });
+  });
+  await page.goto('/e2e/fixtures/managed-usability.html');
+  await page.getByRole('button', { name: 'Workspace', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: 'Project A' }).click();
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await editor.fill('Inspect README');
+  await editor.press('Enter');
+  await expect.poll(() => requests.length).toBe(1);
+  try {
+    await expect(
+      page.getByText('Creation is unconfirmed', { exact: false }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole('button', { name: 'Abandon local confirmation' }),
+    ).toHaveCount(0);
+  } finally {
+    release();
+  }
+  await expect(
+    page.getByText(
+      'A session with this input may already exist or be running.',
+      { exact: false },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText('may repeat its effects', { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: /Possibly admitted task/ }),
+  ).toHaveCount(0);
+  const before = queries;
+  await page
+    .getByRole('button', { name: 'Abandon local confirmation' })
+    .click();
+  await expect(
+    page.getByRole('button', { name: /Possibly admitted task/ }),
+  ).toBeVisible();
+  expect(queries).toBeGreaterThan(before);
+  await expect(editor).toContainText('Inspect README');
+  await expect(editor).toHaveAttribute('contenteditable', 'true');
+  expect(requests).toHaveLength(1);
+  expect(unexpected).toEqual([]);
+  expect(errors).toEqual([]);
+});

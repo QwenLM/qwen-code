@@ -52,6 +52,7 @@ describe('WorkspaceBindingCreator', () => {
   let createEmpty: ReturnType<typeof vi.fn>;
   let getSession: ReturnType<typeof vi.fn>;
   let onCreated: ReturnType<typeof vi.fn>;
+  let onAbandoned: ReturnType<typeof vi.fn>;
   let provider: ManagedAgentProvider;
 
   async function flush() {
@@ -66,6 +67,7 @@ describe('WorkspaceBindingCreator', () => {
             provider={provider}
             clientId="client-a"
             onCreated={onCreated}
+            onAbandoned={onAbandoned}
           />
         </I18nProvider>,
       );
@@ -105,6 +107,7 @@ describe('WorkspaceBindingCreator', () => {
     createEmpty = vi.fn();
     getSession = vi.fn();
     onCreated = vi.fn();
+    onAbandoned = vi.fn();
     provider = {
       kind: 'java',
       storageKey: 'host:scope-a:agent-a:workspace-v1',
@@ -168,6 +171,27 @@ describe('WorkspaceBindingCreator', () => {
     });
     return commit;
   }
+
+  it('asks for a Workspace instead of sending a first input without one', async () => {
+    const createSession = directCreation();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      list: vi.fn().mockResolvedValue({
+        data: [
+          workspace,
+          { ...workspace, workspaceId: 'ws-b', displayName: 'B' },
+        ],
+        supported: true,
+      }),
+    };
+    await render();
+    const commit = await sendInitial('Read README');
+    expect(createSession).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Choose a Workspace',
+    );
+  });
 
   it('reuses the standard welcome and native editor controls for direct initial admission', async () => {
     const createSession = directCreation();
@@ -270,7 +294,12 @@ describe('WorkspaceBindingCreator', () => {
     root = createRoot(container);
     await render();
     expect(editorMocks.props!.composerInput).toEqual({ text: 'Keep my draft' });
+    expect(container.textContent).toContain(
+      'A session with this input may already exist or be running.',
+    );
+    expect(container.textContent).toContain('may repeat its effects');
     await click('Abandon local confirmation');
+    expect(onAbandoned).toHaveBeenCalledOnce();
     expect(editorMocks.setText).toHaveBeenCalledExactlyOnceWith(
       'Keep my draft',
     );
@@ -386,13 +415,14 @@ describe('WorkspaceBindingCreator', () => {
       expect(signal.aborted).toBe(false);
       const buttons = [...container.querySelectorAll('button')];
       expect(
-        buttons.find((item) => item.textContent?.startsWith('Retry'))?.disabled,
-      ).toBe(true);
+        buttons.some((item) => item.textContent?.startsWith('Retry')),
+      ).toBe(false);
       expect(
-        buttons.find(
+        buttons.some(
           (item) => item.textContent === 'Abandon local confirmation',
-        )?.disabled,
-      ).toBe(true);
+        ),
+      ).toBe(false);
+      expect(container.textContent).not.toContain('Creation is unconfirmed');
       await act(async () => {
         resolveCommand(session);
         await flush();
