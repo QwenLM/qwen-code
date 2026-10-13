@@ -92,7 +92,7 @@ jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -215,6 +215,11 @@ jobs:
                 done || true
           fi
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -272,8 +277,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 1200 9; then
-            echo "::error::sdk-java host lock not acquired within 20 minutes"
+          if ! flock --wait 2400 9; then
+            echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress clean test
@@ -444,6 +449,11 @@ jobs:
                 done || true
           fi
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
@@ -482,13 +492,15 @@ jobs:
     # port, and every Maven run holds the test job's per-host sdk-java lock.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # 15 covered the hosted lane. On the pool this job takes the per-host
-    # sdk-java lock once per Maven step — three acquisitions today — and each
-    # acquisition can wait out one full flock --wait 1200 behind the sibling
-    # test job's holds (measured run 37743332082: 1193 s of waits against
-    # 818 s of holds, the cross-job term a one-wait budget misses). The
-    # ceiling is three 20-minute lock waits plus the ~14 minutes of measured
-    # Maven work, plus margin: 85.
-    timeout-minutes: 85
+    # sdk-java lock once per Maven step — three acquisitions today. The
+    # 20-minute per-acquisition budget was sized on one quiet window
+    # (measured run 37743332082: 1193 s of waits against 818 s of holds),
+    # and main run 38258395829 exhausted it — the verify step below starved
+    # a full 1200 s behind cross-run pool traffic and failed before Maven
+    # started (#13989). Each acquisition now waits out two full sibling
+    # holds (flock --wait 2400); the ceiling is three 40-minute lock waits
+    # plus the ~14 minutes of measured Maven work, plus margin: 140.
+    timeout-minutes: 140
     services:
       mariadb:
         image: 'mariadb:10.11.18'
@@ -621,6 +633,11 @@ jobs:
       # gate certifies what merging would produce, cancel-in-progress
       # re-runs a displaced head, and the pool queue is seconds short.
       # Pinned in scripts/tests/sdk-java-workflow.test.js.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
@@ -653,8 +670,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 1200 9; then
-            echo "::error::sdk-java host lock not acquired within 20 minutes"
+          if ! flock --wait 2400 9; then
+            echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
@@ -672,8 +689,8 @@ jobs:
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 1200 9; then
-            echo "::error::sdk-java host lock not acquired within 20 minutes"
+          if ! flock --wait 2400 9; then
+            echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
           # Seed from the cache-restored shared repo so cache: 'maven' and
@@ -693,8 +710,8 @@ jobs:
           set -o pipefail
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 1200 9; then
-            echo "::error::sdk-java host lock not acquired within 20 minutes"
+          if ! flock --wait 2400 9; then
+            echo "::error::sdk-java host lock not acquired within 40 minutes"
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
@@ -1007,6 +1024,11 @@ jobs:
                   fi
                 done || true
           fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
