@@ -13,7 +13,10 @@ import {
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { ToolEditConfirmationDetails } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { RequestPermissionRequest } from '@agentclientprotocol/sdk';
+import type {
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
 import { attachTeamSink, type TeamSinkDeps } from './team-sink.js';
 
 type LeaderCallback = (
@@ -212,6 +215,58 @@ describe('attachTeamSink', () => {
       teammateName: 'security',
     });
     expect(respond.mock.calls[0]![0]).toBe(offered!.options[0]!.optionId);
+  });
+
+  it('keeps simultaneous approvals from the same teammate independently addressable', async () => {
+    const detach = attachTeamSink(deps);
+    const pending = new Map<
+      string,
+      (response: RequestPermissionResponse) => void
+    >();
+    const requests: RequestPermissionRequest[] = [];
+    requestPermission.mockImplementation((params: RequestPermissionRequest) => {
+      requests.push(params);
+      return new Promise<RequestPermissionResponse>((resolve) => {
+        pending.set(params.toolCall.toolCallId, resolve);
+      });
+    });
+    const first = approvalEvent({ toolInput: { path: '/first.ts' } });
+    const second = approvalEvent({ toolInput: { path: '/second.ts' } });
+    manager.emitter.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, first.event);
+    manager.emitter.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, second.event);
+
+    expect(requestPermission).toHaveBeenCalledTimes(2);
+    expect(pending.size).toBe(2);
+    expect(requests[0]!.toolCall.rawInput).toEqual(first.event.toolInput);
+    expect(requests[1]!.toolCall.rawInput).toEqual(second.event.toolInput);
+
+    pending.get(requests[1]!.toolCall.toolCallId)!({
+      outcome: { outcome: 'cancelled' },
+    });
+    await vi.waitFor(() => expect(second.respond).toHaveBeenCalledTimes(1));
+    expect(second.respond.mock.calls[0]![0]).toBe(
+      ToolConfirmationOutcome.Cancel,
+    );
+    expect(first.respond).not.toHaveBeenCalled();
+
+    pending.get(requests[0]!.toolCall.toolCallId)!({
+      outcome: {
+        outcome: 'selected',
+        optionId: ToolConfirmationOutcome.ProceedOnce,
+      },
+    });
+    await vi.waitFor(() => expect(first.respond).toHaveBeenCalledTimes(1));
+    expect(first.respond.mock.calls[0]![0]).toBe(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    expect(second.respond).toHaveBeenCalledTimes(1);
+
+    detach();
+    manager.emitter.emit(
+      TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+      approvalEvent().event,
+    );
+    expect(requestPermission).toHaveBeenCalledTimes(2);
   });
 
   it('fails closed and tells the leader when the host cannot answer', async () => {

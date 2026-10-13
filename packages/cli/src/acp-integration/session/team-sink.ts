@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -195,7 +196,7 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
       sessionId: deps.sessionId,
       options,
       toolCall: {
-        toolCallId: `teammate-${event.teammateName}-${event.timestamp}`,
+        toolCallId: `teammate-${randomUUID()}`,
         status: 'pending',
         title: `Teammate "${event.teammateName}" requests ${event.toolName}`,
         content: buildPermissionRequestContent(full),
