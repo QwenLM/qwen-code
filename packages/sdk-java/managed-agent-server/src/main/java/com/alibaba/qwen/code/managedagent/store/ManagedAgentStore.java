@@ -75,7 +75,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private static final TypeReference<List<ItemRecord>> ITEMS_TYPE =
             new TypeReference<>() {
             };
-    private static final String MESSAGE_PROJECTION = "message_projection";
+    static final String MESSAGE_PROJECTION = "message_projection";
     // Between full rewrites the snapshot may lag the projection by this many
     // events or this long; the batch that ends a Turn rewrites it anyway.
     public static final int SNAPSHOT_REFRESH_EVENTS = 1000;
