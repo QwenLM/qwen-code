@@ -1017,6 +1017,60 @@ describe('LlmChat', async () => {
       });
     });
 
+    it('restores the live generation config when an unstarted prepared replay is disposed', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const liveChat = newChat({
+        chatConfig: { systemInstruction: 'live instruction' },
+      });
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [userText('normalized request')],
+          config: { systemInstruction: 'abandoned snapshot instruction' },
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      const abandoned = await liveChat.sendPreparedMessageStream(
+        saved,
+        'abandoned-replay',
+        new AbortController().signal,
+      );
+      await abandoned.return(undefined);
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'done' }])),
+      );
+      await drain(
+        await liveChat.sendMessageStream(
+          'test-model',
+          { message: 'next' },
+          'after-abandoned-replay',
+        ),
+      );
+      expect(streamMock()).toHaveBeenCalledOnce();
+      const sentInstruction = JSON.stringify(
+        streamMock().mock.calls[0][0].config?.systemInstruction,
+      );
+      expect(sentInstruction).toContain('live instruction');
+      expect(sentInstruction).not.toContain('abandoned snapshot instruction');
+    });
+
     it('preserves primary persistent retry intent through prepared replay', async () => {
       vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'true');
       try {

@@ -6731,6 +6731,8 @@ export class LlmChat {
           manualPlanExitNoticeVersion,
         );
       }
+      if (previousGenerationConfig)
+        self.generationConfig = previousGenerationConfig;
       self.flushDeferredMaxTokensRecords();
       streamDoneResolver!();
     };
