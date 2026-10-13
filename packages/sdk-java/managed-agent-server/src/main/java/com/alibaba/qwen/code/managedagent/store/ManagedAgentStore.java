@@ -42,6 +42,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -977,9 +978,13 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title, String actorId) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        requireSessionForUpdate(tenantId, sessionId);
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         // Tenant and Session locks serialize admission without gap-locking missing index entries.
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
+        if (previous.isPresent()
+                && sessionId.equals(previous.get().sessionId())) {
+            requireRenameReplayOwner(session, previous.get(), actorId);
+        }
         SessionMutationCommand command = beginSessionMutation(tenantId, "RENAME_SESSION",
                 key, digest, sessionId, SessionMutationKind.RENAME, actorId);
         if ("COMPLETED".equals(command.status())) {
@@ -1006,6 +1011,42 @@ public class ManagedAgentStore implements AgentStateStore {
                     revision, key, title, clock.millis(), tenantId, sessionId);
         }
         return new SessionMutationCommand(sessionId, "PENDING", command.replayed(), revision);
+    }
+
+    // The discovery arm of the replay's recorder/creator rule: once this
+    // method finds an existing RENAME command row under the Session lock,
+    // the request may only reuse the row when the caller is its recorder
+    // (V69 actor_key) or the Session's creator. The alternatives —
+    // claiming a still-claimable delivery for the recorder, or failing a
+    // digest comparison against a different title — would hand the
+    // recorder's pending work to the racer or name the live key before
+    // authorization. A legacy Session has no per-actor mutation gate at
+    // all; its key's outcome stays answerable through the same contract
+    // as the pre-read probe. A tombstoned Session answers the reads' 404
+    // instead of the live-Session refusal.
+    private void requireRenameReplayOwner(SessionRecord session,
+            CommandRecord previous, String actorId) {
+        byte[] recorderKey = previous.actorKey();
+        boolean recordedByCaller = false;
+        if (recorderKey != null && actorId != null) {
+            try {
+                recordedByCaller = Arrays.equals(recorderKey,
+                        ManagedWorkspaceRegistry.actorKey(session.tenantId(),
+                                actorId));
+            } catch (IllegalArgumentException error) {
+                recordedByCaller = false;
+            }
+        }
+        if (!recordedByCaller && session.workspace() != null
+                && !workspaces.createdSession(session.tenantId(), actorId,
+                        session.sessionId())) {
+            if ("DELETED".equals(session.status())) {
+                throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
+                        "The Session was not found.");
+            }
+            throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
     }
 
     @Override

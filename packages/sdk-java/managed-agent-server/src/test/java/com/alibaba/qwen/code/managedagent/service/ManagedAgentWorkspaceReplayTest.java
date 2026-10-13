@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -713,6 +714,65 @@ class ManagedAgentWorkspaceReplayTest {
         } finally {
             submitGate.through.countDown();
             cancelGate.through.countDown();
+            renameGate.through.countDown();
+            threads.shutdownNow();
+        }
+    }
+
+    // The PENDING half of the rename race: the recorder's command row is
+    // committed — still claimable — after the racer's replay pre-read ran
+    // empty. The discovery branch in beginSessionRename must re-run the
+    // recorder/creator rule there, not afterwards: claiming that delivery
+    // would flip the recorder's command to COMPLETED under the racer's
+    // name, and failing the digest comparison first would name the live
+    // key the uniform refusal keeps hidden.
+    @Test
+    void aPendingRenameRacedByANonCreatorOperatorIsRefused()
+            throws Exception {
+        freshDatabase();
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
+                        + " ?, 'OPERATOR')",
+                tenant, "actor-c".getBytes(StandardCharsets.UTF_8));
+        ExecutorService threads = Executors.newFixedThreadPool(2);
+        RaceGate renameGate = new RaceGate();
+        ManagedAgentService renameService = service(
+                new AtomicBoolean(true), renameGate);
+        try {
+            Object answer = raceSecondCaller(threads, renameGate,
+                    () -> {
+                        store.beginSessionRename(tenant, "rename-race",
+                                new RequestDigests().digest(Map.of("sessionId",
+                                        sessionId, "title", "raced title")),
+                                sessionId, "raced title", "actor-a");
+                        return null;
+                    },
+                    () -> renameService.renameSession(tenant, "actor-c",
+                            "rename-race", sessionId, "raced title"));
+            assertThat(answer).isInstanceOfSatisfying(
+                    ApiException.class, error -> assertThat(error.getCode())
+                            .isEqualTo("workspace_unavailable"));
+            // The leaked claim never happened: the recorder's command is
+            // still PENDING and its delivery never handed out an attempt.
+            assertThat(jdbc.queryForObject("SELECT command_status FROM"
+                            + " managed_agent_command WHERE tenant_id = ?"
+                            + " AND operation = 'RENAME_SESSION'"
+                            + " AND idempotency_key = 'rename-race'",
+                    String.class, tenant)).isEqualTo("PENDING");
+            assertThat(jdbc.queryForObject("SELECT attempt_count FROM"
+                            + " managed_session_rename_delivery"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                    Integer.class, tenant, sessionId)).isZero();
+            // The recorder's own retry passes the same discovery gate, not
+            // only refuses other actors: it resumes the delivery to
+            // completion.
+            transaction.executeWithoutResult(status -> assertThat(
+                    renameService.renameSession(tenant, "actor-a",
+                            "rename-race", sessionId, "raced title")
+                            .replayed()).isTrue());
+        } finally {
             renameGate.through.countDown();
             threads.shutdownNow();
         }
