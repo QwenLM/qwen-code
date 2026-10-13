@@ -277,7 +277,7 @@ class WorkspaceMigrationMySqlIT {
                 + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
                 + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
-                String.class, lastRank)).containsExactly("57", "60", "62", "64", "65", "66", "67", "68");
+                String.class, lastRank)).containsExactly("57", "60", "62", "64", "65", "66", "67", "68", "69", "70");
     }
 
     private void seed(String tenant, String session, String state) {
