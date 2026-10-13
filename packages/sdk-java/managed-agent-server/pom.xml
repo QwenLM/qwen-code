@@ -241,10 +241,15 @@
                                  history control calls roughly doubled the
                                  ToolTurn driver's runtime. The channel fault
                                  gates (five letters FG7a,b,d–f plus the FG7c
-                                 crash class) extend the fork's wall-clock by
+                                 crash class) extended the fork's wall-clock by
                                  ~150 s — ~60 s of it test time — at 2×
-                                 headroom. -->
-                            <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
+                                 headroom. The FG8 monitor/run fault gates
+                                 (HostedMonitorRunFaultGatesIT: seven cases
+                                 with real background processes and >16 MiB
+                                 captures) add ~310 s measured on the lane, so
+                                 the fork moves to keep ceiling + healthy
+                                 inside it. -->
+                            <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -296,6 +301,24 @@
                     <includes><include>**/HostedChannel*IT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-monitor-run-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedMonitorRun*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <!-- The class's two letters share one fork: their
+                         combined @Timeout ceilings (2×600 s) plus the
+                         healthy runtime must fit, the same relation the CI
+                         profile pins. -->
+                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>

@@ -254,6 +254,26 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain(
       'packages/sdk-java/managed-agent-server/target/fg7-cases/',
     );
+    // FG8 follows the same precedent: its per-case evidence lives in
+    // target/fg8-cases/.
+    expect(upload.with.path).toContain(
+      'packages/sdk-java/managed-agent-server/target/fg8-cases/',
+    );
+  });
+
+  it('pins the cgroup v2 delegation the FG8 monitor/run gates need', () => {
+    const job = java.jobs['hosted-harness-mysql'];
+    const delegate = job.steps.find(
+      (step) => step.name === 'Delegate a cgroup v2 root for the process gates',
+    );
+    const verify = job.steps.find(
+      (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
+    );
+    expect(delegate, 'the cgroup delegation step').toBeDefined();
+    // Without the root the gates refuse admission and burn their full
+    // driver budget before red — so the delegation must land first.
+    expect(job.steps.indexOf(delegate)).toBeLessThan(job.steps.indexOf(verify));
+    expect(verify.env.QWEN_MANAGED_HOOK_CGROUP_ROOT).toBe('/sys/fs/cgroup/fg8');
   });
 
   it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {
@@ -262,12 +282,12 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (35 + 9x10 + 20); the uncapped setup steps need
+    // Step ceilings today (40 + 9x10 + 20); the uncapped setup steps need
     // their own allowance — the job comment estimates it at ~13, so the
     // enforced floor moves with that estimate, not the older 10.
-    expect(summed).toBe(145);
+    expect(summed).toBe(150);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
-    expect(job['timeout-minutes']).toBe(160);
+    expect(job['timeout-minutes']).toBe(165);
   });
 
   it.each([
@@ -374,12 +394,14 @@ describe('Hosted real-process gates', () => {
       expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
         forkSeconds + 600,
       );
-      // The hosted fork bump was deliberate (FG7a,b,d–f plus the FG7c crash
-      // class, ~150 s of wall clock at 2x headroom): the relational check
+      // The hosted fork bumps were deliberate (FG7a,b,d–f plus the FG7c
+      // crash class, ~150 s of wall clock at 2x headroom; the FG8
+      // monitor/run letters, ~310 s measured on the lane with real
+      // background processes and >16 MiB captures): the relational check
       // above tolerates anything up to step*60, so the value is pinned
       // literally here — an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(1200);
+        expect(forkSeconds).toBe(1800);
       }
     },
   );
@@ -387,10 +409,11 @@ describe('Hosted real-process gates', () => {
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
   // @Timeout must still leave the fork its healthy runtime: on main the
   // classes measured 437–546s with HostedTeamLeadMySqlIT adding ~65s, and
-  // the fork itself ~14s, so 650s covers them. A larger ceiling lets
-  // failsafe kill the fork mid-run, and the classes left unrun never report,
-  // failing the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 650;
+  // the FG8 monitor/run letters add ~310s measured on the lane (~450s with
+  // CI headroom); with the fork itself ~14s, 1100s covers them. A larger
+  // ceiling lets failsafe kill the fork mid-run, and the classes left
+  // unrun never report, failing the gate undiagnosably (#13780).
+  const hostedForkHealthySeconds = 1100;
   const hostedForkSeconds = () =>
     Number(
       read('packages/sdk-java/managed-agent-server/pom.xml')
@@ -418,6 +441,21 @@ describe('Hosted real-process gates', () => {
 
   it('keeps the HostedHarnessMySqlIT ceilings inside the shared fork budget', () => {
     const ceilings = ceilingsOf(hostedTestSource('HostedHarnessMySqlIT'));
+    expect(ceilings.length).toBeGreaterThan(0);
+    for (const ceiling of ceilings) {
+      expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
+        hostedForkSeconds(),
+      );
+    }
+  });
+
+  it('keeps the HostedMonitorRunFaultGatesIT ceilings inside the shared fork budget', () => {
+    // The FG8 letters are independent fixtures sharing the fork — a stall
+    // in one letter leaves the other running, so the per-ceiling rule (the
+    // same shape the FG7 channel letters are held to) is the honest model.
+    const ceilings = ceilingsOf(
+      hostedTestSource('HostedMonitorRunFaultGatesIT'),
+    );
     expect(ceilings.length).toBeGreaterThan(0);
     for (const ceiling of ceilings) {
       expect(ceiling + hostedForkHealthySeconds).toBeLessThanOrEqual(
