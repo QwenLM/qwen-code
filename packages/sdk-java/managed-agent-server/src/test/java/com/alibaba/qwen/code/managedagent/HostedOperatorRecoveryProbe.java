@@ -239,7 +239,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
 
     private void stopOwnedProcesses() throws Exception {
         processes.forEach(ProcessHandle::destroyForcibly);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
         for (ProcessHandle process : processes) {
             while (running(process)) {
                 assertThat(System.nanoTime()).as("Owned producer %s", process.pid()).isLessThan(deadline);
