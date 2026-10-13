@@ -43,9 +43,14 @@ public final class ToolPublicationRetentionStore {
     }
 
     static void lockSession(JdbcTemplate jdbc, String tenant, String session) {
+        lockSessionHead(jdbc, tenant, session);
+    }
+
+    static Map<String, Object> lockSessionHead(JdbcTemplate jdbc, String tenant, String session) {
         lockTenant(jdbc, tenant);
-        jdbc.queryForList("SELECT state FROM qwen_managed_session_journal_head"
+        var heads = jdbc.queryForList("SELECT state FROM qwen_managed_session_journal_head"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", tenant, session);
+        return heads.isEmpty() ? null : heads.getFirst();
     }
 
     static void requireLive(JdbcTemplate jdbc, String tenant, String session) {
@@ -313,7 +318,7 @@ public final class ToolPublicationRetentionStore {
                 + " AND state <> 'RETURNED'", scope, publication) != 0) {
             blocker = "put_unresolved";
         } else if (count("SELECT COUNT(*) FROM qwen_tool_publication_operation WHERE scope_key = ?"
-                + " AND publication_id = ? AND state <> 'SUCCEEDED'", scope, publication) != 0) {
+                + " AND publication_id = ? AND state NOT IN ('SUCCEEDED', 'FAILED')", scope, publication) != 0) {
             blocker = "operation_unresolved";
         } else if (count("SELECT COUNT(*) FROM qwen_tool_publication_object WHERE scope_key = ?"
                 + " AND publication_id = ? AND state <> 'VERIFIED'", scope, publication) != 0) {

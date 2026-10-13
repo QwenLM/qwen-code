@@ -317,8 +317,7 @@ public final class InMemoryToolExecutionRepository
         TreeMap<String, ToolExecutionRecord> batch = new TreeMap<>();
         for (ToolExecutionRecord record : recordsById.values()) {
             if (record.belongsTo(session) && !record.isTerminal()
-                    && "background_v3_process".equals(
-                            record.getReference().get("dispatchMode"))) {
+                    && ManagedHoldFamily.of(record) != null) {
                 String key = JdbcRepositorySupport.valueKey(record.getExecutionCallId());
                 if (key.compareTo(after) > 0) {
                     batch.put(key, record);

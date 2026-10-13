@@ -68,6 +68,22 @@ class ManagedCwdChangeOperationTest {
     private final AtomicLong now = new AtomicLong(1_000_000);
 
     @Test
+    void shellProfileRetainsNonExecutingCwdAdmissionAndReplay() {
+        Fixture fixture = fixture(true);
+        String session = fixture.createBoundSession(TENANT, WS);
+        fixture.jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-shell/1' WHERE session_id = ?", session);
+        var admitted = begin(fixture, session, "shell-cwd", "digest", "services/b", 1);
+        assertThat(admitted.operation().kind()).isEqualTo(OperationKind.CWD_CHANGE);
+        assertThat(admitted.operation().targetCwdRelative()).isEqualTo("services/b");
+        assertThat(admitted.operation().expectedContextRevision()).isEqualTo(1);
+        assertThat(admitted.replayed()).isFalse();
+        var replay = begin(fixture, session, "shell-cwd", "digest", "services/b", 1);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.operation().operationId())
+                .isEqualTo(admitted.operation().operationId());
+    }
+
+    @Test
     void admissionAcceptsReplaysAndConflictsByDigest() {
         Fixture fixture = fixture(true);
         String sessionId = fixture.createBoundSession(TENANT, WS);
@@ -1027,6 +1043,23 @@ class ManagedCwdChangeOperationTest {
         var afterAction = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
                 "turn-action", "digest", secondId, List.of(), "payload");
         assertThat(afterAction.turnId()).isNotBlank();
+
+        // H4f: a task cancel stops one task and changes no Session context,
+        // so an open one never holds a later Turn either.
+        String thirdId = fixture.createBoundSession(TENANT, WS);
+        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                + " session_id, operation_id, operation_kind, actor_digest,"
+                + " idempotency_key, request_digest, state,"
+                + " admission_stage, delivery_state, session_status_before,"
+                + " task_id, available_at, created_at, updated_at) VALUES"
+                + " (?, ?, ?, 'TASK_CANCEL', 'actor', 'cancel-key', 'digest',"
+                + " 'RUNNING', 'JAVA_DURABLE', 'LEASED', 'ACTIVE', ?, 0, 0,"
+                + " 0)", TENANT, thirdId, "task-cancel-op",
+                "task_" + "a".repeat(64));
+        var afterTaskCancel = fixture.store.insertTurnCommand(TENANT,
+                "SUBMIT", "turn-task-cancel", "digest", thirdId, List.of(),
+                "payload");
+        assertThat(afterTaskCancel.turnId()).isNotBlank();
     }
 
     // The legacy Turn route keeps its pre-W2 behavior: the workspace gate

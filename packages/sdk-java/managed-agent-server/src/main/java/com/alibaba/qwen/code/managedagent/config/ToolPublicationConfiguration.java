@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.store.AliyunToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.SessionResourceCollectionCollector;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
@@ -10,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionObserver;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationCollector;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.aliyun.oss.ClientBuilderConfiguration;
@@ -88,6 +90,9 @@ public class ToolPublicationConfiguration {
             ManagedSessionStore sessions, ToolPublicationObjectStore objects,
             ManagedAgentProperties properties) {
         var settings = properties.getToolPublication();
+        if (settings.isAsyncVerificationEnabled() && !settings.isJournalHeadAuthorization()) {
+            throw new IllegalStateException("Async verification requires journal-head authorization");
+        }
         if (settings.getOperationTimeout() == null || settings.getClaimTimeout() == null
                 || settings.getMaxVerificationTimeout() == null) {
             throw new IllegalStateException("Tool publication operation and verification deadlines are required");
@@ -130,9 +135,27 @@ public class ToolPublicationConfiguration {
     }
 
     @Bean
+    public ThreadPoolTaskScheduler managedToolVerificationScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("managed-tool-verification-scan-").build();
+    }
+
+    // Rollback disables new async admission; accepted operations must still drain.
+    @Bean(destroyMethod = "close")
+    public ToolPublicationVerifier toolPublicationVerifier(ToolPublicationDataStore data,
+            ManagedAgentProperties properties) {
+        return new ToolPublicationVerifier(data, properties.getToolPublication().getVerificationConcurrency());
+    }
+
+    @Bean
     public ToolPublicationCollector toolPublicationCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ToolPublicationRetentionStore retention, ToolPublicationObjectStore objects, ManagedAgentProperties properties) {
         return new ToolPublicationCollector(jdbc, manager, retention, objects, properties);
+    }
+
+    @Bean
+    public SessionResourceCollectionCollector sessionResourceCollectionCollector(JdbcTemplate jdbc,
+            PlatformTransactionManager manager, ManagedAgentProperties properties) {
+        return new SessionResourceCollectionCollector(jdbc, manager, properties);
     }
 
     private static String required(String value, String label) {

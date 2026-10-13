@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-task-contract.md) | [简体中文](2026-09-27-managed-agent-task-contract.zh-CN.md)
 
-状态：H0a 已实现，仅限契约（它新增的每个路由和 schema，以及它加到现有 schema 的每个属性，当时均为 `planned`）；H0b 已合入；H0c 把四条任务读取路由及其 schema 标记为 `partial`，并去掉 `capabilities.tasks` 上的标记，提供任务列表与详情并宣告任务变化（[设计](2026-09-27-managed-extension-authority.zh-CN.md)）；任务事件、取消和 H1～H6 待实现
+状态：H0a 已实现，仅限契约（它新增的每个路由和 schema，以及它加到现有 schema 的每个属性，当时均为 `planned`）；H0b 已合入；H0c 把四条任务读取路由及其 schema 标记为 `partial`，并去掉 `capabilities.tasks` 上的标记，提供任务列表与详情并宣告任务变化（[设计](2026-09-27-managed-extension-authority.zh-CN.md)）；H3 提供任务事件；H4f 自 `1.40.0` 起为 `child_agent` 任务以 `partial` 提供取消（[设计](2026-10-10-managed-task-cancel.zh-CN.md)）；H1～H6 其余部分待实现
 日期：2026-09-27；契约后续修订：2026-09-29
 Issue：[#12827](https://github.com/QwenLM/qwen-code/issues/12827)，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -169,7 +169,7 @@ operation 模型；本变更选择接受它可见。此后 D4 已把共用命令
 1. 校验键：缺失返回 `400 invalid_request`，格式错误返回 `400 invalid_idempotency_key`。
 2. 检查当前访问权：Session 或任务不可读时返回 `404`；可读但无权取消时返回 `403 task_forbidden`。
 3. 在 tenant/Session/operation-kind/actor/key 域内查找保留的幂等记录。请求摘要包含任务 ID，排除仅用于 trace 的请求 ID。摘要不同返回 `409 idempotency_conflict`；相同则返回同一 operation ID、其最新持久状态及 `replayed: true`。
-4. 仅对新请求依次检查任务支持（`400 unsupported_feature`）、Session 是否为 `active`（否则 `409 session_not_active`，包括 `closing`、`closed`、`archived` 和 `deleting`），最后检查 `action_capabilities` 是否含 `cancel`（否则 `409 task_action_unavailable`）。
+4. 仅对新请求依次检查任务支持（`400 unsupported_feature`）、Session 是否为 `active`（否则 `409 session_not_active`，包括 `closing`、`closed`、`archived` 和 `deleting`），然后检查 `action_capabilities` 是否含 `cancel`（否则 `409 task_action_unavailable`），最后对绑定 Workspace 的 Session 检查其 Workspace 没有被存储迁移栅栏占住（否则 `409 workspace_unavailable`，与所有同类绑定准入一致；由 H4f 加入）。
 5. 原子地复核新请求准入条件并创建 operation，让竞争请求与 Session/任务状态转换串行化。同键并发中已有请求先成功时，按第 3 步处理，不作为新请求。准入还要求该 Session 上没有其他未完成（`pending` 或 `running`）的 operation：取消 operation 与生命周期命令共用同一张持久 operation 表，后者每个 Session 只允许一个未完成的 operation，因此任何未完成的 operation 都会返回 `409 session_operation_active`，而一个未完成的取消同样会阻塞 close、archive 和 delete。
 
 因此，保留的键可以跨越能力和状态变化，但绝不绕过当前访问权检查。资源缺失/已删除或权限撤销仍可返回 `404` 或 `403`；重放承诺以访问权和记录仍保留为前提。合法同键重试不会仅因支持被关闭或任务已结算，就变成新请求的 `400` 或 `409`。
@@ -191,7 +191,7 @@ operation 模型；本变更选择接受它可见。此后 D4 已把共用命令
 `delivery_state: confirmed` 和任务权威方签发的 `receipt_id`。`failed` 和 `recovery_blocked`
 携带 `admission_stage: java_durable` 和 `delivery_state: blocked` —— 投递已经停止，
 确定未被接受或尚未对账的命令不会再被认领和驱动 —— 且不带 `receipt_id`；`failed` 另带
-`failure_code`。`blocked` 表示在对账之前不再尝试投递；目前没有其他 operation 类型产生该值。
+`failure_code`。`blocked` 表示在对账之前不再尝试投递；无法证明清理结果的 Workspace 关闭（`recovery_blocked`）同样携带该值。
 
 任务只有在取消使物理执行结算后才变为 `cancelled`。自然完成若在竞争中胜出，保留自身的终态；命令受理不能覆盖它。物理结果未知会使任务成为 `recovery_blocked`，这与 operation 的受理结果相互独立。
 
@@ -251,6 +251,7 @@ operation）时，创建不同 operation。它们的物理停止请求可以合�
 | `409` | `task_action_unavailable`  | 使用新键时 `action_capabilities` 不含 `cancel`，包括已结算的任务。新增。                                                                                   |
 | `409` | `session_not_active`       | 新取消请求指向非 active 的 Session。                                                                                                                       |
 | `409` | `session_operation_active` | 新取消请求到达时 Session 上有另一个未完成的 operation，与生命周期路由相同。                                                                                |
+| `409` | `workspace_unavailable`    | 新取消请求指向绑定 Workspace 的 Session，而其 Workspace 被存储迁移栅栏占住，与同类绑定准入相同（H4f）。                                                    |
 | `409` | `idempotency_conflict`     | 同一个键用于不同的请求。                                                                                                                                   |
 
 按 API 契约第 10 节，无权读取任务的调用方收到 `404`，而不是 `403`。只读路由唯一会返回的 `403` 是租户过滤器的

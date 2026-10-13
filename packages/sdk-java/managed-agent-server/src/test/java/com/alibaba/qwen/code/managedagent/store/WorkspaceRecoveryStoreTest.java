@@ -114,6 +114,90 @@ class WorkspaceRecoveryStoreTest {
         assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
     }
 
+    @Test
+    void collectedResourceInvalidatesTheCapture() {
+        String session = session("workspace-a");
+        head(session);
+        byte[] bytes = "{\"proof\":true}".getBytes(StandardCharsets.UTF_8);
+        String digest = WorkspaceRecoveryStore.hash(bytes);
+        // The shape the stream-capture collector leaves: identity kept, state COLLECTED, bytes NULL.
+        jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id,"
+                + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
+                + " state, created_at) VALUES (?, 'tenant', 'private-key', ?, 'resource', 'managed-definition', 1, ?, ?,"
+                + " 'MYSQL_INLINE', NULL, 'command', 'COLLECTED', CURRENT_TIMESTAMP(6))",
+                ManagedSessionStore.sessionScopeKey("tenant", session), session, bytes.length, digest);
+        var capture = capture();
+        ObjectNode params = object().put("sessionId", session);
+        params.set("ref", object().put("resourceId", "resource").put("kind", "managed-definition")
+                .put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest));
+        assertThatThrownBy(() -> capture.call("resource", params)).hasMessageContaining("resource_collected");
+        assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("resource_collected");
+    }
+
+    @Test
+    void collectedPublicationObjectInvalidatesTheCapture() {
+        String session = session("workspace-a");
+        head(session);
+        // The shape the publication collector leaves: the publication stays REFERENCED while
+        // the object row is state COLLECTED with its bytes permanently freed.
+        String scope = WorkspaceRecoveryStore.hash(WorkspaceRecoveryStore.JSON.createArrayNode()
+                .add("tenant").add("private-key").add(session).toString());
+        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
+                + " receipt_sequence, receipt_revision) VALUES (?, ?, 'tenant', 'private-key', ?, 'pub-1', ?,"
+                + " 'capture-1', '{}', ?, ?, 'FENCED', 0, 0, 0, 'REFERENCED', TRUE, TRUE, 1, 1)",
+                scope, WorkspaceRecoveryStore.hash("tenant"), session, scope, scope, scope);
+        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key, resource_id,"
+                + " resource_kind, byte_length, sha256, inline_bytes, state, operation_id, created_at)"
+                + " VALUES (?, 'pub-1', 'terminal', 'resource-1', 'managed-tool-terminal', 64, ?, NULL,"
+                + " 'COLLECTED', 'op-1', CURRENT_TIMESTAMP(6))", scope, "a".repeat(64));
+        var capture = capture();
+        assertThatThrownBy(() -> capture.call("publicationObject",
+                object().put("sessionId", session).put("publicationId", "pub-1").put("slotKey", "terminal")))
+                .hasMessageContaining("resource_collected");
+        assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("resource_collected");
+    }
+
+    @Test
+    void registrationRetriesATransientLockWait() {
+        String session = session("workspace-a");
+        head(session);
+        var contended = new JdbcTemplate(jdbc.getDataSource()) {
+            private boolean tripped;
+            @Override public int update(String sql, Object... args) {
+                if (!tripped && sql.startsWith("INSERT INTO managed_workspace_recovery_operation")) {
+                    tripped = true;
+                    throw new org.springframework.dao.CannotAcquireLockException("injected lock wait");
+                }
+                return super.update(sql, args);
+            }
+        };
+        var store = new WorkspaceRecoveryStore(contended, manager, guard, null, "capture",
+                request.toString().getBytes(StandardCharsets.UTF_8));
+        assertThat(store.inspect().path("state").asText()).isEqualTo("CAPTURING");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_session WHERE session_id = ?",
+                Long.class, session)).isOne();
+    }
+
+    @Test
+    void registrationExhaustsItsRetriesOnPersistentLockWaits() {
+        var contended = new JdbcTemplate(jdbc.getDataSource()) {
+            @Override public int update(String sql, Object... args) {
+                if (sql.startsWith("INSERT INTO managed_workspace_recovery_operation")) {
+                    throw new org.springframework.dao.CannotAcquireLockException("injected lock wait");
+                }
+                return super.update(sql, args);
+            }
+        };
+        assertThatThrownBy(() -> new WorkspaceRecoveryStore(contended, manager, guard, null, "capture",
+                request.toString().getBytes(StandardCharsets.UTF_8)))
+                .isInstanceOf(org.springframework.dao.CannotAcquireLockException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_operation", Long.class)).isZero();
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"owner", "generation", "protected", "operation", "public", "head"})
     void refusesInconsistentRetirementEvidence(String damage) {
@@ -131,6 +215,126 @@ class WorkspaceRecoveryStoreTest {
         }
         assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_operation", Integer.class)).isZero();
+    }
+
+    @Test
+    void capturesAndVerifiesSessionsThatPinStoredDefinitions() throws Exception {
+        String builtin = session("workspace-a");
+        // A stored definition is compiled and pinned at admission (D8c-1);
+        // the storage also holds a deleted Session pinned to it.
+        String agentId = "agent_" + "b".repeat(32);
+        String definitionDigest = "c".repeat(64);
+        String definitionJson = "{\"model\":{},\"instructions\":\"\","
+                + "\"tools\":[{\"type\":\"hosted_profile\","
+                + "\"profile\":\"hosted-workspace-files/1\"}],"
+                + "\"permission_policy\":{\"approval_mode\":\"default\"}}";
+        sessions.setManagedAgentDefinitionStore(
+                new ManagedAgentDefinitionStore(jdbc));
+        String pinned = new TransactionTemplate(manager).execute(status -> {
+            new ManagedAgentDefinitionStore(jdbc).create("tenant", "def",
+                    "def-digest", agentId, definitionDigest, definitionJson,
+                    1L);
+            return sessions.insertWorkspaceSessionCommand("tenant", "actor",
+                    UUID.randomUUID().toString(),
+                    "sha256:" + "a".repeat(64), agentId, null, null, List.of(),
+                    null, new WorkspaceSelection("workspace-b", "."))
+                    .sessionId();
+        });
+        String deleted = new TransactionTemplate(manager).execute(status ->
+                sessions.insertWorkspaceSessionCommand("tenant", "actor",
+                        UUID.randomUUID().toString(),
+                        "sha256:" + "a".repeat(64), agentId, "1", null,
+                        List.of(), null,
+                        new WorkspaceSelection("workspace-b", "."))
+                        .sessionId());
+        head(deleted);
+        retireSession(deleted);
+        // The pinned Session carries non-empty agent instructions published
+        // through the production publisher; W1 must read them back.
+        head(pinned);
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET workspace_id = 'workspace-b'"
+                + " WHERE session_id = ?", pinned);
+        var instructions = new ManagedSessionStore(jdbc).publishAgentInstructions(
+                "tenant", "workspace-b", pinned, "Keep the agent instructions. 保留指令。");
+        JsonNode sources = call(capture(), "sessions").path("sessions");
+        assertThat(sources).hasSize(3);
+        JsonNode pinnedSource = null;
+        JsonNode builtinSource = null;
+        JsonNode deletedSource = null;
+        for (JsonNode entry : sources) {
+            JsonNode source = entry.path("source");
+            String id = source.path("sessionId").asText();
+            if (id.equals(pinned)) {
+                pinnedSource = source;
+            } else if (id.equals(builtin)) {
+                builtinSource = source;
+            } else if (id.equals(deleted)) {
+                deletedSource = source;
+            }
+        }
+        assertThat(pinnedSource).isNotNull();
+        assertThat(deletedSource).isNotNull();
+        for (JsonNode source : List.of(pinnedSource, deletedSource)) {
+            assertThat(source.path("agentRevision").asText()).isEqualTo("1");
+            assertThat(source.path("agentDefinitionDigest").asText())
+                    .isEqualTo(definitionDigest);
+        }
+        assertThat(builtinSource.path("agentRevision").asText())
+                .isEqualTo("1");
+        assertThat(builtinSource.path("agentDefinitionDigest").isNull())
+                .isTrue();
+        // The recovery read of the PUBLISHED instructions resource must
+        // return the published bytes (resource_layout_unsupported before
+        // the reader accepted the kind).
+        var capture = capture();
+        ObjectNode ref = object().put("resourceId", instructions.resourceId())
+                .put("kind", instructions.kind())
+                .put("schemaVersion", instructions.schemaVersion())
+                .put("byteLength", (int) instructions.byteLength())
+                .put("digest", instructions.digest());
+        ObjectNode read = object().put("sessionId", pinned);
+        read.set("ref", ref);
+        assertThat(capture.call("resource", read).path("bytesBase64").asText())
+                .isEqualTo(java.util.Base64.getEncoder().encodeToString(
+                        "Keep the agent instructions. 保留指令。"
+                                .getBytes(StandardCharsets.UTF_8)));
+        capture.call("enqueueRef", read);
+        assertThat(capture.call("nextRef", object().put("sessionId", pinned)).toString())
+                .isEqualTo(ref.toString());
+        capture.call("completeRef", read);
+        assertThat(capture.inspect().path("pendingReferences").asLong())
+                .isZero();
+
+        // Capture and verify still pass on the mixed storage.
+        ObjectNode asset = object().put("key", "b".repeat(64));
+        asset.set("metadata", object().put("type", "entry").put("path",
+                "workspace").put("entryType", "directory").put("mode", 493));
+        capture.call("asset", asset);
+        for (String id : List.of(builtin, pinned, deleted)) {
+            capture.call("sessionComplete", object().put("sessionId", id)
+                    .set("summary", object()));
+        }
+        Path manifest = Files.createDirectories(bundle
+                .resolve(".w1-recovery")).resolve("manifest.json");
+        Files.writeString(manifest, manifest(capture).toString());
+        ObjectNode finish = object().put("manifestDigest",
+                WorkspaceRecoveryStore.hash(Files.readAllBytes(manifest)));
+        finish.set("result", object().put("contentVerified", true)
+                .put("activation", false));
+        assertThat(capture.call("finish", finish).path("result")
+                .path("authorityCompatible").asBoolean()).isTrue();
+        String original = request.path("operationId").asText();
+        request.put("captureOperationId", original).put("operationId",
+                UUID.randomUUID().toString());
+        Files.move(root, temporary.resolve("lost-source"));
+        var verify = store("verify");
+        for (String id : List.of(builtin, pinned, deleted)) {
+            verify.call("sessionComplete", object().put("sessionId", id)
+                    .set("summary", object()));
+        }
+        verify.call("asset", asset);
+        assertThat(verify.call("finish", finish).path("state").asText())
+                .isEqualTo("VERIFIED");
     }
 
     @Test
