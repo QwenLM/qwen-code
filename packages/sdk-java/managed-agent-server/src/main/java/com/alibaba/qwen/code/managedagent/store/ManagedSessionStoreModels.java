@@ -14,11 +14,18 @@ public final class ManagedSessionStoreModels {
     public static final String WRITER_TOKEN_HEADER =
             "X-Qwen-Managed-Writer-Token";
     public static final int MAX_INLINE_RESOURCE_BYTES = 64 * 1024;
+    /** The agent-instructions bound the publisher and both verifiers
+     * must agree on (admission, publish, verify, recovery read). */
+    public static final int MAX_AGENT_INSTRUCTIONS_BYTES = 64 * 1024;
     public static final int MAX_RESOURCES_PER_TRANSACTION = 1024;
     public static final int MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
     public static final int MAX_TRANSACTION_EVENTS = 256;
     /** The deepest record line the Session authority's reader accepts. */
     public static final int MAX_JSON_DEPTH = 64;
+    /** The largest record line the authority's reader parses. */
+    public static final int MAX_EVENT_BYTES = 1024 * 1024;
+    /** The largest commit marker the authority's reader derives a digest of. */
+    public static final int MAX_COMMIT_MARKER_BYTES = 64 * 1024;
     public static final int MIN_WRITER_TOKEN_LENGTH = 32;
     public static final int MAX_WRITER_TOKEN_LENGTH = 512;
     public static final long MIN_LEASE_MILLIS = 1_000;
@@ -56,6 +63,16 @@ public final class ManagedSessionStoreModels {
     private ManagedSessionStoreModels() {
     }
 
+    public record AuthorizeLifecycleRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            String kind) {
+        public AuthorizeLifecycleRequest(String workspaceId, String writerId, long writerGeneration) {
+            this(workspaceId, writerId, writerGeneration, null);
+        }
+    }
+
     public record AcquireWriterRequest(
             @NotBlank @Size(max = 512) String workspaceId,
             @NotBlank @Size(max = 512) String writerId,
@@ -81,7 +98,12 @@ public final class ManagedSessionStoreModels {
     public record WriterGrant(long writerGeneration, long leaseUntil,
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
-            boolean replayed) {
+            boolean replayed, int supportedStorageVersion) {
+        public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
+                long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed) {
+            this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
+                    activationEpoch, replayed, ManagedSessionReaderVersion.SUPPORTED);
+        }
     }
 
     public record SealReceipt(long writerGeneration, String state,

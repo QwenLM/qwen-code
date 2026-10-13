@@ -2,12 +2,18 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
@@ -17,6 +23,52 @@ import org.springframework.jdbc.core.JdbcTemplate;
  */
 class ManagedSessionStoreCredentialTest {
     private static final String KEY = "0123456789abcdef0123456789abcdef";
+
+    @ParameterizedTest
+    @CsvSource({"ordinary", "lifecycle", "acquire", "renew", "seal", "commit"})
+    void lifecycleWriterPathsRefuseForeignCredentialsBeforeStateLookup(String route) {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.getDataSource()).thenReturn(new JdbcDataSource());
+        ManagedSessionStore store = new ManagedSessionStore(jdbc);
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getSessionStore().setBindingKey(KEY);
+        WriterCredentialPolicy policy = new WriterCredentialPolicy(properties);
+        store.setCredentials(policy);
+        reset(jdbc);
+
+        for (String token : new String[]{null, "self-minted-token-self-minted-token-0",
+                policy.issue("foreign-tenant", "workspace", "session"),
+                policy.issue("tenant", "foreign-workspace", "session"),
+                policy.issue("tenant", "workspace", "foreign-session")}) {
+            assertThatThrownBy(() -> invokeWriterPath(store, route, token))
+                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                        assertThat(error.getStatus().value()).isEqualTo(403);
+                        assertThat(error.getCode()).isEqualTo("writer_credential_invalid");
+                    });
+            verifyNoInteractions(jdbc);
+        }
+    }
+
+    private static void invokeWriterPath(ManagedSessionStore store, String route, String token) {
+        var authority = new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority("operation", 1);
+        switch (route) {
+            case "ordinary" -> store.authorizeOrdinary("tenant", "session", token,
+                    new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "writer", 1));
+            case "lifecycle" -> store.authorizeLifecycle("tenant", "session", token,
+                    new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "writer", 1), authority);
+            case "acquire" -> store.acquireWriter("tenant", "session", token,
+                    new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L), authority);
+            case "renew" -> store.renewWriter("tenant", "session", token,
+                    new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", 1, 60_000L), authority);
+            case "seal" -> store.sealWriter("tenant", "session", token,
+                    new ManagedSessionStoreModels.SealWriterRequest("workspace", "writer", 1), authority);
+            case "commit" -> store.commit("tenant", "session", token,
+                    new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "writer", 1, 0, 0,
+                            "transaction", "operation", "command", "0".repeat(64), 0, 0, 0, null, null, null,
+                            0, null, 1, "", "0".repeat(64), java.util.List.of()), authority);
+            default -> throw new IllegalArgumentException(route);
+        }
+    }
 
     @Test
     void publicationWriterLockRequiresTheBoundCredential() {

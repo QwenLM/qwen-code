@@ -59,6 +59,16 @@ describe('buildFailureLines', () => {
       }),
     ).toEqual(['[bad] boom\n  at run']);
   });
+
+  it('strips bidi controls from labels', () => {
+    const [line] = buildFailureLines({
+      runId: 'wf_1',
+      dispatches: [
+        { status: 'failed', label: 'build\u202ekcab\u2066', error: 'HTTP 400' },
+      ],
+    });
+    expect(line).toBe('[buildkcab] HTTP 400');
+  });
 });
 
 describe('reportedFailureLines', () => {

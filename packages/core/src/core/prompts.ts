@@ -270,6 +270,7 @@ export function getCustomSystemPrompt(
  */
 export interface PromptToolSurface {
   declaredTools?: ReadonlySet<string>;
+  agentReachable?: boolean;
   executionSandboxFilesystem?: 'read-only' | 'workspace-write';
   executionSandboxBackend?: 'bwrap' | 'landlock';
   executionSandboxNetwork?: 'open' | 'closed';
@@ -277,13 +278,15 @@ export interface PromptToolSurface {
 
 /**
  * Which tools each gated line of `## Using Your Tools` talks about. A line
- * survives only when every tool it names is declared: a line that named a
- * missing tool would send the model after something it cannot call, which is
- * the defect this gating exists to fix. A deferred tool is reachable but not
- * declared, so its line drops too; its selection rule travels in the first
- * description line the deferred-tool reminder shows instead (#12702). Lines
- * absent from this table are policy that holds regardless of the tool surface
- * (tool fallback, parallel calls, respecting denials) and are never dropped.
+ * survives only when every tool it names is one the session can call: declared,
+ * or — for Agent alone — reachable through the deferred-tool bridge (see
+ * `gateToolGuidance`). A line that named an uncallable tool would send the
+ * model after something it cannot call, which is the defect this gating exists
+ * to fix. Any other deferred tool is reachable but not declared, so its line
+ * drops; its selection rule travels in the first description line the
+ * deferred-tool reminder shows instead (#12702). Lines absent from this table
+ * are policy that holds regardless of the tool surface (tool fallback, parallel
+ * calls, respecting denials) and are never dropped.
  */
 const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
   prefix: string;
@@ -314,7 +317,16 @@ const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
 const PREFER_DEDICATED_TOOLS_PREFIX = '- **Prefer Dedicated Tools:**';
 
 /**
- * Drops the tool-guidance lines whose tools this session did not declare.
+ * Drops tool-guidance lines whose tools the session cannot call. Agent policy
+ * also survives when Agent is reachable through the deferred-tool bridge.
+ *
+ * Agent is deliberately the only tool with that exception: the delegation and
+ * codebase-search bullets are the policy that sends the model to the bridge to
+ * discover Agent, so dropping them whenever Agent is deferred would turn
+ * deferral into silent removal. Every other deferred tool's line (monitor
+ * included) is still dropped — discovery of those is the startup reminder's
+ * job, and their bullets are usage guidance rather than the policy that drives
+ * their own discovery.
  *
  * Implemented as a line filter rather than a rebuilt template on purpose: with
  * no snapshot the section returns unchanged, so the default prompt cannot drift
@@ -331,7 +343,14 @@ function gateToolGuidance(
     const gate = TOOL_GUIDANCE_LINE_GATES.find((entry) =>
       line.startsWith(entry.prefix),
     );
-    return !gate || gate.tools.every((tool) => declared.has(tool));
+    return (
+      !gate ||
+      gate.tools.every(
+        (tool) =>
+          declared.has(tool) ||
+          (tool === ToolNames.AGENT && surface?.agentReachable === true),
+      )
+    );
   });
   // The "prefer dedicated tools" bullet only introduces its sub-bullets, so it
   // goes when every tool it was going to recommend is gone.

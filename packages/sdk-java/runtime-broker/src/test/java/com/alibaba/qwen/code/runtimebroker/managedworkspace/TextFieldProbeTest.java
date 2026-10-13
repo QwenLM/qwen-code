@@ -22,7 +22,7 @@ class TextFieldProbeTest {
         probe("actorId", mismatches, text -> new WorkspaceActor(TENANT, text));
         probe("grant actorId", mismatches,
                 text -> GrantedWorkspaceAccessPolicy.builder().grant(TENANT,
-                        text, "ws-a", WorkspaceAccess.READ));
+                        text, "ws-a", WorkspaceAccess.READER));
 
         assertEquals(List.of(), mismatches);
     }

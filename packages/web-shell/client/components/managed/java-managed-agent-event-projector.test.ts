@@ -13,6 +13,39 @@ import type {
 } from './java-managed-agent-client';
 
 describe('java managed agent event projector', () => {
+  it('projects a context change without creating or settling a chat message', () => {
+    const context = projectJavaAgentEvent({
+      sequence: 2,
+      eventId: 'e2',
+      sessionId: 's1',
+      type: 'session.context.changed',
+      createdAt: 2,
+      terminal: false,
+      data: {
+        workspaceId: 'ws',
+        cwdRelative: 'B',
+        contextRevision: 2,
+        operationId: 'op',
+      },
+    });
+    expect(context).toMatchObject({ type: 'context_changed', turnId: '' });
+    const delta = {
+      id: 1,
+      at: 1,
+      sessionId: 's1',
+      turnId: 't1',
+      type: 'assistant_delta' as const,
+      data: { text: 'hello' },
+    };
+    expect(
+      managedEventsToMessages(
+        [delta, context!, { ...delta, id: 3, data: { text: ' world' } }],
+        '',
+      ),
+    ).toMatchObject([
+      { role: 'assistant', content: 'hello world', isStreaming: true },
+    ]);
+  });
   it('recovers the same tool from real Java publication, snapshot and event responses', () => {
     // Exported by ManagedArtifactApiIntegrationTest after publication/receipt and SQL projection.
     const live = javaFixture.events.flatMap((event) => {
@@ -171,6 +204,68 @@ describe('java managed agent event projector', () => {
       })[0]?.type,
     ).toBe('tool_requested');
   });
+
+  it('replays a store-canonicalized pending tool as requested, not started', () => {
+    // The store canonicalizes any unknown status to in_progress but keeps
+    // the raw value in attributes.status; an approval-gated tool must not
+    // come back as already running after a reload.
+    expect(
+      projectJavaAgentItem({
+        itemId: 'item-1',
+        sessionId: 's',
+        turnId: 't',
+        type: 'tool_call',
+        role: 'assistant',
+        status: 'in_progress',
+        content: [],
+        attributes: { status: 'pending' },
+        firstSequence: 1,
+        lastSequence: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      })[0]?.type,
+    ).toBe('tool_requested');
+    // A genuinely running tool (no raw hint) still comes back as started.
+    expect(
+      projectJavaAgentItem({
+        itemId: 'item-2',
+        sessionId: 's',
+        turnId: 't',
+        type: 'tool_call',
+        role: 'assistant',
+        status: 'in_progress',
+        content: [],
+        attributes: {},
+        firstSequence: 2,
+        lastSequence: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      })[0]?.type,
+    ).toBe('tool_started');
+  });
+
+  it('lets a settled canonical status outrank the raw hint', () => {
+    // settleTurnItems rewrites item_status when the Turn ends without
+    // touching attributes_json: a tool that was still pending at that
+    // moment must replay by the canonical status, not its frozen hint.
+    expect(
+      projectJavaAgentItem({
+        itemId: 'item-3',
+        sessionId: 's',
+        turnId: 't',
+        type: 'tool_call',
+        role: 'assistant',
+        status: 'completed',
+        content: [],
+        attributes: { status: 'pending' },
+        firstSequence: 3,
+        lastSequence: 3,
+        createdAt: 3,
+        updatedAt: 3,
+      })[0]?.type,
+    ).toBe('tool_completed');
+  });
+
   it('maps a stream.reconciled event to a stream_gap resynchronization', () => {
     // The Java side emits stream.reconciled on continuation retraction;
     // deleting this mapping once stayed invisible to every test.

@@ -25,6 +25,11 @@
         <maven-failsafe-plugin.version>3.5.6</maven-failsafe-plugin.version>
         <json-schema-validator.version>1.5.9</json-schema-validator.version>
         <spotbugs-maven-plugin.version>4.10.4.1</spotbugs-maven-plugin.version>
+        <!-- The gRPC client is a shaded artifact (io.grpc/com.google are
+             relocated), so the Boot BOM never re-aligns it; the dependency
+             gate is empirical (clean tree + a real-broker round-trip), not a
+             version-table check. -->
+        <rocketmq-client-java.version>5.1.0</rocketmq-client-java.version>
     </properties>
 
     <dependencies>
@@ -32,6 +37,11 @@
             <groupId>com.aliyun.oss</groupId>
             <artifactId>aliyun-sdk-oss</artifactId>
             <version>3.18.4</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-client-java</artifactId>
+            <version>${rocketmq-client-java.version}</version>
         </dependency>
         <dependency>
             <groupId>com.alibaba</groupId>
@@ -134,6 +144,14 @@
                         </configuration>
                     </execution>
                     <execution>
+                        <id>workspace-migration</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>workspace-migration</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceMigrationMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <id>operator-recovery</id>
                         <goals><goal>repackage</goal></goals>
                         <configuration>
@@ -221,8 +239,12 @@
                             <failIfNoTests>true</failIfNoTests>
                             <!-- The Hosted*IT classes share one fork; the file
                                  history control calls roughly doubled the
-                                 ToolTurn driver's runtime. -->
-                            <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
+                                 ToolTurn driver's runtime. The channel fault
+                                 gates (five letters FG7a,b,d–f plus the FG7c
+                                 crash class) extend the fork's wall-clock by
+                                 ~150 s — ~60 s of it test time — at 2×
+                                 headroom. -->
+                            <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>
@@ -260,6 +282,20 @@
                     <includes><include>**/HostedWorkspaceToolTurnIT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
                     <forkedProcessTimeoutInSeconds>300</forkedProcessTimeoutInSeconds>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
+            <id>hosted-channel-gates</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/HostedChannel*IT.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>

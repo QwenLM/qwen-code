@@ -1,3 +1,32 @@
+CREATE TABLE IF NOT EXISTS managed_workspace_execution_lease (
+    storage_key CHAR(64) PRIMARY KEY,
+    holder_key CHAR(64),
+    binding_id VARCHAR(512),
+    runtime_generation BIGINT,
+    runtime_session_id VARCHAR(512),
+    tenant_id VARCHAR(256),
+    storage_id VARCHAR(256),
+    mount_revision BIGINT NOT NULL DEFAULT 0,
+    mount_state VARCHAR(16) NOT NULL DEFAULT 'UNVERIFIED',
+    mount_operation_id CHAR(36),
+    mount_completed_operation_id CHAR(36),
+    mount_root VARCHAR(2048),
+    mount_host_id VARCHAR(256),
+    mount_device VARCHAR(32),
+    mount_inode VARCHAR(32),
+    mount_birth_time VARCHAR(64),
+    mount_registration_id CHAR(36),
+    storage_kind VARCHAR(16) NOT NULL DEFAULT 'LOCAL',
+    csi_phase VARCHAR(16) NOT NULL DEFAULT 'RELEASED',
+    csi_revision BIGINT NOT NULL DEFAULT 0,
+    csi_reservation_id CHAR(36),
+    csi_registration_key CHAR(64),
+    csi_registration_revision BIGINT,
+    csi_provision_request_id VARCHAR(512),
+    maintenance_id CHAR(32),
+    INDEX idx_execution_lease_maintenance (maintenance_id)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE IF NOT EXISTS qwen_runtime_placement_guard (
     tenant_key CHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(512) NOT NULL
@@ -59,7 +88,8 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
         UNIQUE (request_key, runtime_generation),
     INDEX idx_runtime_binding_scope
         (scope_key, isolation_key, binding_state),
-    INDEX qwen_runtime_harness_bindings_idx (isolation_key, isolation_class)
+    INDEX qwen_runtime_harness_bindings_idx (isolation_key, isolation_class),
+    INDEX qwen_runtime_storage_bindings_idx (storage_id, binding_id)
 );
 
 CREATE TABLE IF NOT EXISTS managed_workspace_operator_recovery (
@@ -102,7 +132,8 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_session (
     last_active_at DATETIME(6) NOT NULL,
     PRIMARY KEY (scope_key, runtime_session_id),
     INDEX idx_runtime_session_binding
-        (binding_id, runtime_generation, session_state)
+        (binding_id, runtime_generation, session_state),
+    INDEX idx_runtime_session_id (runtime_session_id)
 );
 
 CREATE TABLE IF NOT EXISTS qwen_tool_execution (
@@ -146,5 +177,18 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_harness_drain (
     harness_key VARCHAR(64) NOT NULL,
     tenant_id VARCHAR(512) NOT NULL,
     harness_session_id VARCHAR(512) NOT NULL,
+    phase VARCHAR(32) NOT NULL DEFAULT 'DRAINING',
+    operation_id VARCHAR(128),
+    claim_generation BIGINT NOT NULL DEFAULT 0,
+    claim_lease_until BIGINT,
     PRIMARY KEY (tenant_key, harness_key)
+);
+
+CREATE TABLE IF NOT EXISTS qwen_runtime_storage_fence (
+    tenant_key VARCHAR(64) NOT NULL,
+    storage_key VARCHAR(64) NOT NULL,
+    tenant_id VARCHAR(512) NOT NULL,
+    storage_id VARCHAR(512) NOT NULL,
+    operation_id VARCHAR(36) NOT NULL,
+    PRIMARY KEY (tenant_key, storage_key)
 );

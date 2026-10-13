@@ -30,9 +30,29 @@ class JdbcRepositoryTest {
                 }
             }
         }
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("DROP INDEX qwen_runtime_storage_bindings_idx");
+            statement.execute("DROP INDEX idx_runtime_session_id");
+        }
         JdbcRepositoryContract.writeLegacyRows(source, "standalone-upgrade");
         JdbcRuntimeBrokerSchema.initialize(source);
         JdbcRuntimeBrokerSchema.initialize(source);
+        try (var connection = source.getConnection()) {
+            for (var entry : java.util.Map.of("qwen_runtime_binding", "qwen_runtime_storage_bindings_idx",
+                    "qwen_runtime_session", "idx_runtime_session_id").entrySet()) {
+                int found = 0;
+                try (var indexes = connection.getMetaData().getIndexInfo(
+                        connection.getCatalog(), null, entry.getKey(), false, false)) {
+                    while (indexes.next()) {
+                        if (entry.getValue().equalsIgnoreCase(indexes.getString("INDEX_NAME"))
+                                && indexes.getInt("ORDINAL_POSITION") == 1) {
+                            found++;
+                        }
+                    }
+                }
+                org.junit.jupiter.api.Assertions.assertEquals(1, found, entry.getValue());
+            }
+        }
         var executions = new JdbcToolExecutionRepository(source);
         for (String state : java.util.List.of("PREPARED", "UNKNOWN", "SETTLED")) {
             var stored = executions.findByIdempotencyKey("standalone-upgrade-" + state + "-key");

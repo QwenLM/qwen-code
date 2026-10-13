@@ -41,6 +41,10 @@ const CARRIED_SYSTEM_SUBTYPES = new Set([
  * record marks where the message came from rather than making it another kind
  * of content, so it belongs on the message channel.
  */
+// `agent_mention` / `agent_message` (session multi-agent) are deliberately
+// absent: a Managed session refuses them, and the daemon reports agents as not
+// supported in managed sessions.
+// TODO(multi-agent): map them if managed sessions ever host agents.
 const CARRIED_MESSAGE_SUBTYPES = new Set([
   'goal_runtime',
   'mid_turn_user_message',
