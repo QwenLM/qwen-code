@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from qwen_code_sdk.transport import (
     ProcessTransport,
     _resolve_windows_command,
