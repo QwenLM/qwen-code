@@ -154,6 +154,32 @@ describe('contextLengthError', () => {
     expect(info.limitTokens).toBe(128000);
   });
 
+  it('detects SGLang input overflow and parses both token counts', () => {
+    const info = getContextLengthExceededInfo(
+      new Error(
+        "400 The input (40000 tokens) is longer than the model's context length (32768 tokens).",
+      ),
+    );
+
+    expect(info.isExceeded).toBe(true);
+    expect(info.actualTokens).toBe(40000);
+    expect(info.limitTokens).toBe(32768);
+    expect(info.limitKind).toBe('total');
+  });
+
+  it('parses SGLang total token counts when the completion pushes past the window', () => {
+    const info = getContextLengthExceededInfo(
+      new Error(
+        "400 Requested token count exceeds the model's maximum context length of 32768 tokens. You requested a total of 40000 tokens: 39000 tokens from the input messages and 1000 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.",
+      ),
+    );
+
+    expect(info.isExceeded).toBe(true);
+    expect(info.actualTokens).toBe(40000);
+    expect(info.limitTokens).toBe(32768);
+    expect(info.limitKind).toBe('total');
+  });
+
   it('extracts nested JSON error messages from strings', () => {
     const info = getContextLengthExceededInfo(
       new Error(

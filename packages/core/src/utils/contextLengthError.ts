@@ -34,6 +34,9 @@ const TIMEOUT_PATTERNS = [
 const CONTEXT_LENGTH_PATTERNS = [
   /\bcontext[_\s-]?length[_\s-]?exceeded\b/i,
   /\bmaximum context length\b/i,
+  // SGLang: "The input (40000 tokens) is longer than the model's context
+  // length (32768 tokens)."
+  /\bis longer than the model's context length\b/i,
   /\bprompt\s+(?:is\s+)?too long\b/i,
   /\binput\s+(?:token\s+)?(?:count\s+|length\s+)?(?:is\s+)?too long\b/i,
   /\brange of input length should be\b/i,
@@ -76,6 +79,29 @@ function parseTokenCounts(text: string): {
   const maxContextLimitMatch = text.match(
     /maximum context length is\s*(\d[\d,]*)\s*tokens?/i,
   );
+  // SGLang words the same limit two ways: an input already past the window,
+  // and input plus max_new_tokens past it. Both carry the real token counts.
+  const sglangMatch = text.match(
+    /input \(\s*(\d[\d,]*)\s*tokens?\s*\) is longer than the model's context length \(\s*(\d[\d,]*)\s*tokens?\s*\)/i,
+  );
+  if (sglangMatch) {
+    return {
+      actualTokens: parseInteger(sglangMatch[1]!),
+      limitTokens: parseInteger(sglangMatch[2]!),
+      limitKind: 'total',
+    };
+  }
+  const sglangTotalMatch = text.match(
+    /maximum context length of\s*(\d[\d,]*)\s*tokens?\.\s*You requested a total of\s*(\d[\d,]*)\s*tokens?/i,
+  );
+  if (sglangTotalMatch) {
+    return {
+      actualTokens: parseInteger(sglangTotalMatch[2]!),
+      limitTokens: parseInteger(sglangTotalMatch[1]!),
+      limitKind: 'total',
+    };
+  }
+
   if (maxContextLimitMatch) {
     return {
       limitTokens: parseInteger(maxContextLimitMatch[1]!),
