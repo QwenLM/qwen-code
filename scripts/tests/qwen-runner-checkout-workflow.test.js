@@ -21,6 +21,12 @@ const jobs = [
   ...['test', 'flyway-migrations', 'mysql-integration', 'daemon-e2e'].map(
     (name) => ['sdk-java', name],
   ),
+  // The two open-PR re-check workflows run on the same shared `ecs-qwen` pool
+  // as `sdk-java.yml`, so they inherit the same stale workspace `.git`; they
+  // were missed when the reset first landed and are pinned here so the gap
+  // cannot reopen silently.
+  ...['recheck'].map((name) => ['sdk-java-flyway-open-prs', name]),
+  ...['recheck'].map((name) => ['sdk-java-contract-open-prs', name]),
   ...['issue-autofix', 'build-cli', 'review-address'].map((name) => [
     'qwen-autofix',
     name,
