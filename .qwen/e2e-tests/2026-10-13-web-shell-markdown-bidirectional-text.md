@@ -23,12 +23,23 @@ Compare the same content before and after the bidirectional text rules.
 - An ordinary English-only Markdown response retains its existing layout.
 - Streaming and settled Markdown use the same automatic base direction.
 
+## Scope limits
+
+- Prose direction is inferred once at the message root. A later paragraph with
+  a different leading direction still inherits the message-level base until
+  per-node direction handling is added.
+- Markdown table cells retain their existing physical left alignment; logical
+  table alignment is a separate follow-up.
+
 ## Automated coverage
 
 The Markdown stylesheet contract test pins automatic direction on message,
 inline-code, and fenced-code elements together with the corresponding
-`unicode-bidi` isolation rules. The existing Markdown component suite guards
-the surrounding streaming, settled, highlighted, plain, Mermaid, and
+`unicode-bidi` isolation rules. The Web Shell visual suite now drives the real
+composer and mock-daemon stream with the mixed-direction response in both dark
+and light themes. It checks the live DOM direction and isolation values before
+capturing the streaming and Shiki-highlighted settled states. The existing
+Markdown component suite guards the surrounding plain, Mermaid, and
 custom-renderer behavior against regressions.
 
 ## Evidence
@@ -36,4 +47,5 @@ custom-renderer behavior against regressions.
 The local Chromium before/after capture uses the same mixed-direction input in
 both panels. The revised panel keeps the Hebrew sentence and embedded LTR tokens
 in reading order, and the mixed fenced block selects direction per line. The
+four visual captures cover streaming and settled rendering in both themes. The
 focused reproduction and Markdown component suites pass after the repair.
