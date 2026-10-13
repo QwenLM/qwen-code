@@ -43,6 +43,63 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it.each(['.', 'assets'])(
+    'ships the spreadsheet worker in a lazy chunk in dist/%s',
+    (directory) => {
+      const chunkDir = resolve(DIST_DIR, directory);
+      const files = readdirSync(chunkDir).filter((name) =>
+        name.endsWith('.js'),
+      );
+      const previewName = files.find((name) =>
+        /^SpreadsheetPreview-.*\.js$/.test(name),
+      );
+      expect(previewName).toBeDefined();
+      const preview = readFileSync(resolve(chunkDir, previewName!), 'utf8');
+      expect(preview).toContain('data-web-shell-excel-preview');
+      expect(preview).toContain('new Worker(');
+      expect(preview).toContain('createObjectURL');
+      const otherChunks = files
+        .filter((name) => name !== previewName)
+        .map((name) => readFileSync(resolve(chunkDir, name), 'utf8'))
+        .join('\n');
+      expect(otherChunks.includes(`import("./${previewName}")`)).toBe(true);
+      expect(
+        /(?:from|import)\s*["']\.\/SpreadsheetPreview-[^"']+\.js["']/.test(
+          otherChunks,
+        ),
+      ).toBe(false);
+      expect(otherChunks.includes('data-web-shell-excel-preview')).toBe(false);
+      const workerCode = preview.match(/["']([A-Za-z0-9+/=]{1000,})["']/)?.[1];
+      expect(workerCode).toBeDefined();
+      const decodedWorker = Buffer.from(workerCode!, 'base64').toString();
+      // Parser code must stay inside the worker, even if the UI remains lazy.
+      for (const marker of [
+        'Worksheet index is outside the preview range.',
+        'Cannot merge already merged cells',
+      ]) {
+        expect(
+          decodedWorker.includes(marker),
+          `Worker contains ${marker}`,
+        ).toBe(true);
+        expect(
+          preview.includes(marker),
+          `Parser leaked into preview: ${marker}`,
+        ).toBe(false);
+        expect(
+          otherChunks.includes(marker),
+          `Parser leaked outside worker: ${marker}`,
+        ).toBe(false);
+      }
+      expect(otherChunks.includes(workerCode!)).toBe(false);
+      // Embedded hosts must not resolve external ExcelJS/SSF packages themselves.
+      expect(
+        /(?:from|import)\s*["'](?:exceljs|ssf)["']/.test(
+          `${preview}\n${otherChunks}\n${decodedWorker}`,
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('does not depend on @qwen-code/webui', () => {
     const bundle = readPackageJavascript();
     expect(bundle).not.toContain('@qwen-code/webui');
@@ -415,10 +472,11 @@ describe('build artifact — transcript entry (#11031)', () => {
     // the 1,325,251 measurement was taken, so the entry was already past the
     // 1,326,500 ceiling at that re-measure's own merge commit (#13964); the
     // Managed task panel's copy (#13936) stays stubbed out of this entry.
-    // At 008c0de7 the remainder measures 1,327,531. Teammate activity notices
-    // add attributed bubbles for tool calls and inter-agent messages to this
-    // entry. The ceiling leaves a small margin around both intentional UI
-    // additions; re-measure and lower it if the entry gets leaner.
+    // At 008c0de7 the remainder measures 1,327,531. The read-only Excel
+    // preview adds shared locale strings while its parser, worker and markup
+    // remain in the lazy SpreadsheetPreview chunk. Teammate activity notices
+    // add attributed tool and inter-agent message bubbles to this entry.
+    // The merged JS remainder measures 1,330,944; retain the existing margin.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
