@@ -304,8 +304,14 @@ not as a transport error.
 ### Compacted Replay
 
 `POST /session/:id/load` now returns a `BridgeRestoredSession` that can include
-`compactedReplay?: BridgeEvent[]`, `liveJournal?: BridgeEvent[]`, and
-`lastEventId?: number`. These fields are the daemon's bounded in-memory replay
+`compactedReplay?: BridgeEvent[]`, `liveJournal?: BridgeEvent[]`,
+`lifecycleReplay?: BridgeEvent[]`, `lifecycleReplayIncomplete?: boolean`, and
+`lastEventId?: number`. The optional lifecycle supplement contains up to 1024
+metadata-only frames from the in-memory replay window when refreshing a
+persisted page, and may overlap that page. An incomplete flag reports
+unavailable, degraded, or truncated lifecycle coverage. Clients must apply
+replayed lifecycle records idempotently without treating starts as proof of
+currently running work; a false flag does not establish complete history. These fields are the daemon's bounded in-memory replay
 window for a live session, not a full transcript API. The default window cap is
 4 MiB per live session (`--compacted-replay-max-bytes`), and boot rejects
 invalid caps; the hard ceiling is 256 MiB. `compactedReplay` is produced by

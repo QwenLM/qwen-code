@@ -7755,6 +7755,8 @@ export function createSessionControlPlane(
     BridgeRestoredSession,
     | 'compactedReplay'
     | 'liveJournal'
+    | 'lifecycleReplay'
+    | 'lifecycleReplayIncomplete'
     | 'lastEventId'
     | 'eventEpoch'
     | 'replayDegraded'
@@ -8011,9 +8013,56 @@ export function createSessionControlPlane(
               compactedReplay = [...page.events, turnErrorEvent];
             }
           }
+          const lifecycleSnapshot = entry.events.snapshotReplay();
+          const lifecycleReplay: BridgeEvent[] = [];
+          let lifecycleReplayIncomplete =
+            lifecycleSnapshot === undefined ||
+            lifecycleSnapshot.degraded === true;
+          if (lifecycleSnapshot) {
+            for (const event of [
+              ...lifecycleSnapshot.compactedTurns,
+              ...lifecycleSnapshot.liveJournal,
+            ]) {
+              if (event.type === 'history_truncated')
+                lifecycleReplayIncomplete = true;
+              if (event.type !== 'session_update' || !isRecord(event.data))
+                continue;
+              const update = isRecord(event.data['update'])
+                ? event.data['update']
+                : event.data;
+              const meta = update['_meta'];
+              if (!isRecord(meta)) continue;
+              if (
+                !isRecord(meta['executionLifecycle']) &&
+                !isRecord(meta['toolLifecycle'])
+              )
+                continue;
+              lifecycleReplay.push({
+                v: 1,
+                type: 'session_update',
+                ...(event.id !== undefined ? { id: event.id } : {}),
+                data: {
+                  _meta: {
+                    ...(isRecord(meta['executionLifecycle'])
+                      ? { executionLifecycle: meta['executionLifecycle'] }
+                      : {}),
+                    ...(isRecord(meta['toolLifecycle'])
+                      ? { toolLifecycle: meta['toolLifecycle'] }
+                      : {}),
+                  },
+                },
+              });
+            }
+          }
+          if (lifecycleReplay.length > 1024) {
+            lifecycleReplay.splice(0, lifecycleReplay.length - 1024);
+            lifecycleReplayIncomplete = true;
+          }
           return {
             compactedReplay,
             liveJournal: [],
+            lifecycleReplay,
+            lifecycleReplayIncomplete,
             lastEventId,
             eventEpoch,
             ...(page.partial === true ? { partial: true as const } : {}),

@@ -35,6 +35,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private final InternalServer internalServer = new InternalServer();
     private final Automation automation = new Automation();
     private final Channels channels = new Channels();
+    private final EventTransport eventTransport = new EventTransport();
     private String agentRevision = "1";
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
@@ -63,6 +64,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public Channels getChannels() {
         return channels;
+    }
+
+    public EventTransport getEventTransport() {
+        return eventTransport;
     }
 
     public SessionStore getSessionStore() {
@@ -1243,6 +1248,46 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setClaimLease(Duration claimLease) {
             this.claimLease = claimLease;
+        }
+    }
+
+    /**
+     * Broker-backed transport for the authoritative journal wire (design
+     * 2026-10-04-managed-agent-event-transport, phase MQ2b). Default off, so a
+     * flag-off deployment creates no transport bean and stays byte-identical.
+     * The topic must be a LITE topic, and the startup capability-probe group
+     * must be pre-created as a LITE group bound to it — see
+     * EventTransportConfiguration for the deployment prerequisite.
+     */
+    public static class EventTransport {
+        private boolean enabled;
+        // The RocketMQ proxy gRPC endpoint (e.g. "host:8081").
+        private String endpoints = "";
+        // The parent topic the per-Session journal LiteTopics live under.
+        private String topic = "";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getEndpoints() {
+            return endpoints;
+        }
+
+        public void setEndpoints(String endpoints) {
+            this.endpoints = endpoints;
+        }
+
+        public String getTopic() {
+            return topic;
+        }
+
+        public void setTopic(String topic) {
+            this.topic = topic;
         }
     }
 }

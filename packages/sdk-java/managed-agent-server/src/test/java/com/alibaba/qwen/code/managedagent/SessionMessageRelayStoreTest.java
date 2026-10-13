@@ -57,15 +57,19 @@ class SessionMessageRelayStoreTest {
             String state, String body) {
         String resource = "resource-" + IDS.incrementAndGet();
         resource(sessionId, resource, body.getBytes(StandardCharsets.UTF_8));
+        // Each record opens at its own journal sequence, in insert order,
+        // as a Session's commits do.
+        long sequence = IDS.incrementAndGet();
         jdbc.update("INSERT INTO qwen_managed_session_extension_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
-                        + " delivery_target, delivery_state, created_at)"
+                        + " delivery_target, delivery_state, created_at,"
+                        + " first_sequence)"
                         + " VALUES ('scope', ?, ?, 'workspace', ?, ?, ?,"
-                        + " 'h', 1, ?, 'session', ?, ?)",
+                        + " 'h', 1, ?, 'session', ?, ?, ?)",
                 sessionId + "/" + recordId, TENANT, sessionId, domain,
-                recordId, resource, state, IDS.incrementAndGet());
+                recordId, resource, state, sequence, sequence);
     }
 
     private static String outbound(String route, String childRunId) {
@@ -239,6 +243,29 @@ class SessionMessageRelayStoreTest {
         store.classify(store.find(TENANT, sender, "cmd_2_open"), "owner-a",
                 "unknown", "gave up", 2_000);
         assertThat(store.olderOpenCommand(TENANT, sender, "cmd_3_new"))
+                .isFalse();
+    }
+
+    // Older is commit order, never the hashed id's spelling: a command id
+    // is a digest, so a later command may sort before an earlier one. And
+    // an older entry discovery has not opened a row for yet still holds
+    // the younger one back.
+    @Test
+    void ordersCommandsByCommitOrderAndCountsAnEntryWithoutARow() {
+        String sender = UUID.randomUUID().toString();
+        command(sender, "cmd_z_first", "planned", "{\"route\":\"to_parent\"}");
+        command(sender, "cmd_a_second", "planned",
+                "{\"route\":\"to_parent\"}");
+        assertThat(store.olderOpenCommand(TENANT, sender, "cmd_a_second"))
+                .isTrue();
+        assertThat(store.olderOpenCommand(TENANT, sender, "cmd_z_first"))
+                .isFalse();
+        store.claim(TENANT, sender, "cmd_z_first", "owner-a", 31_000, 1_000);
+        assertThat(store.olderOpenCommand(TENANT, sender, "cmd_a_second"))
+                .isTrue();
+        store.classify(store.find(TENANT, sender, "cmd_z_first"), "owner-a",
+                "unknown", "gave up", 2_000);
+        assertThat(store.olderOpenCommand(TENANT, sender, "cmd_a_second"))
                 .isFalse();
     }
 
