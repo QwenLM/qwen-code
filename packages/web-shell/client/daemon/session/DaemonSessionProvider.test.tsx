@@ -22146,7 +22146,7 @@ describe('DaemonSessionProvider', () => {
       expect(
         store?.getSnapshot().blocks.find((block) => block.kind === 'user')
           ?.promptId,
-      ).toBeUndefined();
+      ).toBe('live');
       await act(async () => {
         go.resolve();
         await flushPromises();
