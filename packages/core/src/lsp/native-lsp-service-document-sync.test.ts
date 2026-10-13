@@ -2202,6 +2202,124 @@ describe('NativeLspService disk document synchronization', () => {
   });
 
   describe('diagnostics failure visibility', () => {
+    const setDiagnosticPull = (
+      target: LspServerHandle,
+      document: boolean,
+      workspace: boolean,
+    ) => {
+      target.diagnosticPull = { document, workspace };
+    };
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'skips known unsupported servers before a %s pull',
+      async (operation) => {
+        const unsupportedConnection = createConnection();
+        const supportedConnection = createConnection();
+        const unsupportedHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'unsupported' },
+          connection: unsupportedConnection,
+        };
+        const supportedHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'supported' },
+          connection: supportedConnection,
+        };
+        setDiagnosticPull(unsupportedHandle, false, false);
+        setDiagnosticPull(supportedHandle, true, true);
+        withServers([
+          ['unsupported', unsupportedHandle],
+          ['supported', supportedHandle],
+        ]);
+
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri))
+            : run(service.workspaceDiagnostics()),
+        ).resolves.toEqual([]);
+        expect(unsupportedConnection.request).not.toHaveBeenCalled();
+        expect(unsupportedConnection.send).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'reports unsupported when every candidate lacks the %s pull',
+      async (operation) => {
+        setDiagnosticPull(handle, false, false);
+
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri))
+            : run(service.workspaceDiagnostics()),
+        ).rejects.toThrow(/support/i);
+        expect(connection.request).not.toHaveBeenCalled();
+        expect(connection.send).not.toHaveBeenCalled();
+      },
+    );
+
+    it('uses document support without treating it as workspace support', async () => {
+      setDiagnosticPull(handle, true, false);
+
+      await expect(run(service.diagnostics(uri))).resolves.toEqual([]);
+      await expect(run(service.workspaceDiagnostics())).rejects.toThrow(
+        /support/i,
+      );
+      expect(connection.request).toHaveBeenCalledWith(
+        'textDocument/diagnostic',
+        expect.anything(),
+      );
+      expect(connection.request).not.toHaveBeenCalledWith(
+        'workspace/diagnostic',
+        expect.anything(),
+      );
+    });
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'does not add a newly ready unsupported server to a %s pull',
+      async (operation) => {
+        const lateConnection = createConnection();
+        const lateHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'late' },
+          status: 'IN_PROGRESS' as LspServerHandle['status'],
+          connection: lateConnection,
+        };
+        setDiagnosticPull(handle, true, true);
+        setDiagnosticPull(lateHandle, false, false);
+        withServers([
+          ['test', handle],
+          ['late', lateHandle],
+        ]);
+        connection.request.mockImplementation(async (method) => {
+          lateHandle.status = 'READY';
+          return method === 'textDocument/diagnostic'
+            ? { kind: 'full', items: [] }
+            : { items: [] };
+        });
+
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri))
+            : run(service.workspaceDiagnostics()),
+        ).resolves.toEqual([]);
+        expect(lateConnection.request).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps a supporting provider failure as a %s veto',
+      async (operation) => {
+        setDiagnosticPull(handle, true, true);
+        connection.request.mockRejectedValue(new Error('server exploded'));
+
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri))
+            : run(service.workspaceDiagnostics()),
+        ).rejects.toThrow('server exploded');
+      },
+    );
+
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'rejects at the service layer when every %s pull fails',
       async (operation) => {

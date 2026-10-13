@@ -792,7 +792,9 @@ export class NativeLspService {
     serverName?: string,
     uri?: string,
   ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName).filter(
+      ([, handle]) => this.diagnosticPullSupport(handle, uri) !== false,
+    );
     if (handles.length > 0) {
       return handles;
     }
@@ -800,9 +802,20 @@ export class NativeLspService {
       ([name]) => !serverName || name === serverName,
     );
     const extension = uri ? this.diagnosticFileExtension(uri) : undefined;
-    const skipped = configured
-      .filter(([, handle]) => !this.serverDeclaredIrrelevant(handle, extension))
-      .map(([name, handle]) => describeLspServerState(name, handle));
+    const candidates = configured.filter(
+      ([, handle]) => !this.serverDeclaredIrrelevant(handle, extension),
+    );
+    const eligible = candidates.filter(
+      ([, handle]) => this.diagnosticPullSupport(handle, uri) !== false,
+    );
+    if (candidates.length > 0 && eligible.length === 0) {
+      throw new Error(
+        `No configured LSP server supports ${uri ? 'document' : 'workspace'} pull diagnostics`,
+      );
+    }
+    const skipped = eligible.map(([name, handle]) =>
+      describeLspServerState(name, handle),
+    );
     if (skipped.length > 0) {
       throw new Error(
         `No LSP server is ready to provide diagnostics (${boundedRejectionDetail(skipped)})`,
@@ -836,8 +849,18 @@ export class NativeLspService {
     return this.getReadyHandles(serverName).filter(
       ([name, handle]) =>
         !asked.some(([askedName]) => askedName === name) &&
+        this.diagnosticPullSupport(handle, uri) !== false &&
         !this.serverDeclaredIrrelevant(handle, extension),
     );
+  }
+
+  private diagnosticPullSupport(
+    handle: LspServerHandle,
+    uri: string | undefined,
+  ): boolean | undefined {
+    return uri
+      ? handle.diagnosticPull?.document
+      : handle.diagnosticPull?.workspace;
   }
 
   /**
@@ -1000,6 +1023,7 @@ export class NativeLspService {
         ([name, handle]) =>
           (!serverName || name === serverName) &&
           !queried.some(([queriedName]) => queriedName === name) &&
+          this.diagnosticPullSupport(handle, uri) !== false &&
           !this.serverDeclaredIrrelevant(handle, extension),
       )
       .map(([name, handle]) =>
