@@ -870,31 +870,7 @@ export class NativeLspService {
    * veto a healthy sibling's answer for that file.
    */
   private declaredDiagnosticExtensions(handle: LspServerHandle): Set<string> {
-    const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
-    // The mapping's VALUES are language ids: a partial user mapping (only
-    // `.tsx` for a `typescript` server) must not hide the declared
-    // language's other extensions.
-    const languageIds = [...handle.config.languages];
-    const extMapping = handle.config.extensionToLanguage;
-    if (extMapping) {
-      for (const value of Object.values(extMapping)) languageIds.push(value);
-    }
-    for (const language of languageIds) {
-      // `.lsp.json` keys reach `languages` unnormalized, while every extension
-      // this set is compared against is lowercase.
-      const id = language.toLowerCase();
-      if (JS_FAMILY_WIDENING_LANGUAGE_IDS.includes(id)) {
-        for (const ext of JS_TS_FAMILY_EXTENSIONS) {
-          owned.add(ext);
-        }
-        continue;
-      }
-      for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
-        LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
-        owned.add(ext);
-      }
-    }
-    return owned;
+    return this.declaredOwnerExtensions(handle, true);
   }
 
   /**
@@ -910,7 +886,15 @@ export class NativeLspService {
     handle: LspServerHandle,
     widenTypescriptFamily = false,
   ): Set<string> {
-    const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
+    const owned = new Set(
+      Object.keys(handle.config.extensionToLanguage ?? {})
+        .map((extension) => extension.replace(/^\./, ''))
+        .filter(
+          (extension) =>
+            extension.length > 0 &&
+            extension === extension.trim().toLowerCase(),
+        ),
+    );
     const ids = [...handle.config.languages];
     const extMapping = handle.config.extensionToLanguage;
     if (extMapping) {
@@ -928,18 +912,30 @@ export class NativeLspService {
         continue;
       }
       for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
-        LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
+        LANGUAGE_ID_TO_EXTENSIONS[id] ??
+        (ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(id) ? [id] : [])) {
         owned.add(ext);
       }
     }
     return owned;
   }
 
+  private isAttributableDiagnosticExtension(extension: string): boolean {
+    return (
+      ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension) ||
+      Array.from(this.serverManager.getHandles().values()).some(
+        (handle) =>
+          (handle.config.extensionToLanguage?.[extension] ??
+            handle.config.extensionToLanguage?.['.' + extension]) !== undefined,
+      )
+    );
+  }
+
   /**
    * Whether the queried file's extension positively proves this server
    * cannot own the file. Fails closed on every uncertainty: an undefined
    * extension (extensionless or unparseable file), an extension no diagnostics
-   * table can place (`h`, `mts`, …), or a server whose declared set holds no
+   * table or explicit mapping can place, or a server whose declared set holds no
    * attributable extension can prove nothing, so the veto stands. Only a
    * positively attributable extension the server does not declare excuses it —
    * `python`'s `py` vs a queried `.ts` is the canonical case, and `go`'s
@@ -952,24 +948,14 @@ export class NativeLspService {
   ): boolean {
     if (
       extension === undefined ||
-      !ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension)
+      !this.isAttributableDiagnosticExtension(extension)
     ) {
       return false;
     }
     const owned = this.declaredDiagnosticExtensions(handle);
-    // `.lsp.json` keys reach `languages` unvalidated, so a key that is a
-    // server name (`pyright`, `remote-lsp`) seeds `owned` with the guess
-    // `[id]`. A set made only of such guesses proves nothing about the
-    // queried file — reading it as proof both excuses a downed server from
-    // the veto and strips a ready one of its backing. An ID that names a
-    // real language (`cpp`, `go`) is not such a guess, even though the
-    // mapping table omits it, and neither is an alias row's extension
-    // (`kt`, `yml`, `hs`): the row is a real language fact the mapping and
-    // the ID list both omit, which is why all three sources answer here.
-    const attributed = [...owned].some((ext) =>
-      ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(ext),
-    );
-    return attributed && !owned.has(extension);
+    // Only explicit mappings and recognized languages contribute ownership;
+    // an unrecognized server-name key still proves nothing about this file.
+    return owned.size > 0 && !owned.has(extension);
   }
 
   /**
@@ -2217,17 +2203,6 @@ export class NativeLspService {
   ): Promise<LspDiagnostic[]> {
     const handles = this.getDiagnosticHandles(serverName, uri);
     const extension = this.diagnosticFileExtension(uri);
-    // Ownership is only decidable for an extension the tables can place. For
-    // anything else (`h`, `mts`, an extensionless file) the answer is backed by
-    // relevance alone, because no declaration can be shown to cover the file
-    // and a refusal on that basis would reject a configuration that works. A
-    // non-`file:` URI (`jdt://…`) lands here too: `synchronizeDocument` returns
-    // early for it, so the server was never sent a `didOpen`, and refusing the
-    // pass-through would fail servers that answer for their own virtual
-    // documents; the design doc records that residue.
-    const attributable =
-      extension !== undefined &&
-      ATTRIBUTABLE_DIAGNOSTIC_EXTENSIONS.has(extension);
     const allDiagnostics: LspDiagnostic[] = [];
     const failures: Array<{
       name: string;
@@ -2315,7 +2290,6 @@ export class NativeLspService {
               answeredRelevant++;
               if (
                 extension !== undefined &&
-                attributable &&
                 this.declaredOwnerExtensions(handle, true).has(extension)
               ) {
                 answeredOwner++;
@@ -2360,6 +2334,15 @@ export class NativeLspService {
     }
 
     if (allDiagnostics.length === 0) {
+      // Explicit owners can appear while a pull is in flight. Use the same
+      // live configuration as relevance, without discarding their answers
+      // merely because the extension was unknown when the query began.
+      // Unmapped unknown extensions, extensionless files and virtual URIs
+      // still use relevance alone; requiring an unprovable owner would break
+      // the existing pass-through documented in the diagnostic design.
+      const attributable =
+        extension !== undefined &&
+        this.isAttributableDiagnosticExtension(extension);
       // A server the queried file provably excludes cannot veto the answer —
       // its failure says nothing about this file — and neither can a server
       // that answered `-32601`, which never implemented the pull in the first

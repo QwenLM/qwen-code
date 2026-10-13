@@ -134,8 +134,9 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   unbacked, or when a server that could own the queried file was unreachable;
   the tool surfaces the rejection as `ToolErrorType.EXECUTION_FAILED`. An
   authoritative empty report is clean only when it is both relevant and, for an
-  extension the tables can place, positively owned; a file whose extension no
-  table can place (`.h`, `.mts`, an extensionless name) has no decidable owner
+  extension the tables or an explicit mapping can place, positively owned; a
+  file whose extension neither can place (`.h`, `.mts` without a mapping, an
+  extensionless name) has no decidable owner
   and is judged on relevance alone, as it was before ownership became a
   requirement. A non-`file:` URI (`jdt://…`) reaches the same undecidable case
   by another route: `synchronizeDocument` returns before sending any `didOpen`,
@@ -174,6 +175,31 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   return empty arrays or null; these are **not evidence of clean diagnostics**.
 - Notification delivery is not acknowledged by the transport. This change does
   not redesign asynchronous writes/closed connections.
+
+### Explicit diagnostic ownership
+
+An `extensionToLanguage` key is direct ownership evidence even when it is not
+in the built-in extension tables. Such an extension is attributable across the
+configured servers, so a foreign empty answer cannot replace its owner's
+missing answer, and a failed foreign server cannot veto that owner's clean
+report. Explicit keys must match the document synchronization lookup (the
+lowercase extension, with or without its leading dot). This change does not
+introduce whitespace normalization; mapping values still contribute recognized
+language aliases. Unrecognized
+language IDs are not guessed to be extensions. Without any recognized
+declaration or explicit mapping, a server remains unknown and keeps its
+conservative veto. Unknown extensions without an explicit mapping retain the
+fallback above. Workspace-symbol warmup selection is unchanged.
+
+The consumers are diagnostic ownership accounting, failure and unsupported
+attribution, initial unavailable-server reporting, newly-ready selection, and
+the final unreachable-server veto. Attribution is evaluated against live
+configuration at the final decision, and newly-ready owners' answers are counted
+even if their extension was unknown when the query began. Workspace diagnostics have no file extension
+and retain their existing relevance semantics. Regression tests cover custom
+mapping ownership, foreign vetoes, unnormalized and unknown declarations,
+owners added during a query, and the
+unchanged unknown-extension fallback.
 
 ## Costs
 
