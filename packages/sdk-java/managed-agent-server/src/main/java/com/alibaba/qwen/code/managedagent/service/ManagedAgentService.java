@@ -547,27 +547,35 @@ public class ManagedAgentService {
         StoreModels.CommandRecord recorded = store.findCommand(tenantId,
                 RENAME, idempotencyKey).orElse(null);
         if (recorded != null && recorded.sessionId().equals(sessionId)) {
-            // The actor gates cover every recorded rename bound to this
-            // Session, not only a COMPLETED one: an unfinished command's
-            // replay would otherwise claim (and could flip) the recorder's
-            // delivery ungated, because beginSessionMutation compares only
-            // the request digest and the Session, never the actor. Only
-            // the recorder or the creator may re-drive an unfinished
-            // rename, exactly like the recorded outcome itself.
+            // The actor gates run ahead of the digest comparison:
+            // evaluating the digest first throws invalid_title for an
+            // over-bound title and would split a grant-less caller's
+            // answer on the key's liveness (400 against a recorded key,
+            // 404 against a fresh one); the uniform answer is the read
+            // grant's 404. They also cover a recorded row of ANY status,
+            // not only the completed outcome: beginSessionRename below
+            // compares key, Session and digest, never the actor, so an
+            // unfinished row answered without the gates would hand the
+            // recorder's pending delivery — and the recorded outcome it
+            // becomes — to any OPERATOR replaying the key, and a
+            // different-title replay would answer idempotency_conflict,
+            // naming the live key the uniform answer keeps hidden.
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
             requireSubmitterRole(session, actorId);
             if (!recordedByCaller(recorded, actorId)) {
                 requireReplayCreator(session, actorId);
             }
-            // A completed replay comparison digests the title as sent,
-            // never the validated form: a title that fails validation
-            // cannot match a recorded rename, and validating here would
-            // throw ahead of the gates. A mismatched title falls through
-            // to the fresh path, whose validRenameTitle still answers 400
-            // to an authorized caller.
-            if ("COMPLETED".equals(recorded.status())
-                    && title != null && recorded.requestDigest().equals(
+            // The replay comparison digests the title as sent, never the
+            // validated form: a title that fails validation cannot match a
+            // recorded rename, and validating here would throw ahead of
+            // the gates. A mismatched title falls through to the fresh
+            // path, whose validRenameTitle still answers 400 to an
+            // authorized caller. Only a COMPLETED row answers here: the
+            // recorder's unfinished row falls through too, so its own
+            // retry resumes the delivery below.
+            if ("COMPLETED".equals(recorded.status()) && title != null
+                    && recorded.requestDigest().equals(
                             digests.digest(Map.of("sessionId", sessionId,
                                     "title", title)))) {
                 return new SessionMutationResult<>(publicSession(

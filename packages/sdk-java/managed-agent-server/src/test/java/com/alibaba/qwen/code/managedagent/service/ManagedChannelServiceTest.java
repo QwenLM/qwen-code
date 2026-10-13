@@ -262,6 +262,33 @@ class ManagedChannelServiceTest {
                 admitted.sessionId())).isEqualTo("email: alice @example.com");
     }
 
+    // The platform name composes the same title and is validated only as
+    // @NotBlank @Size(max = 64) at registration — no character class — so
+    // a TAB in it refuses the route's Session exactly like an unfolded
+    // subject, and with no binding row written every later event of the
+    // route re-drives the same refusal: the platform folds too.
+    @Test
+    void bindsARouteWhosePlatformCarriesAControlCharacter() {
+        String tabbed = "tab-" + UUID.randomUUID();
+        service.register(TENANT, tabbed, new RegisterChannelRequest(
+                "emai\til", "agent@example.com", 1, ACTOR, WORKSPACE, ".",
+                new ChannelPolicy("emai\til", "allowlist",
+                        List.of("alice@example.com"), "followup")));
+        InboundAdmission admitted = service.submitInbound(TENANT, tabbed,
+                new InboundEventRequest(1, "1700:97", 1,
+                        new RouteScope("chat_thread", null,
+                                "alice@example.com", "thread-7"),
+                        "alice@example.com", "alice@example.com", "thread-7",
+                        "Build status", "check the build", List.of(), null));
+        assertThat(admitted.replayed()).isFalse();
+        assertThat(instances.findBinding(TENANT, tabbed, admitted.routeId()))
+                .isPresent();
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, TENANT,
+                admitted.sessionId())).isEqualTo("emai il: Build status");
+    }
+
     @Test
     void recoversAnAdmissionWhoseAnswerWasLost() {
         // The Harness committed, the control plane died before marking the

@@ -1088,13 +1088,15 @@ class ManagedWorkspaceAdmissionTest {
                 String.class, tenant, sessionY)).isNull();
     }
 
-    // While the recorded RENAME row is still PENDING the recorded outcome
-    // does not exist yet, but replaying it claims — and can flip — the
-    // recorder's delivery. The pre-read gate therefore covers every
-    // recorded rename bound to the Session, not only the COMPLETED one: a
-    // non-creator OPERATOR never claims the recorder's unfinished rename.
+    // The recorded rename's actor gate covers the UNFINISHED row too, not
+    // only the completed outcome: beginSessionRename compares key, Session
+    // and digest, never the actor, so without the gate a non-recorder
+    // OPERATOR replaying the key while the row is PENDING claims the
+    // recorder's delivery, drives harness.rename, flips the row to
+    // COMPLETED and answers 200 replayed — the recorded outcome the
+    // contract reserves for the actor who recorded it.
     @Test
-    void aPendingRenameReplayFromANonCreatorIsRefusedAsWorkspaceUnavailable() {
+    void aPendingRenameReplayKeepsTheRecorderGate() {
         String tenant = "tenant-" + UUID.randomUUID();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
@@ -1102,49 +1104,64 @@ class ManagedWorkspaceAdmissionTest {
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-a", "actor-b", true);
         String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create-p", "sha256:" + "0".repeat(64),
-                "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("ws-a", ".")).sessionId();
-        // beginSessionRename is a workspace-enabled mutation, so the
-        // pending row must be planted with the files-enabled store, as the
-        // beginSessionMutation callers above do.
+                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
+                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+                        "."))
+                .sessionId();
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        // The recorder's unfinished row, written exactly as the service
+        // writes it but never driven to completion. The autowired store
+        // runs the default workspace-disabled profile, whose rename gate
+        // refuses, so the row is written through an enabled one.
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
                 Clock.systemUTC(), ignored -> {
                 }, registry, enabled);
-        var transaction = new TransactionTemplate(transactionManager);
+        String digest = new RequestDigests().digest(Map.of("sessionId",
+                sessionId, "title", "new title"));
         transaction.executeWithoutResult(status -> gated.beginSessionRename(
-                tenant, "rename-p", "sha256:" + "1".repeat(64), sessionId,
-                "new title", "actor-a"));
+                tenant, "rename", digest, sessionId, "new title", "actor-a"));
+
+        // The non-recorder OPERATOR's same-title replay meets the same
+        // refusal the completed outcome answers, and the recorder's row
+        // and delivery stay untouched.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-b", "rename", sessionId, "new title"))
+                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.CONFLICT);
+                            assertThat(error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                        }));
         assertThat(jdbc.queryForObject("SELECT command_status FROM"
                         + " managed_agent_command WHERE tenant_id = ?"
                         + " AND operation = 'RENAME_SESSION'"
-                        + " AND idempotency_key = 'rename-p'",
-                String.class, tenant)).isEqualTo("PENDING");
-        ManagedAgentService service = boundServiceWithWorkingHarness();
-        assertThatThrownBy(() -> transaction.execute(status ->
-                        service.renameSession(tenant, "actor-b", "rename-p",
-                                sessionId, "new title")))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
-                    assertThat(error.getCode())
-                            .isEqualTo("workspace_unavailable");
-                    assertThat(error.getStatus())
-                            .isEqualTo(HttpStatus.CONFLICT);
-                });
-        // The recorder's row is never claimed and never flipped.
-        assertThat(jdbc.queryForObject("SELECT command_status FROM"
-                        + " managed_agent_command WHERE tenant_id = ?"
-                        + " AND operation = 'RENAME_SESSION'"
-                        + " AND idempotency_key = 'rename-p'",
-                String.class, tenant)).isEqualTo("PENDING");
+                        + " AND idempotency_key = 'rename'", String.class,
+                tenant)).isEqualTo("PENDING");
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM"
+                        + " managed_session_rename_delivery WHERE tenant_id"
+                        + " = ? AND session_id = ?", Integer.class, tenant,
+                sessionId)).isZero();
+
+        // The recorder's own retry resumes the delivery to completion.
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename", sessionId,
+                        "new title").replayed()).isTrue());
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant,
+                sessionId)).isEqualTo("new title");
     }
 
-    // The same uniform refusal answers a replay under a different title:
-    // the actor gate runs — and refuses — before any digest comparison,
-    // so the key's liveness is never named by the answer.
+    // A different-title replay of the same unfinished row answers the
+    // uniform refusal too: without the gate, beginSessionMutation's
+    // idempotency_conflict names the live key the answer must keep hidden.
     @Test
-    void aPendingRenameReplayWithADifferentTitleDoesNotRevealTheKey() {
+    void aPendingRenameReplayWithADifferentTitleKeepsTheUniformRefusal() {
         String tenant = "tenant-" + UUID.randomUUID();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
@@ -1152,34 +1169,32 @@ class ManagedWorkspaceAdmissionTest {
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-a", "actor-b", true);
         String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create-pd", "sha256:" + "2".repeat(64),
-                "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("ws-a", ".")).sessionId();
-        var transaction = new TransactionTemplate(transactionManager);
+                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
+                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+                        "."))
+                .sessionId();
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
                 Clock.systemUTC(), ignored -> {
                 }, registry, enabled);
+        String digest = new RequestDigests().digest(Map.of("sessionId",
+                sessionId, "title", "new title"));
         transaction.executeWithoutResult(status -> gated.beginSessionRename(
-                tenant, "rename-pd", "sha256:" + "3".repeat(64), sessionId,
-                "old title", "actor-a"));
-        ManagedAgentService service = boundServiceWithWorkingHarness();
-        assertThatThrownBy(() -> transaction.execute(status ->
-                        service.renameSession(tenant, "actor-b", "rename-pd",
-                                sessionId, "new title")))
-                .isInstanceOfSatisfying(ApiException.class, error -> {
-                    assertThat(error.getCode())
-                            .isEqualTo("workspace_unavailable");
-                    assertThat(error.getStatus())
-                            .isEqualTo(HttpStatus.CONFLICT);
-                });
-        // No replay side effect: the pending row stays untouched.
-        assertThat(jdbc.queryForObject("SELECT command_status FROM"
-                        + " managed_agent_command WHERE tenant_id = ?"
-                        + " AND operation = 'RENAME_SESSION'"
-                        + " AND idempotency_key = 'rename-pd'",
-                String.class, tenant)).isEqualTo("PENDING");
+                tenant, "rename", digest, sessionId, "new title", "actor-a"));
+
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-b", "rename", sessionId, "other title"))
+                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.CONFLICT);
+                            assertThat(error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                        }));
     }
 
     @Test
