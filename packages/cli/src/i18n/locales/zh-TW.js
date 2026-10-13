@@ -1969,6 +1969,17 @@ export default {
     '您可以在 settings.json 中配置 API Key 和模型',
   'Refer to the documentation for setup instructions': '請參考文檔瞭解配置說明',
   'Coding Plan': 'Coding Plan',
+  '千问AI平台 / QwenCloud': '千問AI平台 / QwenCloud',
+  '千问AI平台 / QwenCloud · Access Method': '千問AI平台 / QwenCloud · 接入方式',
+  'Official recommended setup: Token Plan or Standard API Key':
+    '官方推薦配置：Token Plan 或 Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    '按量付費 · 使用既有的平台 API Key 連線',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    '按月 Credit 額度訂閱 · 專用 endpoint（個人版與團隊版）',
+  'China — 千问AI平台': '中國 — 千問AI平台',
+  'International — QwenCloud': '國際 — QwenCloud',
+  Platform: '平台',
   Custom: '自定義',
   'Select Region for Coding Plan': '選擇 Coding Plan 區域',
   'Choose based on where your account is registered':

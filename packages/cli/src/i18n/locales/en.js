@@ -2406,6 +2406,18 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  '千问AI平台 / QwenCloud': '千问AI平台 / QwenCloud',
+  '千问AI平台 / QwenCloud · Access Method':
+    '千问AI平台 / QwenCloud · Access Method',
+  'Official recommended setup: Token Plan or Standard API Key':
+    'Official recommended setup: Token Plan or Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    'Pay-as-you-go · Connect with an existing platform API key',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)',
+  'China — 千问AI平台': 'China — 千问AI平台',
+  'International — QwenCloud': 'International — QwenCloud',
+  Platform: 'Platform',
   Custom: 'Custom',
   'Select Region for Coding Plan': 'Select Region for Coding Plan',
   'Choose based on where your account is registered':
