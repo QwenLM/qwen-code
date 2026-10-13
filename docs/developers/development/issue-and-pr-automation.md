@@ -56,4 +56,12 @@ This workflow handles the process of packaging and publishing new versions of Qw
 - **What you should do**:
   - As a contributor, you don't need to do anything for this process. You can be confident that once your PR is merged into the `main` branch, your changes will be included in the very next nightly release.
 
+### 4. Main-branch CI failure reports
+
+`.github/workflows/main-ci-failure-issue.yml` reports failed main-branch CI runs. When it identifies a failing test in the downloaded job logs, it groups recurrences by that test. When no failing test can be identified, it tracks the failure by commit instead.
+
+New reports include a **Job logs analyzed** count. Incomplete coverage means that some failed-job logs were unavailable; the failing-test list may be incomplete. If the job list could not be read, the total failed-job count is reported as unavailable. Reports grouped by test refresh the count when another recurrence is recorded. A per-commit report keeps its already-filed body for that commit, so its count describes the original analysis.
+
+No identified failure does not mean that tests never ran. A log download may have failed, or the available output may not contain a recognized failure identifier. Use the report's job, step and run links to investigate those cases.
+
 We hope this detailed overview is helpful. If you have any questions about our automation or processes, please don't hesitate to ask!
