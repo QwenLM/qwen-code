@@ -35,6 +35,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private final InternalServer internalServer = new InternalServer();
     private final Automation automation = new Automation();
     private final Channels channels = new Channels();
+    private final EventTransport eventTransport = new EventTransport();
     private String agentRevision = "1";
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
@@ -63,6 +64,10 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public Channels getChannels() {
         return channels;
+    }
+
+    public EventTransport getEventTransport() {
+        return eventTransport;
     }
 
     public SessionStore getSessionStore() {
@@ -1243,6 +1248,95 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public void setClaimLease(Duration claimLease) {
             this.claimLease = claimLease;
+        }
+    }
+
+    /**
+     * Broker-backed EventTransport (design
+     * 2026-10-04-managed-agent-event-transport): the authoritative journal
+     * wire (phase MQ2b), and the public-event wire and the wake and
+     * materialization consumers (phase MQ2c). Default off, so a flag-off
+     * deployment creates no transport, producer or consumer bean and stays
+     * byte-identical. The topic must be a LITE topic, and the
+     * capability-probe, wake-bootstrap and owner groups must be pre-created
+     * as LITE groups bound to it — see EventTransportConfiguration for the
+     * deployment prerequisites.
+     */
+    public static class EventTransport {
+        private boolean enabled;
+        // The RocketMQ proxy gRPC endpoint (e.g. "host:8081").
+        private String endpoints = "";
+        // The parent topic the per-Session LiteTopics (journal and public
+        // envelopes alike) and the wake bootstrap LiteTopic live under.
+        private String topic = "";
+        // The one LiteTopic every wake.requested envelope is also sent to, so
+        // a node can learn of a wake nobody owns yet. Session ids are UUIDs,
+        // so this name cannot collide with a Session's LiteTopic.
+        private String wakeBootstrapLiteTopic = "qwen-wake-bootstrap";
+        // Shared by every node; one dispatch reaches one member.
+        private String wakeBootstrapGroup = "qwen-managed-wake-bootstrap";
+        // Shared by every node; each subscribes it to the Sessions it holds.
+        private String ownerGroup = "qwen-managed-session-owner";
+        // How often the owner subscriptions follow this node's held Sessions.
+        // Unit-less operator overrides must bind in the annotated unit.
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration ownerReconcileInterval = Duration.ofSeconds(1);
+
+        public String getWakeBootstrapLiteTopic() {
+            return wakeBootstrapLiteTopic;
+        }
+
+        public void setWakeBootstrapLiteTopic(String wakeBootstrapLiteTopic) {
+            this.wakeBootstrapLiteTopic = wakeBootstrapLiteTopic;
+        }
+
+        public String getWakeBootstrapGroup() {
+            return wakeBootstrapGroup;
+        }
+
+        public void setWakeBootstrapGroup(String wakeBootstrapGroup) {
+            this.wakeBootstrapGroup = wakeBootstrapGroup;
+        }
+
+        public String getOwnerGroup() {
+            return ownerGroup;
+        }
+
+        public void setOwnerGroup(String ownerGroup) {
+            this.ownerGroup = ownerGroup;
+        }
+
+        public Duration getOwnerReconcileInterval() {
+            return ownerReconcileInterval;
+        }
+
+        public void setOwnerReconcileInterval(
+                Duration ownerReconcileInterval) {
+            this.ownerReconcileInterval = ownerReconcileInterval;
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getEndpoints() {
+            return endpoints;
+        }
+
+        public void setEndpoints(String endpoints) {
+            this.endpoints = endpoints;
+        }
+
+        public String getTopic() {
+            return topic;
+        }
+
+        public void setTopic(String topic) {
+            this.topic = topic;
         }
     }
 }

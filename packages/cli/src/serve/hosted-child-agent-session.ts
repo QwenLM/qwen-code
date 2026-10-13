@@ -65,11 +65,17 @@ import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import { hostedTeamMembership } from './hosted-team-session.js';
+import { parseTeamPlan } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
+import { parseSessionCommand } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-record.js';
 import {
+  HOSTED_MEMBER_MESSAGE_IN_FLIGHT,
+  HOSTED_MEMBER_MESSAGE_PER_RUN,
   HostedChildChains,
+  hostedMemberView,
   hostedOpenTeamChainMember,
   hostedRouteDetails,
   isSentInstruction,
+  MEMBER_MESSAGE_ID_PREFIX,
   memberPlanModeRequired,
   teamMemberPreamble,
   type HostedRouteDetails,
@@ -384,6 +390,11 @@ export function childResultNotificationText(params: {
   readonly teammate?: string;
   /** #13753 I2: a worktree child's merge outcome, already rendered. */
   readonly workspace?: string;
+  readonly plan?: {
+    readonly requestId: string;
+    readonly revision: number;
+    readonly text: string;
+  };
 }): string {
   const label = childKindLabel(params.kind);
   const head = [
@@ -398,6 +409,11 @@ export function childResultNotificationText(params: {
       ? []
       : [`<workspace>${escapeXml(params.workspace)}</workspace>`]),
     `<summary>${label} "${escapeXml(truncateNotificationLabel(params.description))}" finished.</summary>`,
+    ...(params.plan === undefined
+      ? []
+      : [
+          `<plan-approval-request request="${escapeXml(params.plan.requestId)}" revision="${params.plan.revision}">\n${escapeXml(params.plan.text)}\n</plan-approval-request>`,
+        ]),
     '<result>',
   ].join('\n');
   return boundedNotificationText(
@@ -612,6 +628,15 @@ export class HostedChildAgentSession {
     /** #13753 I2: the host serves child Workspaces, which a continued
      * worktree run needs as its first launch did; absent means it does not. */
     readonly childWorkspaces?: boolean;
+    /** A plan decision can only launch a continuation, never send a message. */
+    readonly continuationOnly?: boolean;
+    /** Run all continuation checks without publishing or committing. */
+    readonly preflight?: boolean;
+    readonly planDecision?: {
+      readonly requestId: string;
+      readonly decision: 'approved' | 'rejected';
+      readonly childRunId: string;
+    };
   }): Promise<ChildMessageRoute> {
     return this.inWrites(async () => {
       const content = Buffer.from(params.text, 'utf8');
@@ -619,7 +644,7 @@ export class HostedChildAgentSession {
         'session_message',
         params.messageId,
       );
-      if (sent !== undefined) {
+      if (sent !== undefined && !params.continuationOnly && !params.preflight) {
         const message = parseSessionMessage(sent.record);
         if (
           message.direction !== 'outbound' ||
@@ -701,6 +726,46 @@ export class HostedChildAgentSession {
         chains,
         from.childRunId,
       );
+      const planDecision = params.planDecision;
+      if (planDecision !== undefined) {
+        const stored = this.store.authority.extensionRecord(
+          'team_plan',
+          planDecision.requestId,
+        );
+        const plan =
+          stored === undefined ? undefined : parseTeamPlan(stored.record);
+        if (
+          member === undefined ||
+          member.team.lifecycle !== 'active' ||
+          plan?.teamId !== member.team.teamId ||
+          plan.member !== member.name ||
+          (params.preflight
+            ? plan.run.state !== 'waiting'
+            : plan.decision !== planDecision.decision)
+        ) {
+          return {
+            kind: 'refused',
+            reason:
+              'The plan decision no longer belongs to an eligible active member.',
+          };
+        }
+        if (
+          this.store.authority
+            .extensionRecordsInDomain('team_plan')
+            .some((entry) => {
+              const other = parseTeamPlan(entry.record);
+              return (
+                other.teamId === plan.teamId &&
+                other.member === plan.member &&
+                other.planRevision > plan.planRevision
+              );
+            })
+        )
+          return {
+            kind: 'refused',
+            reason: 'Only the newest plan may continue the member.',
+          };
+      }
       const instruction =
         member === undefined
           ? params.text
@@ -712,11 +777,12 @@ export class HostedChildAgentSession {
                 name: member.name,
                 teamName: member.team.name,
               },
-              memberPlanModeRequired(
-                member.team,
-                this.store.authority.extensionRecordsInDomain('team_plan'),
-                member.name,
-              ),
+              !(params.preflight && planDecision?.decision === 'approved') &&
+                memberPlanModeRequired(
+                  member.team,
+                  this.store.authority.extensionRecordsInDomain('team_plan'),
+                  member.name,
+                ),
             ) + params.text;
       // The bound is the smaller carrier: the continuation's launch
       // envelope, built from the chain's own description and definition,
@@ -743,6 +809,16 @@ export class HostedChildAgentSession {
         };
       }
       const head = this.chainHead(from, chains);
+      if (
+        planDecision !== undefined &&
+        head.childRunId !== planDecision.childRunId
+      ) {
+        return {
+          kind: 'refused',
+          reason:
+            'The member head changed before the decision could be delivered.',
+        };
+      }
       const headTask = this.taskIdOf(head.childRunId);
       // H4e-b2 decision 3: a member's refusal names the member.
       const subject =
@@ -750,6 +826,12 @@ export class HostedChildAgentSession {
           ? `Child agent task ${headTask}`
           : `Member "${member.name}" (task ${headTask})`;
       if (!isTerminalRunState(head.run.state)) {
+        if (params.continuationOnly || params.preflight) {
+          return {
+            kind: 'refused',
+            reason: `Decide after ${subject}'s run settles.`,
+          };
+        }
         if (head.stopRequested) {
           return {
             kind: 'refused',
@@ -858,6 +940,13 @@ export class HostedChildAgentSession {
               : `Hosted child agent refused to continue member "${member.name}" (task ${headTask}) (${admission.reason}).`,
         };
       }
+      if (params.preflight) {
+        return this.routed({
+          kind: 'continuation',
+          childRunId: head.childRunId,
+          predecessorChildRunId: head.childRunId,
+        });
+      }
       const inputRef = await this.store.resources.publish(
         'managed-input',
         envelope,
@@ -897,6 +986,130 @@ export class HostedChildAgentSession {
       ...route,
       ...hostedRouteDetails(this.store.authority, route, messageId),
     };
+  }
+
+  /**
+   * H4e-b3 decision 8 (b3c): the running-only send of one member message,
+   * executed on the lead's funnels for one roster position of its open
+   * team. The head check and the commit ride this one writes chain, so
+   * the recipient's state cannot change between them. The send never
+   * routes to a continuation and never spends H4b's active cap or H4c's
+   * launch budget: a finished, ended or stopping head is not reached.
+   * Member messages share H4d-b's 8 in flight and 64 per run on the head
+   * with the lead's own, capped to 4 in flight and 16 in all. A re-driven
+   * send names the same `msgc_` id with the same content and is answered
+   * sent, so nothing is sent twice.
+   */
+  sendToRunningMember(params: {
+    /** The roster entry's run: the launch the recipient's chain started from. */
+    readonly rootChildRunId: string;
+    readonly content: Buffer;
+    readonly messageId: string;
+    /** The `member_message` command that sends it. */
+    readonly executionCallId: string;
+  }): Promise<
+    | { readonly kind: 'sent' }
+    | {
+        readonly kind: 'notReached';
+        readonly reason:
+          | 'finished'
+          | 'ended'
+          | 'stopping'
+          | 'budget_exhausted'
+          | 'count_limit'
+          | 'member_budget'
+          | 'member_count_limit'
+          | 'completed_after_stop';
+      }
+  > {
+    return this.inWrites(async () => {
+      const sent = this.store.authority.extensionRecord(
+        'session_message',
+        params.messageId,
+      );
+      if (sent !== undefined) {
+        const message = parseSessionMessage(sent.record);
+        if (
+          message.direction === 'outbound' &&
+          message.route === 'to_child' &&
+          message.contentDigest === sha256(params.content)
+        ) {
+          return { kind: 'sent' };
+        }
+        throw new ManagedSessionConflictError(
+          `Session message ${params.messageId} was sent with different evidence.`,
+        );
+      }
+      const chains = new HostedChildChains(
+        this.store.authority.extensionRecordsInDomain('child_run'),
+      );
+      const view = hostedMemberView(chains, params.rootChildRunId);
+      const head = view.head;
+      if (
+        head === undefined ||
+        view.state === 'failed' ||
+        view.state === 'cancelled'
+      ) {
+        return { kind: 'notReached', reason: 'ended' };
+      }
+      // R1-3: a completed head that was stopped before completing is not
+      // the `finished` case — the leader cannot continue it either.
+      if (view.stopRequestedCompletion) {
+        return { kind: 'notReached', reason: 'completed_after_stop' };
+      }
+      if (view.state === 'completed') {
+        return { kind: 'notReached', reason: 'finished' };
+      }
+      if (view.stopping) {
+        return { kind: 'notReached', reason: 'stopping' };
+      }
+      const sentBefore = this.messagesTo(head.childRunId);
+      const limits = MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS;
+      if (sentBefore.length >= limits.maxPerRun) {
+        return { kind: 'notReached', reason: 'budget_exhausted' };
+      }
+      if (
+        sentBefore.filter(isUndeliveredMessage).length >=
+        limits.maxInFlightPerRun
+      ) {
+        return { kind: 'notReached', reason: 'count_limit' };
+      }
+      const memberSent = sentBefore.filter((message) =>
+        message.messageId.startsWith(MEMBER_MESSAGE_ID_PREFIX),
+      );
+      if (memberSent.length >= HOSTED_MEMBER_MESSAGE_PER_RUN) {
+        return { kind: 'notReached', reason: 'member_budget' };
+      }
+      if (
+        memberSent.filter(isUndeliveredMessage).length >=
+        HOSTED_MEMBER_MESSAGE_IN_FLIGHT
+      ) {
+        return { kind: 'notReached', reason: 'member_count_limit' };
+      }
+      const contentRef = await this.store.resources.publish(
+        'managed-message-content',
+        params.content,
+      );
+      const body = outboundMessageBody({
+        messageId: params.messageId,
+        route: 'to_child',
+        childRunId: head.childRunId,
+        senderSessionId: this.key.sessionId,
+        contentRef,
+        executionCallId: params.executionCallId,
+      });
+      await this.store.authority.commitExtensionRecord(
+        {
+          operation: 'sendSessionMessage',
+          commandId: `${params.messageId}:1`,
+          sessionKey: this.key,
+          contentDigest: digest(body),
+        },
+        { domain: 'session_message', record: body },
+        TRUSTED,
+      );
+      return { kind: 'sent' };
+    });
   }
 
   /**
@@ -1366,6 +1579,34 @@ export class HostedChildAgentSession {
       throw new Error(`Child run ${childRunId} has no result to notify.`);
     }
     const inputId = `${childRunId}:accept:notify`;
+    const submitted = new Set(
+      this.store.authority
+        .extensionRecordsInDomain('session_command')
+        .map((entry) => parseSessionCommand(entry.record))
+        .filter(
+          (command) =>
+            command.direction === 'inbound' &&
+            command.childRunId === childRunId &&
+            command.kind === 'plan_submit',
+        )
+        .map((command) => command.commandId),
+    );
+    const waiting = this.store.authority
+      .extensionRecordsInDomain('team_plan')
+      .map((entry) => parseTeamPlan(entry.record))
+      .find(
+        (plan) => submitted.has(plan.requestId) && plan.run.state === 'waiting',
+      );
+    const plan =
+      waiting === undefined
+        ? undefined
+        : {
+            requestId: waiting.requestId,
+            revision: waiting.planRevision,
+            text: (await this.store.resources.read(waiting.planRef)).toString(
+              'utf8',
+            ),
+          };
     // #13753 I2: a worktree child's receipt reports its merge, which the
     // waiting turn must see beside the result.
     const workspace =
@@ -1410,6 +1651,7 @@ export class HostedChildAgentSession {
                   childRunId,
                 )?.name,
               ...(workspace === undefined ? {} : { workspace }),
+              ...(plan === undefined ? {} : { plan }),
             }),
           }),
           'utf8',

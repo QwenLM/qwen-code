@@ -83,6 +83,8 @@ describe('Hosted tool approval settings', () => {
           'task_update',
           'task_list',
           'agent',
+          'exit_plan_mode',
+          'team_plan_approval',
         ].filter((tool) =>
           hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool),
         ),
