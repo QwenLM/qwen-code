@@ -157,7 +157,8 @@ describe('Hosted proxy header relay', () => {
       'utf8',
     );
     const completedArm = source.slice(
-      source.indexOf('const transcript = await daemon.json('),
+      source.indexOf('async function driveProbeTurn('),
+      source.indexOf('async function wedgeEvidence('),
     );
     expect(completedArm).toContain('/transcript?cursor=0&limit=256');
     expect(completedArm).toContain("event.type === 'turn_complete'");
