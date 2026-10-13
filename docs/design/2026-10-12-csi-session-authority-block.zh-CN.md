@@ -87,6 +87,26 @@ Producer 必须在尝试 preparation 前停止为该 Session 发出 execution。
 不循环重试，也不推断通用 worker 409 可以安全重试；保留原证据及失败状态。
 后续自动 producer 需要明确 retry 与 retirement 的契约，包括既有共用错误码。
 
+### 取消和持久化结果容量
+
+已授权的私有执行不能通过共享 Broker 路由取消。Service 在请求持久化取消前拒绝，
+JDBC repository 在原 owner 资格校验后执行相同约束。未启动且未授权的取消，
+以及普通 Runtime 的取消，保留原有语义。
+
+执行 envelope 仍以 1 MiB 为上限。原生 outcome 同时保存精确 envelope 和转换后的
+模型 history，可能重复文本和错误详情。64 KiB 以内继续使用 `managed-tool-outcome`；
+更大的 outcome 使用仅含 `parts` 的 `managed-tool-outcome-chunks` JSON manifest，
+按字节顺序引用 `managed-tool-outcome-part` 资源。除最后一个非空 part 外，每个
+part 为 60 KiB。共需 2–69 个唯一 part，合计最多 4 MiB；先拼接再解析 UTF-8。
+每个 manifest 和 part 均保留既有单资源 64 KiB 上限。
+
+Producer 发布全部 part 和 manifest，将 manifest 用作 `toolOutcomeRef`，并将其
+digest 用作 receipt 的 `contentDigest`。HTTP journal adapter 将 part 纳入同一
+事务的资源清单，manifest 已提交时也必须纳入。Native proof 通过该 revision 的
+SQL reference 校验每个 part 的 kind、长度和 digest，随后继续校验原有的闭合 body、
+execution envelope 和 history。缺失、篡改、重复、过短、超限或外来 part 均拒绝。
+该格式不启用 Hosted 执行，也不代表已完成剩余执行全链路验收。
+
 ### Migration history
 
 主干 V64–V68 已被占用。拆出的未发布 CSI 增量使用新的递增版本，提交前再次检查

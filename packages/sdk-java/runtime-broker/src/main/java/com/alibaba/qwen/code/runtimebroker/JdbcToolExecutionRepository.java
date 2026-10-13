@@ -396,6 +396,10 @@ public final class JdbcToolExecutionRepository
                     || current.getVersion() != expectedVersion) {
                 return null;
             }
+            if (continuation != null && current.getAuthorizedDispatchGeneration() != null) {
+                throw new RuntimeBrokerException(409, "csi_execution_cancel_unavailable",
+                        "An authorized private CSI execution does not support cancellation", false);
+            }
             if (current.isCancelRequested()) {
                 return current;
             }

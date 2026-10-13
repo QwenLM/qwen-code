@@ -1275,6 +1275,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 throw conflict("runtime_execution_conflict",
                                         "A background process settles only on stop evidence");
                             }
+                            if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
+                                    && current.getAuthorizedDispatchGeneration() != null) {
+                                throw conflict("csi_execution_cancel_unavailable",
+                                        "An authorized private CSI execution does not support cancellation");
+                            }
                             requested = requestCancel(current);
                             if (isPreparedProviderCancellation(requested)) {
                                 context.beginControl();

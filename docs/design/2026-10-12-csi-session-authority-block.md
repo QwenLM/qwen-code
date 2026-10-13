@@ -103,6 +103,33 @@ that a generic worker 409 is safely retryable; original evidence and failure
 state remain intact. A future automatic producer needs an explicit
 retry-versus-retirement contract, including the existing shared error codes.
 
+### Cancellation and durable outcome capacity
+
+An authorized private execution cannot be cancelled through the shared Broker
+route. The service refuses before requesting a durable cancellation, and the
+JDBC repository enforces the same rule after original-owner qualification.
+Unstarted, unauthorized cancellation and ordinary Runtime cancellation retain
+their existing semantics.
+
+The execution envelope remains bounded to 1 MiB. A native outcome contains
+that exact envelope and converted model history, which can duplicate text and
+error details. Outcomes up to 64 KiB retain `managed-tool-outcome`. Larger
+outcomes use a `managed-tool-outcome-chunks` JSON manifest containing only
+`parts`, in byte order, referencing `managed-tool-outcome-part` resources.
+Parts are 60 KiB except for the final nonempty part. There must be 2–69 unique
+parts, with a combined limit of 4 MiB; concatenation precedes UTF-8 parsing.
+Each manifest and part remains under the existing 64 KiB inline bound.
+
+The producer publishes every part and the manifest, uses the manifest as
+`toolOutcomeRef` and its digest as the receipt's `contentDigest`. The HTTP
+journal adapter includes the parts in the same transaction's resource census,
+including when the manifest was previously committed. Native proof verifies
+each part's kind, length and digest through that revision's SQL references,
+then applies the existing closed-body, execution-envelope and history checks.
+Missing, altered, duplicate, short, excessive or foreign parts refuse. This
+format does not enable Hosted execution or complete the remaining end-to-end
+execution qualification.
+
 ### Migration history
 
 Main already owns V64–V68. The extracted unpublished CSI additions receive

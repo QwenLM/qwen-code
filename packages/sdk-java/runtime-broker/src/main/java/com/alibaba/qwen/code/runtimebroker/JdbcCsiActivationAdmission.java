@@ -318,7 +318,6 @@ public final class JdbcCsiActivationAdmission {
             long now = JdbcRepositorySupport.databaseNowPrecise(connection).toEpochMilli();
             require(writerExpiresAt > now && activationExpiresAt > now);
         }
-
     }
 
     public static NativeHead lockNativeHead(Connection connection, JdbcCsiFilesRetirementGuard.Original original)

@@ -32,8 +32,6 @@ public final class JdbcCsiFilesRetirementGuard {
                 throw unavailable();
             }
         }
-
-
     }
 
     public static boolean isProfile(RuntimeScope scope) {

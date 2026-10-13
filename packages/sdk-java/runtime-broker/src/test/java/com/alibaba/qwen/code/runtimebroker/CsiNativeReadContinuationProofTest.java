@@ -34,6 +34,140 @@ class CsiNativeReadContinuationProofTest {
             transaction(0), request(0), original, writer, genesis.definitionDigest(), null, reader);
 
     @Test
+    void acceptsChunkedFullResultsAndRetainsExactConvertedHistory() throws Exception {
+        for (String status : List.of("success", "error")) {
+            var before = prefix(12);
+            ObjectNode envelope = JSON.createObjectNode().put("executionStatus", status);
+            envelope.putArray("responseParts").addObject().put("text", "原文 😀\n".repeat(10_000));
+            if (status.equals("error")) {
+                envelope.putObject("error").put("message", "failure");
+            }
+            var changed = receipt(envelope, true);
+            var after = advance(changed.transaction(), changed.metadata(), before);
+            var body = after.receipts().values().iterator().next().body();
+            assertEquals(envelope, body.path("envelope"));
+            assertEquals(CsiNativeActivationProof.convertedResult(envelope, before.pendingBatch().calls().getFirst()),
+                    body.path("history").path("parts"));
+        }
+    }
+
+    @Test
+    void acceptsTheMaximumHttpResultIncludingDuplicatedRuntimeError() throws Exception {
+        ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "error");
+        envelope.putArray("responseParts");
+        var error = envelope.putObject("error").put("message", "");
+        int overhead = CsiNativeActivationProof.utf8(CsiNativeActivationProof.canonical(envelope)).length;
+        error.put("message", "x".repeat(CsiNativeReadbackProtocol.EXECUTION_RESULT_LIMIT - overhead));
+        var changed = receipt(envelope, true);
+        assertEquals(envelope, advance(changed.transaction(), changed.metadata(), prefix(12))
+                .receipts().values().iterator().next().body().path("envelope"));
+        error.put("message", error.path("message").textValue() + "x");
+        assertThrows(RuntimeBrokerException.class, () -> receipt(envelope, true));
+    }
+
+    @Test
+    void advancesTheResultMessageAndCheckpointAfterAChunkedReceipt() throws Exception {
+        ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
+        envelope.putArray("responseParts").addObject().put("text", "x".repeat(40 * 1024));
+        var changed = receipt(envelope, true);
+        var after = advance(changed.transaction(), changed.metadata(), prefix(12));
+        var outcome = after.receipts().values().iterator().next();
+        ObjectNode event = transaction(13).events().getFirst().deepCopy();
+        ObjectNode metadata = request(13).deepCopy();
+        ObjectNode record = (ObjectNode) JSON.readTree(reader.apply(event.path("payload").path("contentRef")));
+        ((ObjectNode) record.path("message")).set("parts", outcome.body().path("history").path("parts"));
+        JsonNode messageRef = publish("managed-message", JSON.writeValueAsBytes(record));
+        ((ObjectNode) event.path("payload")).set("contentRef", messageRef);
+        after = advance(new CsiNativeActivationProof.Transaction(List.of(event), transaction(13).lastRecordUuid()), metadata, after);
+        event = transaction(14).events().getFirst().deepCopy();
+        metadata = request(14).deepCopy();
+        ObjectNode checkpoint = (ObjectNode) JSON.readTree(reader.apply(event.path("payload").path("stateRef")));
+        for (JsonNode item : checkpoint.path("tools").path("items")) {
+            if (outcome.body().path("executionCallId").equals(item.path("executionCallId"))) {
+                ((ObjectNode) item).set("outcomeRef", outcome.ref());
+            }
+        }
+        var checkpointRef = publish("managed-checkpoint", JSON.writeValueAsBytes(checkpoint));
+        ((ObjectNode) event.path("payload")).set("stateRef", checkpointRef);
+        metadata.put("contentDigest", checkpointRef.path("digest").textValue())
+                .put("latestCheckpointResourceId", checkpointRef.path("resourceId").textValue());
+        after = advance(new CsiNativeActivationProof.Transaction(List.of(event), transaction(14).lastRecordUuid()), metadata, after);
+        assertEquals("settled", after.checkpoint().state().path("tools").path("items").get(0).path("state").textValue());
+        assertEquals(outcome.ref(), after.checkpoint().state().path("tools").path("items").get(0).path("outcomeRef"));
+    }
+
+    @Test
+    void refusesOversizedUnchunkedReceiptsAndMissingChangedOrRepeatedParts() throws Exception {
+        ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
+        envelope.putArray("responseParts").addObject().put("text", "x".repeat(40 * 1024));
+        var inline = receipt(envelope, false);
+        assertThrows(RuntimeBrokerException.class, () -> advance(inline.transaction(), inline.metadata(), prefix(12)));
+        for (String fault : List.of("missing", "digest", "duplicate", "short", "extra", "count")) {
+            var changed = receipt(envelope, true);
+            var ref = changed.transaction().events().getFirst().path("payload").path("toolOutcomeRef");
+            ObjectNode manifest = (ObjectNode) JSON.readTree(reader.apply(ref));
+            var parts = (com.fasterxml.jackson.databind.node.ArrayNode) manifest.path("parts");
+            String partId = parts.get(0).path("resourceId").textValue();
+            switch (fault) {
+                case "missing" -> bodies.remove(partId);
+                case "digest" -> bodies.get(partId)[0] ^= 1;
+                case "duplicate" -> parts.set(1, parts.get(0));
+                case "short" -> {
+                    byte[] shortened = java.util.Arrays.copyOf(bodies.get(partId), 10);
+                    bodies.put(partId, shortened);
+                    ((ObjectNode) parts.get(0)).put("byteLength", shortened.length)
+                            .put("digest", CsiNativeActivationProof.sha256(shortened));
+                }
+                case "extra" -> manifest.put("foreign", true);
+                default -> {
+                    while (parts.size() <= 69) {
+                        parts.add(parts.get(0));
+                    }
+                }
+            }
+            var changedRef = publish("managed-tool-outcome-chunks", JSON.writeValueAsBytes(manifest));
+            ((ObjectNode) changed.transaction().events().getFirst().path("payload")).set("toolOutcomeRef", changedRef);
+            ((ObjectNode) changed.metadata()).put("contentDigest", changedRef.path("digest").textValue());
+            assertThrows(RuntimeBrokerException.class, () -> advance(changed.transaction(), changed.metadata(), prefix(12)), fault);
+        }
+    }
+
+    private Changed receipt(ObjectNode envelope, boolean chunked) throws Exception {
+        var before = prefix(12);
+        var tx = transaction(12);
+        ObjectNode event = tx.events().getFirst().deepCopy();
+        ObjectNode metadata = request(12).deepCopy();
+        var oldRef = event.path("payload").path("toolOutcomeRef");
+        ObjectNode body = (ObjectNode) JSON.readTree(reader.apply(oldRef));
+        body.set("envelope", envelope);
+        ((ObjectNode) body.path("history")).set("parts",
+                CsiNativeActivationProof.convertedResult(envelope, before.pendingBatch().calls().getFirst()));
+        byte[] bytes = JSON.writeValueAsBytes(body);
+        JsonNode ref;
+        if (chunked) {
+            ObjectNode manifest = JSON.createObjectNode();
+            var parts = manifest.putArray("parts");
+            for (int offset = 0; offset < bytes.length; offset += 60 * 1024) {
+                parts.add(publish("managed-tool-outcome-part",
+                        java.util.Arrays.copyOfRange(bytes, offset, Math.min(bytes.length, offset + 60 * 1024))));
+            }
+            ref = publish("managed-tool-outcome-chunks", JSON.writeValueAsBytes(manifest));
+        } else {
+            ref = publish("managed-tool-outcome", bytes);
+        }
+        ((ObjectNode) event.path("payload")).set("toolOutcomeRef", ref);
+        metadata.put("contentDigest", ref.path("digest").textValue());
+        return new Changed(new CsiNativeActivationProof.Transaction(List.of(event), tx.lastRecordUuid()), metadata);
+    }
+
+    private JsonNode publish(String kind, byte[] bytes) {
+        String resourceId = java.util.UUID.randomUUID().toString();
+        bodies.put(resourceId, bytes);
+        return JSON.createObjectNode().put("resourceId", resourceId).put("kind", kind).put("schemaVersion", 1)
+                .put("byteLength", bytes.length).put("digest", CsiNativeActivationProof.sha256(bytes));
+    }
+
+    @Test
     void replaysOriginalTwoReadResultsAndTheSecondModelDeltaAtOrdinalOne() {
         var before = prefix(19);
         assertNull(before.stream());
