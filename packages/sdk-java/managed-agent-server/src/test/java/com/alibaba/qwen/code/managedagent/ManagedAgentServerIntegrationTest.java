@@ -43,6 +43,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -265,6 +266,22 @@ class ManagedAgentServerIntegrationTest {
                         .header(TenantContextFilter.HEADER, "tenant-empty-id"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("not_found"));
+    }
+
+    @Test
+    void unicodeBlankCreateTitleIsCoercedToUntitled() throws Exception {
+        // A NBSP-only title must coerce to untitled on create, matching the
+        // rename route's blankness predicate; otherwise the server stores a
+        // value it later refuses to accept back on PATCH (validRenameTitle).
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, "tenant-nbsp-create")
+                        .header("Authorization", "Bearer ignored-by-design")
+                        .header("Idempotency-Key", "create-key-nbsp")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\","
+                                + "\"metadata\":{\"title\":\"\\u00a0\"}}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.metadata.title").doesNotExist());
     }
 
     @Test
@@ -1080,6 +1097,48 @@ class ManagedAgentServerIntegrationTest {
                                         .extracting(part -> part.text())
                                         .containsExactly("before", "after",
                                                 "thought", "final")));
+    }
+
+    @Test
+    void namesAWorkflowLaunchInTheProjectedUserMessage() {
+        // #13803 K1: a workflow child's first turn input is one
+        // `workflow_launch` block with no text key; the projected user
+        // message names its pin exactly as the daemon journal does
+        // (`workflowLaunchSummaryText`), never an empty parts list.
+        String tenant = "tenant-workflow-input-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "workflow-input-create", "digest-create",
+                "qwen-code", null, null, List.of(), null);
+        String turnId = "turn-workflow-input";
+        Map<String, Object> definition = new LinkedHashMap<>();
+        definition.put("definitionId", "workflow/report");
+        definition.put("definitionRevision", 1);
+        definition.put("definitionDigest",
+                "0123456789abcdef0123456789abcdef"
+                        + "0123456789abcdef0123456789abcdef");
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("type", "workflow_launch");
+        block.put("definition", definition);
+        block.put("script", "return 1;");
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
+                "turn.accepted", Map.of("input", List.of(block)), false,
+                "accepted");
+        store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
+                "item.output_text.delta", Map.of("text", "done"), true,
+                "final");
+        store.materializeNextBatch(tenant, session.sessionId(), 100);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .get().satisfies(snapshot -> assertThat(snapshot.items())
+                        .filteredOn(item -> "user".equals(item.role()))
+                        .singleElement().satisfies(item ->
+                                assertThat(item.content()).singleElement()
+                                        .satisfies(part -> {
+                                            assertThat(part.type())
+                                                    .isEqualTo("input_text");
+                                            assertThat(part.text()).isEqualTo(
+                                                    "<workflow workflow/report@1"
+                                                            + " sha256:0123456789abcdef>");
+                                        })));
     }
 
     @Test
