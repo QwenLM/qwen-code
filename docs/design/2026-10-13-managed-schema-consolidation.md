@@ -79,6 +79,8 @@ One versioned MySQL 8.4/InnoDB baseline is shared by Managed Server and Broker. 
 
 Historical SQL/Java migrations and their upgrade-only witnesses are kept under `docs/archive/managed-agent-schema`, outside runtime/test classpaths. The former Broker `schema.sql` is removed. Active tests cover fresh baseline activation and old-catalog refusal; no dormant upgrade path or second schema definition ships with the new application. History-only catalogs and history views are rejected before Flyway writes.
 
+Both MySQL/MariaDB initialization paths require a selected application catalog. They reject `mysql`, `sys`, `information_schema` and `performance_schema` before reading table metadata or invoking DDL/Flyway. JDBC drivers can classify all tables in a system catalog as SYSTEM TABLE, so filtering TABLE/VIEW alone cannot prove an empty application database.
+
 ## Delivery sequence and acceptance
 
 1. Commit bilingual design, complete 63-to-32 ownership inventory, typed keys/state contracts and canonical DDL; verify clean database initialization and refusal of legacy schemas.

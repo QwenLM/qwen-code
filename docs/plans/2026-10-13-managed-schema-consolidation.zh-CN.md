@@ -87,3 +87,5 @@ Node build/typecheck/bundle、相关 ESLint/yamllint 通过；两组 CI 检查�
 最终本地 Server 制品 SHA256 为 `ec2111953876a0aa70893e87187640f1fca4dd2441e41cdf7aebb55f466f7b26`；canonical DDL SHA256 为 `983915936568d67eeb34e11f84b68d8d89bec58d11b802439435a3a53f00ce1a`。读回确认恰好 32 张业务表、没有旧运行时迁移，且制品中的 556 个生产 class 文件均与已测试 class 一致。推送后的 GitHub CI 与这些本地结果分开记录。
 
 推送前，另一位贡献者将主线至 `8515d82f80` 合入 PR，生成 `740f8e8c5d`。保留该合并，仅在其上重放本轮修复。整合后的 Server 全量验证通过 2,506 项（0 失败/错误，7 项按环境跳过），包含新增的 cold child 与 procfs 竞争契约，Checkstyle、SpotBugs 通过。整合前后的已测试 CLI 源码/测试字节完全一致。整合后本地 Server 制品 SHA256 为 `38c79e949cc74370ff2fa4531fd54c00ffdd7b2287cc1c47b2fa2b102b660a26`，canonical DDL digest 不变。
+
+独立只读探针在任务专用 MySQL 上发现系统库准入漏洞：Connector/J 9.7.0 的 TABLE/VIEW 筛选隐藏了 mysql 库的全部表。Server 和 Broker 现共用检查，在元数据枚举、DDL 或 Flyway 前拒绝系统库及未选择的应用库。Broker 的 20 项 schema 单测和 70 项真实 MySQL 用例通过；Server 的 9 项准入/Flyway/连接池用例及静态检查通过。该检查阶段 Server SHA256 为 `01be4715ac1c792bfb53a2f8d2d570e927c5fde1e05130426ec86e08caa4e96a`，DDL 不变。只清理隔离任务实例 mysql 库中由测试创建的 32 张表，核实保留全部 38 张系统表身份；未改动应用数据库。

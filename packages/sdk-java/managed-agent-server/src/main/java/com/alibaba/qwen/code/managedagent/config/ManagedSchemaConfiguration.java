@@ -26,6 +26,7 @@ public class ManagedSchemaConfiguration {
             boolean populated;
             boolean history;
             try (Connection connection = source.getConnection()) {
+                ManagedSchema.requireApplicationCatalog(connection);
                 populated = false;
                 try (var tables =
                         connection

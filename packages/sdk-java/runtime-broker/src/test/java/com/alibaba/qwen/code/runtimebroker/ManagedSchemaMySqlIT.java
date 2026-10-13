@@ -21,6 +21,47 @@ import javax.sql.DataSource;
 /** Requires a dedicated empty database; never cleans, upgrades or repairs an existing schema. */
 class ManagedSchemaMySqlIT {
     @Test
+    void refusesSystemCatalogsBeforeChangingAnyTables() throws Exception {
+        String url = required("mysql.url");
+        int path = url.indexOf('/', "jdbc:mysql://".length());
+        int query = url.indexOf('?', path);
+        for (String catalog :
+                new String[] {"mysql", "sys", "information_schema", "performance_schema"}) {
+            DataSource source =
+                    new DriverManagerDataSource(
+                            url.substring(0, path + 1)
+                                    + catalog
+                                    + (query < 0 ? "" : url.substring(query)),
+                            required("mysql.user"),
+                            System.getProperty("mysql.password", ""));
+            var before = catalogTables(source, catalog);
+            var error =
+                    assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+            assertTrue(error.getCause().getMessage().contains("refused before DDL"));
+            assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
+            assertEquals(before, catalogTables(source, catalog));
+        }
+    }
+
+    private static java.util.Set<String> catalogTables(DataSource source, String catalog)
+            throws SQLException {
+        var tables = new HashSet<String>();
+        try (var connection = source.getConnection();
+                var query =
+                        connection.prepareStatement(
+                                "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.tables"
+                                        + " WHERE TABLE_SCHEMA=?")) {
+            query.setString(1, catalog);
+            try (var rows = query.executeQuery()) {
+                while (rows.next()) {
+                    tables.add(rows.getString(1) + ":" + rows.getString(2));
+                }
+            }
+        }
+        return tables;
+    }
+
+    @Test
     void baselineAndConstraintsWorkOnRealMySql() throws Exception {
         DataSource source =
                 new DriverManagerDataSource(

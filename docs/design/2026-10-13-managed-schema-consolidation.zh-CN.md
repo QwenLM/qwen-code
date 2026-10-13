@@ -79,6 +79,8 @@ MySQL 8.4/InnoDB baseline 只有一个版本化来源，由 Managed Server/Broke
 
 历史 SQL/Java 迁移及仅用于升级的验收保存在 `docs/archive/managed-agent-schema`，不进入运行时或测试 classpath。原 Broker `schema.sql` 已移除。现役测试验证新库 baseline 启用及旧库拒绝，新应用不携带停用的升级入口或第二套结构定义。仅有迁移历史的库及历史 view 在 Flyway 写入前被拒绝。
 
+MySQL/MariaDB 的两个初始化入口都要求选定应用数据库，在读取表元数据或调用 DDL/Flyway 前拒绝 `mysql`、`sys`、`information_schema` 和 `performance_schema`。JDBC 驱动可能把系统库中的所有表都标为 SYSTEM TABLE，因此仅筛选 TABLE/VIEW 不能证明它是空的应用数据库。
+
 ## 实施顺序与验收
 
 1. 提交中英文设计、63→32 完整归属清单、类型/键/状态契约和共享 DDL；验证空库初始化及旧库拒绝。

@@ -15,6 +15,10 @@ public final class ManagedSchema {
 
     private ManagedSchema() {}
 
+    public static void requireApplicationCatalog(Connection connection) throws SQLException {
+        ManagedSchemaCatalog.requireApplicationCatalog(connection);
+    }
+
     public static void initialize(DataSource source) {
         Objects.requireNonNull(source, "source");
         String ddl = ddl();

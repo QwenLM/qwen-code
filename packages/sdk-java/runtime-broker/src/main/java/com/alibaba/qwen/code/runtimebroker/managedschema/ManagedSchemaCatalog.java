@@ -33,7 +33,21 @@ final class ManagedSchemaCatalog {
 
     private ManagedSchemaCatalog() {}
 
+    static void requireApplicationCatalog(Connection connection) throws SQLException {
+        String product = connection.getMetaData().getDatabaseProductName();
+        if ("MySQL".equals(product) || "MariaDB".equals(product)) {
+            String name = connection.getCatalog();
+            if (name == null || name.isBlank()
+                    || Set.of("mysql", "sys", "information_schema", "performance_schema")
+                            .contains(lower(name))) {
+                throw new SQLException("Managed schema requires a dedicated application catalog;"
+                        + " system or missing catalog refused before DDL: " + name);
+            }
+        }
+    }
+
     static Map<String, String> tables(Connection connection) throws SQLException {
+        requireApplicationCatalog(connection);
         Map<String, String> tables = new LinkedHashMap<>();
         try (var result =
                 connection
