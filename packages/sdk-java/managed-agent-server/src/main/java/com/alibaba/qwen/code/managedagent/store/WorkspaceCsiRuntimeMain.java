@@ -67,6 +67,10 @@ public final class WorkspaceCsiRuntimeMain {
     }
 
     static void run(String[] args) throws Exception {
+        if (args.length == 3 && "text".equals(args[0])) {
+            WorkspaceCsiHostedMain.run(args);
+            return;
+        }
         if (args.length != 3 || !"serve".equals(args[0])) {
             throw new IllegalArgumentException("Usage: serve <reviewed-runtime-json> <port>");
         }

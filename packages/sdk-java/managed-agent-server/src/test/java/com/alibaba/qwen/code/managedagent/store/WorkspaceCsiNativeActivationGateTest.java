@@ -112,7 +112,8 @@ class WorkspaceCsiNativeActivationGateTest {
                 new RuntimeResourceHandle("kubernetes-workspace", 3, Map.of("podUid", "fixture-original")),
                 Instant.now(), Instant.now()));
         String method = info.getTestMethod().orElseThrow().getName();
-        generate(method.startsWith("textConversation"));
+        boolean extracted = method.startsWith("hostedTextConversation");
+        generate(method.startsWith("textConversation") || extracted, extracted, method.contains("LegacyTerminal"));
         writerId = nativeFixture.path("writerId").textValue();
         token = nativeFixture.path("writerToken").textValue();
         transaction.execute(status -> journal.acquireWriter("tenant", sessionId, token,
@@ -675,13 +676,49 @@ class WorkspaceCsiNativeActivationGateTest {
         return jdbc.queryForList("SELECT * FROM ma_session_head");
     }
 
-    private void generate(boolean conversation) throws Exception {
+    @Test
+    void hostedTextConversationAcceptsActualExtractedProducerBytesAndExactReplay() throws Exception {
+        ready();
+        int terminalRelease = nativeFixture.path("commits").size() - 1;
+        for (int index = 2; index < terminalRelease; index++) {
+            assertThat(commit(index).replayed()).isFalse();
+        }
+        var before = allRows();
+        for (int index = 0; index < terminalRelease; index++) {
+            assertThat(commit(index).replayed()).isTrue();
+        }
+        assertThat(allRows()).isEqualTo(before);
+        for (JsonNode observation : nativeFixture.path("observations")) {
+            assertThat(observation.path("terminal").path("systemPayload").path("state").textValue()).isEqualTo("completed");
+            assertThat(observation.path("terminal").has("daemonPromptId")).isFalse();
+        }
+        rejectedCommit((ObjectNode) nativeFixture.path("commits").get(terminalRelease).path("request"));
+    }
+
+    @Test
+    void hostedTextConversationRejectsLegacyTerminalFieldsWithValidResourceDigests() throws Exception {
+        ready();
+        int settlement = 2;
+        while (!nativeFixture.path("commits").get(settlement).path("request").path("operation").asText()
+                .equals("settleTurn")) {
+            assertThat(commit(settlement++).replayed()).isFalse();
+        }
+        var before = allRows();
+        rejectedCommit((ObjectNode) nativeFixture.path("commits").get(settlement).path("request"));
+        assertThat(allRows()).isEqualTo(before);
+    }
+
+    private void generate(boolean conversation, boolean extracted, boolean legacyTerminal) throws Exception {
         Path root = Path.of("../../..").toRealPath();
         Path input = directory.resolve("input.json");
         var value = JSON.createObjectNode().put("cwd", request.getScope().getCanonicalCwd())
                 .put("capabilityDigest", CsiFilesRetirementProfile.CAPABILITY_DIGEST);
         if (conversation) {
             value.put("conversation", true);
+        }
+        if (extracted) {
+            value.put("extractedProducer", true);
+            value.put("legacyTerminalShape", legacyTerminal);
         }
         value.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", sessionId);
         JSON.writeValue(input.toFile(), value);

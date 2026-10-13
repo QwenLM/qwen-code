@@ -26,6 +26,13 @@ export async function generateNativeTextTurns(
     pathToFileURL(`${root}/packages/cli/dist/src/serve/hosted-harness-model.js`)
       .href
   );
+  const { runHostedCsiTextTurn } = input.extractedProducer
+    ? await import(
+        pathToFileURL(
+          `${root}/packages/cli/dist/src/serve/hosted-csi-text-turn.js`,
+        ).href
+      )
+    : {};
   const promptFor = (turn) =>
     turn === 5 ? 'A'.repeat(65300) : `owned prompt ${turn} 汉字\nline`;
   const requests = [];
@@ -173,7 +180,17 @@ export async function generateNativeTextTurns(
       requireNew: true,
       create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
     });
-    for (let turn = 1; turn <= 5; turn++) {
+    if (input.legacyTerminalShape) {
+      const write = managed.sink.write.bind(managed.sink);
+      managed.sink.write = (entry) =>
+        write(
+          entry.subtype === 'turn_result'
+            ? { ...entry, daemonPromptId: entry.systemPayload.promptId }
+            : entry,
+        );
+    }
+    const turnCount = input.extractedProducer ? 2 : 5;
+    for (let turn = 1; turn <= turnCount; turn++) {
       const promptId = randomUUID(),
         text = promptFor(turn);
       const bytes = Buffer.from(JSON.stringify([{ type: 'text', text }]));
@@ -203,6 +220,21 @@ export async function generateNativeTextTurns(
           wakeReason: 'input',
         },
       );
+      if (input.extractedProducer) {
+        const terminal = await runHostedCsiTextTurn(
+          { managed, cwd: input.cwd },
+          promptId,
+          text,
+          new AbortController(),
+        );
+        observations.push({
+          turn,
+          promptId,
+          terminal,
+          projected: await managed.sink.project(),
+        });
+        continue;
+      }
       const harness = createManagedHarnessHandle(managed);
       let result, refusal;
       await new ManagedHookActivationController(managed).runTurn(
@@ -264,7 +296,7 @@ export async function generateNativeTextTurns(
         projected: await managed.sink.project(),
       });
     }
-    if (requests.length !== 5)
+    if (requests.length !== turnCount)
       throw new Error('Owned provider request count differs');
     return observations;
   } finally {
