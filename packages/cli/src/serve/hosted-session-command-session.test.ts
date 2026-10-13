@@ -1030,6 +1030,35 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(
       lead.session.authority.extensionRecordsInDomain('session_message'),
     ).toHaveLength(0);
+    // A legal-size address doubling through JSON must still answer its
+    // refusal inside one storable receipt (R2-1).
+    const escapedCommandId = commandIdOf('call-msg-5-escape');
+    const escaped = await lead.commands.execute(lead.teams, {
+      commandId: escapedCommandId,
+      kind: 'member_message',
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { to: 'a\\'.repeat(21828), message: 'hi' },
+    });
+    expect(escaped.outcome).toBe('refused');
+    expect(escaped.text).toContain(
+      'the reply grew past its size limit and was cut',
+    );
+    expect(
+      Buffer.byteLength(JSON.stringify(escaped), 'utf8'),
+    ).toBeLessThanOrEqual(MANAGED_SESSION_COMMAND_LIMITS.maxReplyBytes);
+    expect(lead.commands.command(escapedCommandId)?.direction).toBe('inbound');
+    // The old receipt-store throw left existingReply empty; the replay
+    // must now return the committed reply identically.
+    await expect(
+      lead.commands.execute(lead.teams, {
+        commandId: escapedCommandId,
+        kind: 'member_message',
+        childRunId: LEAF_RUN,
+        senderSessionId: CHILD,
+        args: { to: 'a\\'.repeat(21828), message: 'hi' },
+      }),
+    ).resolves.toEqual(escaped);
   });
 
   it('probes the sends an earlier execution committed and sends only the rest', async () => {

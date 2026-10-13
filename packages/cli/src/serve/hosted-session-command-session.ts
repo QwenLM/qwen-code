@@ -123,19 +123,42 @@ function digest(record: unknown): string {
 }
 
 /**
- * A reply is at most 64 KiB as stored JSON; a longer task list or board
- * answer is shortened with a marker rather than refused. Leaves enough
- * headroom for the reply's own `outcome`/`text` envelope.
+ * A reply is at most 64 KiB AS STORED — the receipt commits the
+ * JSON.stringify of its outcome-and-text envelope, so the cut is
+ * measured on the escape-hungry serialized form, never on the raw text:
+ * a lone `\` costs one byte raw and two in JSON, and control characters
+ * gain even more. The marker itself joins the budget, and the loop
+ * floor (an empty head) always fits.
  */
 function cutCommandReplyText(text: string): string {
-  const cap = MANAGED_SESSION_COMMAND_LIMITS.maxReplyBytes - 512;
-  if (Buffer.byteLength(text, 'utf8') <= cap) return text;
+  const max = MANAGED_SESSION_COMMAND_LIMITS.maxReplyBytes;
+  const envelopeOf = (candidate: string): number =>
+    Buffer.byteLength(
+      JSON.stringify({ outcome: 'answered', text: candidate }),
+      'utf8',
+    );
+  if (envelopeOf(text) <= max) return text;
   const marker = '\n… (the reply grew past its size limit and was cut)';
-  const budget = cap - Buffer.byteLength(marker, 'utf8');
-  const cut = new TextDecoder()
-    .decode(Buffer.from(text, 'utf8').subarray(0, budget))
-    .replace(/\uFFFD+$/, '');
-  return cut + marker;
+  // The escape ratio of the untried text estimates the raw budget; an
+  // escaping tail can overshoot it, so each pass re-measures the
+  // serialized envelope and shrinks until it fits. The estimate lands
+  // inside on the first pass for anything but an all-escape tail.
+  let budget = Math.max(
+    0,
+    Math.floor((Buffer.byteLength(text, 'utf8') * max) / envelopeOf(text)),
+  );
+  for (;;) {
+    const head =
+      budget > 0
+        ? new TextDecoder()
+            .decode(Buffer.from(text, 'utf8').subarray(0, budget))
+            .replace(/\uFFFD+$/, '')
+        : '';
+    const candidate = head + marker;
+    if (envelopeOf(candidate) <= max) return candidate;
+    const overshoot = envelopeOf(candidate) - max;
+    budget = Math.max(0, budget - Math.ceil(overshoot / 2) - 1);
+  }
 }
 
 export class HostedSessionCommandSession {
