@@ -91,7 +91,10 @@ export class HookSystem {
     this.hookRunner = new HookRunner(allowedHttpUrls, config); // Pass config for prompt hooks
     this.hookAggregator = new HookAggregator();
     this.hookPlanner = new HookPlanner(this.hookRegistry);
-    this.sessionHooksManager = new SessionHooksManager();
+    this.sessionHooksManager = new SessionHooksManager((sessionId) => {
+      if (sessionId === this.config.getSessionId())
+        this.refreshFileWatchingInBackground();
+    });
     this.hookEventHandler = new HookEventHandler(
       config,
       this.hookPlanner,
@@ -107,10 +110,10 @@ export class HookSystem {
   /**
    * Initialize the hook system
    */
-  async initialize(): Promise<void> {
+  async initialize(options?: { skipFileWatching?: boolean }): Promise<void> {
     if (this.managedDispatcher) return;
     await this.hookRegistry.initialize();
-    this.fileWatchingStarted = true;
+    this.fileWatchingStarted = !options?.skipFileWatching;
     this.fileWatchingSessionId = this.config.getSessionId();
     await this.refreshFileWatching();
     debugLogger.debug('Hook system initialized successfully');
@@ -199,6 +202,7 @@ export class HookSystem {
       return;
     if (
       this.managedDispatcher ||
+      this.config.getSessionExecutionEngine?.() === 'managed' ||
       this.config.getExecutionEnvironment?.() ||
       this.config.getShellExecutionSandbox?.()
     ) {
@@ -812,8 +816,6 @@ export class HookSystem {
       errorMessage,
       options,
     );
-    if (event === HookEventName.FileChanged)
-      this.refreshFileWatchingInBackground();
     return id;
   }
 
@@ -844,8 +846,6 @@ export class HookSystem {
       hook,
       options,
     );
-    if (event === HookEventName.FileChanged)
-      this.refreshFileWatchingInBackground();
     return id;
   }
 
@@ -866,8 +866,6 @@ export class HookSystem {
       event,
       hookId,
     );
-    if (event === HookEventName.FileChanged)
-      this.refreshFileWatchingInBackground();
     return removed;
   }
 
@@ -879,7 +877,6 @@ export class HookSystem {
    */
   removeSessionHook(sessionId: string, hookId: string): boolean {
     const removed = this.sessionHooksManager.removeHook(sessionId, hookId);
-    this.refreshFileWatchingInBackground();
     return removed;
   }
 
@@ -900,7 +897,6 @@ export class HookSystem {
     this.sessionHooksManager.clearSessionHooks(sessionId);
     // Also clear async hooks for this session
     this.getAsyncRegistry().clearSession(sessionId);
-    this.refreshFileWatchingInBackground();
   }
 
   /**

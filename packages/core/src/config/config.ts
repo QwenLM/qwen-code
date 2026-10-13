@@ -2244,6 +2244,8 @@ export interface ConfigInitializeOptions {
    * need config services (hooks, tools, MCP) before a real session exists.
    */
   skipLlmInitialization?: boolean;
+  /** Load hooks without starting a filesystem subscription for bootstrap configs. */
+  skipFileWatching?: boolean;
   /** @deprecated Use `skipLlmInitialization`; retained until a future major release. */
   skipGeminiInitialization?: boolean;
   /**
@@ -4194,7 +4196,9 @@ export class Config {
         (!options?.skipHooks && !this.getDisableAllHooks()))
     ) {
       this.hookSystem = new HookSystem(this, options?.managedHookDispatcher);
-      await this.hookSystem.initialize();
+      await this.hookSystem.initialize({
+        skipFileWatching: options?.skipFileWatching,
+      });
       this.debugLogger.debug('Hook system initialized');
 
       // Initialize MessageBus for hook execution

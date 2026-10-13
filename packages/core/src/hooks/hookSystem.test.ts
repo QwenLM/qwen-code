@@ -47,6 +47,7 @@ import type { AggregatedHookResult } from './hookAggregator.js';
 import type { HookOutput } from './types.js';
 import path from 'node:path';
 import { FileChangedWatcher } from './file-changed-watcher.js';
+import { applySkillHooks } from '../tools/skill-utils.js';
 import { getHookExecutionOwner } from './hook-execution-context.js';
 import {
   runWithInvocationContext,
@@ -209,6 +210,59 @@ describe('HookSystem', () => {
       expect(mockHookEventHandler.fireSessionStartEvent).not.toHaveBeenCalled();
     });
 
+    it('loads bootstrap hooks without starting watches, including after reload', async () => {
+      await hookSystem.initialize({ skipFileWatching: true });
+      await hookSystem.reload();
+      expect(mockHookRegistry.initialize).toHaveBeenCalledOnce();
+      expect(FileChangedWatcher).not.toHaveBeenCalled();
+      await start();
+      expect(watcher().setPaths).toHaveBeenCalledWith([
+        path.resolve('/test/cwd', '.env'),
+        path.resolve('/test/cwd', '.envrc'),
+      ]);
+    });
+
+    it('refreshes static paths when a skill registers directly with the session manager', async () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+      await hookSystem.initialize();
+      applySkillHooks(
+        {
+          getHookSystem: () => hookSystem,
+          getSessionId: () => 'test-session-id',
+        },
+        {
+          name: 'watch-topic',
+          description: 'Watch topic',
+          level: 'user',
+          filePath: '/skills/watch-topic/SKILL.md',
+          skillRoot: '/skills/watch-topic',
+          body: '',
+          hooks: {
+            FileChanged: [
+              {
+                matcher: 'topic.md',
+                hooks: [{ type: HookType.Command, command: 'echo changed' }],
+              },
+            ],
+          },
+        },
+      );
+      await vi.waitFor(() => {
+        expect(watcher().setPaths).toHaveBeenLastCalledWith([
+          path.resolve('/test/cwd', 'topic.md'),
+        ]);
+      });
+      const manager = hookSystem.getSessionHooksManager();
+      const [entry] = manager.getHooksForEvent(
+        'test-session-id',
+        HookEventName.FileChanged,
+      );
+      manager.removeHook('test-session-id', entry.hookId);
+      await vi.waitFor(() =>
+        expect(watcher().setPaths).toHaveBeenLastCalledWith([]),
+      );
+    });
+
     it('keeps watchPaths from an earlier output when a later hook only adds context', async () => {
       const context = {
         hookSpecificOutput: {
@@ -275,11 +329,19 @@ describe('HookSystem', () => {
       expect(FileChangedWatcher).not.toHaveBeenCalled();
     });
 
-    it.each(['remote', 'sandbox', 'managed', 'disabled'] as const)(
+    it.each([
+      'remote',
+      'sandbox',
+      'managed',
+      'managed-engine',
+      'disabled',
+    ] as const)(
       'does not create a local watcher for %s sessions',
       async (kind) => {
         Object.assign(mockConfig, {
           getExecutionEnvironment: () => (kind === 'remote' ? {} : undefined),
+          getSessionExecutionEngine: () =>
+            kind === 'managed-engine' ? 'managed' : undefined,
           getShellExecutionSandbox: () => (kind === 'sandbox' ? {} : undefined),
           getDisableAllHooks: () => kind === 'disabled',
         });

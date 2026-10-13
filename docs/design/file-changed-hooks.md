@@ -52,10 +52,16 @@ than a transaction or a change journal.
 | Hook documentation                                                        | Explain registration, memory-directory example, and limitations                                  |
 
 The first implementation supports local, non-managed sessions. SSH execution
-environments, shell sandbox workers, and managed dispatchers do not create a
+environments, shell sandbox workers, managed execution engines (including ACP),
+and managed dispatchers do not create a
 host filesystem watcher. A remote absolute path must never be interpreted as a
 host path. Supporting hosted runtimes requires a separate design at the actual
 filesystem owner. This feature introduces no daemon route or memory API.
+
+ACP workspace/bootstrap initialization loads the hook registry with file watching
+disabled; actual session configs own their subscriptions. Session hook manager
+mutations, including skill registration and removal, refresh the listening
+session’s static roots without a reload.
 
 Hook reload and enable/disable update the configured static roots. Events are
 filtered through the current trusted registry. Shutdown stops intake, aborts

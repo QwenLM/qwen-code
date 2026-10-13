@@ -44,9 +44,13 @@ HookSystem 初始化时等待 watcher 就绪，无需额外配置 SessionStart h
 | Hook 文档                                                  | 说明注册、memory 目录示例和限制                               |
 
 首版支持本地非托管会话。SSH execution environment、Shell sandbox worker 和
-managed dispatcher 不创建宿主文件 watcher。远程绝对路径不能被解释为宿主路径。
+managed execution engine（包含 ACP）及 managed dispatcher 不创建宿主文件 watcher。远程绝对路径不能被解释为宿主路径。
 托管 runtime 的支持需要在实际文件系统拥有者处另行设计。本功能不新增 daemon
 route 或 memory API。
+
+ACP workspace/bootstrap 初始化加载 hook registry，但禁用文件监听；实际会话 Config
+拥有各自的订阅。Session hook manager 的变更（含 skill 注册及移除）无需 reload
+即可刷新监听会话的静态根路径。
 
 Hook reload 和启用/禁用会更新静态根路径；事件通过当前可信 registry 筛选。
 关闭时停止接收、取消运行中的 hook 命令、丢弃排队通知并释放 watcher。

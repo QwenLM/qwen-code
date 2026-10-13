@@ -5661,6 +5661,19 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('loads bootstrap hooks with file watching disabled', async () => {
+      const config = makeConfig();
+      await config.initialize({
+        skipFileWatching: true,
+        skipLlmInitialization: true,
+        skipMcpDiscovery: true,
+      });
+      expect(HookSystem).toHaveBeenCalled();
+      expect(config.getHookSystem()?.initialize).toHaveBeenCalledWith({
+        skipFileWatching: true,
+      });
+    });
+
     it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
       const config = makeConfig({ fileCheckpointingEnabled: true });
 
