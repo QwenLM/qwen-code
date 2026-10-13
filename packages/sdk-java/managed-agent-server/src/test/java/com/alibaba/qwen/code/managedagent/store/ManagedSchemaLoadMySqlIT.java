@@ -59,18 +59,10 @@ class ManagedSchemaLoadMySqlIT extends ManagedSchemaSessionMySqlIT {
     }
 
     private long scanned(String sql, Object argument) {
-        String plan = jdbc.queryForObject("EXPLAIN ANALYZE " + sql, String.class, argument);
-        assertThat(plan).doesNotContain("Table scan");
-        var counts =
-                java.util.regex.Pattern.compile("actual time=[^)]*?rows=([0-9.]+) loops=([0-9]+)")
-                        .matcher(plan);
-        long scanned = 0;
-        while (counts.find()) {
-            scanned +=
-                    Math.round(
-                            Double.parseDouble(counts.group(1)) * Long.parseLong(counts.group(2)));
-        }
-        assertThat(scanned).as(plan).isPositive().isLessThanOrEqualTo(10);
+        var plan = ExecutedQueryPlan.explain(jdbc, sql, argument);
+        assertThat(plan.tableScan()).as(plan.text()).isFalse();
+        long scanned = plan.scannedRows();
+        assertThat(scanned).as(plan.text()).isPositive().isLessThanOrEqualTo(10);
         return scanned;
     }
 

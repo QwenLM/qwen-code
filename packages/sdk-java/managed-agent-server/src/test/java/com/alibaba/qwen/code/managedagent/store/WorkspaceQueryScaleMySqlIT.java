@@ -12,7 +12,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Pattern;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.RowMapper;
@@ -197,24 +196,21 @@ class WorkspaceQueryScaleMySqlIT {
 
     private static void assertBounded(CapturingJdbc jdbc, Query query, String index, int limit) {
         assertThat(query).isNotNull();
-        String plan = jdbc.queryForObject("EXPLAIN ANALYZE " + query.sql(), String.class, query.arguments());
-        assertThat(plan).doesNotContain("Table scan on");
-        if ("PRIMARY".equals(index) && plan.contains("Rows fetched before execution")) {
+        var plan = ExecutedQueryPlan.explain(jdbc, query.sql(), query.arguments());
+        assertThat(plan.tableScan()).as(plan.text()).isFalse();
+        if ("PRIMARY".equals(index) && plan.text().contains("Rows fetched before execution")) {
             var table = WorkspaceRecoveryStore.parse(jdbc.queryForObject("EXPLAIN FORMAT=JSON " + query.sql(), String.class, query.arguments()))
                     .path("query_block").path("table");
             assertThat(table.path("access_type").asText()).isEqualTo("const");
             assertThat(table.path("key").asText()).isEqualTo("PRIMARY");
             assertThat(table.path("rows_examined_per_scan").asInt()).isEqualTo(1);
         } else {
-            assertThat(plan).contains(index);
+            assertThat(plan.usesIndex(index)).as(plan.text()).isTrue();
         }
-        var rows = Pattern.compile("actual time=[^)]*?rows=([0-9]+(?:\\.[0-9]+)?) loops=([0-9]+(?:\\.[0-9]+)?)").matcher(plan);
-        int operators = 0;
-        while (rows.find()) {
-            assertThat(Double.parseDouble(rows.group(1)) * Double.parseDouble(rows.group(2))).as(plan).isLessThanOrEqualTo(limit);
-            operators++;
+        assertThat(plan.rowCounts()).as(plan.text()).isNotEmpty();
+        for (double count : plan.rowCounts()) {
+            assertThat(count).as(plan.text()).isLessThanOrEqualTo(limit);
         }
-        assertThat(operators).isPositive();
     }
 
     private record Query(String sql, Object[] arguments) {}

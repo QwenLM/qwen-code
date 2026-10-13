@@ -87,6 +87,8 @@ The retained MariaDB CI lane uses the same canonical DDL. Its CHECK catalog has 
 
 Structural CASE comparison treats only bare TRUE/FALSE tokens as the numeric aliases 1/0, matching [MariaDB Boolean literals](https://mariadb.com/docs/server/reference/sql-structure/sql-language-structure/sql-language-structure-boolean-literals). Quoted strings, branch order/values, operators and ELSE remain part of the checked shape; no CHECK clause is skipped.
 
+Load witnesses preserve actual execution statistics on both retained database families. MySQL uses EXPLAIN ANALYZE tree operators; MariaDB uses [ANALYZE FORMAT=JSON](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/analyze-and-explain-statements/analyze-format-json), multiplying average r_rows by r_loops for every table node. The test helper checks actual chosen keys rather than possible_keys, rejects estimated-only or incomplete counters, and preserves zero-loop unexecuted joins. Existing scan budgets, actual index checks and 1000-to-10000 history assertions remain mandatory; no vendor is skipped.
+
 The real-stack E2E runner seeds and audits only canonical tables, including the ACTION discriminator for approvals. Linux CI explicitly enables verified recovery for both initial and replacement Server processes and registers the fresh task-owned native storage before launching any Harness or admitting work. It never substitutes SQL-only identity proof or enables trusted reboot recovery. Current macOS LOCAL tool support remains an unresolved platform decision; the documented current behavior requires Linux registration and preserves physical exclusion.
 
 ## Delivery sequence and acceptance

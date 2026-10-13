@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Pattern;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -30,12 +29,12 @@ class ManagedSchemaRelayLoadMySqlIT {
                 assertThat(relay.findPendingMessages("worker", 30_000, 50))
                         .extracting(SessionMessageRelayStore.PendingMessage::messageId)
                         .containsExactly("pending-accepting", "pending-planned", "pending-unknown");
-                String plan = explain(database.source(), jdbc.recorded.getFirst());
-                assertThat(plan).contains("ix_ma_record_delivery");
-                long scanned = scanned(plan);
-                assertThat(scanned).as(plan).isPositive().isLessThanOrEqualTo(30);
+                var plan = explain(database.source(), jdbc.recorded.getFirst());
+                assertThat(plan.usesIndex("ix_ma_record_delivery")).as(plan.text()).isTrue();
+                long scanned = plan.scannedRows();
+                assertThat(scanned).as(plan.text()).isPositive().isLessThanOrEqualTo(30);
                 if (previousScan >= 0) {
-                    assertThat(scanned).as(plan).isEqualTo(previousScan);
+                    assertThat(scanned).as(plan.text()).isEqualTo(previousScan);
                 }
                 previousScan = scanned;
                 first = history;
@@ -57,12 +56,12 @@ class ManagedSchemaRelayLoadMySqlIT {
                 jdbc.recorded.clear();
                 assertThat(channels.findPendingDeliveries("tenant", "sender", 50))
                         .extracting(ChannelInstanceStore.PendingDelivery::deliveryId).containsExactly("pending");
-                String plan = explain(database.source(), jdbc.recorded.getFirst());
-                assertThat(plan).contains("ix_ma_record_session_delivery");
-                long scanned = scanned(plan);
-                assertThat(scanned).as(plan).isPositive().isLessThanOrEqualTo(10);
+                var plan = explain(database.source(), jdbc.recorded.getFirst());
+                assertThat(plan.usesIndex("ix_ma_record_session_delivery")).as(plan.text()).isTrue();
+                long scanned = plan.scannedRows();
+                assertThat(scanned).as(plan.text()).isPositive().isLessThanOrEqualTo(10);
                 if (previousScan >= 0) {
-                    assertThat(scanned).as(plan).isEqualTo(previousScan);
+                    assertThat(scanned).as(plan.text()).isEqualTo(previousScan);
                 }
                 previousScan = scanned;
                 first = history;
@@ -70,18 +69,8 @@ class ManagedSchemaRelayLoadMySqlIT {
         }
     }
 
-    private static String explain(DataSource source, Statement statement) {
-        return new JdbcTemplate(source).queryForObject("EXPLAIN ANALYZE " + statement.sql(),
-                String.class, statement.arguments());
-    }
-
-    private static long scanned(String plan) {
-        var rows = Pattern.compile("actual time=[^)]*?rows=([0-9.]+) loops=([0-9]+)").matcher(plan);
-        long scanned = 0;
-        while (rows.find()) {
-            scanned += Math.round(Double.parseDouble(rows.group(1)) * Long.parseLong(rows.group(2)));
-        }
-        return scanned;
+    private static ExecutedQueryPlan.Plan explain(DataSource source, Statement statement) {
+        return ExecutedQueryPlan.explain(new JdbcTemplate(source), statement.sql(), statement.arguments());
     }
 
     private static void record(JdbcTemplate jdbc, String domain, String id, String state, long createdAt) {
