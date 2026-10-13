@@ -143,7 +143,10 @@ class HostedTeamMemberCommandMySqlIT {
      * session_command it did not receipt.
      */
     @Test
-    @Timeout(240)
+    // Above the ~295 s its bounded waits add up to (boot 30, lead 30,
+    // reports 180, close 55) plus the Spring start, so a stall fails on
+    // its own phase's atMost instead of a bare timeout.
+    @Timeout(360)
     void membersReadAndWriteTheBoardTheirLeadReads() throws Exception {
         boot();
         String lead = createLead("H4EB3_CMD_LIFECYCLE");
@@ -198,7 +201,11 @@ class HostedTeamMemberCommandMySqlIT {
      * generation parked.
      */
     @Test
-    @Timeout(180)
+    // Above the ~465 s its bounded waits add up to (boot 30, hold 30,
+    // lead 30, park 60, kill 20, restart 30, takeover 100, consumed 110,
+    // close 55) plus the Spring start, so a stall fails on its own
+    // phase's atMost instead of a bare timeout.
+    @Timeout(540)
     void memberHarnessRestartDuringCommandWait() throws Exception {
         boot();
         CountDownLatch releaseRelay = holdMessageRelay();
@@ -231,9 +238,9 @@ class HostedTeamMemberCommandMySqlIT {
             // The relay goes on only once the takeover holds carol's
             // Session: while it is held, nothing but the coordinator's
             // takeover load can fence the dead generation. A relay attach
-            // that wins the load race instead leaves the parked Turn
-            // without its continue — a separate race this case does not
-            // pin.
+            // that wins the load race instead gets the takeover's load
+            // refused (409 hosted_session_already_attached) and deferred a
+            // full backoff step — a separate race this case does not pin.
             waiting().atMost(Duration.ofSeconds(100))
                     .pollInterval(Duration.ofMillis(500)).untilAsserted(() ->
                             assertThat(writerGeneration(carol))
@@ -278,7 +285,16 @@ class HostedTeamMemberCommandMySqlIT {
                 Thread.currentThread().interrupt();
             }
         });
-        assertThat(held.await(30, TimeUnit.SECONDS))
+        boolean taken = false;
+        try {
+            taken = held.await(30, TimeUnit.SECONDS);
+        } finally {
+            // A hold that never took is still queued: released here, it
+            // returns as soon as it runs instead of parking the relay's
+            // only thread with no caller left to let it go.
+            if (!taken) release.countDown();
+        }
+        assertThat(taken)
                 .as("the message relay's scheduler takes the hold")
                 .isTrue();
         return release;
