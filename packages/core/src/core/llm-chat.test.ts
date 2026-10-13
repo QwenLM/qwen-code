@@ -9784,6 +9784,34 @@ describe('LlmChat', async () => {
     expect(emittedText).toBe('All set.');
   });
 
+  it.each([
+    '<action>deploy</action> is the first step.',
+    '<file_path>src/a.ts</file_path> holds the bug.',
+    '<action android:name="android.intent.action.MAIN"/>',
+  ])('preserves ordinary leading XML: %s (#10797)', async (response) => {
+    const record = vi.fn();
+    const target = chatWithRecorder(record);
+    mockStreamsOnce(streamOf(stopResponse([{ text: response }])));
+    const stream = await send('Draft an XML example.', 'ordinary-xml', target);
+    const events: StreamEvent[] = [];
+    let delivered = '';
+    for await (const event of stream) {
+      events.push(event);
+      if (event.type === StreamEventType.CHUNK) {
+        delivered += (event.value.candidates?.[0]?.content?.parts ?? [])
+          .map((part) => part.text ?? '')
+          .join('');
+      }
+    }
+    expect(delivered).toBe(response);
+    expect(target.getLastModelMessageText()).toBe(response);
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({ message: [{ text: response }] }),
+    );
+    expect(hasRetry(events)).toBe(false);
+    expectStreamCalls(1);
+  });
+
   it('does not reject tool-result scaffolding tag names in mid-prose (#10797)', async () => {
     const response =
       'Pass <file_path> in the schema and mark the <action> field optional.';
@@ -9817,6 +9845,106 @@ describe('LlmChat', async () => {
       ),
     ]);
   };
+
+  it.each([
+    [
+      'closed code before echo',
+      (echo: string) => ({
+        input: `\`\`\`python\nprint(1)\n\`\`\`\n${echo}\n\`\`\`md\ndoc\n\`\`\`\nEnd`,
+        expected: '```python\nprint(1)\n```\n```md\ndoc\n```\nEnd',
+      }),
+    ],
+    [
+      'tilde wrapper',
+      (echo: string) => ({
+        input: `~~~xml\n${echo}\n~~~\nAnswer.`,
+        expected: 'Answer.',
+      }),
+    ],
+    [
+      'CRLF wrapper',
+      (echo: string) => ({
+        input: `\`\`\`xml\r\n${echo}\r\n\`\`\`\r\nAnswer.`,
+        expected: 'Answer.',
+      }),
+    ],
+    [
+      'unclosed wrapper',
+      (echo: string) => {
+        const input = `\`\`\`\n${echo}\nAnswer.`;
+        return { input, expected: input };
+      },
+    ],
+    [
+      'mismatched wrapper',
+      (echo: string) => {
+        const input = `\`\`\`\n${echo}\n~~~\nAnswer.`;
+        return { input, expected: input };
+      },
+    ],
+    [
+      'existing code quotation',
+      (echo: string) => {
+        const input = `Quoted transcript:\n\n\`\`\`text\ntranscript line\n${echo}\nlast line\n\`\`\`\nDone.`;
+        return { input, expected: input };
+      },
+    ],
+    [
+      'mid-line code quote',
+      (echo: string) => {
+        const input = `See \`${echo}\` here.`;
+        return { input, expected: input };
+      },
+    ],
+    [
+      'literal mention before echo',
+      (echo: string) => ({
+        input: `Reminders arrive as <system-reminder> blocks.\n\n\`${echo}\`\nAnswer.`,
+        expected: 'Reminders arrive as <system-reminder> blocks.\n\nAnswer.',
+      }),
+    ],
+    [
+      'JSON-held mention before echo',
+      (echo: string) => ({
+        input: `{ "example": "literal" }\nReminders arrive as <system-reminder> blocks.\n\n\`${echo}\`\nAnswer.`,
+        expected:
+          '{ "example": "literal" }\nReminders arrive as <system-reminder> blocks.\n\nAnswer.',
+      }),
+    ],
+  ])('keeps reminder ownership for %s (#10797)', async (_name, render) => {
+    const body = 'The actual injected todo reminder.';
+    const { input, expected } = render(wrapSystemReminder(body));
+    for (const chunks of [[input], Array.from(input)]) {
+      vi.mocked(mockContentGenerator.generateContentStream).mockClear();
+      const record = vi.fn();
+      const target = chatWithRecorder(record);
+      mockStreamsOnce(
+        streamOf(...chunks.map((text) => textChunk(text)), stopResponse([])),
+      );
+      const stream = await send(
+        [{ text: wrapSystemReminder(body) }, { text: 'Continue the task.' }],
+        'reminder-ownership',
+        target,
+      );
+      const events: StreamEvent[] = [];
+      let delivered = '';
+      for await (const event of stream) {
+        events.push(event);
+        if (event.type === StreamEventType.CHUNK) {
+          delivered += (event.value.candidates?.[0]?.content?.parts ?? [])
+            .map((part) => part.text ?? '')
+            .join('');
+        }
+      }
+      expect(delivered).toBe(expected);
+      expect(target.getLastModelMessageText()).toBe(expected);
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({ message: [{ text: expected }] }),
+      );
+      expect(hasRetry(events)).toBe(false);
+      expectStreamCalls(1);
+    }
+  });
 
   it.each([
     ['bare', (body: string) => `${wrapSystemReminder(body)}\nAnswer.`],

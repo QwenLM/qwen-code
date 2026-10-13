@@ -1706,14 +1706,11 @@ const PROTOCOL_TAG_PREFIXES = [
   '</analysis',
   '<summary',
   '</summary',
-  // Harness-style tool-result scaffolding that some models emit as raw XML
-  // before their real reply (#10797 Shape A): a fake `<file_path>` /
-  // `<action>` block closed by a dangling `</tool_result>`. qwen-code never
-  // generates these tags itself, so a response opening with one is a leak.
-  '<file_path',
-  '<action',
   '</tool_result',
 ] as const;
+const SCAFFOLDING_OPENERS = ['<file_path>', '<action>'] as const;
+const TOOL_RESULT_SCAFFOLDING =
+  /^(?:<(file_path|action|summary)>[^<>]*<\/\1>\s*)+<\/tool_result>(?:\s|$)/i;
 const LEAKED_TOOL_CALL_TAGS = /[}\]]\s*<\/parameter>\s*<\/function>/iy;
 
 function hasLeakedToolCallTags(text: string): boolean {
@@ -1736,7 +1733,8 @@ function hasLeakedToolCallTags(text: string): boolean {
 }
 
 class LeadingProtocolTagLeakDetector {
-  private state: 'detecting' | 'json' | 'clean' | 'leaked' = 'detecting';
+  private state: 'detecting' | 'json' | 'scaffolding' | 'clean' | 'leaked' =
+    'detecting';
   private buffer = '';
 
   accept(text: string): string {
@@ -1745,9 +1743,22 @@ class LeadingProtocolTagLeakDetector {
 
     this.buffer += text;
     if (this.state === 'json') return '';
+    if (this.state === 'scaffolding') {
+      if (TOOL_RESULT_SCAFFOLDING.test(this.buffer.trimStart())) {
+        this.state = 'leaked';
+        this.buffer = '';
+      } else if (this.buffer.length > SYSTEM_REMINDER_ECHO_MAX_BUFFER) {
+        return this.release();
+      }
+      return '';
+    }
     const candidate = this.buffer.trimStart().toLowerCase();
     if (!candidate) return '';
-    if (PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))) {
+    if (
+      [...PROTOCOL_TAG_PREFIXES, ...SCAFFOLDING_OPENERS].some((prefix) =>
+        prefix.startsWith(candidate),
+      )
+    ) {
       return '';
     }
 
@@ -1760,6 +1771,14 @@ class LeadingProtocolTagLeakDetector {
         this.buffer = '';
         return '';
       }
+    }
+    if (SCAFFOLDING_OPENERS.some((prefix) => candidate.startsWith(prefix))) {
+      this.state = 'scaffolding';
+      if (TOOL_RESULT_SCAFFOLDING.test(candidate)) {
+        this.state = 'leaked';
+        this.buffer = '';
+      }
+      return '';
     }
     if (candidate.startsWith('{')) {
       this.state = 'json';
@@ -1786,6 +1805,7 @@ class LeadingProtocolTagLeakDetector {
       }
       return this.release();
     }
+    if (this.state === 'scaffolding') return this.release();
     if (this.state !== 'detecting') return '';
     const candidate = this.buffer.trimStart().toLowerCase();
     if (
@@ -1832,6 +1852,11 @@ class SystemReminderEchoFilter {
   private buffer = '';
   private skipLineBreak = false;
   private readonly bodies: string[];
+  private markdownLine = '';
+  private markdownLineTooLong = false;
+  private fence: { marker: string; length: number } | undefined;
+  private inlineTicks = 0;
+  private tickRun = 0;
 
   constructor(history: Content[]) {
     const bodies = new Set<string>();
@@ -1865,6 +1890,52 @@ class SystemReminderEchoFilter {
     return this.drain(true);
   }
 
+  private preserve(text: string): string {
+    for (const char of text) {
+      if (char === '`') {
+        this.tickRun++;
+      } else if (this.tickRun) {
+        if (!this.fence) {
+          if (!this.inlineTicks) this.inlineTicks = this.tickRun;
+          else if (this.inlineTicks === this.tickRun) this.inlineTicks = 0;
+        }
+        this.tickRun = 0;
+      }
+      if (char === '\n') {
+        const marker = this.markdownLineTooLong
+          ? null
+          : this.markdownLine.match(/^ {0,3}(`{3,}|~{3,})([^\r\n]*)\r?$/);
+        if (marker) {
+          const ticks = marker[1];
+          if (this.fence) {
+            if (
+              ticks[0] === this.fence.marker &&
+              ticks.length >= this.fence.length &&
+              !marker[2].trim()
+            ) {
+              this.fence = undefined;
+              this.inlineTicks = 0;
+            }
+          } else if (ticks[0] === '~' || !marker[2].includes('`')) {
+            this.fence = { marker: ticks[0], length: ticks.length };
+            this.inlineTicks = 0;
+          }
+        }
+        this.markdownLine = '';
+        this.markdownLineTooLong = false;
+      } else if (this.markdownLine.length < SYSTEM_REMINDER_ECHO_MAX_BUFFER) {
+        this.markdownLine += char;
+      } else {
+        this.markdownLineTooLong = true;
+      }
+    }
+    return text;
+  }
+
+  private get inCode(): boolean {
+    return this.fence !== undefined || this.inlineTicks > 0 || this.tickRun > 0;
+  }
+
   private static partialTagLength(text: string, tag: string): number {
     for (
       let length = Math.min(text.length, tag.length - 1);
@@ -1876,10 +1947,24 @@ class SystemReminderEchoFilter {
     return 0;
   }
 
-  private static wrapper(prefix: string): RegExpMatchArray | null {
-    return prefix.match(
-      /(?:^|\n)[ \t]*(`{3,}|~{3,})[^\r\n`~]*\r?\n[ \t]*$|(?:^|\n)[ \t]*(`+)[ \t]*$/,
+  private wrapper(prefix: string): RegExpMatchArray | null {
+    return this.atLineStart(
+      prefix.match(
+        /(?:^|\n)[ \t]*(`{3,}|~{3,})[^\r\n`~]*\r?\n[ \t]*$|(?:^|\n)[ \t]*(`+)[ \t]*$/,
+      ),
     );
+  }
+
+  private atLineStart(match: RegExpMatchArray | null): RegExpMatchArray | null {
+    if (
+      match &&
+      ((match.index === 0 &&
+        !match[0].startsWith('\n') &&
+        this.markdownLine !== '') ||
+        /^(?:\n)?(?: {4}|\t)/.test(match[0]))
+    )
+      return null;
+    return match;
   }
 
   private drain(final = false): string {
@@ -1899,9 +1984,9 @@ class SystemReminderEchoFilter {
           SYSTEM_REMINDER_OPEN,
         );
         const prefix = partial ? this.buffer.slice(0, -partial) : this.buffer;
-        const wrapper = SystemReminderEchoFilter.wrapper(prefix);
-        const trailingWrapper = prefix.match(
-          /(?:^|\n)[ \t]*(?:`+[^\r\n`]*|~{3,}[^\r\n~]*)$/,
+        const wrapper = this.wrapper(prefix);
+        const trailingWrapper = this.atLineStart(
+          prefix.match(/(?:^|\n)[ \t]*(?:`+[^\r\n`]*|~+[^\r\n~]*)\r?$/),
         );
         const held = wrapper ?? trailingWrapper;
         const start = held
@@ -1911,23 +1996,35 @@ class SystemReminderEchoFilter {
           final ||
           this.buffer.length - start > SYSTEM_REMINDER_ECHO_MAX_BUFFER
         ) {
-          output += this.buffer;
+          output += this.preserve(this.buffer);
           this.buffer = '';
         } else {
-          output += this.buffer.slice(0, start);
+          output += this.preserve(this.buffer.slice(0, start));
           this.buffer = this.buffer.slice(start);
         }
         break;
       }
 
       const prefix = this.buffer.slice(0, open);
-      const wrapper = SystemReminderEchoFilter.wrapper(prefix);
+      let wrapper = this.wrapper(prefix);
       const start = wrapper
         ? wrapper.index! + (wrapper[0].startsWith('\n') ? 1 : 0)
         : open;
-      output += this.buffer.slice(0, start);
+      output += this.preserve(this.buffer.slice(0, start));
       this.buffer = this.buffer.slice(start);
-      const bodyStart = open - start + SYSTEM_REMINDER_OPEN.length;
+      let bodyStart = open - start + SYSTEM_REMINDER_OPEN.length;
+      if (wrapper && this.inCode) {
+        const prefixLength = bodyStart - SYSTEM_REMINDER_OPEN.length;
+        output += this.preserve(this.buffer.slice(0, prefixLength));
+        this.buffer = this.buffer.slice(prefixLength);
+        bodyStart = SYSTEM_REMINDER_OPEN.length;
+        wrapper = null;
+      }
+      if (this.inCode) {
+        output += this.preserve(this.buffer.slice(0, bodyStart));
+        this.buffer = this.buffer.slice(bodyStart);
+        continue;
+      }
       const closeOffset = this.buffer
         .slice(bodyStart)
         .search(/<\/system-reminder>/i);
@@ -1951,7 +2048,7 @@ class SystemReminderEchoFilter {
           this.buffer.length <= SYSTEM_REMINDER_ECHO_MAX_BUFFER
         )
           break;
-        output += this.buffer.slice(0, bodyStart);
+        output += this.preserve(this.buffer.slice(0, bodyStart));
         this.buffer = this.buffer.slice(bodyStart);
         continue;
       }
@@ -1959,8 +2056,8 @@ class SystemReminderEchoFilter {
       const body = this.buffer.slice(bodyStart, close).trim();
       const after = close + SYSTEM_REMINDER_CLOSE.length;
       if (!this.bodies.includes(body)) {
-        output += this.buffer.slice(0, after);
-        this.buffer = this.buffer.slice(after);
+        output += this.preserve(this.buffer.slice(0, bodyStart));
+        this.buffer = this.buffer.slice(bodyStart);
         continue;
       }
 
@@ -1979,6 +2076,19 @@ class SystemReminderEchoFilter {
             this.buffer.length <= SYSTEM_REMINDER_ECHO_MAX_BUFFER
           )
             break;
+          const remainder = tail.slice(gap.length + count);
+          if (
+            fenced &&
+            !final &&
+            /^[ \t]*\r?$/.test(remainder) &&
+            this.buffer.length <= SYSTEM_REMINDER_ECHO_MAX_BUFFER
+          )
+            break;
+          if (fenced && !/^[ \t]*(?:\r?\n|$)/.test(remainder)) {
+            output += this.preserve(this.buffer.slice(0, after));
+            this.buffer = this.buffer.slice(after);
+            continue;
+          }
           end += gap.length + count;
         } else if (
           !final &&
@@ -1987,10 +2097,9 @@ class SystemReminderEchoFilter {
         ) {
           break;
         } else {
-          output += this.buffer.slice(
-            0,
-            bodyStart - SYSTEM_REMINDER_OPEN.length,
-          );
+          output += this.preserve(this.buffer.slice(0, after));
+          this.buffer = this.buffer.slice(after);
+          continue;
         }
       }
       this.buffer = this.buffer.slice(end);
