@@ -66,10 +66,14 @@ import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import { hostedTeamMembership } from './hosted-team-session.js';
 import {
+  HOSTED_MEMBER_MESSAGE_IN_FLIGHT,
+  HOSTED_MEMBER_MESSAGE_PER_RUN,
   HostedChildChains,
+  hostedMemberView,
   hostedOpenTeamChainMember,
   hostedRouteDetails,
   isSentInstruction,
+  MEMBER_MESSAGE_ID_PREFIX,
   memberPlanModeRequired,
   teamMemberPreamble,
   type HostedRouteDetails,
@@ -897,6 +901,130 @@ export class HostedChildAgentSession {
       ...route,
       ...hostedRouteDetails(this.store.authority, route, messageId),
     };
+  }
+
+  /**
+   * H4e-b3 decision 8 (b3c): the running-only send of one member message,
+   * executed on the lead's funnels for one roster position of its open
+   * team. The head check and the commit ride this one writes chain, so
+   * the recipient's state cannot change between them. The send never
+   * routes to a continuation and never spends H4b's active cap or H4c's
+   * launch budget: a finished, ended or stopping head is not reached.
+   * Member messages share H4d-b's 8 in flight and 64 per run on the head
+   * with the lead's own, capped to 4 in flight and 16 in all. A re-driven
+   * send names the same `msgc_` id with the same content and is answered
+   * sent, so nothing is sent twice.
+   */
+  sendToRunningMember(params: {
+    /** The roster entry's run: the launch the recipient's chain started from. */
+    readonly rootChildRunId: string;
+    readonly content: Buffer;
+    readonly messageId: string;
+    /** The `member_message` command that sends it. */
+    readonly executionCallId: string;
+  }): Promise<
+    | { readonly kind: 'sent' }
+    | {
+        readonly kind: 'notReached';
+        readonly reason:
+          | 'finished'
+          | 'ended'
+          | 'stopping'
+          | 'budget_exhausted'
+          | 'count_limit'
+          | 'member_budget'
+          | 'member_count_limit'
+          | 'completed_after_stop';
+      }
+  > {
+    return this.inWrites(async () => {
+      const sent = this.store.authority.extensionRecord(
+        'session_message',
+        params.messageId,
+      );
+      if (sent !== undefined) {
+        const message = parseSessionMessage(sent.record);
+        if (
+          message.direction === 'outbound' &&
+          message.route === 'to_child' &&
+          message.contentDigest === sha256(params.content)
+        ) {
+          return { kind: 'sent' };
+        }
+        throw new ManagedSessionConflictError(
+          `Session message ${params.messageId} was sent with different evidence.`,
+        );
+      }
+      const chains = new HostedChildChains(
+        this.store.authority.extensionRecordsInDomain('child_run'),
+      );
+      const view = hostedMemberView(chains, params.rootChildRunId);
+      const head = view.head;
+      if (
+        head === undefined ||
+        view.state === 'failed' ||
+        view.state === 'cancelled'
+      ) {
+        return { kind: 'notReached', reason: 'ended' };
+      }
+      // R1-3: a completed head that was stopped before completing is not
+      // the `finished` case — the leader cannot continue it either.
+      if (view.stopRequestedCompletion) {
+        return { kind: 'notReached', reason: 'completed_after_stop' };
+      }
+      if (view.state === 'completed') {
+        return { kind: 'notReached', reason: 'finished' };
+      }
+      if (view.stopping) {
+        return { kind: 'notReached', reason: 'stopping' };
+      }
+      const sentBefore = this.messagesTo(head.childRunId);
+      const limits = MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS;
+      if (sentBefore.length >= limits.maxPerRun) {
+        return { kind: 'notReached', reason: 'budget_exhausted' };
+      }
+      if (
+        sentBefore.filter(isUndeliveredMessage).length >=
+        limits.maxInFlightPerRun
+      ) {
+        return { kind: 'notReached', reason: 'count_limit' };
+      }
+      const memberSent = sentBefore.filter((message) =>
+        message.messageId.startsWith(MEMBER_MESSAGE_ID_PREFIX),
+      );
+      if (memberSent.length >= HOSTED_MEMBER_MESSAGE_PER_RUN) {
+        return { kind: 'notReached', reason: 'member_budget' };
+      }
+      if (
+        memberSent.filter(isUndeliveredMessage).length >=
+        HOSTED_MEMBER_MESSAGE_IN_FLIGHT
+      ) {
+        return { kind: 'notReached', reason: 'member_count_limit' };
+      }
+      const contentRef = await this.store.resources.publish(
+        'managed-message-content',
+        params.content,
+      );
+      const body = outboundMessageBody({
+        messageId: params.messageId,
+        route: 'to_child',
+        childRunId: head.childRunId,
+        senderSessionId: this.key.sessionId,
+        contentRef,
+        executionCallId: params.executionCallId,
+      });
+      await this.store.authority.commitExtensionRecord(
+        {
+          operation: 'sendSessionMessage',
+          commandId: `${params.messageId}:1`,
+          sessionKey: this.key,
+          contentDigest: digest(body),
+        },
+        { domain: 'session_message', record: body },
+        TRUSTED,
+      );
+      return { kind: 'sent' };
+    });
   }
 
   /**

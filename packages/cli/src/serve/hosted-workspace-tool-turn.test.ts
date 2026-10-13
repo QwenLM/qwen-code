@@ -64,6 +64,7 @@ import {
   type HostedApprovalMode,
 } from './hosted-tool-approval.js';
 import * as stdio from '../utils/stdioHelpers.js';
+import { monitorUnitNameOf } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
 
 const broker = vi.hoisted(() => ({
   fileHistory: vi.fn(),
@@ -80,6 +81,7 @@ const broker = vi.hoisted(() => ({
   release: vi.fn(),
   registerPublisher: vi.fn(),
   acknowledge: vi.fn(),
+  monitorControl: vi.fn(),
 }));
 // child_run's shell kind and monitor_run are enabled by the H3 enablement
 // slice (#13856); a case that needs a gate shut closes it here, per test,
@@ -106,6 +108,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     release = broker.release;
     registerPublisher = broker.registerPublisher;
     acknowledge = broker.acknowledge;
+    monitorControl = broker.monitorControl;
   },
 }));
 vi.mock(
@@ -5297,6 +5300,41 @@ describe('hosted Monitor admission arm', () => {
     expect(rig.options.monitorLoops?.has('monitor-execution')).toBe(true);
   });
 
+  it("stops the watch through its own Runtime call on the turn's broker (#13896)", async () => {
+    const { call, parts } = monitorCall();
+    const rig = monitorTurnRig(DETACHED);
+    turn = rig.turn;
+    await rig.turn.execute(
+      [call],
+      parts,
+      'model',
+      new AbortController().signal,
+    );
+    const runtimeCallId = broker.prepareV3.mock.calls.at(-1)![0];
+    broker.monitorControl.mockResolvedValue({
+      operationId: runtimeCallId,
+      state: 'unknown',
+    });
+    Object.assign(rig.monitors, { blockedRuntimeLost: vi.fn(async () => {}) });
+    // The worker derived the watch's unit from the Runtime call, not from
+    // the execution id: the stop must name that call to reach the watch.
+    await rig.options
+      .monitorLoops!.get('monitor-execution')!
+      .stop('runtime_lost');
+    expect(broker.monitorControl).toHaveBeenCalledExactlyOnceWith({
+      kind: 'monitor-stop',
+      sessionKey: session.authority.sessionHeader.sessionKey,
+      operationId: 'monitor-execution',
+      targetOperationId: runtimeCallId,
+    });
+    expect(runtimeCallId).not.toBe('monitor-execution');
+    // ...the very unit the start receipt recorded.
+    const attach = rig.monitors.calls.find(([name]) => name === 'attach')!;
+    expect(
+      (attach[1] as { receipt: Record<string, unknown> }).receipt['unitName'],
+    ).toBe(monitorUnitNameOf(runtimeCallId));
+  });
+
   it('drives a Monitor through the publication lane exactly where production admits it', async () => {
     const { call, parts } = monitorCall();
     const descriptor = { url: 'http://127.0.0.1:9/lane-mon', token: 'tok' };
@@ -5584,13 +5622,22 @@ describe('hosted Monitor admission arm', () => {
     );
     (bare as unknown as { publisher: unknown }).publisher = publisher;
     const resume = (
-      bare as unknown as { resumeMonitorWatch: (id: string) => Promise<void> }
+      bare as unknown as {
+        resumeMonitorWatch: (
+          executionCallId: string,
+          runtimeCallId: string,
+        ) => Promise<void>;
+      }
     ).resumeMonitorWatch.bind(bare);
-    await expect(resume('monitor-x')).rejects.toThrow('observer bridge gone');
+    await expect(resume('monitor-x', 'runtime-call-x')).rejects.toThrow(
+      'observer bridge gone',
+    );
     // The failed start leaves no dead loop behind to short-circuit the
     // retry that comes from a fresh accept.
     expect(shell.monitorLoops.has('monitor-x')).toBe(false);
-    await expect(resume('monitor-x')).resolves.toBeUndefined();
+    await expect(
+      resume('monitor-x', 'runtime-call-x'),
+    ).resolves.toBeUndefined();
     expect(shell.monitorLoops.has('monitor-x')).toBe(true);
   });
 
