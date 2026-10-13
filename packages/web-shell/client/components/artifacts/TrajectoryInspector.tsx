@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { CopyIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDuration } from '../messages/StatsMessage';
+import type { TrajectoryLifecycleEntry } from '../../trajectory/project-trajectory-lifecycle';
 import type { TrajectoryRow } from '../../trajectory/types';
 import styles from './TrajectoryInspector.module.css';
 
@@ -35,6 +36,7 @@ function statusTone(value: unknown): 'success' | 'error' | undefined {
 
 export function TrajectoryInspector({
   row,
+  lifecycle,
   title,
   stale = false,
   turnSelected = false,
@@ -47,6 +49,7 @@ export function TrajectoryInspector({
   onClose,
 }: {
   row?: TrajectoryRow;
+  lifecycle?: TrajectoryLifecycleEntry;
   title?: string;
   stale?: boolean;
   turnSelected?: boolean;
@@ -101,6 +104,7 @@ export function TrajectoryInspector({
     if (row.kind === 'request') {
       if (selectedTab === 'summary') {
         return [
+          [t('trajectory.inspector.details'), lifecycle],
           [t('trajectory.inspector.model'), row.model],
           [t('trajectory.inspector.status'), row.status],
           ...(row.executionId
@@ -261,7 +265,7 @@ export function TrajectoryInspector({
       }
     }
     return [];
-  }, [row, selectedTab, t, language]);
+  }, [row, lifecycle, selectedTab, t, language]);
 
   const formattedFields = useMemo(
     () =>
