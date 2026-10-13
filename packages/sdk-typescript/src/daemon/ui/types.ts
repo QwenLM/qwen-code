@@ -110,9 +110,10 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   text: string;
   parentToolCallId?: string;
   /**
-   * The agent that produced this frame, when it was not the session's root
-   * agent. Shape mirrors OpenAI's Responses multi-agent contract, where every
-   * output item carries `agent: { agent_name }` as a path (`/root/security`).
+   * The agent associated with this frame. This normally names the producer;
+   * for an inter-agent message it names the recipient, matching OpenAI's
+   * `agent_message` semantics. The identity uses a path such as
+   * `/root/security`.
    *
    * Source: daemon stamps `_meta.agent` (see `SubAgentTracker` in the CLI).
    */
@@ -121,14 +122,12 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
 }
 
 /**
- * Path-style producer identity for one frame.
+ * Path-style agent identity associated with one frame.
  *
- * `agentName` is derived from the spawning agent's path plus the subagent type,
- * so it is stable within one run: clients can group by it without walking
- * `parentToolCallId` chains, and can key in-session policy on it. It is not a
- * durable id — renaming the agent definition renames the path, and a policy
- * keyed on the old string silently stops matching. Key anything that must
- * survive renames on `parentToolCallId` instead.
+ * `agentName` is derived from the spawning agent's path plus the subagent type.
+ * It is a readable role path, not a unique execution id: concurrent subagents
+ * of the same type share it, and renaming the agent definition changes it. Use
+ * `parentToolCallId` when a consumer must distinguish subagent executions.
  */
 export interface DaemonAgentIdentity {
   agentName: string;
@@ -1118,9 +1117,9 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
   parentToolCallId?: string;
   /**
-   * The agent that produced this block, when it was not the session's root
-   * agent. Lets a renderer name a subagent by path without walking
-   * `parentToolCallId` chains.
+   * The agent associated with this block. This normally names the producer;
+   * for an inter-agent message it names the recipient. Lets a renderer name
+   * an agent by path without walking `parentToolCallId` chains.
    */
   agent?: DaemonAgentIdentity;
   /** Raw ACP update metadata used by renderers for display-only routing. */

@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
@@ -66,6 +67,7 @@ import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -787,6 +789,17 @@ class ManagedAgentApiContractTest {
                  "agentId":"qwen-code","title":"web",
                  "metadata":{"clientId":"contract"},"input":[]}
                 """)).get("sessionId").asText();
+        // The widened metadata contract: a body with keys beyond clientId
+        // is both served (202) and schema-valid. exchange() validates
+        // sub-300 request bodies, so re-tightening WebShellMetadata to
+        // additionalProperties: false turns this arm red.
+        exchange(drift, "webShellCreateSession", 202,
+                post(WEB_SHELL + "/sessions/create").header(TENANT, tenant),
+                """
+                {"idempotencyKey":"contract-web-metadata",
+                 "agentId":"qwen-code","input":[],
+                 "metadata":{"clientId":"client-1","other":"trace"}}
+                """);
         MockHttpServletResponse webShellStream = stream(drift,
                 "webShellStreamEvents",
                 post(WEB_SHELL + "/events/stream").header(TENANT, tenant),
@@ -2294,6 +2307,171 @@ class ManagedAgentApiContractTest {
                     .at("/error/code").asText())
                     .isEqualTo("session_not_found");
         }
+    }
+
+    @Test
+    void webShellSubmitAcceptsTheWidenedMetadataShape() throws Exception {
+        // The exact body the integration suite posts to /turns/submit for
+        // the metadata widening must conform to the published
+        // WebShellSubmitRequest: re-tightening WebShellMetadata (or the
+        // request's additionalProperties) turns this red.
+        assertThat(CONTRACT.validate(
+                "#/components/schemas/WebShellSubmitRequest",
+                objectMapper.readTree("""
+                        {"sessionId":"00000000-0000-4000-8000-000000000000",
+                         "idempotencyKey":"metadata-submit",
+                         "input":[{"type":"input_text","text":"hi"}],
+                         "metadata":{"clientId":"client-1","other":"trace"}}
+                        """))).isEmpty();
+    }
+
+    @Test
+    void thePublishedAggregateBudgetIsTheEnforcedOne() throws Exception {
+        String tenant = "tenant-contract-budget-" + UUID.randomUUID();
+        String sessionId = json(webShell(tenant, "/sessions/create",
+                "{\"idempotencyKey\":\"budget-create\","
+                        + "\"agentId\":\"qwen-code\",\"input\":[]}"))
+                .get("sessionId").asText();
+        // Every published copy of the budget states the same three
+        // enforced numbers: the aggregate, the per-block cap and the
+        // durable-record ceiling.
+        long publishedAggregate = 0, publishedBlock = 0, publishedKib = 0;
+        for (String schema : List.of("CreateSessionRequest",
+                "InputMessageEventRequest", "WebShellCreateRequest",
+                "WebShellSubmitRequest")) {
+            String description = CONTRACT.node("/components/schemas/"
+                    + schema + "/properties/input/description").asText();
+            long aggregate = publishedNumber(description,
+                    "([0-9,]+)-character aggregate", schema);
+            long perBlock = publishedNumber(description,
+                    "per-block ([0-9,]+)-character cap", schema);
+            long kib = publishedNumber(description,
+                    "(\\d+) KiB durable-record limit", schema);
+            if (publishedAggregate == 0) {
+                publishedAggregate = aggregate;
+                publishedBlock = perBlock;
+                publishedKib = kib;
+            } else {
+                assertThat(aggregate).as("%s aggregate", schema)
+                        .isEqualTo(publishedAggregate);
+                assertThat(perBlock).as("%s per-block cap", schema)
+                        .isEqualTo(publishedBlock);
+                assertThat(kib).as("%s durable-record KiB", schema)
+                        .isEqualTo(publishedKib);
+            }
+        }
+        assertThat(publishedKib * 1024)
+                .as("published durable-record limit is the enforced one")
+                .isEqualTo(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES);
+        assertThat(CONTRACT.node("/components/schemas/InputBlock"
+                + "/properties/text/maxLength").asLong())
+                .as("published per-block maxLength is the enforced"
+                        + " per-block cap")
+                .isEqualTo(publishedBlock);
+
+        // The enforced numbers are read out of the 400s the server
+        // returns, so no copy of either constant lives in this test.
+        String block = "{\"type\":\"input_text\",\"text\":\""
+                + "x".repeat((int) publishedBlock) + "\"}";
+        String oversizedInput = (block + ",").repeat(4) + block;
+        String oversized = "{\"idempotencyKey\":\"budget-submit\","
+                + "\"sessionId\":\"" + sessionId + "\",\"input\":["
+                + oversizedInput + "]}";
+        String message = json(webShell(tenant, "/turns/submit", oversized))
+                .path("error").path("message").asText();
+        var enforcedMatcher = java.util.regex.Pattern
+                .compile("exceeds the (\\d+) character aggregate limit")
+                .matcher(message);
+        assertThat(enforcedMatcher.find())
+                .as("400 message names the budget: %s", message).isTrue();
+        assertThat(Long.parseLong(enforcedMatcher.group(1)))
+                .as("enforced aggregate matches the published one")
+                .isEqualTo(publishedAggregate);
+
+        // The public events route enforces the same budget, not just the
+        // WebShell one; there the idempotency key travels in the
+        // Idempotency-Key header instead of the body.
+        MockHttpServletResponse publicRefusal = mvc.perform(
+                        post("/v1/agents/sessions/{id}/events", sessionId)
+                                .header(TENANT, tenant)
+                                .header(IDEMPOTENCY_KEY,
+                                        "budget-public-submit")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"type\":\"agent.session.input."
+                                        + "message\",\"input\":["
+                                        + oversizedInput + "]}"))
+                .andReturn().getResponse();
+        assertThat(publicRefusal.getStatus())
+                .as("public events route refuses the oversized body")
+                .isEqualTo(400);
+        JsonNode publicError = json(publicRefusal.getContentAsString(
+                StandardCharsets.UTF_8)).path("error");
+        assertThat(publicError.path("code").asText())
+                .isEqualTo("invalid_input");
+        assertThat(publicError.path("message").asText())
+                .as("public route 400 names the same aggregate budget")
+                .isEqualTo(message);
+
+        // One block at published+1 characters stays under the aggregate,
+        // so this 400 can only come from the per-block cap.
+        String overCap = "{\"idempotencyKey\":\"budget-block\","
+                + "\"sessionId\":\"" + sessionId + "\",\"input\":["
+                + "{\"type\":\"input_text\",\"text\":\""
+                + "x".repeat((int) publishedBlock + 1) + "\"}]}";
+        String blockMessage = json(webShell(tenant, "/turns/submit", overCap))
+                .path("error").path("message").asText();
+        var enforcedBlockMatcher = java.util.regex.Pattern
+                .compile("exceeds the (\\d+) character per-block limit")
+                .matcher(blockMessage);
+        assertThat(enforcedBlockMatcher.find())
+                .as("400 message names the per-block cap: %s", blockMessage)
+                .isTrue();
+        assertThat(Long.parseLong(enforcedBlockMatcher.group(1)))
+                .as("enforced per-block cap matches the published one")
+                .isEqualTo(publishedBlock);
+
+        // The counted unit is the code point, matching the published
+        // maxLength: a 600,000-emoji block is 1,200,000 UTF-16 units, so a
+        // String.length()-based cap would refuse what the schema admits.
+        // Each arm submits to its own session: a second submit while a Turn
+        // is active is a 409, not a budget decision.
+        String emojiBlock = "{\"type\":\"input_text\",\"text\":\""
+                + "\uD83D\uDE00".repeat(600_000) + "\"}";
+        mvc.perform(post(WEB_SHELL + "/turns/submit").header(TENANT, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"budget-emoji-block\","
+                                + "\"sessionId\":\"" + budgetSession(tenant, 1)
+                                + "\",\"input\":[" + emojiBlock + "]}"))
+                .andExpect(status().isAccepted());
+        // 2,000,001 code points stay inside the 4,000,000 aggregate but are
+        // 4,000,002 UTF-16 units: admitted only when the aggregate counts
+        // code points too.
+        String emojiThird = "{\"type\":\"input_text\",\"text\":\""
+                + "\uD83D\uDE00".repeat(666_667) + "\"}";
+        mvc.perform(post(WEB_SHELL + "/turns/submit").header(TENANT, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"idempotencyKey\":\"budget-emoji-sum\","
+                                + "\"sessionId\":\"" + budgetSession(tenant, 2)
+                                + "\",\"input\":[" + emojiThird + ","
+                                + emojiThird + "," + emojiThird + "]}"))
+                .andExpect(status().isAccepted());
+    }
+
+    private String budgetSession(String tenant, int index) throws Exception {
+        return json(webShell(tenant, "/sessions/create",
+                "{\"idempotencyKey\":\"budget-create-" + index + "\","
+                        + "\"agentId\":\"qwen-code\",\"input\":[]}"))
+                .get("sessionId").asText();
+    }
+
+    private static long publishedNumber(String description, String pattern,
+            String schema) {
+        var matcher = java.util.regex.Pattern.compile(pattern)
+                .matcher(description);
+        assertThat(matcher.find())
+                .as("%s input description publishes %s", schema, pattern)
+                .isTrue();
+        return Long.parseLong(matcher.group(1).replace(",", ""));
     }
 
     @Test

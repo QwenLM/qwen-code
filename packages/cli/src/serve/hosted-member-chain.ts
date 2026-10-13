@@ -17,10 +17,12 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import {
   MANAGED_TEAM_LIMITS,
+  parseTeamPlan,
   parseTeamState,
   type TeamState,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import type { ManagedSessionDomain } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { assertManagedSessionDomainEnabled } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 // H4e-b2 of #12827: what a team adds on top of H4d-b's Session messages —
 // a member is its continuation chain, every run of that chain opens its
@@ -82,22 +84,150 @@ export function broadcastMessageId(params: {
     .slice(0, 32)}`;
 }
 
-const PREAMBLE_BODY =
-  'You are a member of this team. Your parent, the agent that launched you, is the team leader. Your result is your answer to the last instruction you receive: if another message from the leader arrives after you have answered, your answer to it becomes your whole result, so answer it in full and repeat anything from your earlier answers the leader still needs. To ask the leader something, use send_message with to "parent"; its reply reaches you after you have answered, as your next instruction. You cannot message other members or edit the team\'s task board.';
+const PREAMBLE_BODY_HEAD =
+  'You are a member of this team. Your parent, the agent that launched you, is the team leader. Your result is your answer to the last instruction you receive: if another message from the leader arrives after you have answered, your answer to it becomes your whole result, so answer it in full and repeat anything from your earlier answers the leader still needs. To ask the leader something, use send_message with to "parent"; its reply reaches you after you have answered, as your next instruction. ';
+
+const PREAMBLE_TAIL_NO_COMMANDS =
+  "You cannot message other members or edit the team's task board.";
+const PREAMBLE_TAIL_WITH_COMMANDS = 'You cannot message other members.';
+
+/**
+ * H4e-b3 decision 5: what the body adds for a plan-mode run, in the
+ * build before b3d — it never names `exit_plan_mode`, which this build
+ * does not declare.
+ */
+const PLAN_MODE_BODY =
+  ' You are in plan mode until the leader approves your plan: your calls may only read, and the decision arrives as your next instruction.';
 
 /**
  * Decision 5: the fixed text every instruction of a member's chain opens
  * with. Names are sanitized to `[a-z0-9-]`, so they need no escaping.
+ * H4e-b3 decision 5: the open tag carries `plan-mode="required"` while
+ * the member's runs are plan-required (decision 9's composition rule).
+ * The wording near the end also follows what the build declares: once
+ * the `session_command` domain is enabled, the member may touch the
+ * board, so the closing sentence no longer forbids it. The build
+ * carries member messages (b3c) before the messaging sentence lifts.
  */
-export function teamMemberPreamble(member: {
-  readonly name: string;
-  readonly teamName: string;
-}): string {
-  return `<team-member name="${member.name}" team="${member.teamName}">\n${PREAMBLE_BODY}\n</team-member>\n\n`;
+export function teamMemberPreamble(
+  member: {
+    readonly name: string;
+    readonly teamName: string;
+  },
+  planMode: boolean = false,
+): string {
+  let commandsEnabled = false;
+  try {
+    assertManagedSessionDomainEnabled('session_command');
+    commandsEnabled = true;
+  } catch {
+    commandsEnabled = false;
+  }
+  const attribute = planMode ? ' plan-mode="required"' : '';
+  const body =
+    PREAMBLE_BODY_HEAD +
+    (commandsEnabled
+      ? PREAMBLE_TAIL_WITH_COMMANDS
+      : PREAMBLE_TAIL_NO_COMMANDS) +
+    (planMode ? PLAN_MODE_BODY : '');
+  return `<team-member name="${member.name}" team="${member.teamName}"${attribute}>\n${body}\n</team-member>\n\n`;
 }
 
 const PREAMBLE_FORM =
-  /^<team-member name="[a-z0-9]+(?:-[a-z0-9]+)*" team="[a-z0-9]+(?:-[a-z0-9]+)*">\n[^<]*\n<\/team-member>\n\n/;
+  /^<team-member name="[a-z0-9]+(?:-[a-z0-9]+)*" team="[a-z0-9]+(?:-[a-z0-9]+)*"(?: plan-mode="required")?>\n[^<]*\n<\/team-member>\n\n/;
+
+/**
+ * Decision 9: the plan-mode attribute, read more widely than the member
+ * preamble's form — any unescaped block that carries it restricts the
+ * run, whatever its body says. A continuation's history is XML-escaped
+ * (`&lt;`), so a literal tag is always the run's own block; matching the
+ * opening tag alone, without the body's form, also fails closed on a
+ * block whose body this build would not recognize.
+ */
+const PLAN_MODE_TAG =
+  /<team-member name="[a-z0-9]+(?:-[a-z0-9]+)*" team="[a-z0-9]+(?:-[a-z0-9]+)*" plan-mode="required">/;
+
+/** Whether a run's first input carries an unescaped plan-mode block. */
+export function hasPlanModeBlock(text: string): boolean {
+  return PLAN_MODE_TAG.test(text);
+}
+
+/**
+ * The text of an input's published body. The `/prompt` route stores its
+ * message as an array of content parts, while funnels writing their own
+ * inputs (child results, notifications, messages) store a bare `{text}`.
+ */
+export function inputBodyText(body: unknown): string | undefined {
+  if (Array.isArray(body)) {
+    const parts: string[] = [];
+    for (const part of body) {
+      const text =
+        typeof part === 'object' &&
+        part !== null &&
+        typeof (part as Record<string, unknown>)['text'] === 'string'
+          ? ((part as Record<string, unknown>)['text'] as string)
+          : undefined;
+      if (text !== undefined) parts.push(text);
+    }
+    return parts.length > 0 ? parts.join('\n') : undefined;
+  }
+  if (
+    typeof body === 'object' &&
+    body !== null &&
+    typeof (body as Record<string, unknown>)['text'] === 'string'
+  ) {
+    return (body as Record<string, unknown>)['text'] as string;
+  }
+  return undefined;
+}
+
+/**
+ * Decision 9's composition rule: whether a member's next run composes in
+ * plan mode — its roster entry is plan-required and the lead holds no
+ * approved plan of that member of that team yet. `team_plan` stays
+ * disabled until b3d, so nothing here commits; the read keeps plan mode
+ * on a b3d journal reopened by this build (decision 5's rollback floor).
+ */
+export function memberPlanModeRequired(
+  team: TeamState,
+  plans: ReadonlyArray<{ readonly record: unknown }>,
+  memberName: string,
+): boolean {
+  if (team.lifecycle === 'deleted') return false;
+  const member = team.members.find((each) => each.name === memberName);
+  if (member === undefined || !member.planModeRequired) return false;
+  return !plans.some((entry) => {
+    const plan = parseTeamPlan(entry.record);
+    return (
+      plan.teamId === team.teamId &&
+      plan.member === memberName &&
+      plan.decision === 'approved'
+    );
+  });
+}
+
+/**
+ * b3b decision 5: whether one run's first input declares member tools —
+ * its instruction part opens with a well-formed preamble block, read
+ * after a launch's `[description]` and its blank line, or after a
+ * continuation's `Your next instruction:` marker (history before it is
+ * escaped, so only the run's own block can match). A misread only ever
+ * hides the tools: admission is the lead's, not the declaration's.
+ */
+export function firstInputOpensWithMemberPreamble(firstInput: string): boolean {
+  const marker = 'Your next instruction:';
+  const at = firstInput.lastIndexOf(marker);
+  if (at >= 0) {
+    return PREAMBLE_FORM.test(
+      firstInput.slice(at + marker.length).replace(/^\s+/, ''),
+    );
+  }
+  const wrapped = /^\[[\s\S]*?\]\n\n/.exec(firstInput);
+  if (wrapped !== null) {
+    return PREAMBLE_FORM.test(firstInput.slice(wrapped[0].length));
+  }
+  return PREAMBLE_FORM.test(firstInput);
+}
 
 /**
  * Decision 5's replay evidence: whether a committed instruction is the

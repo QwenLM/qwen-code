@@ -26,7 +26,7 @@ class FakeTeamEmitter {
   // A list, not a Set: TeamEventEmitter wraps a real Node EventEmitter, which
   // accepts the same listener twice. A Set silently dedupes the sink's stable
   // closures and makes every listener-count assertion below unfalsifiable.
-  private readonly handlers = new Map<string, ((e: never) => void)[]>();
+  private readonly handlers = new Map<string, Array<(e: never) => void>>();
 
   on(type: string, fn: (e: never) => void): void {
     const list = this.handlers.get(type) ?? [];
