@@ -134,6 +134,36 @@ class WorkspaceProfileLifecycleTest {
 
     @ParameterizedTest
     @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
+    void sealedCleanupWriterCanBeReacquiredOnlyWithTheCurrentResourceClaim(String profile) {
+        var f = fixture();
+        var journal = new ManagedSessionStore(f.jdbc);
+        String token = "w".repeat(32);
+        var original = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, token,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
+        var operation = admit(f, profile, OperationKind.DELETE);
+        f.transactions.executeWithoutResult(ignored -> f.lifecycle.recoverEffects(operation));
+        var authority = WorkspaceLifecycleStore.authority(operation);
+        f.transactions.execute(ignored -> journal.sealWriter("tenant", f.session, token,
+                new ManagedSessionStoreModels.SealWriterRequest("workspace", "original", original.writerGeneration()), authority));
+        var recovery = new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "cleanup", 60_000L);
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, token, recovery)))
+                .isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, token, recovery,
+                new RuntimeLifecycleAuthority(operation.operationId(), operation.claimGeneration() + 1))))
+                .isInstanceOf(ApiException.class);
+        var next = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, token, recovery, authority));
+        assertThat(next.writerGeneration()).isEqualTo(original.writerGeneration() + 1);
+        assertThat(next.journalRevision()).isEqualTo(original.journalRevision());
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, token,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "original", original.writerGeneration(), 60_000L), authority)))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_writer_conflict"));
+        assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.renewWriter("tenant", f.session, token,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "cleanup", next.writerGeneration(), 60_000L))))
+                .isInstanceOf(ApiException.class);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
     void cleanupAdmissionDoesNotRequireTheNewExecutionSwitch(String profile) {
         var f = fixture();
         f.jdbc.update("UPDATE managed_agent_session SET tool_profile = ?", profile);
