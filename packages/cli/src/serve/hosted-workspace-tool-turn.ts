@@ -138,6 +138,7 @@ import {
   broadcastRunId,
   firstInputOpensWithMemberPreamble,
   hostedCallKey,
+  hostedFirstInputText,
   hostedPromptKey,
   hostedRouteDetails,
   memberPreambleIdentity,
@@ -1570,49 +1571,32 @@ export class HostedWorkspaceToolTurn {
     return this.memberPreamble;
   }
 
+  /** b3c/R1-10: the one read of the first input per Turn, cached. */
+  private firstInputTextCache?: string | null;
+
   /**
    * The text of this Session's first accepted input, if readable: the
    * admission committers write the launch envelope as an OpenAI
    * message-content array; a plain {text} envelope rides the same gate
-   * for the test-path fixtures.
+   * for the test-path fixtures. One read per Turn via the shared reader
+   * (decision 8); anything unreadable hides the tools — it never grants.
    */
   private async firstInputText(): Promise<string | undefined> {
-    const authority = this.session.authority;
-    const first = authority
-      .eventsInSequenceRange(1, authority.committedSequence)
-      .find((event) => event.kind === 'input.accepted');
-    const contentRef = first?.payload['contentRef'];
-    if (contentRef === undefined) return undefined;
-    const ref = assertManagedSessionDurableRef(
-      contentRef,
-      'member launch input',
-    );
-    if (ref.kind !== 'managed-input') return undefined;
+    if (this.firstInputTextCache !== undefined)
+      return this.firstInputTextCache === null
+        ? undefined
+        : this.firstInputTextCache;
+    let text: string | undefined;
     try {
-      const parsed: unknown = JSON.parse(
-        (await this.session.resources.read(ref)).toString('utf8'),
-      );
-      let text: string | undefined;
-      if (Array.isArray(parsed)) {
-        const part = parsed.find(
-          (each): each is { type: string; text: string } =>
-            typeof each === 'object' &&
-            each !== null &&
-            (each as Record<string, unknown>)['type'] === 'text' &&
-            typeof (each as Record<string, unknown>)['text'] === 'string',
-        );
-        text = part?.text;
-      } else if (
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        typeof (parsed as Record<string, unknown>)['text'] === 'string'
-      ) {
-        text = (parsed as Record<string, unknown>)['text'] as string;
-      }
-      return text;
+      text = await hostedFirstInputText({
+        authority: this.session.authority,
+        resources: this.session.resources,
+      });
     } catch {
-      return undefined;
+      text = undefined;
     }
+    this.firstInputTextCache = text ?? null;
+    return text ?? undefined;
   }
 
   /**
@@ -2540,7 +2524,7 @@ export class HostedWorkspaceToolTurn {
           this.sendMessageRole() === 'child' &&
           this.memberPreamble === true &&
           typeof call.args['to'] === 'string' &&
-          call.args['to'].trim() !== 'parent';
+          sanitizeName(call.args['to']) !== 'parent';
         const command =
           mcpInput === undefined &&
           (this.commandToolNames.has(call.name) || memberMessageCommand);
@@ -2825,7 +2809,9 @@ export class HostedWorkspaceToolTurn {
           } else if (unsupportedKey !== undefined) {
             validationError =
               role === 'child'
-                ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
+                ? this.memberPreamble === true
+                  ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A member send_message takes only a member's to: "parent", a member name, or "*" — pass to and message.`
+                  : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
                 : teamForm
                   ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. Pass to (a member name, or "*" for every member) or task_id, and message; other Sessions belong to the legacy tool.`
                   : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; teams and other Sessions belong to the legacy tool.`;
@@ -4948,10 +4934,12 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
-   * H4e-b3 decision 4 and 6: one member board command's argument check,
-   * and the batch rule — a command call shares its batch only with other
-   * command calls and with the journal-only `send_message` to `"parent"`,
-   * since a command parks the Turn while the leader answers.
+   * H4e-b3 decision 4 and 6 (b3c's decision 8): one member board
+   * command's argument check, and the batch rule — a command call shares
+   * its batch only with other command calls and with `send_message`
+   * (whose member-addressed form is one, while to `"parent"` stays the
+   * journal-only plain lane), since a command parks the Turn while the
+   * leader answers.
    */
   private commandArgumentError(
     call: ToolCallRequestInfo,
@@ -4985,7 +4973,7 @@ export class HostedWorkspaceToolTurn {
           other.name !== 'send_message',
       )
     )
-      return `Hosted ${call.name} cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run board commands in their own batch or beside send_message to "parent".`;
+      return `Hosted ${call.name} cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run board commands in their own batch or beside send_message.`;
     if (call.name === 'task_create') {
       if (
         typeof call.args['subject'] !== 'string' ||

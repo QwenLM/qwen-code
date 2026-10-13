@@ -27,7 +27,6 @@ import {
   type SessionMessageRoute,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import {
-  assertManagedSessionDurableRef,
   ManagedSessionRecordError,
   type ManagedSessionEvent,
   type ManagedSessionKey,
@@ -42,8 +41,8 @@ import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
 import {
   hasPlanModeBlock,
   HostedChildChains,
+  hostedFirstInputText,
   hostedOpenTeamChainMember,
-  inputBodyText,
   MEMBER_MESSAGE_ID_PREFIX,
 } from './hosted-member-chain.js';
 
@@ -504,27 +503,14 @@ export class HostedSessionMessageSession {
 
   /**
    * b3c decision 9: whether this Session's run is in plan mode — its
-   * first input carries an unescaped plan-mode block. An unreadable body
-   * fails closed: the reply hint that always works is "parent".
+   * first input carries an unescaped plan-mode block. One shared reader
+   * (R1-10) carries the read; an unreadable body still fails closed:
+   * the reply hint that always works is "parent".
    */
   private async inPlanMode(): Promise<boolean> {
     try {
-      const authority = this.store.authority;
-      const first = authority
-        .eventsInSequenceRange(1, authority.committedSequence)
-        .find((event) => event.kind === 'input.accepted');
-      const contentRef = first?.payload['contentRef'];
-      if (contentRef === undefined) return false;
-      const ref = assertManagedSessionDurableRef(
-        contentRef,
-        'session first input',
-      );
-      if (ref.kind !== 'managed-input') return false;
-      const parsed: unknown = JSON.parse(
-        (await this.store.resources.read(ref)).toString('utf8'),
-      );
-      const text = inputBodyText(parsed);
-      return text === undefined ? false : hasPlanModeBlock(text);
+      const text = await hostedFirstInputText(this.store);
+      return text !== undefined && hasPlanModeBlock(text);
     } catch {
       return true;
     }

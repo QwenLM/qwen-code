@@ -669,6 +669,11 @@ export class HostedSessionCommandSession {
     receipt: (reply: SessionCommandReply) => Promise<SessionCommandReply>,
   ): Promise<SessionCommandReply> {
     const leadSessionId = this.key.sessionId;
+    // Every early refusal is cut as a body would be: `maxArgsBytes` and
+    // `maxReplyBytes` are both 64 KiB, so an interpolating refusal must
+    // never outgrow what a receipt can hold (R1-1).
+    const refused = (text: string): Promise<SessionCommandReply> =>
+      receipt(refusedCommandReply(cutCommandReplyText(text)));
     const messageIdOf = (position: number): string =>
       memberMessageId({ leadSessionId, commandId: params.commandId, position });
     const committed = new Set<number>();
@@ -696,9 +701,7 @@ export class HostedSessionCommandSession {
     );
     if (membership === undefined) {
       if (committed.size === 0) {
-        return receipt(
-          refusedCommandReply('This Session is not a member of an open team.'),
-        );
+        return refused('This Session is not a member of an open team.');
       }
       return receipt(
         answeredCommandReply(
@@ -712,10 +715,8 @@ export class HostedSessionCommandSession {
       view.state === 'running' &&
       !view.stopping;
     if (committed.size === 0 && !runsNow) {
-      return receipt(
-        refusedCommandReply(
-          'Your run has ended or is being stopped; it takes no more team commands.',
-        ),
+      return refused(
+        'Your run has ended or is being stopped; it takes no more team commands.',
       );
     }
     const senderName = membership.name;
@@ -728,18 +729,12 @@ export class HostedSessionCommandSession {
       typeof text !== 'string' ||
       text.trim() === ''
     ) {
-      return receipt(
-        refusedCommandReply(
-          'A member message takes a nonempty "to" and "message".',
-        ),
-      );
+      return refused('A member message takes a nonempty "to" and "message".');
     }
     const content = Buffer.from(memberMessageContent(senderName, text), 'utf8');
     if (content.byteLength > MANAGED_CHILD_LIMITS.maxEnvelopeBytes) {
-      return receipt(
-        refusedCommandReply(
-          `Message exceeds what a member message can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes with its member-message header.`,
-        ),
+      return refused(
+        `Message exceeds what a member message can carry (byte_limit): keep it under ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes with its member-message header.`,
       );
     }
     const address = to.trim();
@@ -759,25 +754,22 @@ export class HostedSessionCommandSession {
         }
       }
       if (recipients.length === 0) {
-        return receipt(
-          refusedCommandReply(
-            `Team "${team.name}" has no other members to message.`,
-          ),
-        );
+        return refused(`Team "${team.name}" has no other members to message.`);
       }
     } else {
       const named = sanitizeName(address);
-      if (named === senderName) {
-        return receipt(
-          refusedCommandReply('A member cannot send a message to itself.'),
+      if (named === '') {
+        return refused(
+          `Address "${address}" sanitizes to an empty string; name a member of the team, or "*".`,
         );
+      }
+      if (named === senderName) {
+        return refused('A member cannot send a message to itself.');
       }
       const index = team.members.findIndex((member) => member.name === named);
       if (index < 0) {
-        return receipt(
-          refusedCommandReply(
-            `"${named}" is not a member of team "${team.name}". Members: ${team.members.map((each) => each.name).join(', ')}.`,
-          ),
+        return refused(
+          `"${address}" is not a member of team "${team.name}". Members: ${team.members.map((each) => each.name).join(', ')}.`,
         );
       }
       const member = team.members[index]!;
@@ -794,7 +786,8 @@ export class HostedSessionCommandSession {
       | 'budget_exhausted'
       | 'count_limit'
       | 'member_budget'
-      | 'member_count_limit',
+      | 'member_count_limit'
+      | 'completed_after_stop',
       string
     > = {
       finished:
@@ -802,9 +795,11 @@ export class HostedSessionCommandSession {
       ended: 'it has ended.',
       stopping: 'it is being stopped.',
       budget_exhausted: `it has received its ${MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS.maxPerRun} messages (budget_exhausted).`,
-      count_limit: `it has ${MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS.maxInFlightPerRun} messages still on their way to it (count_limit); try again in a later run.`,
+      count_limit: `it has ${MANAGED_SESSION_MESSAGE_RUNTIME_LIMITS.maxInFlightPerRun} messages still on their way to it (count_limit); wait for them to arrive.`,
       member_budget: `it has received the ${HOSTED_MEMBER_MESSAGE_PER_RUN} member messages one run may hold (budget_exhausted).`,
-      member_count_limit: `it has ${HOSTED_MEMBER_MESSAGE_IN_FLIGHT} member messages still on their way (count_limit); try again in a later run.`,
+      member_count_limit: `it has ${HOSTED_MEMBER_MESSAGE_IN_FLIGHT} member messages still on their way (count_limit); wait for them to arrive.`,
+      completed_after_stop:
+        'it completed after a stop was requested; for more work, the leader can launch a new member under a new name — a peer cannot reach it.',
     };
     const lines: string[] = [];
     let sent = 0;
