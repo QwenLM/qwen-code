@@ -940,6 +940,118 @@ describe('the board', () => {
     ).toContain('Cannot filter by owner');
   });
 
+  // A well-formed number with no task is a refusal, never a crash:
+  // existence is proved before the ownership probe reads the task.
+  it('refuses a well-formed addBlocks target that does not exist instead of crashing', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'one', description: 'do one' },
+      'prompt:t1',
+    );
+    expect(
+      await refusal(
+        teams.memberTaskUpdate('alice', 'cmd_missing', {
+          taskId: '1',
+          addBlocks: ['999'],
+        }),
+      ),
+    ).toBe('Cannot update task #1: referenced task #999 not found.');
+  });
+
+  // A partially committed task_update replays its remaining places
+  // against the board as it stands now: the leader legally made task 2
+  // block task 1 after the subject place committed, so the replayed
+  // edge would close a cycle — it rides the receipt, never the fault.
+  it('replays the remaining addBlocks places against the board as it stands now', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'one', description: 'do one' },
+      'prompt:t1',
+    );
+    await teams.run(
+      'task_create',
+      { subject: 'two', description: 'do two' },
+      'prompt:t2',
+    );
+    // The original call committed only the subject place.
+    await teams.memberTaskUpdate('alice', 'cmd_board', {
+      taskId: '1',
+      subject: 'renamed',
+    });
+    await teams.run(
+      'task_update',
+      { taskId: '1', addBlockedBy: ['2'] },
+      'prompt:leader-edge',
+    );
+    const result = await teams.memberTaskUpdate('alice', 'cmd_board', {
+      taskId: '1',
+      subject: 'renamed',
+      addBlocks: ['2'],
+    });
+    expect(result).toContain('Not committed');
+    expect(result).toContain('dependency cycle');
+    const two = parseTeamTask(
+      session.authority.extensionRecord('team_task', 'prompt:call-team#2')!
+        .record,
+    );
+    expect(two.blockedBy).toHaveLength(0);
+  });
+
+  // The blocker-count limit follows the same replay rule: the remaining
+  // place is validated against the current board, so a crowded target
+  // gets its Not-committed entry instead of a fault escaping execute.
+  it('replays a remaining addBlocks place by its blocker cap against the current board', async () => {
+    await createTeam();
+    await addMember('alice');
+    await teams.run(
+      'task_create',
+      { subject: 'one', description: 'do one' },
+      'prompt:t1',
+    );
+    await teams.run(
+      'task_create',
+      { subject: 'two', description: 'do two' },
+      'prompt:t2',
+    );
+    // The original call committed only the subject place.
+    await teams.memberTaskUpdate('alice', 'cmd_cap', {
+      taskId: '1',
+      subject: 'renamed',
+    });
+    // The leader filled task 2 with the maximum since: 64 blockers.
+    const blockers: string[] = [];
+    for (let index = 0; index < 64; index += 1) {
+      const number = index + 3;
+      blockers.push(`${number}`);
+      await teams.run(
+        'task_create',
+        { subject: `filler-${number}`, description: 'f' },
+        `prompt:cap-${number}`,
+      );
+    }
+    await teams.run(
+      'task_update',
+      { taskId: '2', addBlockedBy: blockers },
+      'prompt:cap-fill',
+    );
+    const result = await teams.memberTaskUpdate('alice', 'cmd_cap', {
+      taskId: '1',
+      subject: 'renamed',
+      addBlocks: ['2'],
+    });
+    expect(result).toContain('Not committed');
+    expect(result).toContain('would exceed 64 blockers');
+    const two = parseTeamTask(
+      session.authority.extensionRecord('team_task', 'prompt:call-team#2')!
+        .record,
+    );
+    expect(two.blockedBy).toHaveLength(64);
+  });
+
   it('opens new tasks only in an active team', async () => {
     expect(
       await refusal(

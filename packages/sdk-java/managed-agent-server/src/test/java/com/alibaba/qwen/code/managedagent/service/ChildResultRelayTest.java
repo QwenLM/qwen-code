@@ -104,14 +104,15 @@ class ChildResultRelayTest {
         }
 
         @Override
-        public void runMessageOperation(String tenantId, String sessionId,
-                Map<String, Object> body) {
+        public Map<String, Object> runMessageOperation(String tenantId,
+                String sessionId, Map<String, Object> body) {
             if (refuseMessageCode != null) {
                 throw refusal(refuseMessageCode);
             }
             Map<String, Object> recorded = new LinkedHashMap<>(body);
             recorded.put("sessionId", sessionId);
             messageOperations.add(recorded);
+            return Map.of();
         }
 
         @Override
