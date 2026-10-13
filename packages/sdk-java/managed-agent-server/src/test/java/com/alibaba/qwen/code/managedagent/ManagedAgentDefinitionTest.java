@@ -57,6 +57,12 @@ class ManagedAgentDefinitionTest {
     @Autowired
     private JdbcTemplate jdbc;
 
+    @Autowired
+    private com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore definitions;
+
+    @Autowired
+    private org.springframework.transaction.PlatformTransactionManager transactionManager;
+
     @Test
     void createsAndReplaysTheFirstRevision() throws Exception {
         String tenant = tenant();
@@ -276,6 +282,72 @@ class ManagedAgentDefinitionTest {
                     .andExpect(status().isBadRequest());
         }
         assertThat(rows(tenant)).isZero();
+    }
+
+    @Test
+    void latestForUpdateBlocksAConcurrentLockingReadUntilCommit() throws Exception {
+        // Design §8: "no partially updated read under a concurrent update".
+        // A plain latest() takes no lock, so a concurrent transaction could
+        // interleave; latestForUpdate must hold the row lock until commit.
+        // Both threads drive the production store read through a
+        // transaction-bound JdbcTemplate over the shared DataSource bean, so
+        // dropping FOR UPDATE from the production query turns this red: the
+        // contender would read immediately instead of blocking.
+        String tenant = tenant();
+        String agentId = json(create(tenant, "for-update", DEFINITION)
+                .andExpect(status().isAccepted())).path("id").asText();
+        com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore store =
+                new com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore(
+                        new org.springframework.jdbc.core.JdbcTemplate(
+                                jdbc.getDataSource()));
+        org.springframework.transaction.support.TransactionTemplate template =
+                new org.springframework.transaction.support.TransactionTemplate(
+                        transactionManager);
+        java.util.concurrent.atomic.AtomicReference<Throwable> contenderFailure =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicLong contenderReadMillis =
+                new java.util.concurrent.atomic.AtomicLong(-1);
+        java.util.concurrent.CountDownLatch holderLocked =
+                new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch contenderEntered =
+                new java.util.concurrent.CountDownLatch(1);
+        Thread contender = new Thread(() -> {
+            try {
+                assertThat(holderLocked.await(5,
+                        java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                contenderEntered.countDown();
+                template.executeWithoutResult(ignored -> {
+                    long started = System.nanoTime();
+                    store.latestForUpdate(tenant, agentId);
+                    contenderReadMillis.set(
+                            (System.nanoTime() - started) / 1_000_000);
+                });
+            } catch (Throwable error) {
+                contenderFailure.set(error);
+            }
+        });
+        contender.start();
+        template.executeWithoutResult(ignored -> {
+            store.latestForUpdate(tenant, agentId);
+            holderLocked.countDown();
+            try {
+                // The contender enters its transaction right after the
+                // latch; give it time to reach the blocked locking read.
+                assertThat(contenderEntered.await(5,
+                        java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                Thread.sleep(300);
+            } catch (InterruptedException error) {
+                throw new RuntimeException(error);
+            }
+        });
+        contender.join(5000);
+        assertThat(contenderFailure.get()).as(
+                "the contender's locking read failed for another reason")
+                .isNull();
+        assertThat(contender.isAlive()).isFalse();
+        // The contender's locking read must block on the holder's row lock
+        // for most of the holder's remaining hold, not return immediately.
+        assertThat(contenderReadMillis.get()).isGreaterThanOrEqualTo(150);
     }
 
     private ResultActions create(String tenant, String key, String body)

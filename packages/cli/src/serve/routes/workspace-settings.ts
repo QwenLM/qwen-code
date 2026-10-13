@@ -57,6 +57,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.renderMode',
   'ui.useTerminalBuffer',
   'ui.mouseTracking',
+  'ui.arrowKeysScrollTranscript',
   'ui.showScrollbar',
   'ui.hideBanner',
   'ui.accessibility.enableLoadingPhrases',
