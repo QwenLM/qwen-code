@@ -270,6 +270,72 @@ describe('attachTeamSink', () => {
     expect(requestPermission).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['manager swap', 'detach'] as const)(
+    'cancels pending approvals on %s and ignores late host approval',
+    async (boundary) => {
+      const pending: Array<{
+        signal: AbortSignal;
+        resolve: (response: RequestPermissionResponse) => void;
+      }> = [];
+      requestPermission.mockImplementation(
+        (_params: RequestPermissionRequest, signal: AbortSignal) =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            pending.push({ signal, resolve });
+          }),
+      );
+      const detach = attachTeamSink(deps);
+      const old = approvalEvent();
+      manager.emitter.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, old.event);
+
+      config.fireChange(manager);
+      expect(old.respond).not.toHaveBeenCalled();
+      expect(pending[0]!.signal.aborted).toBe(false);
+
+      const next = makeManager();
+      if (boundary === 'manager swap') config.fireChange(next);
+      else detach();
+
+      expect(pending[0]!.signal.aborted).toBe(true);
+      expect(old.respond).toHaveBeenCalledTimes(1);
+      expect(old.respond.mock.calls[0]![0]).toBe(
+        ToolConfirmationOutcome.Cancel,
+      );
+
+      pending[0]!.resolve({
+        outcome: {
+          outcome: 'selected',
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+        },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(old.respond).toHaveBeenCalledTimes(1);
+
+      if (boundary === 'manager swap') {
+        const current = approvalEvent();
+        next.emitter.emit(
+          TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+          current.event,
+        );
+        expect(pending[1]!.signal.aborted).toBe(false);
+        pending[1]!.resolve({
+          outcome: {
+            outcome: 'selected',
+            optionId: ToolConfirmationOutcome.ProceedOnce,
+          },
+        });
+        await vi.waitFor(() =>
+          expect(current.respond).toHaveBeenCalledTimes(1),
+        );
+        expect(current.respond.mock.calls[0]![0]).toBe(
+          ToolConfirmationOutcome.ProceedOnce,
+        );
+        detach();
+        expect(current.respond).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+
   it('fails closed and tells the leader when the host cannot answer', async () => {
     attachTeamSink(deps);
     requestPermission.mockRejectedValue(new Error('client gone'));

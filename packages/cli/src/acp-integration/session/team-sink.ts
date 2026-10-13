@@ -103,6 +103,7 @@ export interface TeamSinkDeps {
  */
 export function attachTeamSink(deps: TeamSinkDeps): () => void {
   let boundManager: TeamManager | null = null;
+  let bindingController: AbortController | null = null;
   let approvalListener: ((event: TeammateApprovalRequestEvent) => void) | null =
     null;
   let joinedListener: ((event: TeammateJoinedEvent) => void) | null = null;
@@ -112,6 +113,8 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
   let detached = false;
 
   const detachFromManager = (manager: TeamManager): void => {
+    bindingController?.abort();
+    bindingController = null;
     manager.setLeaderMessageCallback(null);
     const emitter = manager.getEventEmitter();
     if (approvalListener) {
@@ -156,7 +159,10 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     );
   };
 
-  const handleApproval = (event: TeammateApprovalRequestEvent): void => {
+  const handleApproval = (
+    event: TeammateApprovalRequestEvent,
+    signal: AbortSignal,
+  ): void => {
     const who = `tool ${event.toolName} requested by teammate "${event.teammateName}"`;
     const details = event.confirmationDetails;
 
@@ -216,9 +222,22 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
       },
     };
 
+    const cancelOnAbort = (): void => {
+      event
+        .respond(ToolConfirmationOutcome.Cancel)
+        .catch((error) => swallow(error, 'Cancel'));
+    };
+    if (signal.aborted) {
+      cancelOnAbort();
+      return;
+    }
+    signal.addEventListener('abort', cancelOnAbort, { once: true });
+
     void (async () => {
       try {
-        const output = await deps.requestPermission(params, deps.signal);
+        const output = await deps.requestPermission(params, signal);
+        if (signal.aborted) return;
+        signal.removeEventListener('abort', cancelOnAbort);
         const outcome = resolvePermissionOutcome(output, offered);
         await event.respond(outcome, {
           answers:
@@ -227,6 +246,7 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
               : undefined,
         });
       } catch (error) {
+        if (signal.aborted) return;
         debugLogger.error('Teammate permission request failed:', error);
         // Fail closed, matching SubAgentTracker: a teammate whose approval
         // cannot be answered must not proceed unreviewed.
@@ -234,6 +254,8 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
           event,
           `The host could not answer the approval for ${who}.`,
         );
+      } finally {
+        signal.removeEventListener('abort', cancelOnAbort);
       }
     })();
   };
@@ -289,7 +311,9 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
       deps.injectLeaderMessage(modelText, displayText, senders);
     });
     const emitter = manager.getEventEmitter();
-    approvalListener = handleApproval;
+    bindingController = new AbortController();
+    const signal = AbortSignal.any([deps.signal, bindingController.signal]);
+    approvalListener = (event) => handleApproval(event, signal);
     emitter.on(TeamEventType.TEAMMATE_APPROVAL_REQUEST, approvalListener);
     joinedListener = handleJoined;
     emitter.on(TeamEventType.TEAMMATE_JOINED, joinedListener);
