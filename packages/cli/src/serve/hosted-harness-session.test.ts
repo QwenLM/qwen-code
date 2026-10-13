@@ -422,6 +422,8 @@ async function app(withBroker = false) {
   const contract = createHostedHarnessContract(
     `sha256:${'a'.repeat(64)}`,
     BOOT_ID,
+
+    ['hosted-workspace-shell/1', 'hosted-workspace-mcp/1'],
   );
   installHostedHarnessContractMiddleware(result, contract);
   registerHostedHarnessSessionRoutes(
@@ -592,6 +594,9 @@ async function hookApp(
   const catalog: ManagedHookCatalog = {
     ...hookPin,
     hooks: [
+      ...(toolProfile === 'hosted-workspace-shell/1'
+        ? [HookEventName.SessionStart]
+        : []),
       HookEventName.Notification,
       HookEventName.SessionEnd,
       HookEventName.SessionDelete,
@@ -1872,6 +1877,213 @@ describe('Hosted Harness no-tool session', () => {
       ).expect(204);
     },
   );
+
+  it.each(['close', 'delete'] as const)(
+    'v2 Shell %s settles Hooks once before resource phases',
+    async (kind) => {
+      const { server, authorize, requests, release } = await hookApp(
+        'hosted-workspace-shell/1',
+      );
+      const initialHook = randomUUID();
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+      )
+        .send({
+          operationId: initialHook,
+          event: 'Notification',
+          input: { message: 'ready', notification_type: 'test' },
+        })
+        .expect(200);
+      await vi.waitFor(async () => {
+        const result = await authorize(
+          supertest(server).get(
+            `/session/${SESSION_ID}/hooks/operations/${initialHook}`,
+          ),
+        );
+        expect(result.body.state).toBe('settled');
+      });
+      requests.length = 0;
+      const operation = {
+        protocolVersion: 2,
+        phase: 'effects',
+        kind,
+        toolProfile: 'hosted-workspace-shell/1',
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+        authority: { operationId: `v2-${kind}`, claimGeneration: 1 },
+      };
+      for (const claimGeneration of [1, 2]) {
+        await authorize(
+          supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+        )
+          .send({
+            ...operation,
+            authority: { ...operation.authority, claimGeneration },
+          })
+          .expect(200);
+      }
+      expect(
+        requests
+          .filter((request) => request.kind === 'hook-execute')
+          .map((request) => request.input.hook_event_name),
+      ).toEqual(
+        kind === 'close' ? ['SessionEnd'] : ['SessionEnd', 'SessionDelete'],
+      );
+      expect(release).not.toHaveBeenCalled();
+      for (const phase of ['prepare_resources', 'settle_resources']) {
+        await authorize(
+          supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+        )
+          .send({
+            ...operation,
+            phase,
+            authority: { ...operation.authority, claimGeneration: 2 },
+          })
+          .expect(200);
+      }
+      expect(state.model).not.toHaveBeenCalled();
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .send({ authority: { ...operation.authority, claimGeneration: 2 } })
+        .expect(204);
+    },
+  );
+
+  it.each([
+    'workspace_lifecycle_claim_fenced',
+    'workspace_close_identity_unverified',
+  ])('preserves %s during v2 resource preparation', async (code) => {
+    const { server, authorize } = await hookApp('hosted-workspace-shell/1');
+    state.assertWritable.mockRejectedValueOnce(
+      new ManagedSessionStoreHttpError(409, code, 'Cleanup rejected'),
+    );
+    const refused = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+    ).send({
+      protocolVersion: 2,
+      phase: 'prepare_resources',
+      kind: 'close',
+      toolProfile: 'hosted-workspace-shell/1',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      authority: { operationId: 'fenced-v2-shell', claimGeneration: 1 },
+    });
+    expect(refused.status).toBe(503);
+    expect(refused.body.code).toBe(code);
+    expect(state.model).not.toHaveBeenCalled();
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/detach`),
+    ).expect(204);
+  });
+
+  it('cold-loads a v2 Shell cleanup claim without SessionStart or new execution', async () => {
+    const { server, authorize, definition, requests } = await hookApp(
+      'hosted-workspace-shell/1',
+    );
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+    )
+      .send({
+        operationId: randomUUID(),
+        event: 'Notification',
+        input: { message: 'ready', notification_type: 'test' },
+      })
+      .expect(200);
+    const operation = {
+      protocolVersion: 2,
+      phase: 'effects',
+      kind: 'close',
+      toolProfile: 'hosted-workspace-shell/1',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      authority: { operationId: 'cold-v2-shell', claimGeneration: 1 },
+    };
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send(operation)
+      .expect(200);
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: operation.authority })
+      .expect(204);
+    requests.length = 0;
+    vi.mocked(HostedWorkspaceBroker.prototype.warm).mockClear();
+    const authority = { ...operation.authority, claimGeneration: 2 };
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        ...definition,
+        lifecycleProtocolVersion: 2,
+        lifecycleAuthority: authority,
+      })
+      .expect(200);
+    const cleanup = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId);
+    for (const phase of ['prepare_resources', 'settle_resources']) {
+      await cleanup(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+        .send({ ...operation, phase, authority })
+        .expect(200);
+    }
+    expect(requests).toHaveLength(0);
+    expect(HostedWorkspaceBroker.prototype.warm).not.toHaveBeenCalled();
+    expect(state.model).not.toHaveBeenCalled();
+    await cleanup(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority })
+      .expect(204);
+  });
+
+  it('v2 MCP effects retain the owner until resources settle', async () => {
+    const { server, authorize, requests } = await mcpApp();
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+    )
+      .send({
+        operationId: randomUUID(),
+        serverId: 'demo',
+        request: { kind: 'resource_read', uri: 'memory://note' },
+      })
+      .expect(202);
+    const operation = {
+      protocolVersion: 2,
+      phase: 'effects',
+      kind: 'close',
+      toolProfile: 'hosted-workspace-mcp/1',
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      authority: { operationId: 'v2-mcp', claimGeneration: 1 },
+    };
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send(operation)
+      .expect(200);
+    expect(
+      requests.filter((request) => request.kind === 'mcp-release'),
+    ).toHaveLength(0);
+    for (const phase of ['prepare_resources', 'settle_resources']) {
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+      )
+        .send({ ...operation, phase })
+        .expect(200);
+    }
+    expect(
+      requests.filter((request) => request.kind === 'mcp-release'),
+    ).toHaveLength(1);
+    expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalled();
+    expect(state.model).not.toHaveBeenCalled();
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority: operation.authority })
+      .expect(204);
+  });
 
   it('resumes the undispatched Delete Hook after revocation without cancelling or repeating End', async () => {
     const { server, authorize, requests } = await hookApp();
@@ -25480,69 +25692,94 @@ describe('Hosted Harness Runtime turn takeover', () => {
   );
 });
 
-it('pins stored definitions across resident and cold loads and delivers instructions to the Turn', async () => {
-  const server = await app();
-  const resources = LocalManagedSessionResourceStore.create({
-    runtimeBaseDir: state.root,
-    sessionKey: {
-      tenantId: 'tenant',
-      workspaceId: 'workspace',
-      sessionId: SESSION_ID,
-    },
+describe('Hosted Harness stored definitions', () => {
+  beforeEach(async () => {
+    state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
+    state.model.mockReset();
+    state.model.mockImplementation(async () => ({
+      text: 'hello back',
+      model: 'test-model',
+    }));
   });
-  const instructionsRef = await resources.publish(
-    'managed-agent-instructions',
-    Buffer.from('D8_PINNED_INSTRUCTIONS'),
-  );
-  const identity = {
-    agentId: `agent_${'a'.repeat(32)}`,
-    revision: '1',
-    digest: 'b'.repeat(64),
-  };
-  const definition = {
-    ...identity,
-    model: { id: 'configured' },
-    instructionsRef,
-  };
-  const created = await headers(supertest(server).post('/session')).send({
-    sessionId: SESSION_ID,
-    sessionScope: 'thread',
-    managedSessionStore: store(),
-    agentDefinition: definition,
-  });
-  expect(created.status).toBe(200);
-  const load = (agentDefinition?: typeof identity) =>
-    headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
-      managedSessionStore: store(),
-      agentDefinition,
-      driveRuntimeRecovery: true,
-    });
-  expect((await load()).body.error).toBe('hosted_agent_definition_conflict');
-  expect((await load({ ...identity, digest: 'c'.repeat(64) })).body.error).toBe(
-    'hosted_agent_definition_conflict',
-  );
-  expect((await load(identity)).status).toBe(200);
-  await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(204);
-  const loaded = await load(identity);
-  expect(loaded.status).toBe(200);
-  const prompt = [{ type: 'text', text: 'hello' }];
-  await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-    .set('X-Qwen-Client-Id', loaded.body.clientId)
-    .send({
-      prompt,
-      promptId: PROMPT_ID,
-      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
-    })
-    .expect(202);
-  await vi.waitFor(() => expect(state.model).toHaveBeenCalled());
-  expect(state.model.mock.calls.at(-1)?.[0]).toMatchObject({
-    agentDefinition: definition,
-    agentInstructions: 'D8_PINNED_INSTRUCTIONS',
-  });
-  await vi.waitFor(async () => {
-    const response = await headers(
-      supertest(server).delete(`/session/${SESSION_ID}`),
+  afterEach(async () => {
+    await Promise.all(
+      [...listeners].map((listener) =>
+        Promise.race([
+          headers(supertest(listener).delete(`/session/${SESSION_ID}`)),
+          new Promise((resolve) => setTimeout(resolve, 5_000)),
+        ]),
+      ),
     );
-    expect(response.status).toBe(204);
+    vi.restoreAllMocks();
+    await rm(state.root, { recursive: true, force: true });
+  });
+
+  it('pins stored definitions across resident and cold loads and delivers instructions to the Turn', async () => {
+    const server = await app();
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const instructionsRef = await resources.publish(
+      'managed-agent-instructions',
+      Buffer.from('D8_PINNED_INSTRUCTIONS'),
+    );
+    const identity = {
+      agentId: `agent_${'a'.repeat(32)}`,
+      revision: '1',
+      digest: 'b'.repeat(64),
+    };
+    const definition = {
+      ...identity,
+      model: { id: 'configured' },
+      instructionsRef,
+    };
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      agentDefinition: definition,
+    });
+    expect(created.status).toBe(200);
+    const load = (agentDefinition?: typeof identity) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        agentDefinition,
+        driveRuntimeRecovery: true,
+      });
+    expect((await load()).body.error).toBe('hosted_agent_definition_conflict');
+    expect(
+      (await load({ ...identity, digest: 'c'.repeat(64) })).body.error,
+    ).toBe('hosted_agent_definition_conflict');
+    expect((await load(identity)).status).toBe(200);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
+    const loaded = await load(identity);
+    expect(loaded.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalled());
+    expect(state.model.mock.calls.at(-1)?.[0]).toMatchObject({
+      agentDefinition: definition,
+      agentInstructions: 'D8_PINNED_INSTRUCTIONS',
+    });
+    await vi.waitFor(async () => {
+      const response = await headers(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+      expect(response.status).toBe(204);
+    });
   });
 });

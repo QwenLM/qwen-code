@@ -551,6 +551,9 @@ class WorkspaceLifecycleStoreTest {
             var beans = new DefaultListableBeanFactory();
             beans.registerSingleton("bindings", bindings);
             lifecycle = new WorkspaceLifecycleStore(jdbc, json, beans.getBeanProvider(RuntimeBindingRepository.class));
+            beans.registerSingleton("results", new ManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store));
+            lifecycle.setProfiles(new WorkspaceProfileLifecycleVerifier(jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),
+                    beans.getBeanProvider(ManagedToolResultStore.class)));
             store.setWorkspaceLifecycleStore(lifecycle);
             jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",

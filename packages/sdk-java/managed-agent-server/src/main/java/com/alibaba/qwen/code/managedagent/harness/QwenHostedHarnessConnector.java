@@ -172,11 +172,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public boolean supportsLifecycle() {
-        if (!isWorkspaceFilesAvailable()) {
-            return false;
-        }
+        return supportsLifecycle(WorkspaceToolProfiles.FILES);
+    }
+
+    @Override
+    public boolean supportsLifecycle(String profile) {
         try {
-            return client().capabilities().getLifecycleProtocolVersion() == 1;
+            return WorkspaceToolProfiles.FILES.equals(profile)
+                    ? isWorkspaceFilesAvailable() && client().capabilities().getLifecycleProtocolVersion() == 1
+                    : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
+                            && client().capabilities().getLifecycleV2Profiles().contains(profile);
         } catch (com.alibaba.qwen.code.daemon.DaemonException
                 | IllegalStateException unavailable) {
             return false;
@@ -187,7 +192,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public com.fasterxml.jackson.databind.JsonNode settleLifecycle(
             com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
         try {
-            return doSettleLifecycle(operation);
+            return doSettleLifecycle(operation, "effects");
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -195,9 +200,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private com.fasterxml.jackson.databind.JsonNode doSettleLifecycle(
-            com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+            com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation, String phase) {
         SessionRecord session = sessions.requireSession(operation.tenantId(), operation.sessionId());
-        requireShellApproval(session);
+        if (operation.lifecycleProtocolVersion() < 0 || operation.lifecycleProtocolVersion() > 2) {
+            throw new IllegalArgumentException("Unknown lifecycle protocol");
+        }
+        if (operation.lifecycleProtocolVersion() != 2) {
+            requireShellApproval(session);
+        }
         AttachmentKey key = new AttachmentKey(operation.tenantId(), operation.sessionId());
         HarnessSessionRef ref = attachments.get(key);
         if (ref == null) {
@@ -206,14 +216,38 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     WorkspaceToolProfiles.isPublicShell(toolProfile(session)))
                     .withAgentDefinition(agentDefinition(session, false))
                     .withChildWorkspaces(childWorkspaces)
-                    .forLifecycle(operation.operationId(), operation.claimGeneration()));
+                    .forLifecycle(operation.operationId(), operation.claimGeneration(), operation.lifecycleProtocolVersion() == 2 ? 2 : 1));
             attachments.put(key, ref);
         }
         var authority = Map.<String, Object>of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration());
-        var request = Map.<String, Object>of("sessionKey", Map.of("tenantId", session.tenantId(),
+        var request = new LinkedHashMap<String, Object>(Map.<String, Object>of("sessionKey", Map.of("tenantId", session.tenantId(),
                 "workspaceId", session.workspace().getWorkspaceId(), "sessionId", session.sessionId()),
-                "kind", operation.kind().name().toLowerCase(java.util.Locale.ROOT), "authority", authority);
+                "kind", operation.kind().name().toLowerCase(java.util.Locale.ROOT), "authority", authority));
+        if (operation.lifecycleProtocolVersion() == 2) {
+            request.put("protocolVersion", 2);
+            request.put("phase", phase);
+            request.put("toolProfile", session.toolProfile());
+        }
         return new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(client().settleLifecycle(ref, request));
+    }
+
+    @Override
+    public void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        runResourcePhase(operation, "prepare_resources");
+    }
+
+    @Override
+    public void settleLifecycleResources(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        runResourcePhase(operation, "settle_resources");
+    }
+
+    private void runResourcePhase(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation, String phase) {
+        try {
+            doSettleLifecycle(operation, phase);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override
