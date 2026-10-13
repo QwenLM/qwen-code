@@ -893,62 +893,69 @@ it('retries a finalize that failed once instead of caching the refusal forever',
   });
 });
 
-it('commits the tail an ownerless watch decoded before its record settles', async () => {
-  const r = await rig();
-  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
-  await r.monitors.admit({
-    monitorId: 'monitor-tail',
-    ownerScopeId: r.key.sessionId,
-    executionCallId: 'monitor-tail',
-    args: { command: 'du -sh .', description: 'du watch' },
-    maxEvents: 100,
-    idleTimeoutMs: 60_000,
-    debounceMs: 1_000,
-  });
-  await r.monitors.dispatchStarted('monitor-tail', BINDING);
-  const request = backgroundRequest(r.key, '1', true);
-  (request.capture as Record<string, unknown>)['executionCallId'] =
-    'monitor-tail';
-  publisher!.register(
-    { reference: request.reference, capture: request.capture },
-    'model-call-m',
-    request.reference.sessionId,
-  );
-  const prepared = await r.registry.prepare(
-    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
-  );
-  await r.monitors.attach('monitor-tail', BINDING, { pid: 9 });
-  prepared.sink.setStarted(9);
-  // The watch ends before any observation arm registers: its decoded
-  // lines still commit — with the wake the end should raise too.
-  await prepared.sink.write('stdout', Buffer.from('last window\nvery last\n'));
-  prepared.sink.setProcessResult({
-    rawOutput: Buffer.alloc(0),
-    output: '',
-    error: null,
-    aborted: false,
-    exitCode: 0,
-    signal: null,
-    pid: undefined,
-    executionMethod: 'child_process',
-  });
-  await prepared.sink.finish('stdout', true);
-  const envelope = await prepared.sink.finalize('success', [], undefined);
-  await r.registry.accept(prepared.identity, envelope);
-  const record = parseMonitorRun(
-    session!.authority.extensionRecord('monitor_run', 'monitor-tail')!.record,
-  );
-  expect(record).toMatchObject({
-    observationSequence: 1,
-    notifiedThrough: 1,
-    stopReason: 'exited',
-    run: { state: 'settled', execution: 'settled' },
-  });
-  const wakes = session!.authority
-    .eventsInSequenceRange(1, session!.authority.committedSequence)
-    .filter((event) => event.kind === 'wake.requested');
-  expect(wakes).toHaveLength(1);
-});
+it.each([false, true])(
+  'commits an ownerless watch tail with lifecycle preparation=%s',
+  async (lifecycle) => {
+    const r = await rig();
+    const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+    await r.monitors.admit({
+      monitorId: 'monitor-tail',
+      ownerScopeId: r.key.sessionId,
+      executionCallId: 'monitor-tail',
+      args: { command: 'du -sh .', description: 'du watch' },
+      maxEvents: 100,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+    });
+    await r.monitors.dispatchStarted('monitor-tail', BINDING);
+    const request = backgroundRequest(r.key, '1', true);
+    (request.capture as Record<string, unknown>)['executionCallId'] =
+      'monitor-tail';
+    publisher!.register(
+      { reference: request.reference, capture: request.capture },
+      'model-call-m',
+      request.reference.sessionId,
+    );
+    const prepared = await r.registry.prepare(
+      request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+    );
+    await r.monitors.attach('monitor-tail', BINDING, { pid: 9 });
+    if (lifecycle) publisher!.prepareLifecycle();
+    prepared.sink.setStarted(9);
+    // The watch ends before any observation arm registers: its decoded
+    // lines still commit — with the wake the end should raise too.
+    await prepared.sink.write(
+      'stdout',
+      Buffer.from('last window\nvery last\n'),
+    );
+    prepared.sink.setProcessResult({
+      rawOutput: Buffer.alloc(0),
+      output: '',
+      error: null,
+      aborted: false,
+      exitCode: 0,
+      signal: null,
+      pid: undefined,
+      executionMethod: 'child_process',
+    });
+    await prepared.sink.finish('stdout', true);
+    const envelope = await prepared.sink.finalize('success', [], undefined);
+    await r.registry.accept(prepared.identity, envelope);
+    const record = parseMonitorRun(
+      session!.authority.extensionRecord('monitor_run', 'monitor-tail')!.record,
+    );
+    expect(record).toMatchObject({
+      observationSequence: 1,
+      notifiedThrough: lifecycle ? 0 : 1,
+      stopReason: 'exited',
+      run: { state: 'settled', execution: 'settled' },
+    });
+    const wakes = session!.authority
+      .eventsInSequenceRange(1, session!.authority.committedSequence)
+      .filter((event) => event.kind === 'wake.requested');
+    expect(wakes).toHaveLength(lifecycle ? 0 : 1);
+  },
+);
 
 it('completes a refused exit settle on the record’s own attach, without a client retry', async () => {
   const r = await rig();
