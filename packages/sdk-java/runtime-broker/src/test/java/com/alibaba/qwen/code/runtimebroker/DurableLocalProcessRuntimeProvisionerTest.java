@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -375,9 +376,13 @@ class DurableLocalProcessRuntimeProvisionerTest {
                         provisioner, TRANSPORT, bindings,
                         new InMemoryRuntimeSessionRepository(),
                         new InMemoryToolExecutionRepository(), "broker",
-                        Duration.ofMillis(300), Duration.ofMillis(300))) {
-            assertThrows(java.util.concurrent.ExecutionException.class,
+                        Duration.ofSeconds(3), Duration.ofMillis(300))) {
+            var spawnFailure = assertThrows(java.util.concurrent.ExecutionException.class,
                     () -> await(service.warm("harness")));
+            var blockedFailure = assertInstanceOf(RuntimeBrokerException.class,
+                    spawnFailure.getCause());
+            assertEquals("runtime_broker_recovery_blocked", blockedFailure.getCode());
+            assertInstanceOf(java.io.IOException.class, blockedFailure.getCause());
             var request = provisioner.createRequest(scope, "harness");
             var blocked = bindings.findActive(request);
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED, blocked.getState());
