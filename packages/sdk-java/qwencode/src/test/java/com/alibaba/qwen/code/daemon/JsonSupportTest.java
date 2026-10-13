@@ -85,6 +85,8 @@ class JsonSupportTest {
                 {"6.02e23", "6.02e+23"},
                 {"0.5", "0.5"},
                 {"-0.25", "-0.25"},
+                {"0.0", "0"},
+                {"-0.0", "0"},
                 {"2.5e-7", "2.5e-7"},
                 {"-1.5e-10", "-1.5e-10"},
                 {"2.2250738585072014e-308", "2.2250738585072014e-308"},
@@ -94,6 +96,37 @@ class JsonSupportTest {
             assertEquals(vector[1], JsonSupport.encode(input),
                     "JSON.stringify(" + vector[0] + ") is " + vector[1]);
         }
+    }
+
+    /**
+     * JSON.stringify writes array-index keys first, ascending, then the rest
+     * in insertion order; the daemon re-stringifies a parsed body that way,
+     * so the encoder must too. Expected strings are Node's output for an
+     * object built with these keys in this order.
+     */
+    @Test
+    void encodeOrdersKeysAsJsonStringifyDoes() {
+        Map<String, Object> keys = new LinkedHashMap<>();
+        String[] names = {"b", "10", "2", "a", "01", "4294967295",
+                "4294967294", "-1", "1.5", "0", " 1", "1e3"};
+        for (int i = 0; i < names.length; i++) {
+            keys.put(names[i], i);
+        }
+        assertEquals("{\"0\":9,\"2\":2,\"10\":1,\"4294967294\":6,"
+                + "\"b\":0,\"a\":3,\"01\":4,\"4294967295\":5,\"-1\":7,"
+                + "\"1.5\":8,\" 1\":10,\"1e3\":11}", JsonSupport.encode(keys));
+
+        Map<String, Object> inner = new LinkedHashMap<>();
+        inner.put("9", 1);
+        inner.put("k", 2);
+        inner.put("8", 3);
+        Map<String, Object> middle = new LinkedHashMap<>();
+        middle.put("3", true);
+        middle.put("x", null);
+        middle.put("1", List.of(inner));
+        assertEquals("{\"z\":{\"1\":[{\"8\":3,\"9\":1,\"k\":2}],"
+                + "\"3\":true,\"x\":null}}",
+                JsonSupport.encode(Map.of("z", middle)));
     }
 
     @Test

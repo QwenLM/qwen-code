@@ -61,3 +61,7 @@ for (const [low, high] of bands) {
 }
 // Uniform over all bit patterns.
 for (let i = 0; i < 1000; i++) line(fromBits(next64()));
+// Signed zeros: JSON.stringify renders -0 as 0, the one notation boundary
+// that no loop above reaches (they clear or randomize the sign elsewhere).
+line(0);
+line(-0);
