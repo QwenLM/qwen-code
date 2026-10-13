@@ -9,6 +9,13 @@ import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import { buildTrajectory } from './buildTrajectory';
 import { projectTrajectoryWindow } from './projectTrajectoryWindow';
 import type { Trajectory } from './types';
+import {
+  projectHistoricalLifecycle,
+  projectTrajectoryLifecycle,
+  type TrajectoryLifecycleProjection,
+} from './project-trajectory-lifecycle';
+import { trajectoryLoaderIdentity } from './transcriptPageLoader';
+import { useTrajectoryLiveSnapshot } from './trajectory-live-context';
 
 /**
  * Records asked for per read. The daemon caps a page at 500 records and at
@@ -72,6 +79,7 @@ export const TRAJECTORY_BOOKMARK_LIMIT = 64;
 export const TRAJECTORY_CURSOR_BUDGET = 256 * 1024;
 
 export interface TrajectoryWindow {
+  lifecycle: TrajectoryLifecycleProjection;
   trajectory: Trajectory | undefined;
   status: 'idle' | 'loading' | 'ready' | 'error';
   error?: TrajectoryWindowFailure;
@@ -185,6 +193,7 @@ export function useTrajectoryWindow(
   const [state, setState] = useState<WindowState>(EMPTY_STATE);
   const stateRef = useRef(state);
   const generationRef = useRef(0);
+  const pagesOwnerRef = useRef(loadPage);
   const pendingRef = useRef<Operation | undefined>(undefined);
 
   const update = useCallback((next: WindowState) => {
@@ -409,6 +418,7 @@ export function useTrajectoryWindow(
   }, [run]);
 
   useEffect(() => {
+    pagesOwnerRef.current = loadPage;
     update(EMPTY_STATE);
     pendingRef.current = undefined;
     if (loadPage) refresh();
@@ -422,7 +432,17 @@ export function useTrajectoryWindow(
     };
   }, [loadPage, refresh, update]);
 
-  const pages = state.pages;
+  const windowState = pagesOwnerRef.current === loadPage ? state : EMPTY_STATE;
+  const pages = windowState.pages;
+  const {
+    requests,
+    tools,
+    status: liveStatus,
+    scope,
+    sessionId,
+    incomplete,
+    truncated: liveTruncated,
+  } = useTrajectoryLiveSnapshot();
   const trajectory = useMemo(
     () =>
       pages === undefined
@@ -430,32 +450,67 @@ export function useTrajectoryWindow(
         : buildTrajectory(projectTrajectoryWindow(pages.flat())),
     [pages],
   );
+  const historicalLifecycle = useMemo(
+    () => projectHistoricalLifecycle(pages?.flat() ?? []),
+    [pages],
+  );
+  const lifecycle = useMemo(
+    () =>
+      projectTrajectoryLifecycle(
+        historicalLifecycle,
+        trajectory,
+        trajectoryLoaderIdentity(loadPage),
+        {
+          requests,
+          tools,
+          status: liveStatus,
+          scope,
+          sessionId,
+          incomplete,
+          truncated: liveTruncated,
+        },
+      ),
+    [
+      historicalLifecycle,
+      trajectory,
+      loadPage,
+      requests,
+      tools,
+      liveStatus,
+      scope,
+      sessionId,
+      incomplete,
+      liveTruncated,
+    ],
+  );
   const navigable =
-    state.status !== 'loading' &&
-    !state.blocked &&
-    !state.olderFailure &&
-    !state.navigationError &&
+    windowState.status !== 'loading' &&
+    !windowState.blocked &&
+    !windowState.olderFailure &&
+    !windowState.navigationError &&
     !pendingRef.current;
 
   return {
+    lifecycle,
     trajectory,
-    status: state.status,
-    error: state.error,
-    loadedPages: state.loadedPages,
-    windowPages: state.pages?.length ?? 0,
-    truncated: state.truncated,
-    olderFailure: state.olderFailure,
-    navigationError: state.navigationError,
-    mode: state.mode,
-    navigationVersion: state.navigationVersion,
+    status: windowState.status,
+    error: windowState.error,
+    loadedPages: windowState.loadedPages,
+    windowPages: windowState.pages?.length ?? 0,
+    truncated: windowState.truncated,
+    olderFailure: windowState.olderFailure,
+    navigationError: windowState.navigationError,
+    mode: windowState.mode,
+    navigationVersion: windowState.navigationVersion,
     canRefresh: Boolean(
       loadPage &&
-        (state.status !== 'loading' || pendingRef.current?.kind !== 'latest'),
+        (windowState.status !== 'loading' ||
+          pendingRef.current?.kind !== 'latest'),
     ),
-    canOlder: Boolean(navigable && state.nextCursor),
-    canNewer: Boolean(navigable && state.index > 0),
-    historyReleased: state.historyReleased,
-    bookmarks: state.cursors.length,
+    canOlder: Boolean(navigable && windowState.nextCursor),
+    canNewer: Boolean(navigable && windowState.index > 0),
+    historyReleased: windowState.historyReleased,
+    bookmarks: windowState.cursors.length,
     refresh,
     older,
     newer,

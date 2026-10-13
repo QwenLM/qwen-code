@@ -1,4 +1,8 @@
 import {
+  FILES_MESSAGES_EN,
+  FILES_MESSAGES_ZH,
+} from './components/artifacts/files-messages.js';
+import {
   createContext,
   useContext,
   useMemo,
@@ -1866,6 +1870,7 @@ const EN: Messages = {
     'Which workspace this conversation belongs to is not known yet.',
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
+  ...FILES_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -3425,6 +3430,10 @@ const EN: Messages = {
   'trajectory.noStart':
     'Recorded durations have no start time, so no bars can be plotted.',
   'trajectory.refreshStale': 'Refresh failed; showing the last successful read',
+  'trajectory.historyGap':
+    'History may have changed while disconnected. Refresh the latest window to update.',
+  'trajectory.lifecycleIncomplete':
+    'Lifecycle details may be incomplete or outside the retained limit.',
   'trajectory.selected.label': 'Selected',
   'trajectory.selected.none': 'Choose a record',
   'trajectory.selected.noTiming': 'no request or tool timing',
@@ -6144,6 +6153,7 @@ const ZH: Messages = {
   'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
+  ...FILES_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -7575,6 +7585,8 @@ const ZH: Messages = {
   'trajectory.missingTiming': (v) => `${v?.count ?? 0} 条工具记录无耗时`,
   'trajectory.noStart': '已记录耗时，但均无起点，无法绘制条带。',
   'trajectory.refreshStale': '刷新失败，当前为上次成功读取的数据',
+  'trajectory.historyGap': '断线期间历史记录可能已变化，请刷新最新窗口。',
+  'trajectory.lifecycleIncomplete': '生命周期详情可能不完整或超出保留上限。',
   'trajectory.selected.label': '所选',
   'trajectory.selected.none': '请选择一条记录',
   'trajectory.selected.noTiming': '无请求或工具计时',

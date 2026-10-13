@@ -180,6 +180,25 @@ async function settleThroughAttach(
 }
 
 describe('childResultNotificationText', () => {
+  it('keeps the escaped plan ahead of a truncated result', () => {
+    const text = childResultNotificationText({
+      taskId: 'task-1',
+      kind: 'child_agent',
+      description: 'plan',
+      text: 'x'.repeat(100000),
+      plan: { requestId: 'request-1', revision: 2, text: '<read> & wait' },
+    });
+    expect(text).toContain(
+      '<plan-approval-request request="request-1" revision="2">\n&lt;read&gt; &amp; wait',
+    );
+    expect(text.indexOf('</plan-approval-request>')).toBeLessThan(
+      text.indexOf('<result>'),
+    );
+    expect(text).toContain('truncated');
+    expect(Buffer.byteLength(JSON.stringify({ text }))).toBeLessThanOrEqual(
+      CHILD_NOTIFICATION_INLINE_LIMIT,
+    );
+  });
   it('round-trips a result far below the inline cap untouched', () => {
     const notification = childResultNotificationText({
       taskId: TASK_ID,
