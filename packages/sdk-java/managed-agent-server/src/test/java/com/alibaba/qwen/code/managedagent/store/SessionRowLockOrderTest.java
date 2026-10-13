@@ -34,6 +34,7 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.HashMap;
@@ -53,6 +54,7 @@ import javax.tools.SimpleJavaFileObject;
 import javax.tools.ToolProvider;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.annotation.Transactional;
 
 // recordAdmission's inline comment fixes the lock order that keeps InnoDB
 // from deadlocking concurrent Turn admissions: the session row FOR UPDATE
@@ -349,6 +351,25 @@ class SessionRowLockOrderTest {
                 .as("the parse must see every compiled member")
                 .isEqualTo(compiledMembers(ManagedAgentStore.class,
                         audit.members()));
+    }
+
+    // The pinned order is load-bearing only inside one transaction: the
+    // audit reads spellings, not runtime wiring, so a dropped
+    // @Transactional would reopen the deadlock window with every spelling
+    // assertion still green. Pin the boundary on the R2 entry points.
+    @Test
+    void theOrderPinnedEntriesKeepTheirTransactionalBoundary() {
+        for (String name : List.of("recordAdmission", "failTurn",
+                "cancelBeforeAdmission")) {
+            List<Method> entries = Arrays.stream(ManagedAgentStore.class
+                    .getDeclaredMethods())
+                    .filter(method -> method.getName().equals(name))
+                    .toList();
+            assertThat(entries).as("%s exists", name).isNotEmpty();
+            assertThat(entries).as("%s keeps @Transactional", name)
+                    .allMatch(entry -> entry.isAnnotationPresent(
+                            Transactional.class));
+        }
     }
 
     // The session-first order is audited on every store whose writers lock

@@ -417,8 +417,9 @@ public class ManagedAgentService {
         // operator, but the recorded outcome stays scoped to its recorder
         // and the Session's creator — and the gate runs when the key
         // exists, before any digest comparison: a reused key's
-        // idempotency_conflict would otherwise tell another actor the key
-        // is live.
+        // idempotency_conflict would otherwise name the live key. The
+        // gate's own refusal still differs from a fresh key's for a
+        // fellow OPERATOR; only the below-OPERATOR arms answer uniformly.
         Admission replay = replayForCreator(tenantId, SUBMIT,
                 idempotencyKey, requestDigest, session, actorId);
         if (replay != null) {
@@ -557,7 +558,9 @@ public class ManagedAgentService {
             // recorder's pending delivery — and the recorded outcome it
             // becomes — to any OPERATOR replaying the key, and a
             // different-title replay would answer idempotency_conflict,
-            // naming the live key the uniform answer keeps hidden.
+            // naming the live key the grant-less caller's uniform 404
+            // keeps hidden; a fellow OPERATOR's refusal still differs
+            // from a fresh key's.
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
             requireSubmitterRole(session, actorId);

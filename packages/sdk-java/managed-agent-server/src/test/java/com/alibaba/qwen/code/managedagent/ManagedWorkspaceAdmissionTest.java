@@ -2183,6 +2183,51 @@ class ManagedWorkspaceAdmissionTest {
                 .containsEntry("title", "renamed title");
     }
 
+    @Test
+    void aRecordedWorkspaceCreateReplaysWhileWorkspaceFilesAreOff() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        var selection = new WorkspaceSelection("ws-a", ".");
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        CommandAdmission first = workspaceFilesService(tenant, true)
+                .createWorkspaceSession(tenant, "actor-a", "create-1",
+                        "qwen-code", null, "a title", null, input, selection);
+        assertThat(first.replayed()).isFalse();
+        // The recorded create answers through a files outage; only a fresh
+        // key meets the availability refusal.
+        CommandAdmission replay = workspaceFilesService(tenant, false)
+                .createWorkspaceSession(tenant, "actor-a", "create-1",
+                        "qwen-code", null, "a title", null, input, selection);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.sessionId()).isEqualTo(first.sessionId());
+        assertRefused(() -> workspaceFilesService(tenant, false)
+                .createWorkspaceSession(tenant, "actor-a", "create-2",
+                        "qwen-code", null, "a title", null, input, selection),
+                "workspace_unavailable");
+    }
+
+    private ManagedAgentService workspaceFilesService(String tenant,
+            boolean workspaceFiles) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(workspaceFiles);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant,
+                        "storage-a", "/workspace")));
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, properties);
+        return new ManagedAgentService(gated, new RequestDigests(), null,
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return workspaceFiles;
+                    }
+                }, registry);
+    }
+
     private ManagedAgentService boundServiceWithWorkingHarness() {
         return boundServiceWith(new UnavailableHarnessConnector() {
             @Override

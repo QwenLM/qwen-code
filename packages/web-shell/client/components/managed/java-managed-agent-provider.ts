@@ -548,7 +548,7 @@ function titleFor(text: string): string {
   // beside the whitespace collapse instead of failing the Session create.
   const title = text
     // eslint-disable-next-line no-control-regex
-    .replace(/[ -]/g, ' ')
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
   return title.length <= 80 ? title : `${title.slice(0, 77)}...`;

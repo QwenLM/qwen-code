@@ -2905,15 +2905,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public void deferTurnRetry(String tenantId, String sessionId,
             String turnId, String owner, long retryAfter) {
-        jdbc.update("UPDATE managed_agent_turn SET retry_count = retry_count"
-                        + " + 1, retry_after = ?, dispatch_owner = NULL,"
-                        + " dispatch_lease_until = NULL, updated_at = ?,"
-                        + " version = version + 1 WHERE tenant_id = ? AND"
-                        + " session_id = ? AND turn_id = ? AND dispatch_owner"
-                        + " = ? AND status IN ('ACCEPTED', 'RUNNING',"
-                        + " 'CANCELLING')",
-                retryAfter, clock.millis(), tenantId, sessionId, turnId,
-                owner);
+        scheduleTurnRetry(tenantId, sessionId, turnId, owner, retryAfter);
     }
 
     public void scheduleTurnRetry(String tenantId, String sessionId,

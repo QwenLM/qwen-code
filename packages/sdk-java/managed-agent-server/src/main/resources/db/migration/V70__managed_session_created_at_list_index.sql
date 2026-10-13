@@ -1,7 +1,7 @@
--- listSessions pages on the immutable created_at keyset. The previous
--- (tenant_id, updated_at, session_id) list index loses its only consumer —
--- the dispatch scans that share its column list read managed_agent_turn, not
--- this table — so it goes away rather than rotting to dead weight.
+-- listSessions pages on the immutable created_at keyset.
+-- CREATE INDEX and DROP INDEX stay in separate migrations: on
+-- MySQL/MariaDB each DDL statement implicit-commits, so a packed pair
+-- would leave a failed migration unable to retry — the retried CREATE
+-- would meet the committed index and fail on the duplicate name.
 CREATE INDEX managed_agent_session_created_idx
     ON managed_agent_session (tenant_id, created_at, session_id);
-DROP INDEX managed_agent_session_list_idx ON managed_agent_session;
