@@ -657,6 +657,7 @@ describe('Shell publication grant renewal', () => {
     'in-flight',
     'timer-failure',
     'rejection-before-settlement',
+    'stale-and-live',
   ] as const)(
     'renews only live grants across %s and a delayed receipt',
     async (mode) => {
@@ -735,7 +736,10 @@ describe('Shell publication grant renewal', () => {
       broker.executeV3.mockImplementation(
         async (id, _payload, publicationId) => {
           if (id === 'shell-1') {
-            if (mode === 'rejection-before-settlement')
+            if (
+              mode === 'rejection-before-settlement' ||
+              mode === 'stale-and-live'
+            )
               settled.add(publicationId);
             startExecution();
             await executionGate;
@@ -777,6 +781,12 @@ describe('Shell publication grant renewal', () => {
           ) {
             startQueuedRenewal();
             await queuedRenewalGate;
+            if (mode === 'stale-and-live')
+              throw new ManagedSessionStoreHttpError(
+                503,
+                'unavailable',
+                'Store down.',
+              );
           }
           if (grant.operation === 'renew' && settled.has(grant.publicationId))
             throw new ManagedSessionStoreHttpError(
@@ -842,6 +852,7 @@ describe('Shell publication grant renewal', () => {
         'model',
         new AbortController().signal,
       );
+      const executionOutcome = execution.catch((cause: unknown) => cause);
       const renewalIds = () =>
         request.mock.calls
           .filter(
@@ -856,7 +867,8 @@ describe('Shell publication grant renewal', () => {
         request.mockClear();
         delayRenewal = mode === 'in-flight';
         failRenewal = mode === 'timer-failure';
-        delayQueuedRenewal = mode === 'rejection-before-settlement';
+        delayQueuedRenewal =
+          mode === 'rejection-before-settlement' || mode === 'stale-and-live';
         await vi.advanceTimersByTimeAsync(10_000);
         if (delayQueuedRenewal) await queuedRenewalStarted;
         expect(renewalIds()).toEqual(
@@ -900,6 +912,36 @@ describe('Shell publication grant renewal', () => {
             .toEqual([publicationIds[1], publicationIds[1]]);
           expect(broker.executeV3).toHaveBeenCalledOnce();
           commitReceipt();
+        }
+        if (mode === 'stale-and-live') {
+          const failure = await executionOutcome;
+          expect(failure).toBeInstanceOf(HostedToolRecoveryRequiredError);
+          const aggregate = (failure as HostedToolRecoveryRequiredError).cause;
+          expect(aggregate).toBeInstanceOf(AggregateError);
+          expect((aggregate as AggregateError).errors).toHaveLength(1);
+          expect((aggregate as AggregateError).message).toContain(
+            `${publicationIds[1]}:`,
+          );
+          expect((aggregate as AggregateError).message).not.toContain(
+            publicationIds[0],
+          );
+          expect(stderr).toHaveBeenCalledOnce();
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `Tool publication renewal failed: AggregateError: ${publicationIds[1]}:`,
+            ),
+          );
+          expect(broker.executeV3).toHaveBeenCalledOnce();
+          expect(broker.cancel.mock.calls.map(([id]) => id)).toEqual([
+            'shell-1',
+            'shell-2',
+          ]);
+          expect(broker.release).not.toHaveBeenCalled();
+          await expect(turn.finish()).rejects.toBeInstanceOf(
+            HostedToolRecoveryRequiredError,
+          );
+          expect(vi.getTimerCount()).toBe(0);
+          return;
         }
         const responses = await execution;
         expect(responses.map((part) => part.functionResponse?.id)).toEqual(
@@ -1005,9 +1047,24 @@ describe('Shell publication grant renewal', () => {
     );
   });
 
-  it.each([400, 503])(
-    'attempts later renewals after HTTP %s but fails closed before dispatch',
-    async (status) => {
+  it.each([
+    { status: 400, multiple: false, label: 'HTTP 400' },
+    { status: 503, multiple: false, label: 'HTTP 503' },
+    { status: 503, multiple: true, label: 'multiple live failures' },
+  ])(
+    'attempts later renewals after $label but fails closed before dispatch',
+    async ({ status, multiple }) => {
+      if (multiple)
+        vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let startRenewal!: () => void;
+      const renewalStarted = new Promise<void>((resolve) => {
+        startRenewal = resolve;
+      });
+      let finishRenewal!: () => void;
+      const renewalGate = new Promise<void>((resolve) => {
+        finishRenewal = resolve;
+      });
       const shellCalls = calls.map((call, index) => ({
         ...call,
         name: 'run_shell_command',
@@ -1024,7 +1081,11 @@ describe('Shell publication grant renewal', () => {
         const grant = body as { operation: string; publicationId: string };
         if (grant.operation === 'renew') {
           renewals.push(grant.publicationId);
-          if (renewals.length === 1)
+          if (multiple && renewals.length === 1) {
+            startRenewal();
+            await renewalGate;
+          }
+          if (renewals.length === 1 || multiple)
             throw new ManagedSessionStoreHttpError(
               status,
               status === 400 ? 'invalid_request' : 'unavailable',
@@ -1052,25 +1113,58 @@ describe('Shell publication grant renewal', () => {
           captureBytes: 1024 * 1024,
         },
       );
-      await expect(
-        turn.execute(
-          shellCalls,
-          shellCalls.map((call) => ({
-            functionCall: { id: call.callId, name: call.name, args: call.args },
-          })),
-          'model',
-          new AbortController().signal,
-        ),
-      ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
-      expect(renewals).toEqual(
-        broker.prepareV3.mock.calls.map((call) => call[3]),
+      const execution = turn.execute(
+        shellCalls,
+        shellCalls.map((call) => ({
+          functionCall: { id: call.callId, name: call.name, args: call.args },
+        })),
+        'model',
+        new AbortController().signal,
       );
-      expect(broker.executeV3).not.toHaveBeenCalled();
-      expect(broker.cancel).toHaveBeenCalledTimes(2);
-      expect(broker.release).not.toHaveBeenCalled();
-      await expect(turn.finish()).rejects.toBeInstanceOf(
-        HostedToolRecoveryRequiredError,
-      );
+      const executionOutcome = execution.catch((cause: unknown) => cause);
+      try {
+        if (multiple) {
+          await renewalStarted;
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(broker.executeV3).not.toHaveBeenCalled();
+          finishRenewal();
+        }
+        const failure = await executionOutcome;
+        expect(failure).toBeInstanceOf(HostedToolRecoveryRequiredError);
+        const publicationIds = broker.prepareV3.mock.calls.map(
+          (call) => call[3],
+        );
+        expect(renewals).toEqual(publicationIds);
+        if (multiple) {
+          const aggregate = (failure as HostedToolRecoveryRequiredError).cause;
+          expect(aggregate).toBeInstanceOf(AggregateError);
+          expect((aggregate as AggregateError).errors).toHaveLength(2);
+          expect((aggregate as AggregateError).errors).toEqual(
+            publicationIds.map((id) =>
+              expect.objectContaining({
+                message: expect.stringContaining(`${id}:`),
+              }),
+            ),
+          );
+          expect(stderr).toHaveBeenCalledOnce();
+          for (const id of publicationIds) {
+            expect((aggregate as AggregateError).message).toContain(`${id}:`);
+            expect(stderr).toHaveBeenCalledWith(
+              expect.stringContaining(`${id}:`),
+            );
+          }
+        }
+        expect(broker.executeV3).not.toHaveBeenCalled();
+        expect(broker.cancel).toHaveBeenCalledTimes(2);
+        expect(broker.release).not.toHaveBeenCalled();
+        await expect(turn.finish()).rejects.toBeInstanceOf(
+          HostedToolRecoveryRequiredError,
+        );
+      } finally {
+        finishRenewal();
+        await execution.catch(() => undefined);
+        if (multiple) vi.useRealTimers();
+      }
     },
   );
 });
