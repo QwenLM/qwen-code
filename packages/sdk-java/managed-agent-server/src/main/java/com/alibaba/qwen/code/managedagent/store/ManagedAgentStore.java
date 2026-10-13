@@ -3557,12 +3557,38 @@ public class ManagedAgentStore implements AgentStateStore {
             Map<String, Object> block = input.get(index);
             String text = string(block.get("text"));
             if (text == null) {
+                text = workflowLaunchSummary(block);
+            }
+            if (text == null) {
                 continue;
             }
             replacePart(event, itemId,
                     "part_" + event.turnId() + "_input_" + index,
                     "input_text", text);
         }
+    }
+
+    /**
+     * A workflow child's first turn carries one {@code workflow_launch}
+     * block and no text (#13803 K1): the message names the launch pin
+     * exactly as the daemon journal does ({@code workflowLaunchSummaryText}
+     * in hosted-workflow-turn.ts), so both projections of the turn agree.
+     * The block itself is never given a text key — the daemon parser
+     * requires its closed key set.
+     */
+    private static String workflowLaunchSummary(Map<String, Object> block) {
+        if (!"workflow_launch".equals(block.get("type"))
+                || !(block.get("definition") instanceof Map<?, ?> pin)) {
+            return null;
+        }
+        String id = string(pin.get("definitionId"));
+        String digest = string(pin.get("definitionDigest"));
+        if (id == null || digest == null
+                || !(pin.get("definitionRevision") instanceof Number revision)) {
+            return null;
+        }
+        return "<workflow " + id + "@" + revision.longValue() + " sha256:"
+                + digest.substring(0, Math.min(16, digest.length())) + ">";
     }
 
     private void materializeText(EventRecord event, String partType) {

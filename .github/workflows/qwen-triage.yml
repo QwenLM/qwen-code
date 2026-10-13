@@ -610,6 +610,11 @@ jobs:
           git worktree prune -v || true
           echo "stale agent state cleaned"
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout repo'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -1322,6 +1327,11 @@ jobs:
             rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
           fi
           git worktree prune -v || true
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout PR merge ref'
         if: "steps.pr.outputs.decision == 'run'"
@@ -2894,6 +2904,11 @@ jobs:
           fi
           git worktree prune -v || true
           echo "stale agent state cleaned"
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout PR merge ref'
         if: "steps.pr.outputs.decision == 'run'"

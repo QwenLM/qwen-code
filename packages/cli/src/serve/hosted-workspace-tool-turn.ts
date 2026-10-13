@@ -42,7 +42,10 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { convertManagedRuntimeToolResult } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-tool-response.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import {
+  managedToolDigest,
+  ManagedToolProtocolError,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import {
   createToolPublicationToken,
   parseToolPublicationBinding,
@@ -101,10 +104,14 @@ import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   childLaunchAdmission,
+  childKindLabel,
   childRunEndedText,
   childWorkspaceAnswerSuffix,
 } from './hosted-child-agent-session.js';
-import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import {
+  memberMessageContent,
+  type HostedSessionMessageSession,
+} from './hosted-session-message-session.js';
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import { MANAGED_SESSION_MESSAGE_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { sanitizeName } from '@qwen-code/qwen-code-core/agents/team/teamHelpers.js';
@@ -123,8 +130,16 @@ import {
 } from './hosted-team-session.js';
 import {
   encodeChildLaunchEnvelope,
+  encodeWorkflowLaunchEnvelope,
   MANAGED_CHILD_LIMITS,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import {
+  ARGS_MAX_DEPTH,
+  extractAndStripMeta,
+  workflowPreLaunchGate,
+} from '@qwen-code/qwen-code-core/agents/runtime/workflow-sandbox.js';
+import { WORKFLOW_NAME_PATTERN } from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
@@ -136,8 +151,10 @@ import {
   broadcastRunId,
   firstInputOpensWithMemberPreamble,
   hostedCallKey,
+  hostedFirstInputText,
   hostedPromptKey,
   hostedRouteDetails,
+  memberPreambleIdentity,
   neverStartedClause,
   neverStartedPhrase,
   teamMemberPreamble,
@@ -314,6 +331,19 @@ function sessionMessageAdmissionsEnabled(): boolean {
   }
 }
 
+// #13803 (K1/K4): workflow-child admissions exist only while the
+// child_run domain's workflow kind is enabled for commits — its own
+// reader beside the child agent's, so the two kinds' enablement stays
+// decoupled in code even while the gate lists both.
+function childWorkflowAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionChildRunKindEnabled('workflow');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // H4e-b3: the member board tools exist only while the session_command
 // domain is enabled for commits.
 function sessionCommandAdmissionsEnabled(): boolean {
@@ -342,6 +372,51 @@ function teamAdmissionsEnabled(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Walk one `args` value for nesting the launch could not commit. The
+ * value sits one level under the tool input the protocol digest walks, so
+ * the walk starts there and refuses exactly where that digest would throw
+ * (64 levels under the input; the sandbox's own ARGS_MAX_DEPTH is the
+ * same bound, counted from `args`, so it is never the tighter one). The
+ * model fixes the value and retries; nothing commits and no slot or quota
+ * is spent.
+ */
+function workflowArgsRefusal(value: unknown): string | undefined {
+  const stack: Array<{ node: unknown; depth: number }> = [
+    { node: value, depth: 1 },
+  ];
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop()!;
+    if (depth > ARGS_MAX_DEPTH) {
+      return `Hosted workflow args nest more than ${ARGS_MAX_DEPTH - 1} levels deep, past what the launch can commit (depth_limit).`;
+    }
+    if (node === null || typeof node !== 'object') {
+      continue;
+    }
+    for (const item of Object.values(node)) {
+      stack.push({ node: item, depth: depth + 1 });
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The launch-time definition pin of an inline workflow (#13803 decision
+ * 2): id+revision classify, the digest binds the exact bytes the child
+ * executes. Inline sources need no revision counter, so revision 1 is the
+ * convention, as in the child agent's own pin.
+ */
+export function workflowDefinitionPin(script: string): DefinitionPin {
+  const meta = extractAndStripMeta(script).meta;
+  const name =
+    meta && WORKFLOW_NAME_PATTERN.test(meta.name) ? meta.name : 'unnamed';
+  return Object.freeze({
+    definitionId: `workflow/${name}`,
+    definitionRevision: 1,
+    definitionDigest: createHash('sha256').update(script, 'utf8').digest('hex'),
+  });
 }
 
 export interface HostedApprovalTurnOptions {
@@ -515,6 +590,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'team_create',
   'task_create',
   'task_update',
+  'workflow',
   'request_shutdown',
 ];
 
@@ -569,6 +645,44 @@ export const HOSTED_AGENT_TOOL: FunctionDeclaration = {
   },
 };
 
+/**
+ * #13803 (K1): launch one child Session that runs one workflow instead of a
+ * prompt. The script is the complete definition: the child executes exactly
+ * these bytes, digest-pinned from the launch on and re-verified before it
+ * runs. The result crosses on the same arms as a child agent — background
+ * by default through a durable notification, or folded into this tool
+ * result when run_in_background is false.
+ */
+/** The posture of a managed workflow's agents, stated once for the
+ * declaration and the admission refusal. */
+const HOSTED_WORKFLOW_TEXT_ONLY_AGENTS =
+  'In this profile agent() runs text-only agents: they carry no tools and use nothing on the host, so tools, agentType, isolation and workingDir are unavailable; model, effort and schema still apply.';
+
+export const HOSTED_WORKFLOW_TOOL: FunctionDeclaration = {
+  name: 'workflow',
+  description: `Launch one workflow as an independent child Session of this Workspace. The script is deterministic JavaScript with the injected globals phase(), log(), agent(), parallel(), pipeline(), args and budget, and cannot import anything; Date and Math.random() throw. ${HOSTED_WORKFLOW_TEXT_ONLY_AGENTS} Runs in the background by default: the run settles later and its result arrives as a notification input. With run_in_background false the call waits and returns the run result directly. Saved-workflow names, script paths, resume and nesting are unavailable in this profile: pass the complete script inline.`,
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      script: {
+        type: 'string',
+        description:
+          'The complete workflow source, optionally starting with a literal `export const meta = {...}` whose name labels the run.',
+      },
+      args: {
+        description:
+          'Optional structured JSON value bound to the `args` global.',
+      },
+      run_in_background: {
+        type: 'boolean',
+        description:
+          'Run the workflow in the background and notify at completion (default true).',
+      },
+    },
+    required: ['script'],
+    additionalProperties: false,
+  },
+};
 const SEND_MESSAGE_TEXT_SCHEMA = {
   type: 'string',
   description: 'The message text.',
@@ -918,6 +1032,32 @@ export const HOSTED_SEND_MESSAGE_TO_PARENT_TOOL: FunctionDeclaration = {
 };
 
 /**
+ * H4e-b3 decision 8 (b3c): a member's send_message names `"parent"`,
+ * another member, or `"*"`; member-addressed sends are commands to the
+ * leader, and only the leader takes the plain message. Declared beside
+ * the board commands, on the same gate (a lineage Session whose run's
+ * first input carries the member preamble).
+ */
+export const HOSTED_MEMBER_SEND_MESSAGE_TOOL: FunctionDeclaration = {
+  name: 'send_message',
+  description:
+    'Send a message to another member of your team by name, to every other member at once (to: "*"), or to the team leader (to: "parent"). Member messages travel through the leader, which answers with each recipient\'s outcome; a running member receives the message as its next input once its current turn ends, and a member that has finished, ended or is being stopped is not reached. There is no inline reply: the recipient answers you with send_message naming you, and the leader\'s reply arrives as your next instruction. A message is not a board change: record work with the task tools.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      to: {
+        type: 'string',
+        description:
+          'A member name, "*" for every other member, or "parent" for the team leader.',
+      },
+      message: SEND_MESSAGE_TEXT_SCHEMA,
+    },
+    required: ['to', 'message'],
+    additionalProperties: false,
+  },
+};
+
+/**
  * H4e-b3 decision 6: a member's board read, as a `board_read` command to
  * its leader. The schema mirrors the lead's `task_list` exactly.
  */
@@ -1201,11 +1341,6 @@ export function hostedChildRunIdFor(promptId: string, callId: string): string {
   return hostedCallKey(promptId, callId);
 }
 
-/**
- * The live background arm's started receipt, shared with the recovery
- * gap fill's background-orphan branch: one sentence naming the task the
- * model should track and exactly how results land on it.
- */
 /** H4e-b1: what a member's started answer adds once its join committed. */
 export function hostedTeamJoinedText(member: {
   readonly teamName: string;
@@ -1214,8 +1349,17 @@ export function hostedTeamJoinedText(member: {
   return ` It joined team "${member.teamName}" as "${member.name}", and its result arrives labeled with that name.`;
 }
 
-export function hostedAgentBackgroundStartedText(taskId: string): string {
-  return `Child agent started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`;
+/**
+ * The live background arm's started receipt, shared with the recovery
+ * gap fill's background-orphan branch: one sentence naming the child's
+ * kind, the task the model should track and exactly how results land on
+ * it.
+ */
+export function hostedChildBackgroundStartedText(
+  kind: 'child_agent' | 'workflow',
+  taskId: string,
+): string {
+  return `${childKindLabel(kind)} started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`;
 }
 
 /**
@@ -1251,6 +1395,26 @@ export function fitChildResultInline(
   throw new Error('Child agent result cannot be recorded inline.');
 }
 
+interface HostedEncodedToolInput {
+  payloadJson: string;
+  inputBytes: Buffer;
+  digest: string;
+}
+
+/** The encoding of a refused call, which nothing downstream reads. */
+const UNENCODED_TOOL_INPUT: HostedEncodedToolInput = Object.freeze({
+  payloadJson: '',
+  inputBytes: Buffer.alloc(0),
+  digest: 'sha256:',
+});
+
+class HostedToolInputInlineLimitError extends Error {
+  constructor() {
+    super('Hosted tool input exceeds the inline Session Store limit.');
+    this.name = 'HostedToolInputInlineLimitError';
+  }
+}
+
 interface HostedPreparedRequest {
   call: ToolCallRequestInfo;
   validationError?: string;
@@ -1261,12 +1425,15 @@ interface HostedPreparedRequest {
   payloadJson: string;
   inputBytes: Buffer;
   digest: string;
-  argsDigest: string;
+  /** Absent when the input exceeds the canonical-digest ceiling; the
+   * call then carries its own validationError (#13803 D1). */
+  argsDigest?: string;
   publicationId: string | null;
   runtimeCallId: string;
   background: boolean;
   monitoring: boolean;
   agent: boolean;
+  workflow: boolean;
   agentBackground: boolean;
   team: boolean;
   message: boolean;
@@ -1457,6 +1624,9 @@ export class HostedWorkspaceToolTurn {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
     const search = isHostedWorkspaceSearchProfile(this.profile);
+    // b3c: a member's widened send_message rides the same gate as its
+    // board commands — resolved once, both declarations follow it.
+    const memberCommands = await this.memberCommandsDeclared();
     this.advertised = [
       ...hostedWorkspaceDeclarations(
         this.publication || this.shell
@@ -1498,15 +1668,28 @@ export class HostedWorkspaceToolTurn {
               : HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
           ]
         : this.sendMessageRole() === 'child'
-          ? [HOSTED_SEND_MESSAGE_TO_PARENT_TOOL]
+          ? [
+              memberCommands
+                ? HOSTED_MEMBER_SEND_MESSAGE_TOOL
+                : HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
+            ]
           : []),
+      // #13803: the Workflow tool joins under the exact gate shape of the
+      // Agent tool, behind its own kind reader — a child Session neither
+      // advertises it nor may admit it (#13803 decision 5).
+      ...(this.childAgents !== undefined &&
+      (this.shell !== undefined || this.backgroundLane !== undefined) &&
+      this.childDepth === 0 &&
+      childWorkflowAdmissionsEnabled()
+        ? [HOSTED_WORKFLOW_TOOL]
+        : []),
     ];
     // H4e-b3: a member's board tools are its commands to the leader,
     // declared only on a lineage Session whose run's first input carries
     // its member preamble (decision 5) — a convenience beside the lead's
     // own admission of every command.
     this.commandToolNames.clear();
-    if (await this.memberCommandsDeclared()) {
+    if (memberCommands) {
       this.advertised.push(...HOSTED_MEMBER_BOARD_TOOLS);
       for (const tool of HOSTED_MEMBER_BOARD_TOOLS)
         if (tool.name !== undefined) this.commandToolNames.add(tool.name);
@@ -1537,7 +1720,38 @@ export class HostedWorkspaceToolTurn {
     if (this.commands?.lineage === undefined) return false;
     if (!sessionCommandAdmissionsEnabled()) return false;
     this.memberPreamble ??= await this.firstInputHasMemberPreamble();
+    // b3c: the widened send_message needs the member's own name for its
+    // local refusals, read off the same preamble.
+    if (this.memberPreamble) await this.resolveMemberIdentity();
     return this.memberPreamble;
+  }
+
+  /** b3c/R1-10: the one read of the first input per Turn, cached. */
+  private firstInputTextCache?: string | null;
+
+  /**
+   * The text of this Session's first accepted input, if readable: the
+   * admission committers write the launch envelope as an OpenAI
+   * message-content array; a plain {text} envelope rides the same gate
+   * for the test-path fixtures. One read per Turn via the shared reader
+   * (decision 8); anything unreadable hides the tools — it never grants.
+   */
+  private async firstInputText(): Promise<string | undefined> {
+    if (this.firstInputTextCache !== undefined)
+      return this.firstInputTextCache === null
+        ? undefined
+        : this.firstInputTextCache;
+    let text: string | undefined;
+    try {
+      text = await hostedFirstInputText({
+        authority: this.session.authority,
+        resources: this.session.resources,
+      });
+    } catch {
+      text = undefined;
+    }
+    this.firstInputTextCache = text ?? null;
+    return text ?? undefined;
   }
 
   /**
@@ -1546,46 +1760,22 @@ export class HostedWorkspaceToolTurn {
    * unreadable hides the tools — it never grants them.
    */
   private async firstInputHasMemberPreamble(): Promise<boolean> {
-    const authority = this.session.authority;
-    const first = authority
-      .eventsInSequenceRange(1, authority.committedSequence)
-      .find((event) => event.kind === 'input.accepted');
-    const contentRef = first?.payload['contentRef'];
-    if (contentRef === undefined) return false;
-    const ref = assertManagedSessionDurableRef(
-      contentRef,
-      'member launch input',
-    );
-    if (ref.kind !== 'managed-input') return false;
-    try {
-      const parsed: unknown = JSON.parse(
-        (await this.session.resources.read(ref)).toString('utf8'),
-      );
-      // The admission committers write the launch envelope as an
-      // OpenAI message-content array; a plain {text} envelope rides
-      // the same gate for the test-path fixtures.
-      let text: string | undefined;
-      if (Array.isArray(parsed)) {
-        const part = parsed.find(
-          (each): each is { type: string; text: string } =>
-            typeof each === 'object' &&
-            each !== null &&
-            (each as Record<string, unknown>)['type'] === 'text' &&
-            typeof (each as Record<string, unknown>)['text'] === 'string',
-        );
-        text = part?.text;
-      } else if (
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        typeof (parsed as Record<string, unknown>)['text'] === 'string'
-      ) {
-        text = (parsed as Record<string, unknown>)['text'] as string;
-      }
-      if (text === undefined) return false;
-      return firstInputOpensWithMemberPreamble(text);
-    } catch {
-      return false;
+    const text = await this.firstInputText();
+    return text === undefined ? false : firstInputOpensWithMemberPreamble(text);
+  }
+
+  /** b3c: who this run's preamble says the Session's member is, cached. */
+  private memberIdentity?: { name: string; team: string } | null;
+  private async resolveMemberIdentity(): Promise<{
+    readonly name: string;
+    readonly team: string;
+  } | null> {
+    if (this.memberIdentity === undefined) {
+      const text = await this.firstInputText();
+      this.memberIdentity =
+        text === undefined ? null : (memberPreambleIdentity(text) ?? null);
     }
+    return this.memberIdentity;
   }
 
   /**
@@ -2230,6 +2420,7 @@ export class HostedWorkspaceToolTurn {
           background: false,
           monitoring: false,
           agent: false,
+          workflow: false,
           agentBackground: true,
           team: false,
           message: false,
@@ -2267,7 +2458,12 @@ export class HostedWorkspaceToolTurn {
         (request) =>
           !['read_file', 'write_file', 'edit', 'glob'].includes(
             request.call.name,
-          ),
+          ) ||
+          // A call refused at the canonical-digest ceiling (#13803 D1) has
+          // no argument digest a restore could re-verify, and one refused
+          // past the inline limit has no encoding to publish.
+          request.argsDigest === undefined ||
+          request.inputBytes.length === 0,
       )
     )
       return undefined;
@@ -2309,7 +2505,8 @@ export class HostedWorkspaceToolTurn {
         inputRef,
         definitionRef,
         requestDigest: request.digest,
-        argsDigest: request.argsDigest,
+        // Present: a batch with an undigested call is never captured.
+        argsDigest: request.argsDigest as string,
         prepareKey: `${this.broker.runtimeSessionId}:${request.runtimeCallId}`,
         prepareReference: {
           sessionId: this.broker.runtimeSessionId,
@@ -2476,13 +2673,24 @@ export class HostedWorkspaceToolTurn {
         let backgroundAdmitted = false;
         let monitorAdmitted = false;
         let agentAdmitted = false;
+        let workflowAdmitted = false;
         let agentBackground = true;
         let messageAdmitted = false;
         // b3b: on a member Session the board vocabulary is its command
         // channel's, never the lead funnel's — the two never meet on one
         // profile, but a name collision must route to the command arm.
+        // b3c decision 8: a member's send_message naming a member or
+        // "*" is the same kind of command; only "parent" stays H4d-b's.
+        const memberMessageCommand =
+          mcpInput === undefined &&
+          call.name === 'send_message' &&
+          this.sendMessageRole() === 'child' &&
+          this.memberPreamble === true &&
+          typeof call.args['to'] === 'string' &&
+          sanitizeName(call.args['to']) !== 'parent';
         const command =
-          mcpInput === undefined && this.commandToolNames.has(call.name);
+          mcpInput === undefined &&
+          (this.commandToolNames.has(call.name) || memberMessageCommand);
         const team =
           !command &&
           mcpInput === undefined &&
@@ -2717,12 +2925,15 @@ export class HostedWorkspaceToolTurn {
             validationError = `Hosted child agent run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
           } else if (
             !agentBackground &&
-            calls.some((other) => other.name !== 'agent')
+            calls.some(
+              (other) => other.name !== 'agent' && other.name !== 'workflow',
+            )
           ) {
-            // The same one-batch candidacy: a non-agent sibling holds the
-            // mount for exactly the wait the foreground answer needs.
+            // The same one-batch candidacy: a sibling outside a child
+            // launch holds the mount for exactly the wait the foreground
+            // answer needs.
             validationError =
-              'Hosted child agent run_in_background=false cannot share a batch with a non-agent tool; the sibling would hold the Workspace mount the child needs.';
+              'Hosted child agent run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
           } else if (
             typeof args['description'] !== 'string' ||
             !args['description'].trim() ||
@@ -2739,10 +2950,104 @@ export class HostedWorkspaceToolTurn {
             validationError = this.memberBatchError(call, source);
           }
           input = { ...args };
+        } else if (call.name === 'workflow') {
+          const args = call.args;
+          // #13803: the Workflow call answers the same admission shape as
+          // the Agent call, behind its own kind reader.
+          workflowAdmitted =
+            this.childAgents !== undefined &&
+            (this.shell !== undefined || this.backgroundLane !== undefined) &&
+            this.childDepth === 0 &&
+            childWorkflowAdmissionsEnabled();
+          const unsupportedKey = Object.keys(args).find(
+            (key) => !['script', 'args', 'run_in_background'].includes(key),
+          );
+          const backgroundValue = args['run_in_background'];
+          agentBackground = !(
+            backgroundValue === false ||
+            (typeof backgroundValue === 'string' &&
+              backgroundValue.toLowerCase() === 'false')
+          );
+          const backgroundIllFormed =
+            backgroundValue !== undefined &&
+            backgroundValue !== true &&
+            backgroundValue !== false &&
+            !(
+              typeof backgroundValue === 'string' &&
+              ['true', 'false'].includes(backgroundValue.toLowerCase())
+            );
+          if (!workflowAdmitted) {
+            validationError =
+              'Hosted workflow children are unavailable on this Session profile; read work through ordinary tools instead.';
+          } else if (unsupportedKey !== undefined) {
+            validationError = `Hosted workflow received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
+          } else if (backgroundIllFormed) {
+            validationError =
+              'Hosted workflow run_in_background must be a boolean.';
+          } else if (this.sessionOwnerMayHoldMount()) {
+            validationError = `Hosted workflow is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
+          } else if (!agentBackground && this.acquired) {
+            validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
+          } else if (
+            !agentBackground &&
+            calls.some(
+              (other) => other.name !== 'agent' && other.name !== 'workflow',
+            )
+          ) {
+            validationError =
+              'Hosted workflow run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
+          } else if (
+            typeof args['script'] !== 'string' ||
+            !args['script'].trim()
+          ) {
+            validationError = 'Hosted workflow requires a nonempty script.';
+          } else if (
+            Buffer.byteLength(args['script'], 'utf8') >
+            MANAGED_CHILD_LIMITS.maxEnvelopeBytes
+          ) {
+            // The byte bound consulted before any V8 work: the compile
+            // and the shape scan below would throw their results away.
+            validationError = `Hosted workflow script exceeds ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes (byte_limit).`;
+          } else {
+            // An unstartable script is a model-correctable argument
+            // error, so it refuses here with the runner's own texts
+            // rather than wedging the child's first Turn on its compile:
+            // a failed child Session is the answer for a run that fails,
+            // never for one that could never start. The args value walks
+            // first: nesting the launch cannot commit refuses here — the
+            // model fixes the value and retries at no quota or slot spent.
+            const argsRefusal = workflowArgsRefusal(args['args']);
+            if (argsRefusal !== undefined) {
+              validationError = argsRefusal;
+            }
+            if (validationError === undefined) {
+              const gate = workflowPreLaunchGate(args['script']);
+              if (gate.refusal !== undefined) {
+                validationError = `Hosted workflow script is invalid: ${gate.refusal.detail}`;
+              } else if (gate.shape.nestedWorkflowCalls.length > 0) {
+                // A nested launch resolves script bytes the pin never
+                // examined (a saved workflow from any tier). Refuse with
+                // the same model-correctable text the reference arguments
+                // carry, so the launched bytes stay exactly the pinned
+                // ones.
+                const extra = gate.shape.nestedWorkflowCalls.length - 1;
+                validationError = `Hosted workflow script is invalid: workflow() on line ${gate.shape.nestedWorkflowCalls[0]}${extra > 0 ? ` and ${extra} more` : ''} launches a nested run whose script this launch never pinned. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
+              } else if (gate.shape.hostBoundAgentOptions.length > 0) {
+                // The child refuses these at dispatch and fails the whole
+                // run; refusing here keeps the model's correction free of
+                // a spent launch slot (#13858 R4-4).
+                const [first] = gate.shape.hostBoundAgentOptions;
+                validationError = `Hosted workflow script is invalid: agent() on line ${first.line} passes ${first.option}. ${HOSTED_WORKFLOW_TEXT_ONLY_AGENTS}`;
+              }
+            }
+          }
+          input = { ...args };
         } else if (call.name === 'send_message') {
           const args = call.args;
           const role = this.sendMessageRole();
-          messageAdmitted = role !== undefined;
+          // b3c: a member message is a command to the leader, never
+          // H4d-b's plain message.
+          messageAdmitted = role !== undefined && !memberMessageCommand;
           // H4e-b2: beside the team tools, the lead also addresses a member
           // by name, or every member with "*".
           const teamForm = role === 'parent' && this.teamsAdmitted();
@@ -2762,13 +3067,68 @@ export class HostedWorkspaceToolTurn {
           } else if (unsupportedKey !== undefined) {
             validationError =
               role === 'child'
-                ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
+                ? this.memberPreamble === true
+                  ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A member send_message takes only a member's to: "parent", a member name, or "*" — pass to and message.`
+                  : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
                 : teamForm
                   ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. Pass to (a member name, or "*" for every member) or task_id, and message; other Sessions belong to the legacy tool.`
                   : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; teams and other Sessions belong to the legacy tool.`;
-          } else if (role === 'child' && args['to'] !== 'parent') {
+          } else if (
+            role === 'child' &&
+            this.memberPreamble !== true &&
+            args['to'] !== 'parent'
+          ) {
             validationError =
               'Hosted send_message from a child Session addresses only to "parent".';
+          } else if (role === 'child' && this.memberPreamble === true) {
+            // b3c decision 8: a member names "parent", another member, or
+            // "*". Member-addressed sends are commands to the leader; the
+            // local refusals answer before anything is sent.
+            const addressed =
+              typeof args['to'] === 'string' ? args['to'].trim() : '';
+            if (addressed === '') {
+              validationError =
+                'Hosted send_message requires "to": "parent" for the team leader, a member name, or "*" for every other member.';
+            } else if (memberMessageCommand && this.memberPlanMode) {
+              validationError = HOSTED_PLAN_MODE_REFUSAL;
+            } else if (
+              memberMessageCommand &&
+              this.memberIdentity?.name !== undefined &&
+              sanitizeName(addressed) === this.memberIdentity.name
+            ) {
+              validationError = `A member cannot send a message to itself ("${this.memberIdentity.name}").`;
+            } else if (
+              memberMessageCommand &&
+              sanitizeName(addressed) === MANAGED_TEAM_LEADER
+            ) {
+              validationError =
+                'A member messages its leader with send_message with to "parent", not "leader".';
+            } else if (typeof text !== 'string' || !text.trim()) {
+              validationError =
+                'Hosted send_message requires a nonempty message.';
+            } else if (
+              memberMessageCommand &&
+              Buffer.byteLength(
+                memberMessageContent(
+                  this.memberIdentity?.name ?? '',
+                  text as string,
+                ),
+                'utf8',
+              ) > MANAGED_CHILD_LIMITS.maxEnvelopeBytes
+            ) {
+              validationError = `Hosted send_message message is too long for a member message (byte_limit): with its wrapper it must fit ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes.`;
+            } else if (
+              memberMessageCommand &&
+              source.some(
+                (other) =>
+                  other !== call &&
+                  !this.commandToolNames.has(other.name) &&
+                  other.name !== 'send_message',
+              )
+            ) {
+              validationError =
+                'Hosted send_message to a member cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run it in its own batch or beside the member board commands.';
+            }
           } else if (
             teamForm &&
             (args['to'] === undefined) === (args['task_id'] === undefined)
@@ -2812,7 +3172,10 @@ export class HostedWorkspaceToolTurn {
           ) {
             validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
           }
-          input = teamForm ? hostedTeamMessageInput(args) : { ...args };
+          input =
+            teamForm || memberMessageCommand
+              ? hostedTeamMessageInput(args)
+              : { ...args };
         } else if (command) {
           validationError = this.commandArgumentError(call, source);
           input = { ...call.args };
@@ -2836,23 +3199,49 @@ export class HostedWorkspaceToolTurn {
             }
           }
         }
-        const encoded = this.encodeToolInput(
-          mcpInput ?? { toolName: call.name, input },
-        );
+        // The inline Session Store limit keeps rejecting exactly as main
+        // does for the ordinary tools. A call that already carries its own
+        // refusal never reads its encoding, and a workflow launch is this
+        // profile's own surface: for either the limit becomes the call's
+        // refusal, never a failure of the whole Turn (review D1/R2-12).
+        let encoded: HostedEncodedToolInput;
+        try {
+          encoded = this.encodeToolInput(
+            mcpInput ?? { toolName: call.name, input },
+          );
+        } catch (cause) {
+          if (
+            !(cause instanceof HostedToolInputInlineLimitError) ||
+            (validationError === undefined && call.name !== 'workflow')
+          )
+            throw cause;
+          validationError ??= `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`;
+          encoded = UNENCODED_TOOL_INPUT;
+        }
+        // H3: the publication evidence chain pins the canonical input
+        // digest for Monitor calls exactly like Shell calls.
+        let argsDigest: string | undefined;
+        let inputDigest: string | undefined;
+        try {
+          inputDigest =
+            isShell || call.name === 'monitor'
+              ? managedToolDigest(input)
+              : undefined;
+          argsDigest = `sha256:${managedToolDigest(input)}`;
+        } catch (cause) {
+          if (!(cause instanceof ManagedToolProtocolError)) throw cause;
+          // An arm's own, more specific refusal of the same input stands.
+          validationError ??= `Hosted tool input cannot commit as protocol evidence: ${cause.message}`;
+        }
         return {
           call,
           validationError,
           input,
           isShell,
-          // H3: the publication evidence chain pins the canonical input
-          // digest for Monitor calls exactly like Shell calls.
-          inputDigest:
-            isShell || call.name === 'monitor'
-              ? managedToolDigest(input)
-              : undefined,
+          inputDigest,
           mcp: mcpInput !== undefined,
           ...encoded,
-          argsDigest: `sha256:${managedToolDigest(input)}`,
+          argsDigest,
           publicationId:
             (isShell || (call.name === 'monitor' && monitorAdmitted)) &&
             this.publication
@@ -2862,8 +3251,10 @@ export class HostedWorkspaceToolTurn {
           background: mcpInput === undefined && backgroundAdmitted,
           monitoring: mcpInput === undefined && monitorAdmitted,
           agent: mcpInput === undefined && agentAdmitted,
+          workflow: mcpInput === undefined && workflowAdmitted,
           agentBackground,
-          message: mcpInput === undefined && messageAdmitted,
+          message:
+            mcpInput === undefined && messageAdmitted && !memberMessageCommand,
           team,
           command,
         };
@@ -2923,7 +3314,8 @@ export class HostedWorkspaceToolTurn {
     // child's wait is exactly the deadlock a shared Workspace creates
     // (parent turn held, child tool call queued behind it forever). v1
     // therefore takes the mount only for a batch with at least one
-    // non-agent tool. A session message (H4d-b) commits a record and
+    // non-agent tool; a workflow launch is a child launch of the same
+    // shape (#13803). A session message (H4d-b) commits a record and
     // touches no Runtime either, and H4e-b1's team tools touch only
     // the journal.
     if (
@@ -2931,6 +3323,7 @@ export class HostedWorkspaceToolTurn {
       requests.some(
         (request) =>
           request.agent !== true &&
+          request.workflow !== true &&
           request.message !== true &&
           !request.team &&
           request.command !== true,
@@ -3238,12 +3631,18 @@ export class HostedWorkspaceToolTurn {
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
         if (refusals[ordinal] !== undefined) continue;
-        // A child-agent launch has no Runtime execution to reserve: the
-        // control plane's relay owns its side effect, so it never enters
-        // the Broker pipeline below. Nor does a session message, a team
-        // tool, or a session command, which commit only to this Session's
+        // A child launch has no Runtime execution to reserve: the control
+        // plane's relay owns its side effect, so it never enters the
+        // Broker pipeline below. Nor does a session message, a team tool,
+        // or a session command, which commit only to this Session's
         // journal.
-        if (request.agent || request.message || request.team || request.command)
+        if (
+          request.agent ||
+          request.message ||
+          request.team ||
+          request.command ||
+          request.workflow
+        )
           continue;
         if (request.mcp) {
           const renewed = this.mcp!.toolInput(
@@ -3271,7 +3670,9 @@ export class HostedWorkspaceToolTurn {
         let executionCallId: string;
         try {
           prepared =
-            (request.isShell || request.monitoring) && this.publication
+            (request.isShell || request.monitoring) &&
+            this.publication &&
+            request.argsDigest !== undefined
               ? await this.broker.prepareV3(
                   request.runtimeCallId,
                   request.argsDigest,
@@ -3382,7 +3783,10 @@ export class HostedWorkspaceToolTurn {
             runtimeBindingId: prepared.runtimeBindingId,
             bindingGeneration: prepared.bindingGeneration,
             runtimeCallId: request.runtimeCallId,
-            argsDigest: request.argsDigest,
+            // Admitted-after-dropdown shells never hold a loose digest:
+            // prepareV3's own gate means a call under the protocol ceiling
+            // was refused long before this map gets another entry.
+            argsDigest: request.argsDigest as string,
             requestDigest: request.digest,
             argsRef: routeRef,
             intentSequence: intent.lastSequence,
@@ -3435,7 +3839,9 @@ export class HostedWorkspaceToolTurn {
           ),
           ordinal,
           inputDigest:
-            request.isShell && this.publication
+            request.isShell &&
+            this.publication &&
+            request.argsDigest !== undefined
               ? request.argsDigest.slice(7)
               : (request.inputDigest ?? request.digest.slice(7)),
           progressCursor: null,
@@ -3469,7 +3875,7 @@ export class HostedWorkspaceToolTurn {
                 // carries the bare input digest. Registration must name the
                 // same lane's value or the worker's prepare never matches it.
                 argsDigest: prepared
-                  ? request.argsDigest
+                  ? (request.argsDigest as string)
                   : request.inputDigest!,
               },
               capture: {
@@ -3675,6 +4081,17 @@ export class HostedWorkspaceToolTurn {
         if (request.team) {
           responses.push(
             ...(await this.acceptTeamTool(request, model, signal)),
+          );
+          continue;
+        }
+        if (request.workflow) {
+          responses.push(
+            ...(await this.acceptChildWorkflow(
+              request,
+              model,
+              signal,
+              messageId,
+            )),
           );
           continue;
         }
@@ -3937,7 +4354,10 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
-  private encodeToolInput(payload: { toolName: string; input: unknown }) {
+  private encodeToolInput(payload: {
+    toolName: string;
+    input: unknown;
+  }): HostedEncodedToolInput {
     const payloadJson = JSON.stringify(payload);
     const inputBytes = Buffer.from(
       JSON.stringify({
@@ -3951,9 +4371,7 @@ export class HostedWorkspaceToolTurn {
       inputBytes.length >
       HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
     )
-      throw new Error(
-        'Hosted tool input exceeds the inline Session Store limit.',
-      );
+      throw new HostedToolInputInlineLimitError();
     return {
       payloadJson,
       inputBytes,
@@ -4057,7 +4475,7 @@ export class HostedWorkspaceToolTurn {
       monitorRecord?.stopReason === null &&
       monitorRecord.run.state !== 'recovery_blocked'
     ) {
-      await this.resumeMonitorWatch(executionCallId);
+      await this.resumeMonitorWatch(executionCallId, saved.runtimeCallId);
     }
     let ref: ManagedSessionDurableRef;
     let converted: Part[];
@@ -4699,7 +5117,125 @@ export class HostedWorkspaceToolTurn {
     const started = convertToFunctionResponse(
       request.call.name,
       request.call.callId,
-      [{ text: hostedAgentBackgroundStartedText(taskId) + membership }],
+      [
+        {
+          text:
+            hostedChildBackgroundStartedText('child_agent', taskId) +
+            membership,
+        },
+      ],
+    );
+    await this.commit('tool_result', started, model);
+    return started;
+  }
+
+  /**
+   * The workflow launch of the batch (#13803 K1): the same discipline as
+   * {@link acceptChildAgent}, with the script-derived pin opening the chain
+   * and the workflow envelope as the launch evidence.
+   */
+  private async acceptChildWorkflow(
+    request: {
+      call: ToolCallRequestInfo;
+      agentBackground: boolean;
+    },
+    model: string,
+    signal: AbortSignal,
+    modelMessageId: string,
+  ): Promise<Part[]> {
+    if (signal.aborted) {
+      const skipped = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        'The turn was cancelled before this workflow was admitted.',
+      );
+      await this.commit('tool_result', skipped, model);
+      return skipped;
+    }
+    const children = this.childAgents!;
+    const authority = this.session.authority;
+    const key = authority.sessionHeader.sessionKey;
+    const script = request.call.args['script'] as string;
+    const args = request.call.args['args'];
+    const childRunId = this.childRunIdFor(request.call.callId);
+    // The launch pin (decision 2): computed from the exact script bytes
+    // that ride the envelope — the child re-verifies before it runs.
+    const definition = workflowDefinitionPin(script);
+    let envelopeBytes: number;
+    try {
+      envelopeBytes = encodeWorkflowLaunchEnvelope({
+        definition,
+        script,
+        args: args ?? null,
+      }).byteLength;
+    } catch (cause) {
+      if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+      envelopeBytes = Number.POSITIVE_INFINITY;
+    }
+    if (children.record(childRunId) === undefined) {
+      const admission = childLaunchAdmission({
+        workspaceMode: 'shared',
+        childWorkspaces: false,
+        sameDefinition: true,
+        closing: authority.currentActivation?.phase !== 'active',
+        activeInScope: children.activeChildRunsOf(key.sessionId).length,
+        launchedInScope: children.launchedChildRunsOf(key.sessionId).length,
+        envelopeBytes,
+      });
+      if (!admission.admitted) {
+        const refused = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          `Hosted workflow refused this launch (${admission.reason}).`,
+        );
+        await this.commit('tool_result', refused, model);
+        return refused;
+      }
+    }
+    const launched = await children.admitWorkflow({
+      childRunId,
+      ownerScopeId: key.sessionId,
+      rootSessionId: key.sessionId,
+      completion: request.agentBackground ? 'sent' : 'tool',
+      script,
+      args: args ?? null,
+      definition,
+      workingDirectory: '.',
+      executionCallId: childRunId,
+    });
+    this.agentDispatched.add(request.call.callId);
+    if (!request.agentBackground) {
+      // The durable wait (#13708), parked exactly as acceptChildAgent parks
+      // it: without it a Harness restart declines this Turn with
+      // unresolved_after_settle while the child keeps running.
+      await this.harness.commitAwaitAgent(
+        [
+          {
+            childRunId,
+            functionCallId: request.call.callId,
+            toolName: request.call.name,
+            modelMessageId,
+            consumed: false,
+          },
+        ],
+        { turnId: this.promptId, promptId: this.promptId },
+        { attemptId: modelMessageId, routeRef: launched.inputRef },
+      );
+      return await this.awaitChildToolResult(
+        children,
+        request,
+        childRunId,
+        model,
+        signal,
+      );
+    }
+    const taskId = managedChildTaskId(key.sessionId, childRunId);
+    const started = convertToFunctionResponse(
+      request.call.name,
+      request.call.callId,
+      [{ text: hostedChildBackgroundStartedText('workflow', taskId) }],
     );
     await this.commit('tool_result', started, model);
     return started;
@@ -4791,10 +5327,12 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
-   * H4e-b3 decision 4 and 6: one member board command's argument check,
-   * and the batch rule — a command call shares its batch only with other
-   * command calls and with the journal-only `send_message` to `"parent"`,
-   * since a command parks the Turn while the leader answers.
+   * H4e-b3 decision 4 and 6 (b3c's decision 8): one member board
+   * command's argument check, and the batch rule — a command call shares
+   * its batch only with other command calls and with `send_message`
+   * (whose member-addressed form is one, while to `"parent"` stays the
+   * journal-only plain lane), since a command parks the Turn while the
+   * leader answers.
    */
   private commandArgumentError(
     call: ToolCallRequestInfo,
@@ -4828,7 +5366,7 @@ export class HostedWorkspaceToolTurn {
           other.name !== 'send_message',
       )
     )
-      return `Hosted ${call.name} cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run board commands in their own batch or beside send_message to "parent".`;
+      return `Hosted ${call.name} cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run board commands in their own batch or beside send_message.`;
     if (call.name === 'task_create') {
       if (
         typeof call.args['subject'] !== 'string' ||
@@ -4894,7 +5432,11 @@ export class HostedWorkspaceToolTurn {
       throw new Error('A member command call has no command funnel.');
     await this.syncCommandTimedOutFromDurable();
     const kind: SessionCommandKind =
-      name === 'task_list' ? 'board_read' : 'board_write';
+      name === 'task_list'
+        ? 'board_read'
+        : name === 'send_message'
+          ? 'member_message'
+          : 'board_write';
     const key = this.session.authority.sessionHeader.sessionKey;
     const commandId = sessionCommandId({
       senderSessionId: key.sessionId,
@@ -5360,8 +5902,10 @@ export class HostedWorkspaceToolTurn {
             request.call.callId,
             text,
             (parts) => this.messageFitsInline('tool_result', parts, model),
-            await childWorkspaceAnswerSuffix(record, acceptance, (ref) =>
-              this.session.resources.read(ref),
+            await childWorkspaceAnswerSuffix(
+              record.kind === 'child_agent' ? record : undefined,
+              acceptance,
+              (ref) => this.session.resources.read(ref),
             ),
           );
           if (!journaled?.has(request.call.callId))
@@ -5381,7 +5925,10 @@ export class HostedWorkspaceToolTurn {
    * once per Session lifetime: the loop resumes an already-attached
    * record and is fed lines through the Session publisher's fan-out.
    */
-  private async resumeMonitorWatch(executionCallId: string): Promise<void> {
+  private async resumeMonitorWatch(
+    executionCallId: string,
+    runtimeCallId: string,
+  ): Promise<void> {
     // The lane is Shell-mode or the publication lane, whichever this turn
     // owns — the detached family's loops park on it either way.
     const lane = this.shell ?? this.backgroundLane;
@@ -5393,7 +5940,14 @@ export class HostedWorkspaceToolTurn {
     const argsBody = JSON.parse(
       (await this.session.resources.read(record.commandRef)).toString('utf8'),
     ) as Record<string, unknown>;
-    const executor = new HostedMonitorRemoteExecutor(this.publisher);
+    // The watch runs on this turn's Runtime Session; its auto-stop asks
+    // the worker there, and that Session outlives the turn as a hold.
+    const executor = new HostedMonitorRemoteExecutor(this.publisher, {
+      broker: this.broker,
+      sessionKey: this.session.authority.sessionHeader.sessionKey,
+      executionCallId,
+      runtimeCallId,
+    });
     const loop = new HostedMonitorLoop(
       this.monitors,
       executionCallId,
