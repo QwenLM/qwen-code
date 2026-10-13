@@ -105,6 +105,23 @@ describe('validatePlan', () => {
     ).toThrow(/both write/);
   });
 
+  it('rejects two items whose targets are aliases of one path', () => {
+    for (const alias of ['docs/en/./intro.md', './docs/en/intro.md']) {
+      expect(() =>
+        validatePlan(
+          {
+            ...validPlan,
+            items: [
+              validPlan.items[0],
+              { ...validPlan.items[1], target: alias },
+            ],
+          },
+          'plan.json',
+        ),
+      ).toThrow(/both write/);
+    }
+  });
+
   it('rejects item ids that cannot ride inside a provider custom_id', () => {
     for (const id of ['has space', '-leading-dash', 'a'.repeat(61), '']) {
       expect(() =>
