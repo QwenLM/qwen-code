@@ -73,7 +73,9 @@ it('advertises batched session catalogs for single and multiple workspaces', () 
 });
 
 it('advertises durable regeneration metadata for regular daemon prompts', () => {
-  expect(getAdvertisedServeFeatures()).toContain('session_prompt_regenerate_of');
+  expect(getAdvertisedServeFeatures()).toContain(
+    'session_prompt_regenerate_of',
+  );
   expect(hostedPersonaServeFeatures()).not.toContain(
     'session_prompt_regenerate_of',
   );

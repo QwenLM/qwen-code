@@ -630,6 +630,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_source_metadata',
   'session_side_task',
   'session_prompt',
+  'session_prompt_regenerate_of',
   'session_turn_status',
   'session_attachments',
   'session_attachment_chunk_upload',

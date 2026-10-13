@@ -1139,7 +1139,11 @@ describe('createTranscriptReplayMachine', () => {
         createTranscriptReplayMachine(),
         record('user-invalid-regeneration', 'user', {
           message: { role: 'user', parts: [{ text: 'hello' }] },
-          systemPayload: { displayText: 'hello', hookContext: '', regenerateOf },
+          systemPayload: {
+            displayText: 'hello',
+            hookContext: '',
+            regenerateOf,
+          },
         }),
       );
       expect(projected[0]._meta).not.toHaveProperty('qwen.regenerateOf');

@@ -17080,7 +17080,9 @@ describe('createAcpSessionBridge', () => {
         const handle = makeChannel({
           promptImpl: () => ({ stopReason: 'end_turn' }),
         });
-        const bridge = makeBridge({ channelFactory: async () => handle.channel });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
         const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
         const abort = new AbortController();
         const events = bridge.subscribeEvents(session.sessionId, {

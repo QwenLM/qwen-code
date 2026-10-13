@@ -28,12 +28,9 @@ describe('parseRegenerateOfPromptId', () => {
     {},
     [],
     'x'.repeat(1000),
-  ])(
-    'ignores a malformed regeneration marker (%j)',
-    (value) => {
-      expect(parseRegenerateOfPromptId(value)).toBeUndefined();
-    },
-  );
+  ])('ignores a malformed regeneration marker (%j)', (value) => {
+    expect(parseRegenerateOfPromptId(value)).toBeUndefined();
+  });
 });
 
 const fixture = JSON.parse(
