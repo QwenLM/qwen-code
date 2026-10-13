@@ -83,6 +83,10 @@ Historical SQL/Java migrations and their upgrade-only witnesses are kept under `
 
 Both MySQL/MariaDB initialization paths require a selected application catalog. They reject `mysql`, `sys`, `information_schema` and `performance_schema` before reading table metadata or invoking DDL/Flyway. JDBC drivers can classify all tables in a system catalog as SYSTEM TABLE, so filtering TABLE/VIEW alone cannot prove an empty application database.
 
+The retained MariaDB CI lane uses the same canonical DDL. Its CHECK catalog has no per-constraint ENFORCED field; validation detects MariaDB even when Connector/J reports MySQL, requires global and session check_constraint_checks, and compares every declared CHECK name/expression. Both database families require InnoDB; MySQL still requires ENFORCED=YES. Missing enforcement settings or disabled checks fail closed before metadata enumeration or DDL. This does not change the MySQL 8.4 acceptance baseline.
+
+The real-stack E2E runner seeds and audits only canonical tables, including the ACTION discriminator for approvals. Linux CI explicitly enables verified recovery for both initial and replacement Server processes and registers the fresh task-owned native storage before launching any Harness or admitting work. It never substitutes SQL-only identity proof or enables trusted reboot recovery. Current macOS LOCAL tool support remains an unresolved platform decision; the documented current behavior requires Linux registration and preserves physical exclusion.
+
 ## Delivery sequence and acceptance
 
 1. Commit bilingual design, complete 63-to-32 ownership inventory, typed keys/state contracts and canonical DDL; verify clean database initialization and refusal of legacy schemas.

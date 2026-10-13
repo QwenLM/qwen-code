@@ -83,6 +83,10 @@ MySQL 8.4/InnoDB baseline 只有一个版本化来源，由 Managed Server/Broke
 
 MySQL/MariaDB 的两个初始化入口都要求选定应用数据库，在读取表元数据或调用 DDL/Flyway 前拒绝 `mysql`、`sys`、`information_schema` 和 `performance_schema`。JDBC 驱动可能把系统库中的所有表都标为 SYSTEM TABLE，因此仅筛选 TABLE/VIEW 不能证明它是空的应用数据库。
 
+保留的 MariaDB CI 车道使用同一 canonical DDL。其 CHECK 目录没有逐约束的 ENFORCED 字段；即使 Connector/J 将产品名报告为 MySQL，校验仍识别 MariaDB，要求全局和当前会话的 check_constraint_checks 均开启，并核对每项 CHECK 的名称与表达式。两种数据库均要求 InnoDB；MySQL 继续要求 ENFORCED=YES。无法读取强制执行配置或约束关闭时，在元数据枚举或 DDL 前安全拒绝。MySQL 8.4 的验收基线不变。
+
+真实栈 E2E 运行器仅使用 canonical 表播种和验收，审批查询明确限定 ACTION 类型。Linux CI 对首个及替换 Server 都显式开启 verified recovery，在启动任何 Harness 或接纳工作前注册任务专用新存储的原生身份，不使用仅 SQL 的身份证明，不启用 trusted reboot recovery。macOS LOCAL 工具支持仍属待决定的平台边界；文档描述当前要求 Linux 注册的行为，并保留物理排他规则。
+
 ## 实施顺序与验收
 
 1. 提交中英文设计、63→32 完整归属清单、类型/键/状态契约和共享 DDL；验证空库初始化及旧库拒绝。

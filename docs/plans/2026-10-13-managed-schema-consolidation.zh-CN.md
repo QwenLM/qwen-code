@@ -93,3 +93,17 @@ Node build/typecheck/bundle、相关 ESLint/yamllint 通过；两组 CI 检查�
 独立制品探针随后验证四个系统库的 8 次 Broker/Server 调用全部拒绝，写语句尝试和 Flyway 调用均为零，前后表目录完全一致。后续合入主线至 `6212189f1f`，包含 MQ2c 公开事件消费者。其原生产查询在 32 表库中独立复现失败，同时 7 项旧表夹具失败。适配后的消费者使用 canonical 表、独立的可空 wake 水位，以及摘要索引和原始身份核对。整合后 Server 验证通过 2,561 项（7 项按环境跳过）；最后补充 Control/退役作用域检查后，61 项重点用例和 10 项真实 MySQL 消费者用例通过。Broker 的 70 项原生用例、Node build/typecheck/bundle、128 项 core envelope 和 4 项 CLI 审批用例通过。修正 CI 指出的两处生成器空格后，全仓库 Prettier 通过。
 
 独立真实 MySQL 探针对最终制品验证：16 个并发 wake 领取者只有一个成功，公开 tail/floor/投影/调度字段不变，真实消息物化及输出撤回/重建保留 wake 水位，实体作用域、字节精确身份和摘要碰撞原值校验正确。历史 head 从 1,000 增至 10,000 时，单行读取始终使用主键常量查询；205 个请求身份分成 200 和 5 两批主键范围查询。这属于 SQL 侧验收，未测试真实 MQ 服务或当前 head 的 Linux 重启。最终 Server SHA256 为 `467d6b34877bdb047949e1cdbc4857e8f20f1753515c4c777fdc8321c97ce9b0`，共享 DDL SHA256 为 `9800309ca17f5b0c65cb11c29d349385f2c0a23a77d43f098f2d0d4c46368e2b`；恰好 32 张业务表，568 个生产 class 均与已测试源码树对应。
+
+## 2026-10-14 真实栈运行器及 MariaDB 目录后续修复
+
+维护者报告的 B3 运行器缺陷在 `9d779d4baa` 独立复现：canonical V1 初始化了 32 张表，但首条旧 Workspace 播种以 MySQL 1146 失败，尚未启动 Harness 或 Turn。运行器现对播种、不变量检查和失败诊断全部使用 canonical 表，审批读取限定 record_kind=ACTION。Linux CI 对两个 Server 进程一致开启 verified recovery，在启动任何 Harness 前离线注册新存储的原生身份。注册失败即中止测试，不使用仅 SQL 的证明，不绕过 trusted reboot 保护。
+
+macOS/Node 22.22.3/Java 21/MySQL 8.4.11 的两项独立真实栈纯文本场景通过：Session owner 故障转移（16.245 秒，writer 1→2、journal 13→23、committed 14→26）及 Harness-only 故障转移（13.732 秒，writer 1→2、journal 12→22、committed 13→25）。两者均恢复首个 Turn 上下文、删除旧 Harness 磁盘、改变 Harness boot identity 并完成两个 Turn。执行时 Server SHA256 为 `467d6b34877bdb047949e1cdbc4857e8f20f1753515c4c777fdc8321c97ce9b0`，DDL 为 `9800309ca17f5b0c65cb11c29d349385f2c0a23a77d43f098f2d0d4c46368e2b`；早于后续 Broker 目录修复。各自的 MySQL、进程和端口均已清理。运行器/工作流的 81 项回归及 Node build/typecheck/bundle 通过。
+
+之后当前 head 的 MariaDB CI 在 DDL 后失败，原因是 TABLE_CONSTRAINTS 没有 ENFORCED 列。修改后的目录校验通过产品/版本元数据识别 MariaDB，在 DDL 前要求全局及当前会话 CHECK 强制执行，并保留表达式校验；MySQL 继续读取真实 ENFORCED 字段。原生验收夹具使用对应引擎的实际负向测试语法，不再向 MariaDB 发出 MySQL 专有 ALTER CHECK。独立受控元数据 fixture 的 9 项检查通过；任务专用 MySQL 8.4.11 上的新 UUID 库通过 11 项原生初始化/约束/审批检查，删除后查询确认不存在。这些探针不代表原生 MariaDB 验收通过。
+
+Linux 原生注册/工具模式及修改后的原生 MariaDB 车道仍需 CI 验证。Linux 主机不可达，本地 Docker 不可用；没有部署或重启操作。README 现描述新 baseline 的实际注册要求，并移除已过时的 V25 升级说明。保留 Linux-only LOCAL 边界还是实现安全的 macOS 物理身份，仍待用户/维护者决定；未关闭任何物理 fence。旧应用数据库和历史 Linux 验收环境均未改动。
+
+随后全新打包的 Java 21 Server 逐字节嵌入已验证 Broker（Server SHA256 `20c62363d3f7b78f2efbe0c153fc74b46f0791c83a65e667abce2d27600382fe`；DDL 不变）。两个完整纯文本故障转移模式在最终制品上再次通过，耗时 16.197 和 13.793 秒，各自 writer 1→2、journal 12→22、committed 13→25。Session 事件验收明确排除 TASK 流。Broker 在 Java 25（release 21）下全量验证通过 842 项测试，2 项按环境跳过，静态门禁通过；23 项 schema 用例在 Java 21 下重复通过。Server clean 验证通过 9 项重点初始化/Flyway/连接池用例及静态门禁；修改后的两项真实 MySQL 目录用例全部通过且无跳过。这是本轮最终本地制品证据，Linux 与 MariaDB CI 验收仍待完成。
+
+只读复审发现，驱动报告 MariaDB 产品名时会绕过原先仅限 MySQL 的 InnoDB 检查。独立失败探针确认该路径跳过引擎查询；共享数据库族检查现对两种名称都在列校验前拒绝非事务表。最终 Java 21 Broker 验证通过 24 项重点 schema 用例及静态门禁；Server clean 验证再次通过相同 9 项用例及静态门禁。独立探针通过 2 项引擎、9 项 CHECK 和 13 项原生 MySQL 检查，包含真实 MyISAM 拒绝及恢复。最终 Server SHA256 为 `167d5d0d7bea90e3e14d4e19d993d35863469a7bb43e7d5b02eee0c8ddc64eab`；DDL 不变。该制品的两个完整纯文本故障转移循环耗时 16.149 和 14.306 秒，原不变量和清理全部通过。这些最终结果替代前述本地制品证据；原生 Linux/MariaDB CI 及平台决策仍待完成。

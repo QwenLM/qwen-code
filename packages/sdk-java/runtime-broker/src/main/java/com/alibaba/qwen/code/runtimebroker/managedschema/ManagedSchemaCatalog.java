@@ -43,7 +43,24 @@ final class ManagedSchemaCatalog {
                 throw new SQLException("Managed schema requires a dedicated application catalog;"
                         + " system or missing catalog refused before DDL: " + name);
             }
+            if (isMariaDb(connection)) {
+                try (var statement = connection.prepareStatement(
+                        "SELECT @@GLOBAL.check_constraint_checks, @@SESSION.check_constraint_checks");
+                        var result = statement.executeQuery()) {
+                    if (!result.next() || result.getInt(1) != 1 || result.getInt(2) != 1) {
+                        throw new SQLException("Managed schema requires MariaDB CHECK enforcement"
+                                + " globally and for the current session; refused before DDL");
+                    }
+                }
+            }
         }
+    }
+
+    private static boolean isMariaDb(Connection connection) throws SQLException {
+        var metadata = connection.getMetaData();
+        String version = metadata.getDatabaseProductVersion();
+        return "MariaDB".equals(metadata.getDatabaseProductName())
+                || version != null && lower(version).contains("mariadb");
     }
 
     static Map<String, String> tables(Connection connection) throws SQLException {
@@ -89,7 +106,8 @@ final class ManagedSchemaCatalog {
             throw new SQLException(
                     "Managed schema must contain exactly the 32 target tables: " + actual.keySet());
         }
-        if ("MySQL".equals(connection.getMetaData().getDatabaseProductName())) {
+        if ("MySQL".equals(connection.getMetaData().getDatabaseProductName())
+                || isMariaDb(connection)) {
             try (var statement =
                     connection.prepareStatement(
                             "SELECT TABLE_NAME, ENGINE FROM INFORMATION_SCHEMA.TABLES WHERE"
@@ -417,12 +435,13 @@ final class ManagedSchemaCatalog {
         }
     }
 
-    private static void validateChecks(Connection connection, String name, String body)
+    static void validateChecks(Connection connection, String name, String body)
             throws SQLException {
         Map<String, String> actual = new HashMap<>();
+        String enforcement = isMariaDb(connection) ? "'YES'" : "t.ENFORCED";
         try (var statement =
                 connection.prepareStatement(
-                        "SELECT t.CONSTRAINT_NAME, c.CHECK_CLAUSE, t.ENFORCED FROM"
+                        "SELECT t.CONSTRAINT_NAME, c.CHECK_CLAUSE, " + enforcement + " FROM"
                             + " INFORMATION_SCHEMA.TABLE_CONSTRAINTS t JOIN"
                             + " INFORMATION_SCHEMA.CHECK_CONSTRAINTS c ON c.CONSTRAINT_SCHEMA ="
                             + " t.CONSTRAINT_SCHEMA AND c.CONSTRAINT_NAME = t.CONSTRAINT_NAME WHERE"

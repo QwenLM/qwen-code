@@ -963,22 +963,17 @@ for record capacity and rewind semantics.
 
 ### Verified original-mount recovery (W1a)
 
-W1a's physical mount guard is opt-in for process restart in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Taking the next tool Turn after a Broker restart requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
-V25 adds a persistent storage registration, independent `mount_birth_time` and mount fence. Leave
-`QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=false` while
-upgrading every Broker and Harness instance. An unregistered mount is refused
-once the option is enabled; it is never registered from the directory found at
-startup.
+The current fresh 32-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. The current native identity reader requires Linux, so this baseline does not provide macOS LOCAL tool execution. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
 
 Marker v2 stores birth time as a canonical `Instant` string preserving nanoseconds. The guard reads creation time, mtime, device and inode in one `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID, keyed by the trimmed machine-id UTF-8 bytes with `Qwen-Code/verified-workspace/v2` as input, rather than the raw machine ID.
 
 Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
 
-Prerelease W1 V21/V24 databases and marker v1 cannot be directly upgraded to V25/v2. Experimental W1 V24 conflicts with main’s Actions V24; renaming the migration does not upgrade an existing database. Do not bypass the mismatch with Flyway `repair`, `outOfOrder` or manual history edits. Preserve backups and design an explicit offline migration for deployments with retained data; only disposable test deployments may be rebuilt.
+The retired V1–V68 migration chain and marker v1 are historical formats. This application initializes a new database with the shared V1 baseline and marker v2; it does not upgrade or migrate an existing database. Preserve old deployments and their data for historical access. Do not attach this binary to an old catalog or bypass refusal with Flyway `repair`, `outOfOrder` or manual history edits.
 
 Stop all processes and external jobs that can write the storage, account for
-old Runtime holders and verify the original root before registration. Apply
-Flyway migrations, then run the private maintenance entry from this module on
+old Runtime holders and verify the original root before registration. Initialize
+the new database with the canonical V1 baseline, then run the private maintenance entry from this module on
 the same Linux host. Give a stable canonical lowercase, hyphenated 36-character UUID to each operation and reuse it after a
 crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
 `W1_JDBC_PASSWORD` environment variables:
@@ -1010,7 +1005,7 @@ a live shared storage.
 
 After registration, enable
 `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` on the
-whole upgraded deployment. On each new attachment, model submission, Runtime
+whole new deployment before admission. On each new attachment, model submission, Runtime
 claim and execute, the server compares the configured canonical root against
 the SQL registration, Linux host/device/inode/birth-time identity and the root marker.
 A missing or conflicting marker, replacement root, missing saved cwd or fenced

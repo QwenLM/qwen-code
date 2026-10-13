@@ -74,6 +74,9 @@ class ManagedSchemaMySqlIT {
         String prefix = "schema-it-" + java.util.UUID.randomUUID();
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
+            boolean mariaDb = connection.getMetaData().getDatabaseProductVersion()
+                    .contains("MariaDB");
+            String dropCheck = mariaDb ? "DROP CONSTRAINT " : "DROP CHECK ";
             var tables = new HashSet<String>();
             try (var rows =
                     connection
@@ -230,13 +233,23 @@ class ManagedSchemaMySqlIT {
                         "ALTER TABLE ma_session_head MODIFY writer_lease_until DATETIME(6) NULL");
             }
             ManagedSchema.initialize(source);
-            statement.execute(
-                    "ALTER TABLE ma_operation ALTER CHECK ck_ma_operation_kind NOT ENFORCED");
-            try {
-                assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-            } finally {
+            if (mariaDb) {
+                String url = required("mysql.url");
+                DataSource disabledChecks = new DriverManagerDataSource(
+                        url + (url.contains("?") ? "&" : "?")
+                                + "sessionVariables=check_constraint_checks=0",
+                        required("mysql.user"), System.getProperty("mysql.password", ""));
+                assertThrows(IllegalStateException.class,
+                        () -> ManagedSchema.initialize(disabledChecks));
+            } else {
                 statement.execute(
-                        "ALTER TABLE ma_operation ALTER CHECK ck_ma_operation_kind ENFORCED");
+                        "ALTER TABLE ma_operation ALTER CHECK ck_ma_operation_kind NOT ENFORCED");
+                try {
+                    assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+                } finally {
+                    statement.execute(
+                            "ALTER TABLE ma_operation ALTER CHECK ck_ma_operation_kind ENFORCED");
+                }
             }
             String pageCheck =
                     ManagedSchema.ddl()
@@ -250,7 +263,7 @@ class ManagedSchemaMySqlIT {
                             .orElseThrow()
                             .trim()
                             .replaceFirst(",$", "");
-            statement.execute("ALTER TABLE ma_resource DROP CHECK ck_ma_resource_snapshot_page");
+            statement.execute("ALTER TABLE ma_resource " + dropCheck + "ck_ma_resource_snapshot_page");
             statement.execute(
                     "ALTER TABLE ma_resource ADD "
                             + pageCheck.replace("'MYSQL_INLINE'", "'MYSQL_BROKEN'"));
@@ -258,10 +271,10 @@ class ManagedSchemaMySqlIT {
                 assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
             } finally {
                 statement.execute(
-                        "ALTER TABLE ma_resource DROP CHECK ck_ma_resource_snapshot_page");
+                        "ALTER TABLE ma_resource " + dropCheck + "ck_ma_resource_snapshot_page");
                 statement.execute("ALTER TABLE ma_resource ADD " + pageCheck);
             }
-            statement.execute("ALTER TABLE ma_session_head DROP CHECK ck_ma_head_counters");
+            statement.execute("ALTER TABLE ma_session_head " + dropCheck + "ck_ma_head_counters");
             statement.execute(
                     "ALTER TABLE ma_session_head ADD CONSTRAINT ck_ma_head_counters CHECK"
                             + " ((claim_generation >= 0 AND writer_generation IS NULL OR"
@@ -270,7 +283,7 @@ class ManagedSchemaMySqlIT {
             try {
                 assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
             } finally {
-                statement.execute("ALTER TABLE ma_session_head DROP CHECK ck_ma_head_counters");
+                statement.execute("ALTER TABLE ma_session_head " + dropCheck + "ck_ma_head_counters");
                 statement.execute(
                         "ALTER TABLE ma_session_head ADD CONSTRAINT ck_ma_head_counters CHECK"
                                 + " (claim_generation >= 0 AND (writer_generation IS NULL OR"
