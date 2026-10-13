@@ -27,6 +27,7 @@ class LiteTopicEventTransportTest {
     private static final String TENANT = "t1";
     private static final String WORKSPACE = "w1";
     private static final String SESSION = "s1";
+    private static final String BOOTSTRAP = "wake-bootstrap";
 
     private static String eventRecord(long sequence, String eventId,
             String kind) {
@@ -96,10 +97,11 @@ class LiteTopicEventTransportTest {
         CompletableFuture<SendReceipt> ok = CompletableFuture.completedFuture(null);
         when(producer.sendAsync(any())).thenReturn(ok);
         LiteTopicEventTransport transport = new LiteTopicEventTransport(
-                producer, ClientServiceProvider.loadService(), "journal-parent");
+                producer, ClientServiceProvider.loadService(), "journal-parent",
+                BOOTSTRAP);
         transport.publishCommitted(journalRecord(
                 eventRecord(1, "evt-1", "input.accepted"),
-                eventRecord(2, "evt-2", "wake.requested"),
+                eventRecord(2, "evt-2", "model.attempt"),
                 commitMarker()));
         ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
         verify(producer, times(2)).sendAsync(captor.capture());
@@ -111,6 +113,46 @@ class LiteTopicEventTransportTest {
         assertTrue(body.contains("\"eventId\":\"evt-1\""), body);
         assertTrue(body.contains("\"stream\":\"authoritative_journal\""), body);
         assertEquals("evt-2", sent.get(1).getKeys().iterator().next());
+        assertEquals(SESSION, sent.get(1).getLiteTopic().orElseThrow());
+    }
+
+    // MQ2c: a wake nobody owns has no subscriber on its Session's LiteTopic,
+    // so the same envelope also rides the shared bootstrap lane.
+    @Test
+    void aWakeAlsoRidesTheBootstrapLiteTopic() {
+        Producer producer = mock(Producer.class);
+        when(producer.sendAsync(any()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        LiteTopicEventTransport transport = new LiteTopicEventTransport(
+                producer, ClientServiceProvider.loadService(), "journal-parent",
+                BOOTSTRAP);
+        transport.publishCommitted(journalRecord(
+                eventRecord(1, "evt-1", "input.accepted"),
+                eventRecord(2, "evt-2", "wake.requested"),
+                commitMarker()));
+        ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
+        verify(producer, times(3)).sendAsync(captor.capture());
+        List<Message> sent = captor.getAllValues();
+        assertEquals(List.of(SESSION, SESSION, BOOTSTRAP), sent.stream()
+                .map(message -> message.getLiteTopic().orElseThrow())
+                .toList());
+        assertEquals("evt-2", sent.get(2).getKeys().iterator().next());
+        assertEquals(body(sent.get(1)), body(sent.get(2)));
+    }
+
+    @Test
+    void aSynchronouslyRefusedSendNeitherPropagatesNorSkipsTheRest() {
+        Producer producer = mock(Producer.class);
+        when(producer.sendAsync(any()))
+                .thenThrow(new IllegalStateException("producer closing"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        LiteTopicEventTransport transport = new LiteTopicEventTransport(
+                producer, ClientServiceProvider.loadService(), "journal-parent",
+                BOOTSTRAP);
+        transport.publishCommitted(journalRecord(
+                eventRecord(1, "evt-1", "wake.requested"), commitMarker()));
+        // the session-lane send threw; the bootstrap send still went out.
+        verify(producer, times(2)).sendAsync(any());
     }
 
     @Test
@@ -120,7 +162,8 @@ class LiteTopicEventTransportTest {
         failed.completeExceptionally(new IllegalStateException("broker down"));
         when(producer.sendAsync(any())).thenReturn(failed);
         LiteTopicEventTransport transport = new LiteTopicEventTransport(
-                producer, ClientServiceProvider.loadService(), "journal-parent");
+                producer, ClientServiceProvider.loadService(), "journal-parent",
+                BOOTSTRAP);
         // must not throw even though every send fails.
         transport.publishCommitted(journalRecord(
                 eventRecord(1, "evt-1", "input.accepted"), commitMarker()));
@@ -131,7 +174,8 @@ class LiteTopicEventTransportTest {
     void publishCommittedNeverThrowsOnAMalformedRecord() {
         Producer producer = mock(Producer.class);
         LiteTopicEventTransport transport = new LiteTopicEventTransport(
-                producer, ClientServiceProvider.loadService(), "journal-parent");
+                producer, ClientServiceProvider.loadService(), "journal-parent",
+                BOOTSTRAP);
         // A record that is not valid JSON must not propagate — a transport
         // failure never blocks the commit path (#12380).
         transport.publishCommitted("not json".getBytes(StandardCharsets.UTF_8));
