@@ -8,15 +8,175 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import {
   collectDependencies,
   findLicenseFile,
   findNoticeFile,
   findSupplementaryLicenseFiles,
   getFallbackLicenseText,
+  getExceljsBrowserNotices,
   normalizeRepositoryUrl,
   runNoticeGeneration,
 } from './generate-notices.js';
+
+describe('ExcelJS browser bundle notices', () => {
+  const require = createRequire(
+    new URL('../../web-shell/package.json', import.meta.url),
+  );
+  const exceljsDir = path.dirname(require.resolve('exceljs/package.json'));
+
+  it('ships original licenses for each embedded source path and version', async () => {
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await runNoticeGeneration({});
+      expect(write).toHaveBeenCalledTimes(1);
+      const notices = String(write.mock.calls[0][1]);
+      const sourceMap = JSON.parse(
+        await fs.readFile(
+          path.join(exceljsDir, 'dist/exceljs.min.js.map'),
+          'utf-8',
+        ),
+      );
+      const sourcesByPackage = new Map();
+      for (const [index, source] of sourceMap.sources.entries()) {
+        if (!source.includes('node_modules/')) continue;
+        const tail = source.split('node_modules/').at(-1);
+        const name = tail
+          .split('/')
+          .slice(0, tail.startsWith('@') ? 2 : 1)
+          .join('/');
+        const prefix = source.slice(0, source.length - tail.length) + name;
+        const files = sourcesByPackage.get(prefix) ?? [];
+        files.push([source, sourceMap.sourcesContent[index]]);
+        sourcesByPackage.set(prefix, files);
+      }
+      const inventory = JSON.parse(
+        await fs.readFile(
+          new URL('./licenses/exceljs-browser.json', import.meta.url),
+          'utf-8',
+        ),
+      );
+      const mapBytes = await fs.readFile(
+        path.join(exceljsDir, 'dist/exceljs.min.js.map'),
+      );
+      expect(createHash('sha256').update(mapBytes).digest('hex')).toBe(
+        inventory.sourceMapSha256,
+      );
+      expect(inventory.packages).toHaveLength(72);
+      expect(
+        new Set(inventory.packages.map(({ sourcePrefix }) => sourcePrefix)),
+      ).toEqual(new Set(sourcesByPackage.keys()));
+      for (const dep of inventory.packages) {
+        const hash = createHash('sha256');
+        for (const [source, content] of sourcesByPackage
+          .get(dep.sourcePrefix)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+          hash.update(source).update('\0').update(content).update('\0');
+        }
+        expect(hash.digest('hex')).toBe(dep.sourceSha256);
+        expect(() => new URL(dep.repository)).not.toThrow();
+        expect(notices).toContain(
+          `${dep.name}@${dep.version}\n(${dep.repository})\n\n${dep.license}`,
+        );
+        expect(dep.license).toMatch(/Copyright|copyright/);
+        expect(dep.license).not.toContain('License text not found.');
+      }
+      const pakoNotice = notices
+        .split('\npako@1.0.11\n')[1]
+        .split(
+          '============================================================\n',
+        )[0];
+      expect(pakoNotice).toContain(
+        (
+          await fs.readFile(
+            new URL('./licenses/pako-1.0.11-zlib.txt', import.meta.url),
+            'utf-8',
+          )
+        ).trim(),
+      );
+      expect(pakoNotice).toContain("This software is provided 'as-is'");
+      expect(pakoNotice).toContain('1995-2013 Jean-loup Gailly and Mark Adler');
+      expect(pakoNotice).toContain(
+        '2014-2017 Vitaly Puzrin and Andrey Tupitsin',
+      );
+      expect(pakoNotice).toContain(
+        '3. This notice may not be removed or altered from any source distribution.',
+      );
+      expect(notices).not.toContain('License text not found.');
+      const noticeCount = [
+        ...notices.matchAll(/^={60}\n(?=[^\n]+@[^\n]+\n\()/gm),
+      ].length;
+      expect(log).toHaveBeenCalledWith(`Total dependencies: ${noticeCount}`);
+      for (const key of [
+        'saxes@5.0.1',
+        'safer-buffer@2.1.2',
+        'jszip@3.10.1',
+        'buffer@5.2.1',
+        'inherits@2.0.3',
+      ]) {
+        expect(notices).toContain(`\n${key}\n`);
+      }
+      expect(
+        inventory.packages.find(({ name }) => name === 'browserify-rsa')
+          .repository,
+      ).toBe('https://github.com/crypto-browserify/browserify-rsa');
+      expect(
+        inventory.packages
+          .filter(({ name }) => name === 'bn.js')
+          .map(({ version }) => version),
+      ).toEqual(['4.12.0', '5.2.1']);
+    } finally {
+      write.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it('rejects an unreviewed bundle or ExcelJS version', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'exceljs-notices-'));
+    try {
+      await fs.mkdir(path.join(dir, 'dist'));
+      const manifest = JSON.parse(
+        await fs.readFile(path.join(exceljsDir, 'package.json'), 'utf-8'),
+      );
+      await fs.writeFile(
+        path.join(dir, 'package.json'),
+        JSON.stringify(manifest),
+      );
+      const bundle = await fs.readFile(
+        path.join(exceljsDir, 'dist/exceljs.min.js'),
+      );
+      await fs.writeFile(path.join(dir, 'dist/exceljs.min.js'), bundle);
+      expect(await getExceljsBrowserNotices(dir)).toHaveLength(72);
+      await fs.appendFile(
+        path.join(dir, 'dist/exceljs.min.js'),
+        '\n// changed',
+      );
+      await expect(getExceljsBrowserNotices(dir)).rejects.toThrow(
+        'refresh its bundled license inventory',
+      );
+      await fs.writeFile(path.join(dir, 'dist/exceljs.min.js'), bundle);
+      await fs.writeFile(
+        path.join(dir, 'package.json'),
+        JSON.stringify({ ...manifest, browser: './dist/exceljs.js' }),
+      );
+      await expect(getExceljsBrowserNotices(dir)).rejects.toThrow(
+        'refresh its bundled license inventory',
+      );
+      await fs.writeFile(
+        path.join(dir, 'package.json'),
+        JSON.stringify({ ...manifest, version: '4.5.0' }),
+      );
+      await expect(getExceljsBrowserNotices(dir)).rejects.toThrow(
+        'refresh its bundled license inventory',
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('runNoticeGeneration', () => {
   it('skips generation during dependency-only worktree setup', async () => {
@@ -92,6 +252,16 @@ describe('findLicenseFile', () => {
     const resolved = await findLicenseFile(packageDir);
 
     expect(resolved).toBe(path.join(packageDir, 'License'));
+  });
+
+  it('finds JSZip’s LICENSE.markdown attribution', async () => {
+    await fs.writeFile(
+      path.join(packageDir, 'LICENSE.markdown'),
+      'JSZip license',
+    );
+    expect(await findLicenseFile(packageDir)).toBe(
+      path.join(packageDir, 'LICENSE.markdown'),
+    );
   });
 
   it('prefers LICENSE over other variants', async () => {
@@ -178,6 +348,25 @@ describe('collectDependencies', () => {
         dir: path.join(core, 'node_modules', 'nested'),
       },
     ]);
+  });
+
+  it('excludes only ExcelJS Node-only branches while retaining other consumers', async () => {
+    await writePackage(path.join(root, 'node_modules', 'exceljs'), {
+      name: 'exceljs',
+      version: '4.4.0',
+      dependencies: { archiver: '*', unzipper: '*', tmp: '*', jszip: '*' },
+    });
+    for (const name of ['archiver', 'unzipper', 'tmp', 'jszip']) {
+      await writePackage(path.join(root, 'node_modules', name), {
+        name,
+        version: '1.0.0',
+      });
+    }
+    const dependencies = new Map();
+    await collectDependencies('exceljs', root, dependencies, new Set());
+    expect([...dependencies.keys()]).toEqual(['exceljs@4.4.0', 'jszip@1.0.0']);
+    await collectDependencies('archiver', root, dependencies, new Set());
+    expect(dependencies.has('archiver@1.0.0')).toBe(true);
   });
 
   it('resolves each dependency from the nearest node_modules above it', async () => {
