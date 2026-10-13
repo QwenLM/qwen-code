@@ -22,6 +22,7 @@ import {
   type TeamState,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import type { ManagedSessionDomain } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { assertManagedSessionDomainEnabled } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 // H4e-b2 of #12827: what a team adds on top of H4d-b's Session messages —
 // a member is its continuation chain, every run of that chain opens its
@@ -83,8 +84,12 @@ export function broadcastMessageId(params: {
     .slice(0, 32)}`;
 }
 
-const PREAMBLE_BODY =
-  'You are a member of this team. Your parent, the agent that launched you, is the team leader. Your result is your answer to the last instruction you receive: if another message from the leader arrives after you have answered, your answer to it becomes your whole result, so answer it in full and repeat anything from your earlier answers the leader still needs. To ask the leader something, use send_message with to "parent"; its reply reaches you after you have answered, as your next instruction. You cannot message other members or edit the team\'s task board.';
+const PREAMBLE_BODY_HEAD =
+  'You are a member of this team. Your parent, the agent that launched you, is the team leader. Your result is your answer to the last instruction you receive: if another message from the leader arrives after you have answered, your answer to it becomes your whole result, so answer it in full and repeat anything from your earlier answers the leader still needs. To ask the leader something, use send_message with to "parent"; its reply reaches you after you have answered, as your next instruction. ';
+
+const PREAMBLE_TAIL_NO_COMMANDS =
+  "You cannot message other members or edit the team's task board.";
+const PREAMBLE_TAIL_WITH_COMMANDS = 'You cannot message other members.';
 
 /**
  * H4e-b3 decision 5: what the body adds for a plan-mode run, in the
@@ -99,6 +104,10 @@ const PLAN_MODE_BODY =
  * with. Names are sanitized to `[a-z0-9-]`, so they need no escaping.
  * H4e-b3 decision 5: the open tag carries `plan-mode="required"` while
  * the member's runs are plan-required (decision 9's composition rule).
+ * The wording near the end also follows what the build declares: once
+ * the `session_command` domain is enabled, the member may touch the
+ * board, so the closing sentence no longer forbids it. The build
+ * carries member messages (b3c) before the messaging sentence lifts.
  */
 export function teamMemberPreamble(
   member: {
@@ -107,8 +116,20 @@ export function teamMemberPreamble(
   },
   planMode: boolean = false,
 ): string {
+  let commandsEnabled = false;
+  try {
+    assertManagedSessionDomainEnabled('session_command');
+    commandsEnabled = true;
+  } catch {
+    commandsEnabled = false;
+  }
   const attribute = planMode ? ' plan-mode="required"' : '';
-  const body = planMode ? PREAMBLE_BODY + PLAN_MODE_BODY : PREAMBLE_BODY;
+  const body =
+    PREAMBLE_BODY_HEAD +
+    (commandsEnabled
+      ? PREAMBLE_TAIL_WITH_COMMANDS
+      : PREAMBLE_TAIL_NO_COMMANDS) +
+    (planMode ? PLAN_MODE_BODY : '');
   return `<team-member name="${member.name}" team="${member.teamName}"${attribute}>\n${body}\n</team-member>\n\n`;
 }
 
@@ -183,6 +204,29 @@ export function memberPlanModeRequired(
       plan.decision === 'approved'
     );
   });
+}
+
+/**
+ * b3b decision 5: whether one run's first input declares member tools —
+ * its instruction part opens with a well-formed preamble block, read
+ * after a launch's `[description]` and its blank line, or after a
+ * continuation's `Your next instruction:` marker (history before it is
+ * escaped, so only the run's own block can match). A misread only ever
+ * hides the tools: admission is the lead's, not the declaration's.
+ */
+export function firstInputOpensWithMemberPreamble(firstInput: string): boolean {
+  const marker = 'Your next instruction:';
+  const at = firstInput.lastIndexOf(marker);
+  if (at >= 0) {
+    return PREAMBLE_FORM.test(
+      firstInput.slice(at + marker.length).replace(/^\s+/, ''),
+    );
+  }
+  const wrapped = /^\[[\s\S]*?\]\n\n/.exec(firstInput);
+  if (wrapped !== null) {
+    return PREAMBLE_FORM.test(firstInput.slice(wrapped[0].length));
+  }
+  return PREAMBLE_FORM.test(firstInput);
 }
 
 /**
