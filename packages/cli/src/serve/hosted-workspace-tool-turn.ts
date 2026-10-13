@@ -41,7 +41,10 @@ import {
   convertToFunctionErrorResponse,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import {
+  managedToolDigest,
+  ManagedToolProtocolError,
+} from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import {
   createToolPublicationToken,
   parseToolPublicationBinding,
@@ -62,7 +65,11 @@ import {
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import type { HarnessAgentWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import {
+  harnessCommandLocked,
+  type HarnessAgentWaitRun,
+  type HarnessCommandWaitRun,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   ManagedSessionStoreHttpError,
@@ -96,26 +103,43 @@ import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
   childLaunchAdmission,
+  childKindLabel,
   childRunEndedText,
   childWorkspaceAnswerSuffix,
 } from './hosted-child-agent-session.js';
-import type { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import {
+  memberMessageContent,
+  type HostedSessionMessageSession,
+} from './hosted-session-message-session.js';
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import { MANAGED_SESSION_MESSAGE_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { sanitizeName } from '@qwen-code/qwen-code-core/agents/team/teamHelpers.js';
 import {
+  ACTIVE_FORM_CHARS,
+  DESCRIPTION_CHARS,
   HOSTED_TEAM_TOOLS,
+  HOSTED_TEAM_PLAN_TOOL,
   HOSTED_TEAM_TOOL_NAMES,
   HostedTeamRefusal,
   hostedTeamArgumentError,
   hostedTeamMembership,
+  SUBJECT_CHARS,
+  TASK_STATUSES,
   type HostedTeamMembership,
   type HostedTeamSession,
 } from './hosted-team-session.js';
 import {
   encodeChildLaunchEnvelope,
+  encodeWorkflowLaunchEnvelope,
   MANAGED_CHILD_LIMITS,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import {
+  ARGS_MAX_DEPTH,
+  extractAndStripMeta,
+  workflowPreLaunchGate,
+} from '@qwen-code/qwen-code-core/agents/runtime/workflow-sandbox.js';
+import { WORKFLOW_NAME_PATTERN } from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
@@ -125,13 +149,23 @@ import {
   HostedChildChains,
   broadcastMessageId,
   broadcastRunId,
+  firstInputOpensWithMemberPreamble,
   hostedCallKey,
+  hostedFirstInputText,
   hostedPromptKey,
   hostedRouteDetails,
+  memberPreambleIdentity,
   neverStartedClause,
   neverStartedPhrase,
   teamMemberPreamble,
 } from './hosted-member-chain.js';
+import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
+import type { SessionCommandKind } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-record.js';
+import {
+  SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
+  sessionCommandEvidenceText,
+  type HostedSessionCommandSession,
+} from './hosted-session-command-session.js';
 import { MANAGED_TEAM_LEADER } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js';
@@ -297,6 +331,46 @@ function sessionMessageAdmissionsEnabled(): boolean {
   }
 }
 
+// #13803 (K1/K4): workflow-child admissions exist only while the
+// child_run domain's workflow kind is enabled for commits — its own
+// reader beside the child agent's, so the two kinds' enablement stays
+// decoupled in code even while the gate lists both.
+function childWorkflowAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionChildRunKindEnabled('workflow');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// H4e-b3: the member board tools exist only while the session_command
+// domain is enabled for commits.
+function sessionCommandAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('session_command');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * H4e-b3 decision 4: a command's wait bound, measured from the outbound
+ * entry's own commit — well inside the Turn deadline and the relay's
+ * inactivity bound.
+ */
+export const COMMAND_WAIT_MS = 120_000;
+
+function teamPlanAdmissionsEnabled(): boolean {
+  try {
+    assertManagedSessionDomainEnabled('team_plan');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // H4e-b1: the team tools, and the agent tool's `name`, exist only while
 // both lead-side team domains are enabled for commits.
 function teamAdmissionsEnabled(): boolean {
@@ -307,6 +381,51 @@ function teamAdmissionsEnabled(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Walk one `args` value for nesting the launch could not commit. The
+ * value sits one level under the tool input the protocol digest walks, so
+ * the walk starts there and refuses exactly where that digest would throw
+ * (64 levels under the input; the sandbox's own ARGS_MAX_DEPTH is the
+ * same bound, counted from `args`, so it is never the tighter one). The
+ * model fixes the value and retries; nothing commits and no slot or quota
+ * is spent.
+ */
+function workflowArgsRefusal(value: unknown): string | undefined {
+  const stack: Array<{ node: unknown; depth: number }> = [
+    { node: value, depth: 1 },
+  ];
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop()!;
+    if (depth > ARGS_MAX_DEPTH) {
+      return `Hosted workflow args nest more than ${ARGS_MAX_DEPTH - 1} levels deep, past what the launch can commit (depth_limit).`;
+    }
+    if (node === null || typeof node !== 'object') {
+      continue;
+    }
+    for (const item of Object.values(node)) {
+      stack.push({ node: item, depth: depth + 1 });
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The launch-time definition pin of an inline workflow (#13803 decision
+ * 2): id+revision classify, the digest binds the exact bytes the child
+ * executes. Inline sources need no revision counter, so revision 1 is the
+ * convention, as in the child agent's own pin.
+ */
+export function workflowDefinitionPin(script: string): DefinitionPin {
+  const meta = extractAndStripMeta(script).meta;
+  const name =
+    meta && WORKFLOW_NAME_PATTERN.test(meta.name) ? meta.name : 'unnamed';
+  return Object.freeze({
+    definitionId: `workflow/${name}`,
+    definitionRevision: 1,
+    definitionDigest: createHash('sha256').update(script, 'utf8').digest('hex'),
+  });
 }
 
 export interface HostedApprovalTurnOptions {
@@ -462,7 +581,10 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'team_create',
   'task_create',
   'task_update',
+  'workflow',
   'request_shutdown',
+  'exit_plan_mode',
+  'team_plan_approval',
 ];
 
 /**
@@ -474,6 +596,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
 const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
   'read_file',
   'glob',
+  'task_list',
   'send_message',
 ]);
 
@@ -481,8 +604,21 @@ const HOSTED_PLAN_MODE_READS: ReadonlySet<string> = new Set([
  * The b3a plan-mode refusal, worded for a build without `exit_plan_mode`
  * (decision 5): it says the run may only read and never names it.
  */
-const HOSTED_PLAN_MODE_REFUSAL =
-  'This run is in plan mode until the leader approves its plan: only read_file, glob and send_message to the leader are admitted. The decision arrives as your next instruction.';
+function hostedPlanModeRefusal(): string {
+  return `This run is in plan mode until the leader approves its plan: only read_file, glob, task_list${teamPlanAdmissionsEnabled() ? ', exit_plan_mode' : ''} and send_message to the leader are admitted. The decision arrives as your next instruction.`;
+}
+
+export const HOSTED_MEMBER_PLAN_TOOL: FunctionDeclaration = {
+  name: 'exit_plan_mode',
+  description:
+    'Submit your plan to the leader, then end your turn. The decision arrives as your next instruction; this run remains read-only.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: { plan: { type: 'string', minLength: 1 } },
+    required: ['plan'],
+    additionalProperties: false,
+  },
+};
 
 /**
  * H4b: launch one child Session from the Session's own definition. The
@@ -516,6 +652,44 @@ export const HOSTED_AGENT_TOOL: FunctionDeclaration = {
   },
 };
 
+/**
+ * #13803 (K1): launch one child Session that runs one workflow instead of a
+ * prompt. The script is the complete definition: the child executes exactly
+ * these bytes, digest-pinned from the launch on and re-verified before it
+ * runs. The result crosses on the same arms as a child agent — background
+ * by default through a durable notification, or folded into this tool
+ * result when run_in_background is false.
+ */
+/** The posture of a managed workflow's agents, stated once for the
+ * declaration and the admission refusal. */
+const HOSTED_WORKFLOW_TEXT_ONLY_AGENTS =
+  'In this profile agent() runs text-only agents: they carry no tools and use nothing on the host, so tools, agentType, isolation and workingDir are unavailable; model, effort and schema still apply.';
+
+export const HOSTED_WORKFLOW_TOOL: FunctionDeclaration = {
+  name: 'workflow',
+  description: `Launch one workflow as an independent child Session of this Workspace. The script is deterministic JavaScript with the injected globals phase(), log(), agent(), parallel(), pipeline(), args and budget, and cannot import anything; Date and Math.random() throw. ${HOSTED_WORKFLOW_TEXT_ONLY_AGENTS} Runs in the background by default: the run settles later and its result arrives as a notification input. With run_in_background false the call waits and returns the run result directly. Saved-workflow names, script paths, resume and nesting are unavailable in this profile: pass the complete script inline.`,
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      script: {
+        type: 'string',
+        description:
+          'The complete workflow source, optionally starting with a literal `export const meta = {...}` whose name labels the run.',
+      },
+      args: {
+        description:
+          'Optional structured JSON value bound to the `args` global.',
+      },
+      run_in_background: {
+        type: 'boolean',
+        description:
+          'Run the workflow in the background and notify at completion (default true).',
+      },
+    },
+    required: ['script'],
+    additionalProperties: false,
+  },
+};
 const SEND_MESSAGE_TEXT_SCHEMA = {
   type: 'string',
   description: 'The message text.',
@@ -865,6 +1039,160 @@ export const HOSTED_SEND_MESSAGE_TO_PARENT_TOOL: FunctionDeclaration = {
 };
 
 /**
+ * H4e-b3 decision 8 (b3c): a member's send_message names `"parent"`,
+ * another member, or `"*"`; member-addressed sends are commands to the
+ * leader, and only the leader takes the plain message. Declared beside
+ * the board commands, on the same gate (a lineage Session whose run's
+ * first input carries the member preamble).
+ */
+export const HOSTED_MEMBER_SEND_MESSAGE_TOOL: FunctionDeclaration = {
+  name: 'send_message',
+  description:
+    'Send a message to another member of your team by name, to every other member at once (to: "*"), or to the team leader (to: "parent"). Member messages travel through the leader, which answers with each recipient\'s outcome; a running member receives the message as its next input once its current turn ends, and a member that has finished, ended or is being stopped is not reached. There is no inline reply: the recipient answers you with send_message naming you, and the leader\'s reply arrives as your next instruction. A message is not a board change: record work with the task tools.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      to: {
+        type: 'string',
+        description:
+          'A member name, "*" for every other member, or "parent" for the team leader.',
+      },
+      message: SEND_MESSAGE_TEXT_SCHEMA,
+    },
+    required: ['to', 'message'],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * H4e-b3 decision 6: a member's board read, as a `board_read` command to
+ * its leader. The schema mirrors the lead's `task_list` exactly.
+ */
+export const HOSTED_MEMBER_TASK_LIST_TOOL: FunctionDeclaration = {
+  name: 'task_list',
+  description:
+    'List your team board, optionally filtered, followed by each member with the state of its current run — the board and the roster as your leader holds them. Board changes are not pushed to you: read the board again when you need the current state.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      status: {
+        type: 'string',
+        enum: ['pending', 'in_progress', 'completed'],
+        description: 'Filter by task status.',
+      },
+      owner: {
+        type: 'string',
+        description: 'Filter by owner name.',
+      },
+      blockedBy: {
+        type: 'string',
+        description: 'Filter for tasks still blocked by this task number.',
+      },
+    },
+    additionalProperties: false,
+  },
+};
+
+/** H4e-b3 decision 6: a member's task creation, as a `board_write` command. */
+export const HOSTED_MEMBER_TASK_CREATE_TOOL: FunctionDeclaration = {
+  name: 'task_create',
+  description:
+    'Create a pending task on your team board. The leader records it and answers with the new task number. Members are not told about board changes: put new work for another member in your final answer, or ask the leader to hand it out.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      subject: {
+        type: 'string',
+        maxLength: SUBJECT_CHARS,
+        description: 'Short title for the task.',
+      },
+      description: {
+        type: 'string',
+        maxLength: DESCRIPTION_CHARS,
+        description: 'Detailed description of the task.',
+      },
+      activeForm: {
+        type: 'string',
+        maxLength: ACTIVE_FORM_CHARS,
+        description: 'Present tense label for UI (e.g., "Running tests").',
+      },
+      metadata: {
+        type: 'object',
+        description: 'Optional arbitrary metadata.',
+      },
+    },
+    required: ['subject', 'description'],
+    additionalProperties: false,
+  },
+};
+
+/** H4e-b3 decision 6: a member's task revision, as a `board_write` command. */
+export const HOSTED_MEMBER_TASK_UPDATE_TOOL: FunctionDeclaration = {
+  name: 'task_update',
+  description:
+    'Update a board task: status, owner, subject, description, active form, metadata or dependencies; set status to "deleted" to remove it. Status, owner, subject and description change only on a task you own or that has no owner, and edges only reach such tasks; activeForm and metadata change on any task; owner may be only your own name or "" to unassign, and moving an unowned task to in_progress makes you its owner. A task in progress needs an owner. The answer is the revised task, or the refusal.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      taskId: {
+        type: 'string',
+        description: 'Number of the task to update, as "3" or "#3".',
+      },
+      status: {
+        type: 'string',
+        enum: TASK_STATUSES,
+        description: 'New task status.',
+      },
+      owner: {
+        type: 'string',
+        description:
+          'New owner: your own name, or an empty string to unassign.',
+      },
+      subject: {
+        type: 'string',
+        maxLength: SUBJECT_CHARS,
+        description: 'Updated task title.',
+      },
+      description: {
+        type: 'string',
+        maxLength: DESCRIPTION_CHARS,
+        description: 'Updated task description.',
+      },
+      activeForm: {
+        type: 'string',
+        maxLength: ACTIVE_FORM_CHARS,
+        description: 'Present tense label for UI.',
+      },
+      metadata: {
+        type: 'object',
+        description: 'Metadata to merge. Set a key to null to delete it.',
+      },
+      addBlocks: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Numbers of the tasks this task blocks.',
+      },
+      addBlockedBy: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Numbers of the tasks that block this task.',
+      },
+    },
+    required: ['taskId'],
+    additionalProperties: false,
+  },
+};
+
+export const HOSTED_MEMBER_BOARD_TOOLS: readonly FunctionDeclaration[] = [
+  HOSTED_MEMBER_TASK_LIST_TOOL,
+  HOSTED_MEMBER_TASK_CREATE_TOOL,
+  HOSTED_MEMBER_TASK_UPDATE_TOOL,
+];
+
+export const HOSTED_MEMBER_COMMAND_TOOL_NAMES: readonly string[] =
+  HOSTED_MEMBER_BOARD_TOOLS.map((tool) => tool.name!);
+
+/**
  * H4e-b1: the agent tool of a Session whose team tools are declared. With
  * `name`, the child is a member of the Session's active team.
  */
@@ -1020,11 +1348,6 @@ export function hostedChildRunIdFor(promptId: string, callId: string): string {
   return hostedCallKey(promptId, callId);
 }
 
-/**
- * The live background arm's started receipt, shared with the recovery
- * gap fill's background-orphan branch: one sentence naming the task the
- * model should track and exactly how results land on it.
- */
 /** H4e-b1: what a member's started answer adds once its join committed. */
 export function hostedTeamJoinedText(member: {
   readonly teamName: string;
@@ -1033,8 +1356,17 @@ export function hostedTeamJoinedText(member: {
   return ` It joined team "${member.teamName}" as "${member.name}", and its result arrives labeled with that name.`;
 }
 
-export function hostedAgentBackgroundStartedText(taskId: string): string {
-  return `Child agent started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`;
+/**
+ * The live background arm's started receipt, shared with the recovery
+ * gap fill's background-orphan branch: one sentence naming the child's
+ * kind, the task the model should track and exactly how results land on
+ * it.
+ */
+export function hostedChildBackgroundStartedText(
+  kind: 'child_agent' | 'workflow',
+  taskId: string,
+): string {
+  return `${childKindLabel(kind)} started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`;
 }
 
 /**
@@ -1070,6 +1402,26 @@ export function fitChildResultInline(
   throw new Error('Child agent result cannot be recorded inline.');
 }
 
+interface HostedEncodedToolInput {
+  payloadJson: string;
+  inputBytes: Buffer;
+  digest: string;
+}
+
+/** The encoding of a refused call, which nothing downstream reads. */
+const UNENCODED_TOOL_INPUT: HostedEncodedToolInput = Object.freeze({
+  payloadJson: '',
+  inputBytes: Buffer.alloc(0),
+  digest: 'sha256:',
+});
+
+class HostedToolInputInlineLimitError extends Error {
+  constructor() {
+    super('Hosted tool input exceeds the inline Session Store limit.');
+    this.name = 'HostedToolInputInlineLimitError';
+  }
+}
+
 interface HostedPreparedRequest {
   call: ToolCallRequestInfo;
   validationError?: string;
@@ -1080,15 +1432,19 @@ interface HostedPreparedRequest {
   payloadJson: string;
   inputBytes: Buffer;
   digest: string;
-  argsDigest: string;
+  /** Absent when the input exceeds the canonical-digest ceiling; the
+   * call then carries its own validationError (#13803 D1). */
+  argsDigest?: string;
   publicationId: string | null;
   runtimeCallId: string;
   background: boolean;
   monitoring: boolean;
   agent: boolean;
+  workflow: boolean;
   agentBackground: boolean;
   team: boolean;
   message: boolean;
+  command: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -1140,6 +1496,16 @@ export class HostedWorkspaceToolTurn {
   private readonly childConsumption: (childRunId: string) => void;
   private readonly messages?: HostedSessionMessageSession;
   private readonly teams?: HostedTeamSession;
+  /** H4e-b3: the member's command funnel to its parent, beside its messages. */
+  private readonly commands?: HostedSessionCommandSession;
+  /** b3b: whether this Session's run carries a member preamble (once read). */
+  private memberPreamble?: boolean;
+  /** b3b: the member board vocabulary declared, refreshed per declarations. */
+  private readonly commandToolNames = new Set<string>();
+  /** b3b decision 4: batches of this Turn whose command park committed. */
+  private readonly commandParks = new Set<string>();
+  /** b3b decision 4: a command call of this Turn timed out (decision 4's lock). */
+  private commandTimedOut = false;
   /**
    * H4e-b3 decisions 5/9: this run's first input carried an unescaped
    * `plan-mode="required"` preamble (assembly read it off the journal).
@@ -1188,6 +1554,7 @@ export class HostedWorkspaceToolTurn {
       };
       messages?: HostedSessionMessageSession;
       teams?: HostedTeamSession;
+      commands?: HostedSessionCommandSession;
       /**
        * H4e-b3 decisions 5/9: this run's first input carried an unescaped
        * `plan-mode="required"` preamble; its calls admit reads only.
@@ -1209,6 +1576,7 @@ export class HostedWorkspaceToolTurn {
       extras?.childAgents?.queueConsumption ?? (() => undefined);
     this.messages = extras?.messages;
     this.teams = extras?.teams;
+    this.commands = extras?.commands;
     this.memberPlanMode = extras?.memberPlanMode === true;
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
@@ -1263,6 +1631,9 @@ export class HostedWorkspaceToolTurn {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
     const search = isHostedWorkspaceSearchProfile(this.profile);
+    // b3c: a member's widened send_message rides the same gate as its
+    // board commands — resolved once, both declarations follow it.
+    const memberCommands = await this.memberCommandsDeclared();
     this.advertised = [
       ...(this.publication || this.shell
         ? search
@@ -1296,6 +1667,7 @@ export class HostedWorkspaceToolTurn {
               ? HOSTED_TEAM_AGENT_WORKTREE_TOOL
               : HOSTED_TEAM_AGENT_TOOL,
             ...HOSTED_TEAM_TOOLS,
+            ...(teamPlanAdmissionsEnabled() ? [HOSTED_TEAM_PLAN_TOOL] : []),
           ]
         : this.agentsAdmitted()
           ? [
@@ -1313,9 +1685,58 @@ export class HostedWorkspaceToolTurn {
               : HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
           ]
         : this.sendMessageRole() === 'child'
-          ? [HOSTED_SEND_MESSAGE_TO_PARENT_TOOL]
+          ? [
+              memberCommands
+                ? HOSTED_MEMBER_SEND_MESSAGE_TOOL
+                : HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
+            ]
           : []),
+      // #13803: the Workflow tool joins under the exact gate shape of the
+      // Agent tool, behind its own kind reader — a child Session neither
+      // advertises it nor may admit it (#13803 decision 5).
+      ...(this.childAgents !== undefined &&
+      (this.shell !== undefined || this.backgroundLane !== undefined) &&
+      this.childDepth === 0 &&
+      childWorkflowAdmissionsEnabled()
+        ? [HOSTED_WORKFLOW_TOOL]
+        : []),
     ];
+    // H4e-b3: a member's board tools are its commands to the leader,
+    // declared only on a lineage Session whose run's first input carries
+    // its member preamble (decision 5) — a convenience beside the lead's
+    // own admission of every command.
+    this.commandToolNames.clear();
+    if (memberCommands) {
+      this.advertised.push(...HOSTED_MEMBER_BOARD_TOOLS);
+      for (const tool of HOSTED_MEMBER_BOARD_TOOLS)
+        if (tool.name !== undefined) this.commandToolNames.add(tool.name);
+      if (this.memberPlanMode && teamPlanAdmissionsEnabled()) {
+        this.advertised.push(HOSTED_MEMBER_PLAN_TOOL);
+        this.commandToolNames.add('exit_plan_mode');
+      }
+    }
+    if (this.teamsAdmitted() && teamPlanAdmissionsEnabled()) {
+      this.advertised = this.advertised.map((tool) =>
+        tool.name === 'agent'
+          ? {
+              ...tool,
+              parametersJsonSchema: {
+                ...(tool.parametersJsonSchema as Record<string, unknown>),
+                properties: {
+                  ...((tool.parametersJsonSchema as Record<string, unknown>)[
+                    'properties'
+                  ] as Record<string, unknown>),
+                  plan_mode_required: {
+                    type: 'boolean',
+                    description:
+                      'Require this named member to submit a plan before editing.',
+                  },
+                },
+              },
+            }
+          : tool,
+      );
+    }
     return this.advertised;
   }
 
@@ -1331,6 +1752,73 @@ export class HostedWorkspaceToolTurn {
     return this.childDepth === 0 && childAgentAdmissionsEnabled()
       ? 'parent'
       : undefined;
+  }
+
+  /**
+   * b3b decision 5: the member board tools ride the command channel, and
+   * only a lineage Session whose run's first input opens with a
+   * well-formed member preamble declares them.
+   */
+  private async memberCommandsDeclared(): Promise<boolean> {
+    if (this.commands?.lineage === undefined) return false;
+    if (!sessionCommandAdmissionsEnabled()) return false;
+    this.memberPreamble ??= await this.firstInputHasMemberPreamble();
+    // b3c: the widened send_message needs the member's own name for its
+    // local refusals, read off the same preamble.
+    if (this.memberPreamble) await this.resolveMemberIdentity();
+    return this.memberPreamble;
+  }
+
+  /** b3c/R1-10: the one read of the first input per Turn, cached. */
+  private firstInputTextCache?: string | null;
+
+  /**
+   * The text of this Session's first accepted input, if readable: the
+   * admission committers write the launch envelope as an OpenAI
+   * message-content array; a plain {text} envelope rides the same gate
+   * for the test-path fixtures. One read per Turn via the shared reader
+   * (decision 8); anything unreadable hides the tools — it never grants.
+   */
+  private async firstInputText(): Promise<string | undefined> {
+    if (this.firstInputTextCache !== undefined)
+      return this.firstInputTextCache === null
+        ? undefined
+        : this.firstInputTextCache;
+    let text: string | undefined;
+    try {
+      text = await hostedFirstInputText({
+        authority: this.session.authority,
+        resources: this.session.resources,
+      });
+    } catch {
+      text = undefined;
+    }
+    this.firstInputTextCache = text ?? null;
+    return text ?? undefined;
+  }
+
+  /**
+   * The member marker (decision 5): this Session's own first accepted
+   * input's text, checked for the run's preamble block. Anything
+   * unreadable hides the tools — it never grants them.
+   */
+  private async firstInputHasMemberPreamble(): Promise<boolean> {
+    const text = await this.firstInputText();
+    return text === undefined ? false : firstInputOpensWithMemberPreamble(text);
+  }
+
+  /** b3c: who this run's preamble says the Session's member is, cached. */
+  private memberIdentity?: { name: string; team: string } | null;
+  private async resolveMemberIdentity(): Promise<{
+    readonly name: string;
+    readonly team: string;
+  } | null> {
+    if (this.memberIdentity === undefined) {
+      const text = await this.firstInputText();
+      this.memberIdentity =
+        text === undefined ? null : (memberPreambleIdentity(text) ?? null);
+    }
+    return this.memberIdentity;
   }
 
   /**
@@ -1753,7 +2241,18 @@ export class HostedWorkspaceToolTurn {
         intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
-        (HOSTED_TEAM_TOOL_NAMES.includes(call.name) &&
+        ((HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
+          (call.name === 'exit_plan_mode' &&
+            this.commands?.command(
+              sessionCommandId({
+                senderSessionId:
+                  this.session.authority.sessionHeader.sessionKey.sessionId,
+                promptKey: hostedPromptKey(this.promptId),
+                callId: call.callId,
+              }),
+            )?.kind === 'plan_submit') ||
+          (call.name === 'team_plan_approval' &&
+            teamPlanAdmissionsEnabled())) &&
           physicalToolStatus(response) === 'success');
       const preToolOutput = preToolOutputs.get(call.callId);
       const beforeContext = preToolOutput?.getAdditionalContext();
@@ -1975,9 +2474,11 @@ export class HostedWorkspaceToolTurn {
           background: false,
           monitoring: false,
           agent: false,
+          workflow: false,
           agentBackground: true,
           team: false,
           message: false,
+          command: false,
         });
       }
       this.logicalRound = plan.round;
@@ -2011,7 +2512,12 @@ export class HostedWorkspaceToolTurn {
         (request) =>
           !['read_file', 'write_file', 'edit', 'glob'].includes(
             request.call.name,
-          ),
+          ) ||
+          // A call refused at the canonical-digest ceiling (#13803 D1) has
+          // no argument digest a restore could re-verify, and one refused
+          // past the inline limit has no encoding to publish.
+          request.argsDigest === undefined ||
+          request.inputBytes.length === 0,
       )
     )
       return undefined;
@@ -2053,7 +2559,8 @@ export class HostedWorkspaceToolTurn {
         inputRef,
         definitionRef,
         requestDigest: request.digest,
-        argsDigest: request.argsDigest,
+        // Present: a batch with an undigested call is never captured.
+        argsDigest: request.argsDigest as string,
         prepareKey: `${this.broker.runtimeSessionId}:${request.runtimeCallId}`,
         prepareReference: {
           sessionId: this.broker.runtimeSessionId,
@@ -2220,15 +2727,43 @@ export class HostedWorkspaceToolTurn {
         let backgroundAdmitted = false;
         let monitorAdmitted = false;
         let agentAdmitted = false;
+        let workflowAdmitted = false;
         let agentBackground = true;
         let messageAdmitted = false;
+        // b3b: on a member Session the board vocabulary is its command
+        // channel's, never the lead funnel's — the two never meet on one
+        // profile, but a name collision must route to the command arm.
+        // b3c decision 8: a member's send_message naming a member or
+        // "*" is the same kind of command; only "parent" stays H4d-b's.
+        const memberMessageCommand =
+          mcpInput === undefined &&
+          call.name === 'send_message' &&
+          this.sendMessageRole() === 'child' &&
+          this.memberPreamble === true &&
+          typeof call.args['to'] === 'string' &&
+          sanitizeName(call.args['to']) !== 'parent';
+        const command =
+          mcpInput === undefined &&
+          (this.commandToolNames.has(call.name) || memberMessageCommand);
         const team =
-          mcpInput === undefined && HOSTED_TEAM_TOOL_NAMES.includes(call.name);
+          !command &&
+          mcpInput === undefined &&
+          (HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
+            (call.name === 'team_plan_approval' &&
+              teamPlanAdmissionsEnabled()));
         // H4e-b3 decision 9: a run whose first input carried an unescaped
         // plan-mode preamble admits reads only; every other call is
         // refused before it runs, ahead of any per-tool arm below.
-        if (this.memberPlanMode && !HOSTED_PLAN_MODE_READS.has(call.name)) {
-          validationError = HOSTED_PLAN_MODE_REFUSAL;
+        if (
+          this.memberPlanMode &&
+          !HOSTED_PLAN_MODE_READS.has(call.name) &&
+          !(
+            call.name === 'exit_plan_mode' &&
+            command &&
+            teamPlanAdmissionsEnabled()
+          )
+        ) {
+          validationError = hostedPlanModeRefusal();
           input = { ...call.args };
         } else if (mcpInput) {
           input = { ...mcpInput.input };
@@ -2409,6 +2944,9 @@ export class HostedWorkspaceToolTurn {
                 'prompt',
                 'run_in_background',
                 ...(named ? ['name'] : []),
+                ...(named && teamPlanAdmissionsEnabled()
+                  ? ['plan_mode_required']
+                  : []),
                 'isolation',
               ].includes(key),
           );
@@ -2437,6 +2975,12 @@ export class HostedWorkspaceToolTurn {
           ) {
             validationError =
               'Hosted child agent isolation must be "worktree" or omitted.';
+          } else if (
+            args['plan_mode_required'] !== undefined &&
+            typeof args['plan_mode_required'] !== 'boolean'
+          ) {
+            validationError =
+              'Hosted child agent plan_mode_required must be a boolean.';
           } else if (backgroundIllFormed) {
             validationError =
               'Hosted child agent run_in_background must be a boolean.';
@@ -2454,12 +2998,15 @@ export class HostedWorkspaceToolTurn {
             validationError = `Hosted child agent run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
           } else if (
             !agentBackground &&
-            calls.some((other) => other.name !== 'agent')
+            calls.some(
+              (other) => other.name !== 'agent' && other.name !== 'workflow',
+            )
           ) {
-            // The same one-batch candidacy: a non-agent sibling holds the
-            // mount for exactly the wait the foreground answer needs.
+            // The same one-batch candidacy: a sibling outside a child
+            // launch holds the mount for exactly the wait the foreground
+            // answer needs.
             validationError =
-              'Hosted child agent run_in_background=false cannot share a batch with a non-agent tool; the sibling would hold the Workspace mount the child needs.';
+              'Hosted child agent run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
           } else if (
             typeof args['description'] !== 'string' ||
             !args['description'].trim() ||
@@ -2476,10 +3023,104 @@ export class HostedWorkspaceToolTurn {
             validationError = this.memberBatchError(call, source);
           }
           input = { ...args };
+        } else if (call.name === 'workflow') {
+          const args = call.args;
+          // #13803: the Workflow call answers the same admission shape as
+          // the Agent call, behind its own kind reader.
+          workflowAdmitted =
+            this.childAgents !== undefined &&
+            (this.shell !== undefined || this.backgroundLane !== undefined) &&
+            this.childDepth === 0 &&
+            childWorkflowAdmissionsEnabled();
+          const unsupportedKey = Object.keys(args).find(
+            (key) => !['script', 'args', 'run_in_background'].includes(key),
+          );
+          const backgroundValue = args['run_in_background'];
+          agentBackground = !(
+            backgroundValue === false ||
+            (typeof backgroundValue === 'string' &&
+              backgroundValue.toLowerCase() === 'false')
+          );
+          const backgroundIllFormed =
+            backgroundValue !== undefined &&
+            backgroundValue !== true &&
+            backgroundValue !== false &&
+            !(
+              typeof backgroundValue === 'string' &&
+              ['true', 'false'].includes(backgroundValue.toLowerCase())
+            );
+          if (!workflowAdmitted) {
+            validationError =
+              'Hosted workflow children are unavailable on this Session profile; read work through ordinary tools instead.';
+          } else if (unsupportedKey !== undefined) {
+            validationError = `Hosted workflow received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
+          } else if (backgroundIllFormed) {
+            validationError =
+              'Hosted workflow run_in_background must be a boolean.';
+          } else if (this.sessionOwnerMayHoldMount()) {
+            validationError = `Hosted workflow is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
+          } else if (!agentBackground && this.acquired) {
+            validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
+          } else if (
+            !agentBackground &&
+            calls.some(
+              (other) => other.name !== 'agent' && other.name !== 'workflow',
+            )
+          ) {
+            validationError =
+              'Hosted workflow run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
+          } else if (
+            typeof args['script'] !== 'string' ||
+            !args['script'].trim()
+          ) {
+            validationError = 'Hosted workflow requires a nonempty script.';
+          } else if (
+            Buffer.byteLength(args['script'], 'utf8') >
+            MANAGED_CHILD_LIMITS.maxEnvelopeBytes
+          ) {
+            // The byte bound consulted before any V8 work: the compile
+            // and the shape scan below would throw their results away.
+            validationError = `Hosted workflow script exceeds ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes (byte_limit).`;
+          } else {
+            // An unstartable script is a model-correctable argument
+            // error, so it refuses here with the runner's own texts
+            // rather than wedging the child's first Turn on its compile:
+            // a failed child Session is the answer for a run that fails,
+            // never for one that could never start. The args value walks
+            // first: nesting the launch cannot commit refuses here — the
+            // model fixes the value and retries at no quota or slot spent.
+            const argsRefusal = workflowArgsRefusal(args['args']);
+            if (argsRefusal !== undefined) {
+              validationError = argsRefusal;
+            }
+            if (validationError === undefined) {
+              const gate = workflowPreLaunchGate(args['script']);
+              if (gate.refusal !== undefined) {
+                validationError = `Hosted workflow script is invalid: ${gate.refusal.detail}`;
+              } else if (gate.shape.nestedWorkflowCalls.length > 0) {
+                // A nested launch resolves script bytes the pin never
+                // examined (a saved workflow from any tier). Refuse with
+                // the same model-correctable text the reference arguments
+                // carry, so the launched bytes stay exactly the pinned
+                // ones.
+                const extra = gate.shape.nestedWorkflowCalls.length - 1;
+                validationError = `Hosted workflow script is invalid: workflow() on line ${gate.shape.nestedWorkflowCalls[0]}${extra > 0 ? ` and ${extra} more` : ''} launches a nested run whose script this launch never pinned. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
+              } else if (gate.shape.hostBoundAgentOptions.length > 0) {
+                // The child refuses these at dispatch and fails the whole
+                // run; refusing here keeps the model's correction free of
+                // a spent launch slot (#13858 R4-4).
+                const [first] = gate.shape.hostBoundAgentOptions;
+                validationError = `Hosted workflow script is invalid: agent() on line ${first.line} passes ${first.option}. ${HOSTED_WORKFLOW_TEXT_ONLY_AGENTS}`;
+              }
+            }
+          }
+          input = { ...args };
         } else if (call.name === 'send_message') {
           const args = call.args;
           const role = this.sendMessageRole();
-          messageAdmitted = role !== undefined;
+          // b3c: a member message is a command to the leader, never
+          // H4d-b's plain message.
+          messageAdmitted = role !== undefined && !memberMessageCommand;
           // H4e-b2: beside the team tools, the lead also addresses a member
           // by name, or every member with "*".
           const teamForm = role === 'parent' && this.teamsAdmitted();
@@ -2499,13 +3140,68 @@ export class HostedWorkspaceToolTurn {
           } else if (unsupportedKey !== undefined) {
             validationError =
               role === 'child'
-                ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
+                ? this.memberPreamble === true
+                  ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A member send_message takes only a member's to: "parent", a member name, or "*" — pass to and message.`
+                  : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
                 : teamForm
                   ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. Pass to (a member name, or "*" for every member) or task_id, and message; other Sessions belong to the legacy tool.`
                   : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; teams and other Sessions belong to the legacy tool.`;
-          } else if (role === 'child' && args['to'] !== 'parent') {
+          } else if (
+            role === 'child' &&
+            this.memberPreamble !== true &&
+            args['to'] !== 'parent'
+          ) {
             validationError =
               'Hosted send_message from a child Session addresses only to "parent".';
+          } else if (role === 'child' && this.memberPreamble === true) {
+            // b3c decision 8: a member names "parent", another member, or
+            // "*". Member-addressed sends are commands to the leader; the
+            // local refusals answer before anything is sent.
+            const addressed =
+              typeof args['to'] === 'string' ? args['to'].trim() : '';
+            if (addressed === '') {
+              validationError =
+                'Hosted send_message requires "to": "parent" for the team leader, a member name, or "*" for every other member.';
+            } else if (memberMessageCommand && this.memberPlanMode) {
+              validationError = hostedPlanModeRefusal();
+            } else if (
+              memberMessageCommand &&
+              this.memberIdentity?.name !== undefined &&
+              sanitizeName(addressed) === this.memberIdentity.name
+            ) {
+              validationError = `A member cannot send a message to itself ("${this.memberIdentity.name}").`;
+            } else if (
+              memberMessageCommand &&
+              sanitizeName(addressed) === MANAGED_TEAM_LEADER
+            ) {
+              validationError =
+                'A member messages its leader with send_message with to "parent", not "leader".';
+            } else if (typeof text !== 'string' || !text.trim()) {
+              validationError =
+                'Hosted send_message requires a nonempty message.';
+            } else if (
+              memberMessageCommand &&
+              Buffer.byteLength(
+                memberMessageContent(
+                  this.memberIdentity?.name ?? '',
+                  text as string,
+                ),
+                'utf8',
+              ) > MANAGED_CHILD_LIMITS.maxEnvelopeBytes
+            ) {
+              validationError = `Hosted send_message message is too long for a member message (byte_limit): with its wrapper it must fit ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes.`;
+            } else if (
+              memberMessageCommand &&
+              source.some(
+                (other) =>
+                  other !== call &&
+                  !this.commandToolNames.has(other.name) &&
+                  other.name !== 'send_message',
+              )
+            ) {
+              validationError =
+                'Hosted send_message to a member cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run it in its own batch or beside the member board commands.';
+            }
           } else if (
             teamForm &&
             (args['to'] === undefined) === (args['task_id'] === undefined)
@@ -2549,7 +3245,13 @@ export class HostedWorkspaceToolTurn {
           ) {
             validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
           }
-          input = teamForm ? hostedTeamMessageInput(args) : { ...args };
+          input =
+            teamForm || memberMessageCommand
+              ? hostedTeamMessageInput(args)
+              : { ...args };
+        } else if (command) {
+          validationError = this.commandArgumentError(call, source);
+          input = { ...call.args };
         } else if (team) {
           validationError = hostedTeamArgumentError(call.name, call.args);
           input = { ...call.args };
@@ -2570,23 +3272,49 @@ export class HostedWorkspaceToolTurn {
             }
           }
         }
-        const encoded = this.encodeToolInput(
-          mcpInput ?? { toolName: call.name, input },
-        );
+        // The inline Session Store limit keeps rejecting exactly as main
+        // does for the ordinary tools. A call that already carries its own
+        // refusal never reads its encoding, and a workflow launch is this
+        // profile's own surface: for either the limit becomes the call's
+        // refusal, never a failure of the whole Turn (review D1/R2-12).
+        let encoded: HostedEncodedToolInput;
+        try {
+          encoded = this.encodeToolInput(
+            mcpInput ?? { toolName: call.name, input },
+          );
+        } catch (cause) {
+          if (
+            !(cause instanceof HostedToolInputInlineLimitError) ||
+            (validationError === undefined && call.name !== 'workflow')
+          )
+            throw cause;
+          validationError ??= `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`;
+          encoded = UNENCODED_TOOL_INPUT;
+        }
+        // H3: the publication evidence chain pins the canonical input
+        // digest for Monitor calls exactly like Shell calls.
+        let argsDigest: string | undefined;
+        let inputDigest: string | undefined;
+        try {
+          inputDigest =
+            isShell || call.name === 'monitor'
+              ? managedToolDigest(input)
+              : undefined;
+          argsDigest = `sha256:${managedToolDigest(input)}`;
+        } catch (cause) {
+          if (!(cause instanceof ManagedToolProtocolError)) throw cause;
+          // An arm's own, more specific refusal of the same input stands.
+          validationError ??= `Hosted tool input cannot commit as protocol evidence: ${cause.message}`;
+        }
         return {
           call,
           validationError,
           input,
           isShell,
-          // H3: the publication evidence chain pins the canonical input
-          // digest for Monitor calls exactly like Shell calls.
-          inputDigest:
-            isShell || call.name === 'monitor'
-              ? managedToolDigest(input)
-              : undefined,
+          inputDigest,
           mcp: mcpInput !== undefined,
           ...encoded,
-          argsDigest: `sha256:${managedToolDigest(input)}`,
+          argsDigest,
           publicationId:
             (isShell || (call.name === 'monitor' && monitorAdmitted)) &&
             this.publication
@@ -2596,9 +3324,12 @@ export class HostedWorkspaceToolTurn {
           background: mcpInput === undefined && backgroundAdmitted,
           monitoring: mcpInput === undefined && monitorAdmitted,
           agent: mcpInput === undefined && agentAdmitted,
+          workflow: mcpInput === undefined && workflowAdmitted,
           agentBackground,
-          message: mcpInput === undefined && messageAdmitted,
+          message:
+            mcpInput === undefined && messageAdmitted && !memberMessageCommand,
           team,
+          command,
         };
       });
     };
@@ -2656,14 +3387,19 @@ export class HostedWorkspaceToolTurn {
     // child's wait is exactly the deadlock a shared Workspace creates
     // (parent turn held, child tool call queued behind it forever). v1
     // therefore takes the mount only for a batch with at least one
-    // non-agent tool. A session message (H4d-b) commits a record and
+    // non-agent tool; a workflow launch is a child launch of the same
+    // shape (#13803). A session message (H4d-b) commits a record and
     // touches no Runtime either, and H4e-b1's team tools touch only
     // the journal.
     if (
       !this.acquired &&
       requests.some(
         (request) =>
-          request.agent !== true && request.message !== true && !request.team,
+          request.agent !== true &&
+          request.workflow !== true &&
+          request.message !== true &&
+          !request.team &&
+          request.command !== true,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -2968,11 +3704,19 @@ export class HostedWorkspaceToolTurn {
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
         if (refusals[ordinal] !== undefined) continue;
-        // A child-agent launch has no Runtime execution to reserve: the
-        // control plane's relay owns its side effect, so it never enters
-        // the Broker pipeline below. Nor does a session message or a team
-        // tool, which commit only to this Session's journal.
-        if (request.agent || request.message || request.team) continue;
+        // A child launch has no Runtime execution to reserve: the control
+        // plane's relay owns its side effect, so it never enters the
+        // Broker pipeline below. Nor does a session message, a team tool,
+        // or a session command, which commit only to this Session's
+        // journal.
+        if (
+          request.agent ||
+          request.message ||
+          request.team ||
+          request.command ||
+          request.workflow
+        )
+          continue;
         if (request.mcp) {
           const renewed = this.mcp!.toolInput(
             request.call.name,
@@ -2999,7 +3743,9 @@ export class HostedWorkspaceToolTurn {
         let executionCallId: string;
         try {
           prepared =
-            (request.isShell || request.monitoring) && this.publication
+            (request.isShell || request.monitoring) &&
+            this.publication &&
+            request.argsDigest !== undefined
               ? await this.broker.prepareV3(
                   request.runtimeCallId,
                   request.argsDigest,
@@ -3110,7 +3856,10 @@ export class HostedWorkspaceToolTurn {
             runtimeBindingId: prepared.runtimeBindingId,
             bindingGeneration: prepared.bindingGeneration,
             runtimeCallId: request.runtimeCallId,
-            argsDigest: request.argsDigest,
+            // Admitted-after-dropdown shells never hold a loose digest:
+            // prepareV3's own gate means a call under the protocol ceiling
+            // was refused long before this map gets another entry.
+            argsDigest: request.argsDigest as string,
             requestDigest: request.digest,
             argsRef: routeRef,
             intentSequence: intent.lastSequence,
@@ -3163,7 +3912,9 @@ export class HostedWorkspaceToolTurn {
           ),
           ordinal,
           inputDigest:
-            request.isShell && this.publication
+            request.isShell &&
+            this.publication &&
+            request.argsDigest !== undefined
               ? request.argsDigest.slice(7)
               : (request.inputDigest ?? request.digest.slice(7)),
           progressCursor: null,
@@ -3197,7 +3948,7 @@ export class HostedWorkspaceToolTurn {
                 // carries the bare input digest. Registration must name the
                 // same lane's value or the worker's prepare never matches it.
                 argsDigest: prepared
-                  ? request.argsDigest
+                  ? (request.argsDigest as string)
                   : request.inputDigest!,
               },
               capture: {
@@ -3349,6 +4100,27 @@ export class HostedWorkspaceToolTurn {
         renewTimer.unref();
       }
       const responses: Part[] = [];
+      // b3b decision 4: the batch's command park names every command call
+      // that survived validation; the first of them commits the checkpoint.
+      const commandRuns: HarnessCommandWaitRun[] = requests.flatMap(
+        (request, index) =>
+          request.command && refusals[index] === undefined
+            ? [
+                {
+                  commandId: sessionCommandId({
+                    senderSessionId:
+                      this.session.authority.sessionHeader.sessionKey.sessionId,
+                    promptKey: hostedPromptKey(this.promptId),
+                    callId: request.call.callId,
+                  }),
+                  functionCallId: request.call.callId,
+                  toolName: request.call.name,
+                  modelMessageId: messageId,
+                  folded: false,
+                },
+              ]
+            : [],
+      );
       for (const [index, request] of requests.entries()) {
         const refused = refusal(index);
         if (refused) {
@@ -3368,9 +4140,31 @@ export class HostedWorkspaceToolTurn {
           );
           continue;
         }
+        if (request.command) {
+          responses.push(
+            ...(await this.acceptSessionCommand(
+              request,
+              model,
+              signal,
+              commandRuns,
+            )),
+          );
+          continue;
+        }
         if (request.team) {
           responses.push(
             ...(await this.acceptTeamTool(request, model, signal)),
+          );
+          continue;
+        }
+        if (request.workflow) {
+          responses.push(
+            ...(await this.acceptChildWorkflow(
+              request,
+              model,
+              signal,
+              messageId,
+            )),
           );
           continue;
         }
@@ -3670,7 +4464,10 @@ export class HostedWorkspaceToolTurn {
     }
   }
 
-  private encodeToolInput(payload: { toolName: string; input: unknown }) {
+  private encodeToolInput(payload: {
+    toolName: string;
+    input: unknown;
+  }): HostedEncodedToolInput {
     const payloadJson = JSON.stringify(payload);
     const inputBytes = Buffer.from(
       JSON.stringify({
@@ -3684,9 +4481,7 @@ export class HostedWorkspaceToolTurn {
       inputBytes.length >
       HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
     )
-      throw new Error(
-        'Hosted tool input exceeds the inline Session Store limit.',
-      );
+      throw new HostedToolInputInlineLimitError();
     return {
       payloadJson,
       inputBytes,
@@ -3790,7 +4585,7 @@ export class HostedWorkspaceToolTurn {
       monitorRecord?.stopReason === null &&
       monitorRecord.run.state !== 'recovery_blocked'
     ) {
-      await this.resumeMonitorWatch(executionCallId);
+      await this.resumeMonitorWatch(executionCallId, saved.runtimeCallId);
     }
     let ref: ManagedSessionDurableRef;
     let converted: Part[];
@@ -4301,7 +5096,9 @@ export class HostedWorkspaceToolTurn {
         ? prompt
         : teamMemberPreamble(
             member,
-            joining ? false : this.teams!.memberPlanMode(member),
+            joining
+              ? request.call.args['plan_mode_required'] === true
+              : this.teams!.memberPlanMode(member),
           ) + prompt;
     // The envelope bound is enforced by the admission's byte_limit
     // refusal — but the encoder throws a size error before that branch
@@ -4399,6 +5196,7 @@ export class HostedWorkspaceToolTurn {
         teamId: member.teamId,
         name: member.name,
         childRunId,
+        planModeRequired: request.call.args['plan_mode_required'] === true,
       });
       if ('ended' in joined) {
         // A run that finished first still delivers its result, unlabeled.
@@ -4432,7 +5230,125 @@ export class HostedWorkspaceToolTurn {
     const started = convertToFunctionResponse(
       request.call.name,
       request.call.callId,
-      [{ text: hostedAgentBackgroundStartedText(taskId) + membership }],
+      [
+        {
+          text:
+            hostedChildBackgroundStartedText('child_agent', taskId) +
+            membership,
+        },
+      ],
+    );
+    await this.commit('tool_result', started, model);
+    return started;
+  }
+
+  /**
+   * The workflow launch of the batch (#13803 K1): the same discipline as
+   * {@link acceptChildAgent}, with the script-derived pin opening the chain
+   * and the workflow envelope as the launch evidence.
+   */
+  private async acceptChildWorkflow(
+    request: {
+      call: ToolCallRequestInfo;
+      agentBackground: boolean;
+    },
+    model: string,
+    signal: AbortSignal,
+    modelMessageId: string,
+  ): Promise<Part[]> {
+    if (signal.aborted) {
+      const skipped = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        'The turn was cancelled before this workflow was admitted.',
+      );
+      await this.commit('tool_result', skipped, model);
+      return skipped;
+    }
+    const children = this.childAgents!;
+    const authority = this.session.authority;
+    const key = authority.sessionHeader.sessionKey;
+    const script = request.call.args['script'] as string;
+    const args = request.call.args['args'];
+    const childRunId = this.childRunIdFor(request.call.callId);
+    // The launch pin (decision 2): computed from the exact script bytes
+    // that ride the envelope — the child re-verifies before it runs.
+    const definition = workflowDefinitionPin(script);
+    let envelopeBytes: number;
+    try {
+      envelopeBytes = encodeWorkflowLaunchEnvelope({
+        definition,
+        script,
+        args: args ?? null,
+      }).byteLength;
+    } catch (cause) {
+      if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+      envelopeBytes = Number.POSITIVE_INFINITY;
+    }
+    if (children.record(childRunId) === undefined) {
+      const admission = childLaunchAdmission({
+        workspaceMode: 'shared',
+        childWorkspaces: false,
+        sameDefinition: true,
+        closing: authority.currentActivation?.phase !== 'active',
+        activeInScope: children.activeChildRunsOf(key.sessionId).length,
+        launchedInScope: children.launchedChildRunsOf(key.sessionId).length,
+        envelopeBytes,
+      });
+      if (!admission.admitted) {
+        const refused = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          `Hosted workflow refused this launch (${admission.reason}).`,
+        );
+        await this.commit('tool_result', refused, model);
+        return refused;
+      }
+    }
+    const launched = await children.admitWorkflow({
+      childRunId,
+      ownerScopeId: key.sessionId,
+      rootSessionId: key.sessionId,
+      completion: request.agentBackground ? 'sent' : 'tool',
+      script,
+      args: args ?? null,
+      definition,
+      workingDirectory: '.',
+      executionCallId: childRunId,
+    });
+    this.agentDispatched.add(request.call.callId);
+    if (!request.agentBackground) {
+      // The durable wait (#13708), parked exactly as acceptChildAgent parks
+      // it: without it a Harness restart declines this Turn with
+      // unresolved_after_settle while the child keeps running.
+      await this.harness.commitAwaitAgent(
+        [
+          {
+            childRunId,
+            functionCallId: request.call.callId,
+            toolName: request.call.name,
+            modelMessageId,
+            consumed: false,
+          },
+        ],
+        { turnId: this.promptId, promptId: this.promptId },
+        { attemptId: modelMessageId, routeRef: launched.inputRef },
+      );
+      return await this.awaitChildToolResult(
+        children,
+        request,
+        childRunId,
+        model,
+        signal,
+      );
+    }
+    const taskId = managedChildTaskId(key.sessionId, childRunId);
+    const started = convertToFunctionResponse(
+      request.call.name,
+      request.call.callId,
+      [{ text: hostedChildBackgroundStartedText('workflow', taskId) }],
     );
     await this.commit('tool_result', started, model);
     return started;
@@ -4497,6 +5413,10 @@ export class HostedWorkspaceToolTurn {
         args,
         this.childRunIdFor(callId),
         `${hostedPromptKey(this.promptId)}:`,
+        {
+          closing: this.session.authority.currentActivation?.phase !== 'active',
+          childWorkspaces: this.childWorkspaces,
+        },
       );
       answer = (each) =>
         convertToFunctionResponse(name, callId, [{ text: each }]);
@@ -4521,6 +5441,533 @@ export class HostedWorkspaceToolTurn {
     }
     await this.commit('tool_result', parts, model);
     return parts;
+  }
+
+  /**
+   * H4e-b3 decision 4 and 6 (b3c's decision 8): one member board
+   * command's argument check, and the batch rule — a command call shares
+   * its batch only with other command calls and with `send_message`
+   * (whose member-addressed form is one, while to `"parent"` stays the
+   * journal-only plain lane), since a command parks the Turn while the
+   * leader answers.
+   */
+  private commandArgumentError(
+    call: ToolCallRequestInfo,
+    batch: readonly ToolCallRequestInfo[],
+  ): string | undefined {
+    const keys: Record<string, readonly string[]> = {
+      exit_plan_mode: ['plan'],
+      task_list: ['status', 'owner', 'blockedBy'],
+      task_create: ['subject', 'description', 'activeForm', 'metadata'],
+      task_update: [
+        'taskId',
+        'status',
+        'owner',
+        'subject',
+        'description',
+        'activeForm',
+        'metadata',
+        'addBlocks',
+        'addBlockedBy',
+      ],
+    };
+    const unsupported = Object.keys(call.args).find(
+      (key) => !keys[call.name]?.includes(key),
+    );
+    if (unsupported !== undefined)
+      return `Hosted ${call.name} received unsupported argument ${JSON.stringify(unsupported)}.`;
+    if (
+      batch.some(
+        (other) =>
+          other !== call &&
+          !this.commandToolNames.has(other.name) &&
+          other.name !== 'send_message',
+      )
+    )
+      return `Hosted ${call.name} cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run board commands in their own batch or beside send_message.`;
+    if (
+      call.name === 'exit_plan_mode' &&
+      (typeof call.args['plan'] !== 'string' || !call.args['plan'].trim())
+    )
+      return 'Hosted exit_plan_mode requires a nonempty plan.';
+    if (call.name === 'task_create') {
+      if (
+        typeof call.args['subject'] !== 'string' ||
+        !(call.args['subject'] as string).trim()
+      )
+        return 'Hosted task_create requires a nonempty subject.';
+      if (
+        typeof call.args['description'] !== 'string' ||
+        !(call.args['description'] as string).trim()
+      )
+        return 'Hosted task_create requires a nonempty description.';
+    }
+    if (
+      call.name === 'task_update' &&
+      (typeof call.args['taskId'] !== 'string' ||
+        !(call.args['taskId'] as string).trim())
+    )
+      return 'Hosted task_update requires the taskId of the task to update.';
+    if (
+      call.args['status'] !== undefined &&
+      !TASK_STATUSES.includes(call.args['status'] as string)
+    )
+      return `Hosted ${call.name} status must be one of ${TASK_STATUSES.join(', ')}.`;
+    return undefined;
+  }
+
+  /**
+   * H4e-b3 decision 4: one member board command. Before the batch's first
+   * command call runs, the Turn commits the `await_command` checkpoint
+   * naming every command call of the batch; each call then commits its
+   * outbound entry and polls its own journal for the reply, as
+   * `await_agent` does for a child's acceptance, never holding the funnel
+   * chain the relay's `handover` and `answered` commit on. The wait ends
+   * at the reply, at 2 minutes from the entry's own commit, or with the
+   * Turn; once one call of the Turn timed out, every later command call
+   * of it refuses at once.
+   */
+  /** Decision 4's lock is the Turn's durable state, not just Turn
+   * memory: every checkpoint of the Turn carries it, so a replacement
+   * owner re-arms from whichever one it resumes, and a timed-out leader
+   * stays unanswering for every later command, across restarts as across
+   * seconds. */
+  private async syncCommandTimedOutFromDurable(): Promise<void> {
+    if (this.commandTimedOut) return;
+    const authorization =
+      await this.session.authority.harnessRunAuthorization();
+    if (
+      authorization.status === 'runnable' &&
+      harnessCommandLocked(authorization.checkpoint, this.promptId)
+    )
+      this.commandTimedOut = true;
+  }
+
+  private async acceptSessionCommand(
+    request: { call: ToolCallRequestInfo },
+    model: string,
+    signal: AbortSignal,
+    batchRuns: readonly HarnessCommandWaitRun[],
+  ): Promise<Part[]> {
+    const { name, callId, args } = request.call;
+    const commands = this.commands;
+    if (commands === undefined)
+      throw new Error('A member command call has no command funnel.');
+    await this.syncCommandTimedOutFromDurable();
+    const kind: SessionCommandKind =
+      name === 'task_list'
+        ? 'board_read'
+        : name === 'send_message'
+          ? 'member_message'
+          : name === 'exit_plan_mode'
+            ? 'plan_submit'
+            : 'board_write';
+    const key = this.session.authority.sessionHeader.sessionKey;
+    const commandId = sessionCommandId({
+      senderSessionId: key.sessionId,
+      promptKey: hostedPromptKey(this.promptId),
+      callId,
+    });
+    // Before this batch's first command call runs, the park names every
+    // command call of the batch. Batch siblings replay the same run set;
+    // a fully folded earlier batch left no durable wait, and a later
+    // batch of this Turn parks afresh under its own run set.
+    const parkKey = batchRuns.map((run) => run.commandId).join(':');
+    if (!this.commandParks.has(parkKey)) {
+      const argsRef = await this.session.resources.publish(
+        'managed-command-args',
+        Buffer.from(JSON.stringify(args), 'utf8'),
+      );
+      await this.harness.commitAwaitCommand(
+        batchRuns,
+        { turnId: this.promptId, promptId: this.promptId },
+        {
+          holdsWorkspaceMount: this.acquired,
+          attempt: {
+            attemptId: batchRuns[0]?.modelMessageId ?? this.promptId,
+            routeRef: argsRef,
+          },
+        },
+      );
+      this.commandParks.add(parkKey);
+    }
+    const answer = async (text: string, failed: boolean): Promise<Part[]> => {
+      const parts = failed
+        ? convertToFunctionErrorResponse(name, callId, [], text)
+        : convertToFunctionResponse(name, callId, [{ text }]);
+      await this.commit('tool_result', parts, model);
+      return parts;
+    };
+    if (this.commandTimedOut) {
+      // The lock refuses only a call that sent nothing. A call whose
+      // outbound already exists is the one whose own wait timed out,
+      // named again by a re-driven batch: its journal answers it.
+      const parts =
+        commands.command(commandId) === undefined
+          ? await answer(SESSION_COMMAND_LEADER_UNANSWERING_TEXT, true)
+          : await this.answerCommandByJournal(
+              commands,
+              request,
+              commandId,
+              model,
+            );
+      // The locked run still folds, or the Turn's wait never completes —
+      // its answer rides the batch the same as a call that ran.
+      await this.harness.resolveAwaitCommand(commandId, { timedOut: true });
+      return parts;
+    }
+    if (signal.aborted) {
+      return answer('The turn was cancelled before this tool call ran.', true);
+    }
+    try {
+      await commands.runCommand({
+        commandId,
+        kind,
+        args: { ...args },
+        executionCallId: this.childRunIdFor(callId),
+        closing: this.session.authority.currentActivation?.phase !== 'active',
+      });
+    } catch (cause) {
+      // byte_limit and budget_exhausted are the funnel's member-facing
+      // refusals; a store fault is recovery's, never the call's answer.
+      if (cause instanceof ManagedSessionRecordError) {
+        const parts = await answer(cause.message, true);
+        // A normal local refusal still owes the parked wait its fold —
+        // a durable wait it leaves behind turns the Turn's next call
+        // into a recovery fault.
+        await this.harness.resolveAwaitCommand(commandId);
+        return parts;
+      }
+      throw cause;
+    }
+    // The bound measures from the entry's own commit, so a resumed wait
+    // keeps what is left instead of a fresh 2 minutes.
+    const anchor = commands.outboundCommittedAt(commandId) ?? Date.now();
+    const deadline = anchor + COMMAND_WAIT_MS;
+    for (;;) {
+      if (signal.aborted) {
+        const parts = await this.answerCommandByJournal(
+          commands,
+          request,
+          commandId,
+          model,
+        );
+        await this.harness.resolveAwaitCommand(commandId);
+        return parts;
+      }
+      const record = commands.command(commandId);
+      const state = record?.run.delivery?.state;
+      if (state === 'accepted' || state === 'consumed') {
+        const reply = await commands.readReply(commandId);
+        if (reply !== null) {
+          const parts = await this.commitCommandReply(
+            request,
+            reply.text,
+            reply.outcome === 'refused',
+            model,
+          );
+          await commands.commitConsumed(commandId);
+          await this.harness.resolveAwaitCommand(commandId);
+          return parts;
+        }
+      }
+      if (
+        state === 'rejected' ||
+        state === 'cancelled' ||
+        state === 'unknown'
+      ) {
+        const parts = await this.answerCommandByJournal(
+          commands,
+          request,
+          commandId,
+          model,
+        );
+        await this.harness.resolveAwaitCommand(commandId);
+        return parts;
+      }
+      if (Date.now() >= deadline) {
+        this.commandTimedOut = true;
+        // The lock is stamped at detection time — before this Turn's next
+        // commit, so a crash in the settle/tool_result window between the
+        // accepting-to-unknown write and its answer can never un-lock it.
+        await this.harness.markCommandWaitTimeout();
+        const parts = await this.answerCommandByJournal(
+          commands,
+          request,
+          commandId,
+          model,
+        );
+        // The fold restates the Turn's lock: a replacement owner of this
+        // Turn re-arms from it and refuses the next command too.
+        await this.harness.resolveAwaitCommand(commandId, {
+          timedOut: true,
+        });
+        return parts;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  /**
+   * Decision 14: the command call's answer by what its journal committed.
+   * A planned entry is cancelled and answered as not sent; a handed-over
+   * one says the command reached the leader and a write may have taken
+   * effect; rejected, cancelled and unknown are said so, with a reply
+   * that landed mid-race still read. The settle's conflict is the race's
+   * own evidence, so once it loses the journal is re-read and answered.
+   */
+  private async answerCommandByJournal(
+    commands: HostedSessionCommandSession,
+    request: { call: Pick<ToolCallRequestInfo, 'name' | 'callId'> },
+    commandId: string,
+    model: string,
+    journaled?: ReadonlySet<string>,
+  ): Promise<Part[]> {
+    const { name, callId } = request.call;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const record = commands.command(commandId);
+      if (record === undefined) {
+        // 未发送：没有记录要结算，直接给了计划态的答案，不再走
+        // settle（那只会抛 "has no record to revise"）。
+        const unsent = convertToFunctionErrorResponse(
+          name,
+          callId,
+          [],
+          sessionCommandEvidenceText('planned'),
+        );
+        if (!journaled?.has(callId))
+          await this.commit('tool_result', unsent, model);
+        return unsent;
+      }
+      const state = record.run.delivery?.state;
+      if (state === 'accepted' || state === 'consumed') {
+        const reply = await commands.readReply(commandId);
+        if (reply !== null) {
+          const parts = await this.commitCommandReply(
+            request,
+            reply.text,
+            reply.outcome === 'refused',
+            model,
+            journaled,
+          );
+          // A call consumes only the reply it commits now: one already
+          // answered may have read the not-sent or unknown evidence before
+          // the relay's reply landed, and never read this one.
+          if (!journaled?.has(callId)) await commands.commitConsumed(commandId);
+          return parts;
+        }
+        continue;
+      }
+      try {
+        if (state === 'planned') await commands.settle(commandId, 'cancelled');
+        if (state === 'accepting') await commands.settle(commandId, 'unknown');
+      } catch (cause) {
+        if (cause instanceof ManagedSessionConflictError) continue;
+        throw cause;
+      }
+      const parts = convertToFunctionErrorResponse(
+        name,
+        callId,
+        [],
+        sessionCommandEvidenceText(
+          // The accepted/consumed arm above returned already; what remains
+          // of the delivery vocabulary is exactly the settle-relevant five.
+          state as
+            | 'planned'
+            | 'accepting'
+            | 'rejected'
+            | 'cancelled'
+            | 'unknown',
+        ),
+      );
+      if (!journaled?.has(callId))
+        await this.commit('tool_result', parts, model);
+      return parts;
+    }
+    throw new Error(`Session command ${commandId} never settled.`);
+  }
+
+  /** A long board answer folds to the inline bound, as the team tools'. */
+  private async commitCommandReply(
+    request: { call: Pick<ToolCallRequestInfo, 'name' | 'callId'> },
+    text: string,
+    failed: boolean,
+    model: string,
+    journaled?: ReadonlySet<string>,
+  ): Promise<Part[]> {
+    const { name, callId } = request.call;
+    const make = (each: string): Part[] =>
+      failed
+        ? convertToFunctionErrorResponse(name, callId, [], each)
+        : convertToFunctionResponse(name, callId, [{ text: each }]);
+    let parts = make(text);
+    for (
+      let head = Math.floor(text.length / 2);
+      !this.messageFitsInline('tool_result', parts, model);
+      head = Math.floor(head / 2)
+    ) {
+      if (head === 0) throw new Error('Command answer cannot be recorded.');
+      parts = make(
+        text.slice(0, head) +
+          '\n… (truncated to fit the Session record; narrow task_list with its filters)',
+      );
+    }
+    if (!journaled?.has(callId)) await this.commit('tool_result', parts, model);
+    return parts;
+  }
+
+  /**
+   * The recovered arm of the command wait (decision 4): re-enter the poll
+   * the dead owner's acceptSessionCommand ran, for every run the
+   * checkpoint still owes, with what is left of the bound measured from
+   * the entry's own commit. A restart lost the Turn's in-memory mount,
+   * so the lease the checkpoint's flag names comes back first, and the
+   * journaled set keeps a replayed fold silent — the resolve still runs
+   * so the wait advances. A call already answered never consumes: what
+   * it read is the journaled answer, which may predate the reply.
+   */
+  async resumeCommandWaitRuns(
+    runs: readonly HarnessCommandWaitRun[],
+    holdsWorkspaceMount: boolean,
+    model: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const commands = this.commands;
+    if (commands === undefined)
+      throw new Error('Recovered command wait has no command funnel.');
+    if (holdsWorkspaceMount && !this.acquired) {
+      await this.acquire(false, signal);
+    }
+    const journaled = await journaledToolResultIds(this.session, this.promptId);
+    await this.syncCommandTimedOutFromDurable();
+    for (const run of runs) {
+      if (run.folded) continue;
+      const request = {
+        call: { name: run.toolName, callId: run.functionCallId },
+      };
+      const anchor = commands.outboundCommittedAt(run.commandId) ?? Date.now();
+      const deadline = anchor + COMMAND_WAIT_MS;
+      for (;;) {
+        const record = commands.command(run.commandId);
+        if (this.commandTimedOut) {
+          if (record === undefined) {
+            // A call the lock refused before it sent anything: the same
+            // fixed answer the live arm gives every later call.
+            const locked = convertToFunctionErrorResponse(
+              run.toolName,
+              run.functionCallId,
+              [],
+              SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
+            );
+            if (!journaled.has(run.functionCallId))
+              await this.commit('tool_result', locked, model);
+          } else if (!journaled.has(run.functionCallId)) {
+            // The call whose own wait timed out: the dead owner stamped
+            // the lock at detection and may have died before settling
+            // it. Its journal answers it — a planned entry cancelled as
+            // not sent, a handed-over one unknown — never the later
+            // calls' refusal, or the entry stays live for the relay to
+            // deliver after the wait has ended. A call already answered
+            // was settled first (the timeout arm settles, then answers),
+            // so a reply the relay copied in since is not what it read
+            // and is never consumed: it only folds.
+            await this.answerCommandByJournal(
+              commands,
+              request,
+              run.commandId,
+              model,
+              journaled,
+            );
+          }
+          await this.harness.resolveAwaitCommand(run.commandId, {
+            timedOut: true,
+          });
+          break;
+        }
+        if (record === undefined) {
+          // The checkpoint names a call whose outbound was never
+          // committed — the dead owner exited between the two steps,
+          // and no process will ever commit it now. This answer holds
+          // under any signal: a cancelled recovery must not fall into
+          // arm that would try (and fail) to settle a record that does
+          // not exist.
+          const unsent = convertToFunctionErrorResponse(
+            run.toolName,
+            run.functionCallId,
+            [],
+            sessionCommandEvidenceText('planned'),
+          );
+          if (!journaled.has(run.functionCallId))
+            await this.commit('tool_result', unsent, model);
+          await this.harness.resolveAwaitCommand(run.commandId);
+          break;
+        }
+        if (signal.aborted) {
+          await this.answerCommandByJournal(
+            commands,
+            request,
+            run.commandId,
+            model,
+            journaled,
+          );
+          await this.harness.resolveAwaitCommand(run.commandId);
+          break;
+        }
+        const state = record.run.delivery?.state;
+        if (state === 'accepted' || state === 'consumed') {
+          const reply = await commands.readReply(run.commandId);
+          if (reply !== null) {
+            await this.commitCommandReply(
+              request,
+              reply.text,
+              reply.outcome === 'refused',
+              model,
+              journaled,
+            );
+            // The same rule as the journal arm: only the reply committed
+            // now is the one the call read.
+            if (!journaled.has(run.functionCallId))
+              await commands.commitConsumed(run.commandId);
+            await this.harness.resolveAwaitCommand(run.commandId);
+            break;
+          }
+        }
+        if (
+          state === 'rejected' ||
+          state === 'cancelled' ||
+          state === 'unknown'
+        ) {
+          await this.answerCommandByJournal(
+            commands,
+            request,
+            run.commandId,
+            model,
+            journaled,
+          );
+          await this.harness.resolveAwaitCommand(run.commandId);
+          break;
+        }
+        if (Date.now() >= deadline) {
+          this.commandTimedOut = true;
+          // The lock is stamped at detection time — before the journal
+          // arm's next commit, so a crash between the settle and the
+          // tool_result write can never un-lock it.
+          await this.harness.markCommandWaitTimeout();
+          await this.answerCommandByJournal(
+            commands,
+            request,
+            run.commandId,
+            model,
+            journaled,
+          );
+          await this.harness.resolveAwaitCommand(run.commandId, {
+            timedOut: true,
+          });
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
   }
 
   /**
@@ -4580,8 +6027,10 @@ export class HostedWorkspaceToolTurn {
             request.call.callId,
             text,
             (parts) => this.messageFitsInline('tool_result', parts, model),
-            await childWorkspaceAnswerSuffix(record, acceptance, (ref) =>
-              this.session.resources.read(ref),
+            await childWorkspaceAnswerSuffix(
+              record.kind === 'child_agent' ? record : undefined,
+              acceptance,
+              (ref) => this.session.resources.read(ref),
             ),
           );
           if (!journaled?.has(request.call.callId))
@@ -4601,7 +6050,10 @@ export class HostedWorkspaceToolTurn {
    * once per Session lifetime: the loop resumes an already-attached
    * record and is fed lines through the Session publisher's fan-out.
    */
-  private async resumeMonitorWatch(executionCallId: string): Promise<void> {
+  private async resumeMonitorWatch(
+    executionCallId: string,
+    runtimeCallId: string,
+  ): Promise<void> {
     // The lane is Shell-mode or the publication lane, whichever this turn
     // owns — the detached family's loops park on it either way.
     const lane = this.shell ?? this.backgroundLane;
@@ -4613,7 +6065,14 @@ export class HostedWorkspaceToolTurn {
     const argsBody = JSON.parse(
       (await this.session.resources.read(record.commandRef)).toString('utf8'),
     ) as Record<string, unknown>;
-    const executor = new HostedMonitorRemoteExecutor(this.publisher);
+    // The watch runs on this turn's Runtime Session; its auto-stop asks
+    // the worker there, and that Session outlives the turn as a hold.
+    const executor = new HostedMonitorRemoteExecutor(this.publisher, {
+      broker: this.broker,
+      sessionKey: this.session.authority.sessionHeader.sessionKey,
+      executionCallId,
+      runtimeCallId,
+    });
     const loop = new HostedMonitorLoop(
       this.monitors,
       executionCallId,

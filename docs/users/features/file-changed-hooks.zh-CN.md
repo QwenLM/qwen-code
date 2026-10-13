@@ -50,6 +50,8 @@
 这些 hook 接收会话已监听路径的事件，包括动态路径。事件筛选使用文件 basename 和
 [现有 matcher 规则](hooks.md#matcher-patterns)。
 
+正则表达式只筛选已监听路径的事件；请通过 `watchPaths` 显式注册对应文件或目录。
+
 ## 监听目录及 cwd 外的路径
 
 执行成功的同步 `SessionStart` hook 可通过 `hookSpecificOutput.watchPaths` 注册绝对文件

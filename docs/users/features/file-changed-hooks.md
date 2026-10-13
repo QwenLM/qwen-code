@@ -53,6 +53,9 @@ session's watched paths, including dynamic paths. Events are filtered against
 the file's basename using the
 [existing matcher rules](hooks.md#matcher-patterns).
 
+Regex patterns filter already watched paths; register their files or directories
+explicitly through `watchPaths`.
+
 ## Watch directories and paths outside cwd
 
 A successful synchronous `SessionStart` hook can register absolute files or directories

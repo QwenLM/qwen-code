@@ -3,6 +3,14 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## Managed 工作区与模型
+
+`ManagedAgentWebShell` 可通过 `enableWorkspaceBinding` 启用 Java 授权工作区列表，并通过 `modelPresets={[{ agentId: 'agent-model-a', label: 'Model A' }]}` 提供新建会话的模型预设。每个 `agentId` 必须由宿主预先发布为模型专属 AgentDefinition；服务端模型允许列表和定义中的工具、审批设置决定实际准入。浏览器不发布定义或传入模型凭证。模型预设名称是宿主展示数据，已有会话显示其 Agent 身份；实际模型及修订由 Java 固定。
+
+Java 新建页直接复用标准 Web Shell 的欢迎标题、输入框、原生模型菜单和工作区底栏。选择工作区、相对目录和模型后输入任务并发送，一次请求创建会话与首个 Turn；响应丢失保留冻结请求，已创建后的读回重试不会再次发送输入。旧 provider 的空创建能力保持兼容。已有会话更换模型或工作区应新建，绑定工作区内切换目录仍使用已有修订校验流程。对话复用标准消息列表及输入框布局，保留 Managed 审批、取消、结果与未确认请求重试；不提供 daemon 附件、文件引用或斜杠命令。
+
+本地 Vite Java 演示可添加 `managedWorkspace=1`，或设置 `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true`。`VITE_MANAGED_AGENT_MODEL_PRESETS` 为上述预设数组的 JSON；`VITE_MANAGED_AGENT_ACTOR_ID` 可通过 `X-Qwen-Actor-Id` 提供本地用户身份，同时进入存储隔离 scope。Java 必须已有对应工作区授权，并显式配置 `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`；该本地开发配置仅用于可信 loopback 环境。文件工具执行还需要 Java 文档中的 Workspace files、Session Store、Broker mounts 和 Harness Broker 连接配置。
+
 ## Managed 工具结果
 
 `ManagedAgentWebShell` 与 `createJavaManagedAgentProvider` 支持 Java O3 工具结果。
@@ -32,6 +40,28 @@ Shell 执行。卡片区分执行、捕获与交付状态，面板按固定版�
 支持具备进程替换能力的 macOS/Linux CLI 服务，以及独立安装或受管理的全局 npm
 安装。关闭 `general.enableAutoUpdate`、旧服务、桌面 shell、不支持的安装及嵌入式
 服务不显示按钮。临时配对连接也不提供更新入口。使用自定义 `sidebar.footer.items` 时，通过 `update` 项控制此功能。
+
+## 工作区文件浏览
+
+独立页面右侧拓展区的「文件」入口打开只读浏览器：未选择文件时仅展示
+Pierre 目录树，点击文件后左侧显示内容、右侧保留目录树。Markdown、HTML 和图片沿用现有预览，文本源码由 Pierre File
+高亮展示；Markdown 和 HTML 可以切换预览与源码。目录按需加载，筛选仅覆盖
+已加载路径，不因筛选而读取目录；输入保留原文，零匹配时显示明确提示。刷新重新加载根目录和当前文件，并收起目录。窄面板可隐藏文件树。
+中间分隔线可拖动调整两列宽度，也支持键盘方向键；文件树底部保留留白。
+深层目录和长文件名可通过整棵树的横向滚动查看，不压缩名称。
+目录列表最多显示前 2,000 个条目，截断时有提示。符号链接不作为目录递归展开。
+切换页签保留目录展开、选中文件、源码模式、筛选及滚动位置。文件页签保存
+工作区归属，展开与选中状态不会跨页面刷新保存。不接入 Git，
+不编辑文件，也不自动把打开的文件加入对话上下文。文件右键菜单支持复制相对
+或绝对路径、下载、在独立页签预览 Markdown/HTML/图片，以及通过「引用」插入
+与输入框 `@` 选择文件相同的标签。仅当前工作区文件可引用，不自动发送消息。
+
+嵌入式宿主通过 `rightPanel={{ items: ['files', 'review', 'sideTask'] }}` 启用。
+此入口需要有效、可信且无歧义的 daemon 工作区归属。
+
+Excel（`.xlsx`）支持内联预览，也可通过右键「预览」在独立页签打开；重复打开同一文件复用页签，其他 Excel 格式仍仅支持下载。
+文件树源码预览在读取前限制为 4 MiB，更大的文件请通过右键菜单下载。
+导入失败仅在凭据可恢复的独立页面中提供重载；嵌入宿主或仅内存凭据时提供关闭文件，保留对话和宿主页面。
 
 ## 开发网页预览
 

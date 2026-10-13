@@ -21,6 +21,7 @@ export type ManagedAgentRuntimeState =
 
 export interface ManagedAgentSessionSummary {
   sessionId: string;
+  agentId?: string;
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
@@ -190,6 +191,8 @@ export interface ManagedAgentProvider {
   };
   readonly workspaceBinding?: {
     readonly agentId: string;
+    /** Host-published model-specific AgentDefinitions available for new Sessions. */
+    readonly modelPresets?: readonly { agentId: string; label: string }[];
     list(
       options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
     ): Promise<{
@@ -204,6 +207,15 @@ export interface ManagedAgentProvider {
     ): Promise<ManagedAgentWorkspace>;
     createEmpty(
       request: { agentId: string; workspaceId: string; cwdRelative: string },
+      options: ManagedAgentCommandOptions,
+    ): Promise<{ sessionId: string }>;
+    createSession?(
+      request: {
+        agentId: string;
+        workspaceId: string;
+        cwdRelative: string;
+        text: string;
+      },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
   };
