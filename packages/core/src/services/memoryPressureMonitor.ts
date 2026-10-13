@@ -735,14 +735,11 @@ export class MemoryPressureMonitor extends EventEmitter {
             },
           );
           if (result.meta) {
-            const cancellationReason =
-              chat.getLastTurnCancellationReason?.() ??
-              (chat.isLastTurnCancelled() ? 'user' : undefined);
-            const confirmationId =
-              chat.getLastTurnCancellationConfirmationId?.();
-            chat.setHistory(result.history, chat.getCompletedToolCallIds());
-            if (cancellationReason)
-              chat.markLastTurnCancelled(cancellationReason, confirmationId);
+            chat.setHistory(
+              result.history,
+              chat.getCompletedToolCallIds(),
+              true,
+            );
             const memoryManager = this.coreConfig.getMemoryManager();
             if (result.meta.unresolvedEvictedMemoryBodies > 0) {
               memoryManager.markAllMemoryBodiesEvictedFromHistory();

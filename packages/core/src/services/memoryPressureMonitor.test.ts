@@ -964,84 +964,49 @@ describe('MemoryPressureMonitor', () => {
   });
 
   describe('compact_history step', () => {
-    it('preserves cancellation when idle compaction clears only old tool results', async () => {
-      const { LlmChat } = await import('../core/llm-chat.js');
-      const chat = new LlmChat(
-        { getToolRegistry: () => undefined } as unknown as Config,
-        {},
-        [
-          ...readFileHistory(),
-          content('user', { text: 'cancelled request' }),
-          content(
-            'model',
-            fnCall('read_file', { path: '/latest.ts' }, 'latest'),
-          ),
-          content(
-            'user',
-            fnResponse('read_file', { output: 'latest' }, 'latest'),
-          ),
-        ],
-      );
-      chat.markLastTurnCancelled();
-      const monitor = createMonitor({
-        llmClient: { isInitialized: () => true, getChat: () => chat },
-      });
-
-      await checkAt(monitor, 11 * GB);
-
-      expect(
-        chat
-          .getHistory()
-          .some((entry) =>
-            entry.parts?.some(
-              (part) =>
-                part.functionResponse?.response?.['output'] ===
-                MICROCOMPACT_CLEARED_MESSAGE,
+    it.each([true, false])(
+      'preserves cancellation=%s when idle compaction clears old tool results',
+      async (cancelled) => {
+        const { LlmChat } = await import('../core/llm-chat.js');
+        const chat = new LlmChat(
+          { getToolRegistry: () => undefined } as unknown as Config,
+          {},
+          [
+            ...readFileHistory(),
+            content('user', { text: 'cancelled request' }),
+            content(
+              'model',
+              fnCall('read_file', { path: '/latest.ts' }, 'latest'),
             ),
-          ),
-      ).toBe(true);
-      expect(chat.isLastTurnCancelled()).toBe(true);
-      chat.addHistory(content('user', { text: 'new request' }));
-      expect(chat.isLastTurnCancelled()).toBe(false);
-    });
-
-    it('does not invent a cancellation when idle compaction runs on a clean chat', async () => {
-      const { LlmChat } = await import('../core/llm-chat.js');
-      const chat = new LlmChat(
-        { getToolRegistry: () => undefined } as unknown as Config,
-        {},
-        [
-          ...readFileHistory(),
-          content('user', { text: 'finished request' }),
-          content(
-            'model',
-            fnCall('read_file', { path: '/latest.ts' }, 'latest'),
-          ),
-          content(
-            'user',
-            fnResponse('read_file', { output: 'latest' }, 'latest'),
-          ),
-        ],
-      );
-      const monitor = createMonitor({
-        llmClient: { isInitialized: () => true, getChat: () => chat },
-      });
-
-      await checkAt(monitor, 11 * GB);
-
-      expect(
-        chat
-          .getHistory()
-          .some((entry) =>
-            entry.parts?.some(
-              (part) =>
-                part.functionResponse?.response?.['output'] ===
-                MICROCOMPACT_CLEARED_MESSAGE,
+            content(
+              'user',
+              fnResponse('read_file', { output: 'latest' }, 'latest'),
             ),
-          ),
-      ).toBe(true);
-      expect(chat.isLastTurnCancelled()).toBe(false);
-    });
+          ],
+        );
+        if (cancelled) chat.markLastTurnCancelled();
+        const monitor = createMonitor({
+          llmClient: { isInitialized: () => true, getChat: () => chat },
+        });
+
+        await checkAt(monitor, 11 * GB);
+
+        expect(
+          chat
+            .getHistory()
+            .some((entry) =>
+              entry.parts?.some(
+                (part) =>
+                  part.functionResponse?.response?.['output'] ===
+                  MICROCOMPACT_CLEARED_MESSAGE,
+              ),
+            ),
+        ).toBe(true);
+        expect(chat.isLastTurnCancelled()).toBe(cancelled);
+        chat.addHistory(content('user', { text: 'new request' }));
+        expect(chat.isLastTurnCancelled()).toBe(false);
+      },
+    );
 
     it('skips compaction when client is not initialized', async () => {
       const setHistory = vi.fn();

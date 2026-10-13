@@ -478,11 +478,9 @@ describe('build artifact — transcript entry (#11031)', () => {
     // imported SpreadsheetPreview chunk, so only the copy enters this graph.
     // That is the +2,000 this branch carried over the 1,325,000 budget, so
     // the merged ceiling is the two budgets added — 1,331,500 — rather than a
-    // fresh measurement of a merged build. This branch's interrupted-turn
-    // copy (#13436) lands in that same shared table and measures 1,325,202 on
-    // its own; merged with main at 14cc19b4bd the remainder measures
-    // 1,328,322. The ceiling leaves a small margin around that intentional
-    // UI; re-measure and lower it if the entry gets leaner.
+    // fresh measurement of a merged build. The ceiling leaves a small margin
+    // around that intentional UI; re-measure and lower it if the entry gets
+    // leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',

@@ -19527,45 +19527,19 @@ describe('createAcpSessionBridge', () => {
 
   describe('turn_complete promptCancelled', () => {
     it.each([
-      [
-        'cancelled',
-        { cancelledAt: 4_500, elapsedMs: 3_500 },
-        true,
-        'interrupted',
-      ],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: 3_500 }, true],
       [
         'cancelled',
         { cancelledAt: 4_500, elapsedMs: 3_500, reason: 'user' },
         true,
-        'user',
       ],
-      [
-        'end_turn',
-        { cancelledAt: 4_500, elapsedMs: 3_500 },
-        false,
-        'interrupted',
-      ],
-      [
-        'cancelled',
-        { cancelledAt: NaN, elapsedMs: 3_500 },
-        false,
-        'interrupted',
-      ],
-      [
-        'cancelled',
-        { cancelledAt: 4_500, elapsedMs: -1 },
-        false,
-        'interrupted',
-      ],
-      [
-        'cancelled',
-        { cancelledAt: 4_500, elapsedMs: Infinity },
-        false,
-        'interrupted',
-      ],
+      ['end_turn', { cancelledAt: 4_500, elapsedMs: 3_500 }, false],
+      ['cancelled', { cancelledAt: NaN, elapsedMs: 3_500 }, false],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: -1 }, false],
+      ['cancelled', { cancelledAt: 4_500, elapsedMs: Infinity }, false],
     ])(
       'validates %s cancellation metadata %j',
-      async (stopReason, metadata, valid, reason) => {
+      async (stopReason, metadata, valid) => {
         const events: BridgeEvent[] = [];
         const handle = makeChannel({
           promptImpl: () =>
@@ -19597,7 +19571,10 @@ describe('createAcpSessionBridge', () => {
         if (valid) {
           expect(terminal?.data).toHaveProperty('promptCancelled', {
             ...metadata,
-            reason,
+            reason:
+              'reason' in metadata && metadata.reason === 'user'
+                ? 'user'
+                : 'interrupted',
           });
         } else {
           expect(terminal?.data).not.toHaveProperty('promptCancelled');
@@ -23289,69 +23266,8 @@ describe('createAcpSessionBridge', () => {
       },
     );
 
-    it('keeps a caller-declared interruption when the cancel lands before dispatch', async () => {
-      const prompt = deferred<PromptResponse>();
-      const handle = makeChannel({ promptImpl: () => prompt.promise });
-      const bridge = makeBridge({ channelFactory: async () => handle.channel });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const resolveSpy = vi.spyOn(
-        SessionAttachmentStore.prototype,
-        'resolveContent',
-      );
-      const gate =
-        deferred<
-          Awaited<ReturnType<SessionAttachmentStore['resolveContent']>>
-        >();
-      resolveSpy.mockReturnValueOnce(gate.promise);
-      try {
-        const running = bridge.sendPrompt(
-          session.sessionId,
-          {
-            sessionId: session.sessionId,
-            prompt: [{ type: 'text', text: 'work' }],
-          },
-          undefined,
-          { promptId: 'infra-1' },
-        );
-        void running.catch(() => {});
-        // Parked in attachment resolution, so `dispatched` is still unset and
-        // the direct-forward gate is false: only the abort-driven forward can
-        // carry the reason to the child.
-        await vi.waitFor(() =>
-          expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1),
-        );
-        await bridge.cancelSession(session.sessionId, {
-          sessionId: session.sessionId,
-          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
-        });
-        gate.resolve([{ type: 'text', text: 'work' }]);
-        // Re-labelling an infrastructure interrupt as an explicit user
-        // cancellation makes the child stamp `cancelledAt`, which durably
-        // excludes the turn from recovery.
-        await vi.waitFor(() =>
-          expect(
-            handle.agent.extMethodCalls.filter(
-              ({ method }) => method === PROMPT_CANCEL_METHOD,
-            ),
-          ).toEqual([
-            {
-              method: PROMPT_CANCEL_METHOD,
-              params: {
-                sessionId: session.sessionId,
-                _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
-              },
-            },
-          ]),
-        );
-      } finally {
-        resolveSpy.mockRestore();
-        prompt.resolve({ stopReason: 'cancelled' });
-        await bridge.shutdown();
-      }
-    });
-
-    it.each(['cancel', 'remove'] as const)(
-      'upgrades a pre-dispatch interruption via user %s before dispatch',
+    it.each(['interrupted', 'cancel', 'remove'] as const)(
+      'preserves pre-dispatch cancellation intent via %s',
       async (action) => {
         const prompt = deferred<PromptResponse>();
         const handle = makeChannel({ promptImpl: () => prompt.promise });
@@ -23393,7 +23309,7 @@ describe('createAcpSessionBridge', () => {
               sessionId: session.sessionId,
               _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'user' },
             });
-          } else {
+          } else if (action === 'remove') {
             expect(
               bridge.removePendingPrompt(
                 session.sessionId,
@@ -23412,7 +23328,10 @@ describe('createAcpSessionBridge', () => {
                 method: PROMPT_CANCEL_METHOD,
                 params: {
                   sessionId: session.sessionId,
-                  _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'user' },
+                  _meta: {
+                    [PROMPT_CANCEL_REASON_META_KEY]:
+                      action === 'interrupted' ? 'interrupted' : 'user',
+                  },
                 },
               },
             ]),

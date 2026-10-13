@@ -15,7 +15,7 @@ import {
   getLastApiHistoryPromptId,
   getApiHistoryPromptId,
   restoreApiHistoryPromptIds,
-  isLastApiPromptCancelled,
+  getLastApiPromptCancellation,
   markApiHistoryPrompt,
 } from './session-api-history.js';
 
@@ -671,7 +671,7 @@ describe('cancelled prompt identity with automatic tails', () => {
       ];
       expect(getLastApiHistoryPromptId(history)).toBe('client-1');
       expect(
-        isLastApiPromptCancelled(history, [
+        getLastApiPromptCancellation(history, [
           { kind: 'prompt', promptId: 'client-1', daemonPromptId: 'daemon-1' },
           { kind: 'attempt', promptId: 'client-1', daemonPromptId: 'daemon-2' },
           {
@@ -681,11 +681,11 @@ describe('cancelled prompt identity with automatic tails', () => {
             cancelledAt: 100,
             cancelReason: 'user',
           },
-        ]),
-      ).toBe(true);
+        ])?.reason,
+      ).toBe('user');
       markApiHistoryPrompt(history[1]!, 'real-newer-input');
       expect(getLastApiHistoryPromptId(history)).toBe('real-newer-input');
-      expect(isLastApiPromptCancelled(history, [])).toBe(false);
+      expect(getLastApiPromptCancellation(history, [])).toBeUndefined();
     },
   );
   it('keeps untagged ordinary newer user input as an unknown ownership boundary', () => {

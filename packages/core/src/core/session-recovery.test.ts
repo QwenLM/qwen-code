@@ -443,19 +443,32 @@ describe('explicitly cancelled recorded turns', () => {
       planFor(conversationFromRecords([prompt(), toolResult()])).canContinue,
     ).toBe(true);
   });
-  it.each(['missing owner', 'duplicate owner', 'superseded'] as const)(
-    'conservatively gates the latest legacy cancellation with %s',
-    (ownership) => {
+  it.each([
+    ['missing owner', true],
+    ['duplicate owner', true],
+    ['superseded', true],
+    ['missing owner', false],
+    ['duplicate owner', false],
+    ['duplicate result', false],
+    ['different client', false],
+  ])(
+    'conservatively gates the latest legacy cancellation with %s (legacy=%s)',
+    (ownership, legacy) => {
       const owner = prompt();
       if (ownership === 'missing owner') delete owner.daemonPromptId;
       const terminal = result();
-      delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
+      if (legacy)
+        delete (terminal.systemPayload as { cancelReason?: string })
+          .cancelReason;
       const records = [
         owner,
         ...(ownership === 'duplicate owner'
           ? [{ ...prompt(), uuid: 'duplicate' }]
-          : []),
+          : ownership === 'different client'
+            ? [{ ...prompt(), promptId: 'other-client' }]
+            : []),
         terminal,
+        ...(ownership === 'duplicate result' ? [terminal] : []),
         ...(ownership === 'superseded'
           ? [result('completed', 'later-daemon')]
           : []),
@@ -469,6 +482,7 @@ describe('explicitly cancelled recorded turns', () => {
         ownership === 'superseded' ? undefined : 'daemon-1',
       );
       expect(plan.canAutoContinue).toBe(ownership === 'superseded');
+      expect(plan.requiresUserConfirmation).toBe(ownership !== 'superseded');
       expect(plan.canContinue).toBe(true);
     },
   );
@@ -520,26 +534,6 @@ describe('explicitly cancelled recorded turns', () => {
       ).toBe('interrupted_prompt');
     },
   );
-  it('refuses ambiguous prompt and terminal identities', () => {
-    const missingOwner = prompt();
-    delete missingOwner.daemonPromptId;
-    for (const messages of [
-      [missingOwner, result()],
-      [prompt(), prompt(), result()],
-      [prompt(), result(), result()],
-      [prompt(), { ...prompt(), promptId: 'other-client' }, result()],
-    ]) {
-      const plan = buildSessionRecoveryPlan({
-        sessionId: 'session-1',
-        conversation: conversationFromRecords(messages),
-        options: { allowAutoContinue: true },
-      });
-      expect(plan.canContinue).toBe(true);
-      expect(plan.cancellationConfirmationId).toBe('daemon-1');
-      expect(plan.canAutoContinue).toBe(false);
-      expect(plan.requiresUserConfirmation).toBe(true);
-    }
-  });
   it('does not reuse a terminal that precedes its user record', () => {
     expect(
       planFor(conversationFromRecords([result(), prompt()])).canContinue,

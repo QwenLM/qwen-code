@@ -6758,49 +6758,39 @@ describe('Session', () => {
       );
     });
 
-    it('marks a user entry appended after cancellation before the first send', async () => {
-      mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
-      mockFileHistoryService.makeSnapshot.mockImplementationOnce(async () => {
-        await session.cancelPendingPrompt();
-      });
-      await expect(
-        session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'cancel before send' }],
-        }),
-      ).resolves.toMatchObject({ stopReason: 'cancelled' });
-      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-      expect(mockChat.addHistory).toHaveBeenCalledWith(
-        expect.objectContaining({ role: 'user' }),
-      );
-      expect(mockChat.markLastTurnCancelled).toHaveBeenCalledOnce();
-    });
-
-    it('marks a cancelled pre-send preserve when the abort lands mid-preparation', async () => {
-      // The abort fires after the loop's entry guard (so the in-loop mark
-      // is skipped) but before the model request: the wrapper returns a
-      // null stream and the preserve path re-adds the user content.
-      mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
-      mockLlmClient.tryCompressChat.mockImplementationOnce(async () => {
-        await session.cancelPendingPrompt();
-        return {
-          originalTokenCount: 10,
-          newTokenCount: 5,
-          compressionStatus: core.CompressionStatus.NOOP,
-        };
-      });
-      await expect(
-        session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'cancel during preparation' }],
-        }),
-      ).resolves.toMatchObject({ stopReason: 'cancelled' });
-      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-      expect(mockChat.addHistory).toHaveBeenCalledWith(
-        expect.objectContaining({ role: 'user' }),
-      );
-      expect(mockChat.markLastTurnCancelled).toHaveBeenCalledOnce();
-    });
+    it.each(['snapshot', 'compression'] as const)(
+      'marks user content preserved after cancellation during %s',
+      async (stage) => {
+        mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
+        if (stage === 'snapshot') {
+          mockFileHistoryService.makeSnapshot.mockImplementationOnce(
+            async () => {
+              await session.cancelPendingPrompt();
+            },
+          );
+        } else {
+          mockLlmClient.tryCompressChat.mockImplementationOnce(async () => {
+            await session.cancelPendingPrompt();
+            return {
+              originalTokenCount: 10,
+              newTokenCount: 5,
+              compressionStatus: core.CompressionStatus.NOOP,
+            };
+          });
+        }
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'cancel before send' }],
+          }),
+        ).resolves.toMatchObject({ stopReason: 'cancelled' });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({ role: 'user' }),
+        );
+        expect(mockChat.markLastTurnCancelled).toHaveBeenCalledOnce();
+      },
+    );
 
     it.each([false, true])(
       'marks a pre-send admission cancel only with user intent (upgraded=%s)',
@@ -6832,56 +6822,71 @@ describe('Session', () => {
       },
     );
 
-    it('binds user cancellation to the chat created by compression', async () => {
-      mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
-      const replacementChat = Object.create(mockChat) as LlmChat;
-      let pushed = 0;
-      replacementChat.getUserContentPushCount = vi.fn(() => pushed);
-      replacementChat.markLastTurnCancelled = vi.fn(() => {
-        replacementChat.isLastTurnCancelled = vi.fn().mockReturnValue(true);
-      });
-      mockLlmClient.tryCompressChat.mockImplementationOnce(async () => {
-        mockLlmClient.getChat.mockReturnValue(replacementChat);
-        return {
-          originalTokenCount: 10,
-          newTokenCount: 5,
-          compressionStatus: core.CompressionStatus.COMPRESSED,
-        };
-      });
-      let consumed!: () => void;
-      const started = new Promise<void>((resolve) => {
-        consumed = resolve;
-      });
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      replacementChat.sendMessageStream = vi.fn().mockResolvedValue(
-        (async function* () {
-          pushed++;
-          yield {
-            type: core.StreamEventType.CHUNK,
-            value: { text: 'partial' },
-          } as const;
-          consumed();
-          await gate;
-        })(),
-      );
-      const prompt = session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'hello' }],
-      });
-      await started;
-      await session.cancelPendingPrompt();
-      release();
-      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
-      expect(replacementChat.markLastTurnCancelled).toHaveBeenCalledOnce();
-      expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
-      expect(session.getRecoveryStatus()).toEqual({
-        kind: 'clean',
-        canContinue: false,
-      });
-    });
+    it.each([false, true])(
+      'binds live cancellation to the current chat after clearing its controller (compressed=%s)',
+      async (compressed) => {
+        let pushed = 0;
+        mockChat.getUserContentPushCount = vi.fn(() => pushed);
+        const currentChat = compressed
+          ? (Object.create(mockChat) as LlmChat)
+          : mockChat;
+        if (compressed) {
+          currentChat.getUserContentPushCount = vi.fn(() => pushed);
+          currentChat.markLastTurnCancelled = vi.fn(() => {
+            currentChat.isLastTurnCancelled = vi.fn().mockReturnValue(true);
+          });
+          mockLlmClient.tryCompressChat.mockImplementationOnce(async () => {
+            mockLlmClient.getChat.mockReturnValue(currentChat);
+            return {
+              originalTokenCount: 10,
+              newTokenCount: 5,
+              compressionStatus: core.CompressionStatus.COMPRESSED,
+            };
+          });
+        }
+        let consumed!: () => void;
+        const started = new Promise<void>((resolve) => {
+          consumed = resolve;
+        });
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        currentChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            pushed++;
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: { text: 'partial' },
+            } as const;
+            consumed();
+            await gate;
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: { text: 'ignored' },
+            } as const;
+          })(),
+        );
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        await started;
+        await session.cancelPendingPrompt();
+        release();
+        await expect(prompt).resolves.toMatchObject({
+          stopReason: 'cancelled',
+        });
+        expect(currentChat.markLastTurnCancelled).toHaveBeenCalledOnce();
+        if (compressed) {
+          expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
+          expect(session.getRecoveryStatus()).toEqual({
+            kind: 'clean',
+            canContinue: false,
+          });
+        }
+      },
+    );
 
     it('does not send a retry when its durable attempt write fails', async () => {
       const original: Content = { role: 'user', parts: [{ text: 'retry me' }] };
@@ -6903,43 +6908,6 @@ describe('Session', () => {
         }),
       ).rejects.toThrow('attempt write failed');
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-    });
-
-    it('binds live cancellation after cancel clears the pending controller', async () => {
-      let pushed = 0;
-      mockChat.getUserContentPushCount = vi.fn(() => pushed);
-      let firstChunkConsumed!: () => void;
-      const consumed = new Promise<void>((resolve) => {
-        firstChunkConsumed = resolve;
-      });
-      let releaseStream!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        releaseStream = resolve;
-      });
-      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-        (async function* () {
-          pushed += 1;
-          yield {
-            type: core.StreamEventType.CHUNK,
-            value: { text: 'partial' },
-          } as const;
-          firstChunkConsumed();
-          await gate;
-          yield {
-            type: core.StreamEventType.CHUNK,
-            value: { text: 'ignored' },
-          } as const;
-        })(),
-      );
-      const prompt = session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'hello' }],
-      });
-      await consumed;
-      await session.cancelPendingPrompt();
-      releaseStream();
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
-      expect(mockChat.markLastTurnCancelled).toHaveBeenCalledTimes(1);
     });
 
     it('does not mark a superseded turn when its successor is cancelled before sending', async () => {
@@ -34243,112 +34211,80 @@ describe('Session', () => {
           },
         );
 
-        it('does not record a clean boundary when cancellation arrives during tool-result rewriting', async () => {
-          const permit: core.GoalTurnPermit = {
-            goalId: 'goal-1',
-            revision: 1,
-            turnId: 'cancelled-tool-end',
-          };
-          const turnKey = `goal-runtime:${permit.turnId}`;
-          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
-          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
-            key === turnKey ? permit : undefined,
-          );
-          mockToolsWithTerminatingUpdateGoal();
-          let releaseRewrite!: () => void;
-          const waitForPendingRewrites = vi.fn(
-            () =>
-              new Promise<void>((resolve) => {
-                releaseRewrite = resolve;
-              }),
-          );
-          session.messageRewriter = {
-            interceptUpdate: vi.fn().mockResolvedValue(undefined),
-            flushTurn: vi.fn().mockResolvedValue(undefined),
-            waitForPendingRewrites,
-          } as unknown as Session['messageRewriter'];
-          mockChat.sendMessageStream = vi
-            .fn()
-            .mockResolvedValueOnce(
-              streamCalling({ id: 'call-update', name: 'update_goal' }),
+        it.each(['qwen:user-cancel', 'qwen:prompt-interrupted'])(
+          'does not record a clean boundary when %s arrives during tool-result rewriting',
+          async (reason) => {
+            const permit: core.GoalTurnPermit = {
+              goalId: 'goal-1',
+              revision: 1,
+              turnId: 'cancelled-tool-end',
+            };
+            const turnKey = `goal-runtime:${permit.turnId}`;
+            mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+            mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+              key === turnKey ? permit : undefined,
             );
-          await boundGoalHost!.startGoalTurn({
-            permit,
-            continuationContext: 'finish the goal',
-          });
-          await vi.waitFor(() =>
-            expect(waitForPendingRewrites).toHaveBeenCalled(),
-          );
-          await session.cancelPendingPrompt();
-          releaseRewrite();
-          await vi.waitFor(() =>
-            expect(mockClient.extNotification).toHaveBeenCalledWith(
-              '_qwencode/end_turn',
-              expect.objectContaining({ reason: 'cancelled', source: 'goal' }),
-            ),
-          );
-          expect(
-            mockChatRecordingService.recordGoalTurnEnd,
-          ).not.toHaveBeenCalled();
-          expect(mockChat.setCompletedToolCallIds).not.toHaveBeenCalled();
-          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
-          vi.mocked(mockChat.getHistory).mockReturnValue(
-            vi.mocked(mockChat.addHistory).mock.calls.map(([entry]) => entry),
-          );
-          expect(session.getRecoveryStatus()).toEqual({
-            kind: 'interrupted_prompt',
-            canContinue: true,
-          });
-        });
-
-        it('pauses a Goal turn interrupted by transport infrastructure', async () => {
-          const permit: core.GoalTurnPermit = {
-            goalId: 'goal-1',
-            revision: 1,
-            turnId: 'interrupted-by-transport',
-          };
-          const turnKey = `goal-runtime:${permit.turnId}`;
-          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
-          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
-            key === turnKey ? permit : undefined,
-          );
-          mockToolsWithTerminatingUpdateGoal();
-          let releaseRewrite!: () => void;
-          const waitForPendingRewrites = vi.fn(
-            () =>
-              new Promise<void>((resolve) => {
-                releaseRewrite = resolve;
-              }),
-          );
-          session.messageRewriter = {
-            interceptUpdate: vi.fn().mockResolvedValue(undefined),
-            flushTurn: vi.fn().mockResolvedValue(undefined),
-            waitForPendingRewrites,
-          } as unknown as Session['messageRewriter'];
-          mockChat.sendMessageStream = vi
-            .fn()
-            .mockResolvedValueOnce(
-              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            mockToolsWithTerminatingUpdateGoal();
+            let releaseRewrite!: () => void;
+            const waitForPendingRewrites = vi.fn(
+              () =>
+                new Promise<void>((resolve) => {
+                  releaseRewrite = resolve;
+                }),
             );
-          await boundGoalHost!.startGoalTurn({
-            permit,
-            continuationContext: 'finish the goal',
-          });
-          await vi.waitFor(() =>
-            expect(waitForPendingRewrites).toHaveBeenCalled(),
-          );
-          await session.cancelPendingPrompt('qwen:prompt-interrupted');
-          releaseRewrite();
-          await vi.waitFor(() =>
-            expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
-              expect.objectContaining({
-                action: 'pause',
-                reason: GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
-              }),
-            ),
-          );
-          expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
-        });
+            session.messageRewriter = {
+              interceptUpdate: vi.fn().mockResolvedValue(undefined),
+              flushTurn: vi.fn().mockResolvedValue(undefined),
+              waitForPendingRewrites,
+            } as unknown as Session['messageRewriter'];
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(
+                streamCalling({ id: 'call-update', name: 'update_goal' }),
+              );
+            await boundGoalHost!.startGoalTurn({
+              permit,
+              continuationContext: 'finish the goal',
+            });
+            await vi.waitFor(() =>
+              expect(waitForPendingRewrites).toHaveBeenCalled(),
+            );
+            await session.cancelPendingPrompt(reason);
+            releaseRewrite();
+            await vi.waitFor(() =>
+              expect(mockClient.extNotification).toHaveBeenCalledWith(
+                '_qwencode/end_turn',
+                expect.objectContaining({
+                  reason: 'cancelled',
+                  source: 'goal',
+                }),
+              ),
+            );
+            expect(
+              mockChatRecordingService.recordGoalTurnEnd,
+            ).not.toHaveBeenCalled();
+            if (reason === 'qwen:prompt-interrupted') {
+              await vi.waitFor(() =>
+                expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
+                  expect.objectContaining({
+                    action: 'pause',
+                    reason: GOAL_PAUSE_REASON_PROMPT_INTERRUPTED,
+                  }),
+                ),
+              );
+              expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+            }
+            expect(mockChat.setCompletedToolCallIds).not.toHaveBeenCalled();
+            expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+            vi.mocked(mockChat.getHistory).mockReturnValue(
+              vi.mocked(mockChat.addHistory).mock.calls.map(([entry]) => entry),
+            );
+            expect(session.getRecoveryStatus()).toEqual({
+              kind: 'interrupted_prompt',
+              canContinue: true,
+            });
+          },
+        );
 
         it('names a cancel that arrives after the model started by its transport reason', async () => {
           const permit: core.GoalTurnPermit = {

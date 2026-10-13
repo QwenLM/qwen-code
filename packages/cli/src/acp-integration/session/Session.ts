@@ -1701,11 +1701,7 @@ interface AgentResponseCapture {
   turnResult?: {
     finalText: string;
   };
-  /**
-   * Persists a restore prompt's turn attempt once the restore no-op bail has
-   * re-checked history, so a restore that runs nothing writes no attempt.
-   */
-  restoreTurnAttempt?: () => Promise<void>;
+  recordingService?: ChatRecordingService;
   agentOutput: AgentOutputMessageCapture;
 }
 
@@ -5664,24 +5660,9 @@ export class Session implements SessionContext {
       ...(channelTask ? { channelTask } : {}),
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
       ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
+      recordingService: turnRecording?.recordingService,
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
-    const restoreAttemptPromptId = invocationContext?.promptId;
-    const restoreAttemptRecorder = turnRecording?.recordingService;
-    if (
-      restoreAttemptPromptId &&
-      restoreAttemptRecorder &&
-      !recordsRetryAttempt
-    ) {
-      // Written after #executePromptInner's restore no-op bail, which is
-      // where the restorable-question check is no longer racing history.
-      responseCapture.restoreTurnAttempt = async () => {
-        await restoreAttemptRecorder.recordTurnAttempt(
-          getLastApiHistoryPromptId(this.#getCurrentChat().getHistoryShallow()),
-          restoreAttemptPromptId,
-        );
-      };
-    }
     // One server-side channel classification, consumed by both the
     // rejection gate below and the guard-mode selection in
     // #executePromptInner. Only the authenticated channel-prompt marker
@@ -6435,10 +6416,16 @@ export class Session implements SessionContext {
               // restore doesn't persist phantom records.
               return { stopReason: 'end_turn' };
             }
-            if (isRestoreAskUserQuestion) {
-              // A resumed attempt must supersede an old cancellation before
-              // model execution; a failed write rejects the prompt.
-              await responseCapture.restoreTurnAttempt?.();
+            if (
+              isRestoreAskUserQuestion &&
+              !isRetry &&
+              !isContinue &&
+              daemonPromptId
+            ) {
+              await responseCapture.recordingService?.recordTurnAttempt(
+                continuedPromptId,
+                daemonPromptId,
+              );
             }
             if (
               !isRetry &&

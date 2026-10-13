@@ -702,7 +702,8 @@ describe('Gemini Client (client.ts)', () => {
       getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
       getHistory: vi.fn(() => structuredClone(history)),
       getHistoryShallow: vi.fn(() => history.map((c) => ({ ...c }))),
-      isLastTurnCancelled: vi.fn().mockReturnValue(false),
+      getLastTurnCancellationReason: vi.fn(),
+      getLastTurnCancellationConfirmationId: vi.fn(),
       markLastTurnCancelled: vi.fn(),
       setHistory: vi.fn(),
     });
@@ -2115,6 +2116,7 @@ describe('Gemini Client (client.ts)', () => {
       expect(await refreshOver(currentHistory, [])).toHaveBeenCalledWith(
         currentHistory.slice(1),
         undefined,
+        true,
       );
     });
 
@@ -2138,6 +2140,7 @@ describe('Gemini Client (client.ts)', () => {
       expect(setHistory).toHaveBeenCalledWith(
         [newPrelude, ...currentHistory.slice(2)],
         undefined,
+        true,
       );
       const reinstalled = vi.mocked(setHistory).mock.calls[0]![0] as Content[];
       expect(findApiHistoryPromptIndex(reinstalled, 'S########1')).toBe(1);
@@ -5345,30 +5348,21 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
-    it('carries the cancellation basis to the chat created by compression', async () => {
-      const originalChat = client.getChat();
-      originalChat.markLastTurnCancelled();
-      compressLiveChatTo(summaryHistory());
-
-      await client.tryCompressChat('p-cancelled');
-
-      expect(client.getChat()).not.toBe(originalChat);
-      expect(client.getChat().isLastTurnCancelled()).toBe(true);
-      expect(client.getChat().getLastTurnCancellationReason()).toBe('user');
-    });
-
-    it('carries an unknown-intent confirmation id to the compressed chat', async () => {
-      const originalChat = client.getChat();
-      originalChat.markLastTurnCancelled('unknown', 'daemon-1');
-      compressLiveChatTo(summaryHistory());
-
-      await client.tryCompressChat('p-unknown');
-
-      expect(client.getChat().getLastTurnCancellationConfirmationId()).toBe(
-        'daemon-1',
-      );
-      expect(client.getChat().isLastTurnCancelled()).toBe(false);
-    });
+    it.each(['user', 'unknown'] as const)(
+      'carries %s cancellation to the chat created by compression',
+      async (reason) => {
+        const originalChat = client.getChat();
+        originalChat.markLastTurnCancelled(reason, 'daemon-1');
+        compressLiveChatTo(summaryHistory());
+        await client.tryCompressChat('p-cancelled');
+        expect(client.getChat()).not.toBe(originalChat);
+        expect(client.getChat().getLastTurnCancellationReason()).toBe(reason);
+        expect(client.getChat().isLastTurnCancelled()).toBe(reason === 'user');
+        expect(client.getChat().getLastTurnCancellationConfirmationId()).toBe(
+          reason === 'unknown' ? 'daemon-1' : undefined,
+        );
+      },
+    );
 
     it('preserves Compact SessionStart additionalContext on the new chat', async () => {
       const hookSystem = sessionStartHook('Compact hook context');

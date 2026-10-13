@@ -2917,12 +2917,7 @@ export class LlmChat {
           completedToolCallIds: this.completedToolCallIds,
         });
       }
-      const cancellationReason = this.getLastTurnCancellationReason();
-      const confirmationId = this.getLastTurnCancellationConfirmationId();
-      this.setHistory(newHistory, this.completedToolCallIds);
-      if (cancellationReason) {
-        this.markLastTurnCancelled(cancellationReason, confirmationId);
-      }
+      this.setHistory(newHistory, this.completedToolCallIds, true);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       try {
@@ -3070,12 +3065,7 @@ export class LlmChat {
         tokens_after: info.newTokenCount,
       }),
     );
-    const cancellationReason = this.getLastTurnCancellationReason();
-    const confirmationId = this.getLastTurnCancellationConfirmationId();
-    this.setHistory(newHistory, this.completedToolCallIds);
-    if (cancellationReason) {
-      this.markLastTurnCancelled(cancellationReason, confirmationId);
-    }
+    this.setHistory(newHistory, this.completedToolCallIds, true);
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
     this.lastCachedContentTokenCount = 0;
@@ -3488,19 +3478,12 @@ export class LlmChat {
             // guard can compare the compressed prompt size. If the compressed
             // prompt is still too large to send, restore the pre-compression
             // state. The JSONL compression checkpoint is intentionally not
-            // written because the send is about to be rejected. The rollback
-            // setHistory clears the per-instance cancellation basis on the
-            // very "changed nothing" path this throw describes; carry it
-            // across like the compression rewrites above.
-            const cancellationReason = this.getLastTurnCancellationReason();
-            const confirmationId = this.getLastTurnCancellationConfirmationId();
+            // written because the send is about to be rejected.
             this.setHistory(
               historyBeforeHardRescue,
               completedToolCallIdsBeforeHardRescue,
+              true,
             );
-            if (cancellationReason) {
-              this.markLastTurnCancelled(cancellationReason, confirmationId);
-            }
             // setHistory conservatively cleared loaded-skill tracking; the
             // restored bodies re-arm it on their next invoke.
             this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
@@ -6026,7 +6009,12 @@ export class LlmChat {
   setHistory(
     history: Content[],
     completedToolCallIds?: readonly string[],
+    preserveCancellation = false,
   ): void {
+    const reason = preserveCancellation
+      ? this.getLastTurnCancellationReason()
+      : undefined;
+    const confirmationId = this.getLastTurnCancellationConfirmationId();
     this.cancelledHistory = undefined;
     this.history = history;
     this.setCompletedToolCallIds(completedToolCallIds);
@@ -6050,6 +6038,7 @@ export class LlmChat {
         .getToolRegistry()
         ?.syncReviewedDeclarations?.(this.history, this);
     }
+    if (reason) this.markLastTurnCancelled(reason, confirmationId);
   }
 
   truncateHistory(keepCount: number): void {

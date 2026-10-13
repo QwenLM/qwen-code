@@ -2059,16 +2059,11 @@ export class LlmClient {
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
     const chat = this.getChat();
-    const cancellationReason =
-      chat.getLastTurnCancellationReason?.() ??
-      (chat.isLastTurnCancelled() ? 'user' : undefined);
-    const confirmationId = chat.getLastTurnCancellationConfirmationId?.();
     chat.setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
       chat.getCompletedToolCallIds(),
+      true,
     );
-    if (cancellationReason)
-      chat.markLastTurnCancelled(cancellationReason, confirmationId);
   }
 
   /**
@@ -5831,9 +5826,7 @@ export class LlmClient {
     const previousChat = this.getChat();
     // Capture before tryCompress: its setHistory clears the per-instance
     // basis, and the swap below starts a fresh chat without one.
-    const cancellationReason =
-      previousChat.getLastTurnCancellationReason?.() ??
-      (previousChat.isLastTurnCancelled?.() ? 'user' : undefined);
+    const cancellationReason = previousChat.getLastTurnCancellationReason?.();
     const cancellationConfirmationId =
       previousChat.getLastTurnCancellationConfirmationId?.();
     const info = await previousChat.tryCompress(

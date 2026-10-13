@@ -5,7 +5,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { isTurnResultRecordPayload } from './turn-result-record.js';
+import { isTurnResultRecordPayload } from './chatRecordingService.js';
 import {
   isApiUserPrompt,
   isTodoStopGuardPromptText,
@@ -17,26 +17,17 @@ import type {
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
 } from './chatRecordingService.js';
-import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
+import {
+  isInternalCodeModeToolResult,
+  markApiHistoryPrompt,
+  getApiHistoryPromptId,
+} from '../utils/transcript-records.js';
 
-const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
-
-type IdentifiedContent = Content & {
-  [API_HISTORY_PROMPT_ID]?: string;
-};
-
-export function markApiHistoryPrompt(
-  content: Content,
-  promptId: unknown,
-): void {
-  if (typeof promptId === 'string' && promptId.length > 0) {
-    (content as IdentifiedContent)[API_HISTORY_PROMPT_ID] = promptId;
-  }
-}
-
-export function getApiHistoryPromptId(content: Content): string | undefined {
-  return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
-}
+export {
+  markApiHistoryPrompt,
+  getApiHistoryPromptId,
+  moveApiHistoryPromptId,
+} from '../utils/transcript-records.js';
 
 export function restoreApiHistoryPromptIds(
   current: readonly Content[],
@@ -53,20 +44,6 @@ export function restoreApiHistoryPromptIds(
     if (promptId && findApiHistoryPromptIndex(current, promptId) === index) {
       markApiHistoryPrompt(restored[index]!, promptId);
     }
-  }
-}
-
-export function moveApiHistoryPromptId(
-  history: readonly Content[],
-  current: Content,
-): void {
-  const promptId = getApiHistoryPromptId(current);
-  if (!promptId) return;
-  const previous = history.filter(
-    (entry) => entry !== current && getApiHistoryPromptId(entry) === promptId,
-  );
-  if (previous.length === 1) {
-    delete (previous[0] as IdentifiedContent)[API_HISTORY_PROMPT_ID];
   }
 }
 
@@ -217,17 +194,6 @@ export function getLastApiPromptCancellation(
   return hints.findLast((hint) => hint?.kind === 'result') === result
     ? { reason: 'unknown', promptId: result.promptId }
     : undefined;
-}
-
-export function isLastApiPromptCancelled(
-  history: readonly Content[],
-  hints: ReadonlyArray<SessionTurnSettlementHint | undefined>,
-  trailingSystemNotifications?: number,
-): boolean {
-  return (
-    getLastApiPromptCancellation(history, hints, trailingSystemNotifications)
-      ?.reason === 'user'
-  );
 }
 
 export interface BuildApiHistoryOptions {
