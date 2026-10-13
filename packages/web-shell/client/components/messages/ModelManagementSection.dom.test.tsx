@@ -125,7 +125,7 @@ describe('ModelManagementSection', () => {
     expect(container.textContent).toContain('DeepSeek V4');
   });
 
-  it('resolves the current bare id without the hidden OAuth collision', () => {
+  it('uses the server current flag when a bare id collides with a hidden model', () => {
     const { container } = renderSection({
       currentModelId: 'coder-model',
       providers: ['qwen-oauth', 'openai'].map((authType) => ({
@@ -138,7 +138,7 @@ describe('ModelManagementSection', () => {
             modelId: `qwen-route:v1:${authType}`,
             baseModelId: 'coder-model',
             name: 'coder-model',
-            isCurrent: false,
+            isCurrent: authType === 'openai',
             isRuntime: false,
           },
         ],
@@ -150,6 +150,80 @@ describe('ModelManagementSection', () => {
       container.querySelector('button[aria-label="Set current coder-model"]'),
     ).toBeNull();
   });
+
+  it.each(['qwen-oauth', 'openai'])(
+    'does not guess an ambiguous bare id without row flags (%s)',
+    (activeAuthType) => {
+      const { container } = renderSection({
+        currentModelId: 'coder-model',
+        providers: ['qwen-oauth', 'openai'].map((authType) => ({
+          kind: 'model_provider' as const,
+          status: 'ok' as const,
+          authType,
+          current: authType === activeAuthType,
+          models: [
+            {
+              modelId: `coder-model(${authType})`,
+              baseModelId: 'coder-model',
+              name: 'coder-model',
+              isCurrent: false,
+              isRuntime: false,
+            },
+          ],
+        })),
+      });
+      expect(container.textContent).not.toContain('Current');
+      expect(
+        container.querySelector('button[aria-label="Set current coder-model"]'),
+      ).not.toBeNull();
+    },
+  );
+
+  it.each(['provider', 'configuration'])(
+    'explains when only discontinued models remain (%s)',
+    (source) => {
+      const { container } = renderSection({
+        providers:
+          source === 'provider'
+            ? [
+                {
+                  kind: 'model_provider',
+                  status: 'ok',
+                  authType: 'qwen-oauth',
+                  current: true,
+                  models: [
+                    {
+                      modelId: 'coder-model(qwen-oauth)',
+                      baseModelId: 'coder-model',
+                      name: 'coder-model',
+                      isCurrent: true,
+                      isRuntime: false,
+                    },
+                  ],
+                },
+              ]
+            : [],
+        configurations:
+          source === 'configuration'
+            ? [
+                {
+                  key: 'saved-oauth',
+                  authType: 'qwen-oauth',
+                  modelId: 'coder-model',
+                  purpose: 'chat',
+                },
+              ]
+            : [],
+        currentModelId: 'coder-model(qwen-oauth)',
+      });
+      expect(container.textContent).not.toContain('No configured models yet.');
+      expect(container.textContent).toContain(
+        'Qwen OAuth models are discontinued. Add a model from another provider.',
+      );
+      expect(container.textContent).not.toContain('coder-model');
+      expect(buttonByText(container, '+ Add Model').disabled).toBe(false);
+    },
+  );
 
   it('does not transfer a hidden current OAuth model to a same-name OpenAI row', () => {
     const { container } = renderSection({
@@ -178,7 +252,7 @@ describe('ModelManagementSection', () => {
 
   it('does not mark an unloaded saved configuration current by bare id', () => {
     const { container } = renderSection({
-      providers: [],
+      providers: providers(),
       currentModelId: 'coder-model',
       configurations: [
         {
@@ -190,7 +264,15 @@ describe('ModelManagementSection', () => {
       ],
     });
     expect(container.textContent).toContain('coder-model');
-    expect(container.textContent).not.toContain('Current');
+    const savedRow = container
+      .querySelector('button[aria-label="Delete coder-model"]')!
+      .closest('[class*="modelRow"]')!;
+    expect(savedRow.textContent).not.toContain('Current');
+    expect(
+      container
+        .querySelector('button[aria-label="Delete GPT-4o"]')!
+        .closest('[class*="modelRow"]')!.textContent,
+    ).toContain('Current');
   });
 
   it('does not restore the hidden OAuth model from saved configurations', () => {

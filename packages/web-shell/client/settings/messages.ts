@@ -81,6 +81,8 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.models.confirmDelete': 'Confirm',
   'settings.models.cancel': 'Cancel',
   'settings.models.empty': 'No configured models yet.',
+  'settings.models.discontinuedOnly':
+    'Qwen OAuth models are discontinued. Add a model from another provider.',
   'settings.models.loading': 'Loading models…',
   'settings.models.deleteFailed': 'Failed to delete model',
   'settings.models.runtimeSyncFailed':
@@ -172,6 +174,8 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.models.confirmDelete': '确认删除',
   'settings.models.cancel': '取消',
   'settings.models.empty': '暂无配置的模型。',
+  'settings.models.discontinuedOnly':
+    'Qwen OAuth 模型已停用，请添加其他提供商的模型。',
   'settings.models.loading': '正在加载模型…',
   'settings.models.deleteFailed': '删除模型失败',
   'settings.models.runtimeSyncFailed':

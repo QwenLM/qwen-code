@@ -60,7 +60,9 @@ function getRouteEndpointIdentity(baseUrl: string | undefined): string | null {
  * `packages/vscode-ide-companion/src/webview/utils/discontinuedModel.ts` to
  * detect discontinued Qwen OAuth registry models without changing the wire
  * format. If the encoding here evolves (new authTypes, runtime prefix changes,
- * etc.), update that file too.
+ * etc.), update that file and Web Shell
+ * `client/utils/composerModels.ts` too. Both exclude runtime snapshots from
+ * discontinued OAuth filtering.
  */
 function formatAcpModelId(modelId: string, authType: AuthType): string {
   return `${modelId}(${authType})`;

@@ -5,16 +5,14 @@
  */
 
 /**
- * Model IDs hidden from the composer's model picker — internal / duplicate
- * entries that must not be user-selectable. Shared by the main chat composer
- * (App), split-view pane composers (ChatPane), and Settings model management
- * so all hide the same set.
+ * Whether a model may appear in the composer or Settings model list.
+ * Keep the non-runtime OAuth rule in sync with the CLI's acpModelUtils.ts
+ * encoding and the VSCode webview's utils/discontinuedModel.ts. Derive it from
+ * the auth marker so new OAuth registry entries cannot bypass the filter.
  */
-export const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
-
-/** Whether a model may appear in the composer's model picker. */
 export function isVisibleComposerModel(model: { id: string }): boolean {
-  return !HIDDEN_COMPOSER_MODEL_IDS.has(model.id);
+  const id = model.id.trim();
+  return id.startsWith('$runtime|') || !id.endsWith('(qwen-oauth)');
 }
 
 /**

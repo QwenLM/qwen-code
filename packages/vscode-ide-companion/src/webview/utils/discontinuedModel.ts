@@ -14,7 +14,8 @@
  *
  * This helper mirrors the encoding contract used by the CLI's
  * `acpModelUtils.ts` and the discontinued check in the CLI's `ModelDialog`.
- * Keep these two files in sync when the encoding evolves.
+ * Keep these files and Web Shell `client/utils/composerModels.ts` in sync
+ * when the encoding or the non-runtime OAuth discontinued rule evolves.
  */
 
 // Local copy of core's RUNTIME_SNAPSHOT_PREFIX: the webview bundle marks core

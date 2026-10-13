@@ -5,7 +5,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { isStandaloneModelPickerUnavailable } from './composerModels';
+import { RUNTIME_SNAPSHOT_PREFIX } from '@qwen-code/qwen-code-core/utils/runtimeModelPrefix.js';
+import { QWEN_OAUTH_MODELS } from '@qwen-code/qwen-code-core/models/constants.js';
+import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
+import {
+  isVisibleComposerModel,
+  isStandaloneModelPickerUnavailable,
+} from './composerModels';
 
 describe('isStandaloneModelPickerUnavailable', () => {
   it('is available when a session is attached', () => {
@@ -68,6 +74,34 @@ describe('isStandaloneModelPickerUnavailable', () => {
           { id: 'qwen3-max(USE_OPENAI)' },
         ],
       }),
+    ).toBe(false);
+  });
+});
+
+describe('isVisibleComposerModel discontinued OAuth rule', () => {
+  it.each([
+    ...QWEN_OAUTH_MODELS.map((model) => model.id),
+    'qwen3-coder-plus',
+    'model(with-parens)',
+  ])('hides any registry OAuth route: %s', (id) => {
+    expect(
+      isVisibleComposerModel({ id: `${id}(${AuthType.QWEN_OAUTH})` }),
+    ).toBe(false);
+  });
+  it.each(['coder-model', 'qwen3-coder-plus'])(
+    'preserves runtime snapshots and other providers: %s',
+    (id) => {
+      expect(
+        isVisibleComposerModel({
+          id: `${RUNTIME_SNAPSHOT_PREFIX}qwen-oauth|${id}(qwen-oauth)`,
+        }),
+      ).toBe(true);
+      expect(isVisibleComposerModel({ id: `${id}(openai)` })).toBe(true);
+    },
+  );
+  it('trims the route before checking the trailing auth marker', () => {
+    expect(
+      isVisibleComposerModel({ id: '  qwen3-coder-plus(qwen-oauth)  ' }),
     ).toBe(false);
   });
 });

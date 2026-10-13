@@ -72,16 +72,8 @@ function findCurrentRowKey(
   if (currentModelId) {
     const exact = all.find(({ model }) => model.modelId === currentModelId);
     if (exact) return rowKeyFor(exact.provider, exact.model);
-    const hiddenCurrent = all.find(
-      ({ provider, model }) =>
-        model.isCurrent && !isVisibleSettingsModel(provider, model),
-    );
-    if (hiddenCurrent)
-      return rowKeyFor(hiddenCurrent.provider, hiddenCurrent.model);
     const byBase = all.filter(
-      ({ provider, model }) =>
-        model.baseModelId === currentModelId &&
-        isVisibleSettingsModel(provider, model),
+      ({ model }) => model.baseModelId === currentModelId,
     );
     if (byBase.length === 1) {
       return rowKeyFor(byBase[0]!.provider, byBase[0]!.model);
@@ -123,6 +115,8 @@ export function ModelManagementSection({
     return () => document.removeEventListener('keydown', onKey);
   }, [confirmKey]);
 
+  // Keep the source rows intact: current-model resolution must include hidden
+  // collisions and must not treat unloaded saved configurations as active.
   const displayProviders = providers.map((provider) => ({
     ...provider,
     models: [...provider.models],
@@ -162,6 +156,7 @@ export function ModelManagementSection({
       isRuntime: false,
     });
   }
+  const hasConfiguredModels = displayProviders.some((p) => p.models.length > 0);
   for (const provider of displayProviders) {
     provider.models = provider.models.filter((model) =>
       isVisibleSettingsModel(provider, model),
@@ -191,7 +186,13 @@ export function ModelManagementSection({
         <div className={styles.hint}>{t('settings.models.loading')}</div>
       )}
       {!loading && !hasModels && !error && (
-        <div className={styles.empty}>{t('settings.models.empty')}</div>
+        <div className={hasConfiguredModels ? styles.hint : styles.empty}>
+          {t(
+            hasConfiguredModels
+              ? 'settings.models.discontinuedOnly'
+              : 'settings.models.empty',
+          )}
+        </div>
       )}
 
       {displayProviders.map((provider, providerIndex) =>
