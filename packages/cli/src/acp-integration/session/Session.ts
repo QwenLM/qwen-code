@@ -12881,6 +12881,7 @@ export class Session implements SessionContext {
   #withBackgroundPermission(
     params: RequestPermissionRequest,
   ): RequestPermissionRequest {
+    if (params._meta?.['permissionScope'] === 'session') return params;
     const execution = backgroundTurnContext.getStore();
     return execution?.active && execution.sessionId === this.sessionId
       ? {

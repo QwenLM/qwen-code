@@ -209,6 +209,7 @@ describe('attachTeamSink', () => {
 
     await vi.waitFor(() => expect(respond).toHaveBeenCalled());
     expect(requestPermission).toHaveBeenCalledTimes(1);
+    expect(offered?._meta).toEqual({ permissionScope: 'session' });
     expect(offered?.toolCall.title).toContain('security');
     expect(offered?.toolCall._meta).toMatchObject({
       toolName: 'write_file',

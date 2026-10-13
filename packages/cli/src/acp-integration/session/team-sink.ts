@@ -200,6 +200,7 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     const offered = options.map((option) => ({ ...option }));
     const params: RequestPermissionRequest = {
       sessionId: deps.sessionId,
+      _meta: { permissionScope: 'session' },
       options,
       toolCall: {
         toolCallId: `teammate-${randomUUID()}`,

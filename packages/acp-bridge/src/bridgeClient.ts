@@ -1021,9 +1021,11 @@ export class BridgeClient implements Client {
       return { outcome: { outcome: 'cancelled' } };
     }
 
-    const explicitBackgroundTurn = parseBackgroundNotificationTurn(
-      params._meta?.['backgroundTurn'],
-    );
+    // Teammates outlive the leader turn that happens to be running.
+    const sessionOwned = params._meta?.['permissionScope'] === 'session';
+    const explicitBackgroundTurn = sessionOwned
+      ? undefined
+      : parseBackgroundNotificationTurn(params._meta?.['backgroundTurn']);
     if (
       explicitBackgroundTurn &&
       entry.backgroundTurn?.turnId !== explicitBackgroundTurn.turnId
@@ -1043,16 +1045,20 @@ export class BridgeClient implements Client {
     ) {
       return { outcome: { outcome: 'cancelled' } };
     }
-    const backgroundTurn = appClientId
-      ? undefined
-      : (explicitBackgroundTurn ??
-        (entry.promptActive ? undefined : entry.backgroundTurn));
-    const permissionPromptId = appClientId
-      ? undefined
-      : (backgroundTurn?.turnId ?? entry.activePromptId);
+    const backgroundTurn =
+      appClientId || sessionOwned
+        ? undefined
+        : (explicitBackgroundTurn ??
+          (entry.promptActive ? undefined : entry.backgroundTurn));
+    const permissionPromptId =
+      appClientId || sessionOwned
+        ? undefined
+        : (backgroundTurn?.turnId ?? entry.activePromptId);
     const permissionOriginator =
       appClientId ??
-      (backgroundTurn ? undefined : entry.activePromptOriginatorClientId);
+      (backgroundTurn || sessionOwned
+        ? undefined
+        : entry.activePromptOriginatorClientId);
     // Reserve model permission capacity within the existing session cap.
     if (
       appClientId &&

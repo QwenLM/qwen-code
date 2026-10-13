@@ -5511,18 +5511,37 @@ describe('background execution ownership', () => {
       toolCall: { toolCallId: 'call-fg', title: 'run', kind: 'execute' },
       options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
     });
-    expect(entry.pendingPermissionIds.size).toBe(2);
+    entry.promptActive = false;
+    const teammateApproval = client.requestPermission({
+      sessionId: 'session',
+      _meta: { permissionScope: 'session', backgroundTurn },
+      toolCall: {
+        toolCallId: 'teammate-write',
+        title: 'Write report',
+        kind: 'edit',
+      },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+    });
+    entry.promptActive = true;
+    const teammateFrame = publish.mock.calls.at(-1)![0];
+    expect(teammateFrame.promptId).toBeUndefined();
+    expect(teammateFrame.originatorClientId).toBeUndefined();
+    expect(teammateFrame.data.backgroundTurn).toBeUndefined();
+    expect(entry.pendingPermissionIds.size).toBe(3);
 
     client.finishBackgroundTurn('session', 'notification-1', 'end_turn');
 
     await expect(turnApproval).resolves.toMatchObject({
       outcome: { outcome: 'cancelled' },
     });
-    expect(entry.pendingPermissionIds.size).toBe(1);
-    expect(entry.pendingInteractions.size).toBe(1);
-    // The live prompt's approval stays pending for its own lifecycle.
+    expect(entry.pendingPermissionIds.size).toBe(2);
+    expect(entry.pendingInteractions.size).toBe(2);
+    // The live prompt and teammate approvals survive the background turn.
     mediator.forgetSession('session');
     await expect(promptApproval).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
+    await expect(teammateApproval).resolves.toMatchObject({
       outcome: { outcome: 'cancelled' },
     });
     expect(entry.pendingPermissionIds.size).toBe(0);
