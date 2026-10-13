@@ -2119,6 +2119,12 @@ export const ChatEditor = memo(
       if (!visibleActionSet) return true;
       return visibleActionSet.has(action);
     };
+    // The ring goes one level deeper than its hover summary, so a click opens
+    // the details surface. Embedded read-only panes deliberately have none,
+    // and keep the in-transcript snapshot as their only view.
+    const contextUsageClick = onOpenContextUsage ?? onShowContextUsage;
+    const contextUsageSnapshotOnly =
+      !onOpenContextUsage && Boolean(onShowContextUsage);
     const showModeAction = showToolbarAction('approvalMode');
     const showPlanAction = Boolean(
       onTogglePlan && visibleActionSet?.has('plan'),
@@ -3728,7 +3734,7 @@ export const ChatEditor = memo(
                       contextWindow={contextWindow}
                       controls={contextUsageControls}
                       onOpenDetails={onOpenContextUsage}
-                      showSnapshotHint={Boolean(onShowContextUsage)}
+                      showSnapshotHint={contextUsageSnapshotOnly}
                     >
                       <button
                         className={`${styles.toolBtn} ${styles.contextUsageBtn}`}
@@ -3736,9 +3742,9 @@ export const ChatEditor = memo(
                         data-web-shell-context-usage
                         onClick={(e) => {
                           e.stopPropagation();
-                          onShowContextUsage?.();
+                          contextUsageClick?.();
                         }}
-                        disabled={!onShowContextUsage}
+                        disabled={!contextUsageClick}
                         aria-label={
                           contextWindow > 0 && tokenCount > 0
                             ? t('status.contextUsed', {

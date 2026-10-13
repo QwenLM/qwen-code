@@ -1067,6 +1067,10 @@ describe('ChatEditor context usage ring', () => {
     expect(card.querySelector('dl')).toBeNull();
     expect(ring(container)!.hasAttribute('aria-describedby')).toBe(false);
     expect(container.querySelector('[id$="-description"]')).toBeNull();
+    // The hint describes the snapshot fallback, which a details surface replaces.
+    expect(card.textContent).not.toContain(
+      'Click to view the breakdown in the conversation.',
+    );
     const buttons = Array.from(card.querySelectorAll('button'));
     const compression = buttons.find(
       (button) => button.textContent === 'Compress context',
@@ -1082,7 +1086,27 @@ describe('ChatEditor context usage ring', () => {
     expect(getContextUsage).not.toHaveBeenCalled();
   });
 
-  it('opens the context breakdown when clicked', () => {
+  it('opens the context details surface when clicked', () => {
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onOpenContextUsage,
+      onShowContextUsage,
+    });
+
+    act(() => {
+      ring(container)!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(onOpenContextUsage).toHaveBeenCalledTimes(1);
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the transcript snapshot when the host has no details surface', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
       tokenCount: 100,

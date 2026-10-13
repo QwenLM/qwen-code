@@ -214,19 +214,21 @@ for (const theme of ['light', 'dark']) {
     for (const label of await tooltip.locator('dt').all()) {
       await expect(label).toHaveCSS('color', secondaryColor);
     }
-    await expect(tooltip).toContainText(
+    // The ring opens the details surface, so the snapshot hint is gone.
+    await expect(tooltip).not.toContainText(
       'Click to view the breakdown in the conversation.',
     );
-    await expect(
-      tooltip.getByText('Click to view the breakdown in the conversation.', {
-        exact: true,
-      }),
-    ).toHaveCSS('color', secondaryColor);
     expect(contextRequests).toEqual([]);
     await page.screenshot({
       path: testInfo.outputPath(`context-hover-${theme}.png`),
     });
-    await usage.click();
+    // /context typed in the composer still posts into the transcript, and that
+    // is the path this card-layout coverage follows. The ring's own click is
+    // asserted at the end of this test.
+    await page.mouse.move(0, 0);
+    await expect(tooltip).toHaveCount(0);
+    await editor.fill('/context');
+    await page.keyboard.press('Enter');
     const history = page.locator('[data-web-shell-message-list]');
     const cards = history.getByRole('group', {
       name: 'Context Usage',
@@ -397,8 +399,10 @@ for (const theme of ['light', 'dark']) {
         'background-color',
         color,
       );
-      await usage.click();
+      await page.keyboard.press('Escape');
       await expect(tooltip).toHaveCount(0);
+      await editor.fill('/context');
+      await page.keyboard.press('Enter');
       await expect(cards.last().locator('[class*="percentage"]')).toHaveText(
         `${tokens / 1000}.0%`,
       );
@@ -417,5 +421,12 @@ for (const theme of ['light', 'dark']) {
         await expect(usedValue).toHaveCSS('text-align', 'right');
       }
     }
+
+    // The ring's own click opens the single details surface in place and never
+    // appends another snapshot card to the transcript.
+    const cardsBeforeRingClick = await cards.count();
+    await usage.click();
+    await expect(panel).toBeVisible();
+    await expect(cards).toHaveCount(cardsBeforeRingClick);
   });
 }

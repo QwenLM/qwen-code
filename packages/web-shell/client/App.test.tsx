@@ -16707,7 +16707,7 @@ describe('App session callbacks', () => {
     expect(container.textContent).not.toContain('qwen-plus::hybrid');
   });
 
-  it('wires the composer context ring from the connection and opens /context on click', async () => {
+  it('wires the composer context ring from the connection and opens details on click', async () => {
     const usageConnection = mockConnection as typeof mockConnection & {
       tokenCount?: number;
       contextWindow?: number;
@@ -16723,15 +16723,20 @@ describe('App session callbacks', () => {
     );
     expect(testState.latestChatEditorProps?.tokenCount).toBe(338);
     expect(testState.latestChatEditorProps?.contextWindow).toBe(1000);
+    // The ring opens the details surface; the main composer no longer offers
+    // the in-transcript snapshot at all.
+    expect(testState.latestChatEditorProps?.onShowContextUsage).toBeUndefined();
 
     await act(async () => {
-      testState.latestChatEditorProps?.onShowContextUsage?.();
+      testState.latestChatEditorProps?.onOpenContextUsage?.();
     });
     await flush();
 
     expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
-      detail: false,
+      detail: true,
+      silent: true,
     });
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
   });
 
   it.each(['main', 'split'] as const)(
@@ -16766,7 +16771,7 @@ describe('App session callbacks', () => {
     },
   );
 
-  it('updates and removes the host context usage callback without changing snapshots', async () => {
+  it('updates and removes the host context usage callback', async () => {
     const onContextUsageOpen = vi.fn();
     const replacement = vi.fn();
     const { rerender } = renderApp({ onContextUsageOpen });
@@ -16778,12 +16783,6 @@ describe('App session callbacks', () => {
     );
     expect(replacement).toHaveBeenCalledExactlyOnceWith('session-1');
     expect(onContextUsageOpen).not.toHaveBeenCalled();
-    await act(async () =>
-      testState.latestChatEditorProps!.onShowContextUsage!(),
-    );
-    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
-      detail: false,
-    });
     expect(replacement).toHaveBeenCalledTimes(1);
     mockSessionActions.getContextUsage.mockClear();
     rerender({});
@@ -16895,7 +16894,7 @@ describe('App session callbacks', () => {
       await flush();
       expect(testState.latestChatEditorProps?.tokenCount).toBe(23_000);
       expect(testState.latestChatEditorProps?.contextWindow).toBe(131_072);
-      expect(testState.latestChatEditorProps?.onShowContextUsage).toBeTypeOf(
+      expect(testState.latestChatEditorProps?.onOpenContextUsage).toBeTypeOf(
         'function',
       );
 
@@ -16906,7 +16905,7 @@ describe('App session callbacks', () => {
       expect(testState.latestChatEditorProps?.tokenCount).toBe(0);
       expect(testState.latestChatEditorProps?.contextWindow).toBe(0);
       expect(
-        testState.latestChatEditorProps?.onShowContextUsage,
+        testState.latestChatEditorProps?.onOpenContextUsage,
       ).toBeUndefined();
 
       mockConnection.status = 'connected';
@@ -16914,7 +16913,7 @@ describe('App session callbacks', () => {
       await flush();
       expect(testState.latestChatEditorProps?.tokenCount).toBe(23_000);
       expect(testState.latestChatEditorProps?.contextWindow).toBe(131_072);
-      expect(testState.latestChatEditorProps?.onShowContextUsage).toBeTypeOf(
+      expect(testState.latestChatEditorProps?.onOpenContextUsage).toBeTypeOf(
         'function',
       );
     } finally {

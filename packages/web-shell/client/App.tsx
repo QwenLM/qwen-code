@@ -13951,12 +13951,6 @@ export function App({
       t,
     ],
   );
-  // Stable identity: ChatEditor is memoized and an inline closure would
-  // re-render it on every app render.
-  const handleShowContextUsage = useCallback(
-    () => showContextUsage('/context', false),
-    [showContextUsage],
-  );
   const contextUsageAvailable = !shouldBlockComposerSubmit({
     connectionStatus: connection.status,
     hasSession: Boolean(connection.sessionId),
@@ -22866,9 +22860,6 @@ export function App({
                           }
                           contextUsageAlwaysVisible={
                             contextUsageAlwaysVisible
-                          }
-                          onShowContextUsage={
-                            contextUsageAvailable ? handleShowContextUsage : undefined
                           }
                           contextUsageControls={
                             connection.sessionId
