@@ -1358,6 +1358,23 @@ class ManagedSessionStoreHttpClient {
       try {
         return await run(Math.max(1, deadline - Date.now()));
       } catch (error) {
+        // A bounded tenant-guard wait is a definite non-commit: the store
+        // rolled the transaction back before writing anything. Keep retrying
+        // it — on any route — for the rest of this request budget instead of
+        // spending the three-attempt cap in ~15 s and latching the Session's
+        // writes behind a contention window it could have outlasted (#13800).
+        if (
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 503 &&
+          error.remoteCode === 'tenant_guard_contended' &&
+          deadline - Date.now() > 250
+        ) {
+          debugLogger.debug(
+            `Managed Session Store ${method} ${path} attempt ${attempt} found the tenant guard contended; retrying.`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          continue;
+        }
         const transient =
           error instanceof ManagedSessionStoreTransportError ||
           (error instanceof ManagedSessionStoreHttpError &&

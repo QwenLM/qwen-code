@@ -1973,6 +1973,121 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('keeps retrying a contended tenant guard past the attempt cap within one request budget', async () => {
+    const server = new FakeManagedSessionStore();
+    let contended = 5;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?') && contended > 0) {
+        contended--;
+        return jsonResponse(
+          { error: { code: 'tenant_guard_contended', message: 'held' } },
+          503,
+        );
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(handle.read()).resolves.toBeDefined();
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ),
+      ).toHaveLength(6);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('retries a contended guard on a non-retryable POST because the store rolled it back', async () => {
+    const server = new FakeManagedSessionStore();
+    let contended = 4;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).endsWith('/recovery:block') && contended > 0) {
+        contended--;
+        return jsonResponse(
+          { error: { code: 'tenant_guard_contended', message: 'held' } },
+          503,
+        );
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await stores.assertWritable();
+      await handle.blockRecovery!({
+        status: 'BLOCKED_RESOURCE',
+        detailCode: 'managed_session_test',
+      });
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/recovery:block'),
+        ),
+      ).toHaveLength(5);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('gives up on a persistently contended guard at the request deadline', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).includes('/restore?'))
+        return jsonResponse(
+          { error: { code: 'tenant_guard_contended', message: 'held' } },
+          503,
+        );
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+      requestTimeoutMs: 1_500,
+    });
+    try {
+      const handle = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      const started = Date.now();
+      await expect(handle.read()).rejects.toMatchObject({
+        status: 503,
+        remoteCode: 'tenant_guard_contended',
+      });
+      expect(Date.now() - started).toBeLessThan(1_500 + 1_000);
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).includes('/restore?'),
+        ).length,
+      ).toBeGreaterThan(3);
+    } finally {
+      await stores.close();
+    }
+  });
+
   it('answers the last consecutive transport failure with the path and attempt count', async () => {
     const server = new FakeManagedSessionStore();
     const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
