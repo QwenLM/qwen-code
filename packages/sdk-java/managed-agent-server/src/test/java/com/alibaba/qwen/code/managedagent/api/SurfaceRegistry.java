@@ -313,6 +313,11 @@ public enum SurfaceRegistry {
                     + "/transactions:commit",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_TRANSACTION_COMMIT)),
+    INTERNAL_TRANSACTION_COMMIT_V2(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}"
+                    + "/transactions:commit-v2",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_TRANSACTION_COMMIT)),
     INTERNAL_RESTORE(Method.GET,
             "/internal/managed-session-store/v1/sessions/{sessionId}/restore",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,

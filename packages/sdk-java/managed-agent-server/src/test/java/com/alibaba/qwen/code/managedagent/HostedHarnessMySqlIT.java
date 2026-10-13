@@ -109,7 +109,9 @@ class HostedHarnessMySqlIT {
                 "SELECT VERSION() AS version, @@version_comment AS engine");
         System.out.println("HOSTED_MYSQL_DATABASE " + json.writeValueAsString(database));
         assertThat(database.get("version").toString()).doesNotContainIgnoringCase("mariadb");
-        assertThat(database.get("engine").toString()).containsIgnoringCase("mysql");
+        try (var connection = dataSource.getConnection()) {
+            assertThat(connection.getMetaData().getDatabaseProductName()).isEqualTo("MySQL");
+        }
 
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class).run(
@@ -477,7 +479,7 @@ class HostedHarnessMySqlIT {
 
     private List<JsonNode> readEvents(HostedHarnessClient client, HarnessSessionRef session,
             long after, String epoch, int count) throws IOException {
-        // Stream.close cannot interrupt the client's synchronized blocking read.
+        // Stream.close queues on the stream lock and cannot interrupt the client's blocking read.
         var deadline = watchdog.schedule(this::killChild, 10, TimeUnit.SECONDS);
         try (HarnessEventStream stream = client.streamEvents(StreamHarnessEvents.builder()
                 .session(session).lastEventId(after).eventEpoch(epoch).build())) {

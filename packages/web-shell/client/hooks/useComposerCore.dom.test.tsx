@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { undo } from '@codemirror/commands';
+import { EditorView } from '@codemirror/view';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
@@ -35,6 +36,7 @@ function Harness({
   atWorkspaceCwd,
   composerScopeKey,
   disableLegacyHistoryFallback,
+  shellModeEnabled,
   commands,
   allowEmptySlashMenu,
   cycleModeOnTab,
@@ -61,6 +63,7 @@ function Harness({
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   allowEmptySlashMenu?: boolean;
   cycleModeOnTab?: boolean;
@@ -89,6 +92,7 @@ function Harness({
     atWorkspaceCwd,
     composerScopeKey,
     disableLegacyHistoryFallback,
+    shellModeEnabled,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
@@ -119,6 +123,7 @@ async function mount({
   atWorkspaceCwd,
   composerScopeKey,
   disableLegacyHistoryFallback,
+  shellModeEnabled,
   commands,
   allowEmptySlashMenu,
   cycleModeOnTab,
@@ -145,6 +150,7 @@ async function mount({
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   allowEmptySlashMenu?: boolean;
   cycleModeOnTab?: boolean;
@@ -182,6 +188,7 @@ async function mount({
             atWorkspaceCwd={currentWorkspaceCwd}
             composerScopeKey={composerScopeKey}
             disableLegacyHistoryFallback={disableLegacyHistoryFallback}
+            shellModeEnabled={shellModeEnabled}
             commands={currentCommands}
             allowEmptySlashMenu={currentAllowEmptySlashMenu}
             cycleModeOnTab={cycleModeOnTab}
@@ -1373,6 +1380,51 @@ describe('useComposerCore paste', () => {
     expect.soft(event.defaultPrevented).toBe(false);
     expect.soft(latest!.pastedFiles).toEqual([]);
     expect.soft(latest!.getText()).toBe('');
+  });
+
+  it('keeps "!" and "?" typed into a focused Managed composer literal', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    const view = EditorView.findFromDOM(
+      document.querySelector<HTMLElement>('.cm-content')!,
+    )!;
+    for (const key of ['!', '?']) {
+      const handled = view.state
+        .facet(EditorView.inputHandler)
+        .some((handler) =>
+          handler(view, 0, 0, key, () =>
+            view.state.update({ changes: { from: 0, insert: key } }),
+          ),
+        );
+      expect({ key, handled }).toEqual({ key, handled: false });
+      expect(latest!.shellMode).toBe(false);
+    }
+  });
+
+  it('keeps Managed bang input literal and cannot enter the global Shell history mode', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    act(() => latest!.toggleShellMode());
+    expect(latest!.shellMode).toBe(false);
+    act(() => latest!.setShellMode(true));
+    expect(latest!.shellMode).toBe(false);
+    const event = new KeyboardEvent('keydown', {
+      key: '!',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      (document.activeElement as HTMLElement)?.blur();
+      document.body.dispatchEvent(event);
+    });
+    expect(latest!.shellMode).toBe(false);
+    expect(latest!.getText()).toBe('!');
   });
 
   it('leaves a long paste inline in shell mode', async () => {

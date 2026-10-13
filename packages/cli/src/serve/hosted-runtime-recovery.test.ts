@@ -18,6 +18,7 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import {
   stopParkedRuntimeExecutions,
+  answerCommittedTurnCalls,
   recoverHostedRuntimeTurn,
   RecoveryDeclined,
   settleInterruptedTurnRuntime,
@@ -26,6 +27,7 @@ import {
   type HostedRuntimeRecoveryOutcome,
 } from './hosted-runtime-recovery.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedTeamSession } from './hosted-team-session.js';
 import {
   commitHostedFileHistory,
   readHostedFileHistory,
@@ -33,6 +35,7 @@ import {
 import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
+import { HOSTED_TOOL_APPROVAL_POLICY } from './hosted-tool-approval.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
@@ -462,6 +465,59 @@ describe('recoverHostedRuntimeTurn', () => {
    */
   const ACTION_ID = '77777777-7777-4777-8777-777777777777';
 
+  it('recovers a plan decision from call-keyed evidence even with the plan gate off', async () => {
+    const session = await open('plan-recovery', true);
+    try {
+      await session.sink.write({
+        uuid: 'plan-assistant',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'hosted-harness/1',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'assistant',
+          parts: [
+            {
+              functionCall: {
+                id: 'decide',
+                name: 'team_plan_approval',
+                args: {},
+              },
+            },
+          ],
+        },
+      });
+      const teams = new HostedTeamSession(
+        { authority: session.authority, resources: session.resources },
+        session.authority.sessionHeader.sessionKey,
+      );
+      const evidence = vi
+        .spyOn(teams, 'planDecisionEvidence')
+        .mockResolvedValue(
+          'Decision committed; continuation not delivered. Request cmd_plan.',
+        );
+      const generic = vi.spyOn(teams, 'committedBy');
+      await answerCommittedTurnCalls({
+        session,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        teams,
+      });
+      expect(evidence).toHaveBeenCalledTimes(1);
+      expect(evidence.mock.calls[0]?.[0]).toContain('decide');
+      expect(generic).not.toHaveBeenCalled();
+      expect(JSON.stringify(await session.sink.project())).toContain(
+        'continuation not delivered',
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
   async function parkAtAwaitAction(
     expiresAt = Date.now() + 3_600_000,
   ): Promise<ManagedSession> {
@@ -496,7 +552,7 @@ describe('recoverHostedRuntimeTurn', () => {
         kind: 'execute',
         source: 'tool_call',
         optionsRef: await session.resources.publish(
-          'managed-approval',
+          'managed-action-options',
           Buffer.from(
             JSON.stringify({
               v: 1,
@@ -504,11 +560,14 @@ describe('recoverHostedRuntimeTurn', () => {
               turnId: PROMPT_ID,
               functionCallId: 'call-1',
               toolName: 'write_file',
-              policyRevision: 'pol-1',
+              policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
               inputRevision: 1,
               createdAt: expiresAt - 20_000,
               expiresAt,
-              options: [{ id: 'allow' }, { id: 'deny' }],
+              options: [
+                { id: 'allow', label: 'Allow once' },
+                { id: 'deny', label: 'Deny' },
+              ],
             }),
           ),
         ),

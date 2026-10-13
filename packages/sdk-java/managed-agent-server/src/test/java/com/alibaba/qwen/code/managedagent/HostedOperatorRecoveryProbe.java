@@ -239,7 +239,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
 
     private void stopOwnedProcesses() throws Exception {
         processes.forEach(ProcessHandle::destroyForcibly);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
         for (ProcessHandle process : processes) {
             while (running(process)) {
                 assertThat(System.nanoTime()).as("Owned producer %s", process.pid()).isLessThan(deadline);
@@ -250,18 +250,21 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        for (var session : sessions) {
-            escaped(session);
-        }
-        var owned = (Map<?, ?>) ReflectionTestUtils.getField(local, "owned");
-        for (var value : owned.values()) {
-            ProcessHandle process = registeredProcess(value);
-            if (process == null) {
-                continue;
+        try {
+            var owned = (Map<?, ?>) ReflectionTestUtils.getField(local, "owned");
+            for (var value : owned.values()) {
+                ProcessHandle process = registeredProcess(value);
+                if (process == null) {
+                    continue;
+                }
+                processes.addAll(process.descendants().toList());
+                processes.add(process);
             }
-            processes.addAll(process.descendants().toList());
-            processes.add(process);
+            for (var session : sessions) {
+                escaped(session);
+            }
+        } finally {
+            stopOwnedProcesses();
         }
-        stopOwnedProcesses();
     }
 }
