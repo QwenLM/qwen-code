@@ -67,6 +67,7 @@ import {
   hostedOpenTeamChainMember,
   hostedRouteDetails,
   isSentInstruction,
+  memberPlanModeRequired,
   teamMemberPreamble,
   type HostedRouteDetails,
 } from './hosted-member-chain.js';
@@ -653,10 +654,20 @@ export class HostedChildAgentSession {
       const instruction =
         member === undefined
           ? params.text
-          : teamMemberPreamble({
-              name: member.name,
-              teamName: member.team.name,
-            }) + params.text;
+          : // H4e-b3 decision 9: plan mode follows the roster entry until an
+            // approved plan of this member exists; team_plan stays disabled
+            // here, so the read only ever sees a b3d journal's records.
+            teamMemberPreamble(
+              {
+                name: member.name,
+                teamName: member.team.name,
+              },
+              memberPlanModeRequired(
+                member.team,
+                this.store.authority.extensionRecordsInDomain('team_plan'),
+                member.name,
+              ),
+            ) + params.text;
       // The bound is the smaller carrier: the continuation's launch
       // envelope, built from the chain's own description and definition,
       // which no later state changes — so a running and a completed task
@@ -1070,9 +1081,20 @@ export class HostedChildAgentSession {
   }
 
   /** A stop was requested of the owner; set once, never cleared. */
-  requestStop(childRunId: string): Promise<void> {
-    return this.revise(childRunId, (previous) =>
-      childStopRequestedBody(previous),
+  requestStop(
+    childRunId: string,
+    /**
+     * H4e-b3 b3a: evidence identifying the tool call that requested this
+     * stop, so an interrupted turn's recovery tells "my caller committed
+     * it" from someone else's. The default keeps the revision-shaped id
+     * the user-facing cancel paths use.
+     */
+    evidence?: { readonly operation: string; readonly commandId: string },
+  ): Promise<void> {
+    return this.revise(
+      childRunId,
+      (previous) => childStopRequestedBody(previous),
+      evidence,
     );
   }
 
@@ -1308,6 +1330,10 @@ export class HostedChildAgentSession {
   private revise(
     childRunId: string,
     step: (previous: ChildAgentRun) => ChildAgentRun,
+    evidence?: {
+      readonly operation?: string;
+      readonly commandId?: string;
+    },
   ): Promise<void> {
     const write = this.writes.then(async () => {
       const existing = this.store.authority.extensionRecord(
@@ -1325,8 +1351,9 @@ export class HostedChildAgentSession {
       if (isDeepStrictEqual(previousParsed, next)) return;
       await this.store.authority.commitExtensionRecord(
         {
-          operation: 'commitChildRunRecord',
-          commandId: `${childRunId}:${existing!.revision + 1}`,
+          operation: evidence?.operation ?? 'commitChildRunRecord',
+          commandId:
+            evidence?.commandId ?? `${childRunId}:${existing!.revision + 1}`,
           sessionKey: this.key,
           contentDigest: digest(next),
         },
