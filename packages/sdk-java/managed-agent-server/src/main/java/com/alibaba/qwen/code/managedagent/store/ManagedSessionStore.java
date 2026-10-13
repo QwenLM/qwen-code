@@ -190,7 +190,10 @@ public class ManagedSessionStore {
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
-        if (authority != null) {
+        boolean v2 = !jdbc.queryForList("SELECT o.operation_id FROM managed_agent_operation o JOIN qwen_runtime_harness_drain f"
+                + " ON o.tenant_id = f.tenant_id AND o.session_id = f.harness_session_id AND o.operation_id = f.operation_id"
+                + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.lifecycle_protocol_version = 2", tenantId, sessionId).isEmpty();
+        if (authority != null || v2) {
             WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, true);
         }
     }
@@ -303,7 +306,8 @@ public class ManagedSessionStore {
                 writerToken);
         checkLifecycleWriter(tenantId, sessionId, authority);
         if (authority != null) {
-            WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority, false);
+            WorkspaceLifecycleStore.requireClaim(jdbc, tenantId, sessionId, authority,
+                    WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority));
         } else {
             requireOrdinaryAdmission(tenantId, sessionId);
         }
@@ -430,8 +434,11 @@ public class ManagedSessionStore {
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         requireCsiWriter(csiOriginal, head);
         Timestamp now = databaseNow();
+        boolean cleanup = authority != null && WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
+        // A resident cleanup writer may outlive its lease while the coordinator
+        // is down; its token and generation must still own the locked head.
         requireWriter(head, request.writerId(), request.writerGeneration(),
-                writerToken, now, true);
+                writerToken, now, !cleanup);
         Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                 plusMillis(now, request.leaseMillis()));
         requireCsiLease(continuation, databaseEpochMillis(head.writerLeaseUntil()), databaseEpochMillis(leaseUntil));
@@ -636,8 +643,12 @@ public class ManagedSessionStore {
                         request.workspaceId(), sessionId, closureReader, hostedReferences);
             }
         }
+        boolean v2 = authority != null && jdbc.queryForObject("SELECT lifecycle_protocol_version FROM managed_agent_operation"
+                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", Integer.class,
+                tenantId, sessionId, authority.operationId()) == 2;
+        boolean resourcePhase = v2 && WorkspaceLifecycleStore.resourceClaim(jdbc, tenantId, sessionId, authority);
         if (authority != null && extensionRecords.hasNewLifecycleDispatch(tenantId, sessionId, validated.recordBytes(),
-                reader)) {
+                reader, v2, resourcePhase)) {
             if (lifecycleExecution == null || lifecycleSessions == null) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
             }
@@ -1109,9 +1120,17 @@ public class ManagedSessionStore {
     @Transactional
     public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request) {
+        return publishToolResult(tenantId, sessionId, writerToken, request, null);
+    }
+
+    @Transactional
+    public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
+            String writerToken, PublishToolResultRequest request,
+            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         validateScope(tenantId, request.workspaceId(), sessionId);
         requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
+        checkLifecycleWriter(tenantId, sessionId, authority);
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateStableId(request.resourceId(), "resourceId");

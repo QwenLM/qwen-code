@@ -41,7 +41,7 @@ public class ManagedSessionStoreController {
         this.store = store;
     }
 
-    private static com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycleAuthority(HttpHeaders headers) {
+    static com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycleAuthority(HttpHeaders headers) {
         String operation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.OPERATION_HEADER);
         String generation = headers.getFirst(com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority.GENERATION_HEADER);
         if (operation == null && generation == null) {
@@ -139,8 +139,8 @@ public class ManagedSessionStoreController {
     public ToolResultResourceRef publishToolResult(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
-            @Valid @RequestBody PublishToolResultRequest request) {
-        return store.publishToolResult(tenant.tenantId(), sessionId, writerToken, request);
+            @Valid @RequestBody PublishToolResultRequest request, @RequestHeader HttpHeaders headers) {
+        return store.publishToolResult(tenant.tenantId(), sessionId, writerToken, request, lifecycleAuthority(headers));
     }
 
     @GetMapping("/transactions")
