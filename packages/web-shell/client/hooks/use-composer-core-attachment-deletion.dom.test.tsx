@@ -106,6 +106,83 @@ function pressKey(key: string) {
 
 describe('useComposerCore issue #10794 attachment deletion', () => {
   it.each(['Backspace', 'Delete'])(
+    'removes a removable tag before an image with %s',
+    async (key) => {
+      await mount();
+      await pasteImages([
+        new File(['png'], 'photo.png', { type: 'image/png' }),
+      ]);
+      act(() => latest!.addTags([{ id: 'orders', value: 'orders' }]));
+      pressKey(key);
+      expect(latest!.composerTags).toEqual([]);
+      expect(latest!.pastedImages).toHaveLength(1);
+      pressKey(key);
+      expect(latest!.pastedImages).toEqual([]);
+    },
+  );
+
+  it.each(['Backspace', 'Delete'])(
+    'preserves non-removable tags while deleting an image with %s',
+    async (key) => {
+      await mount();
+      await pasteImages([
+        new File(['png'], 'photo.png', { type: 'image/png' }),
+      ]);
+      act(() =>
+        latest!.addTags([{ id: 'fixed', value: 'fixed', removable: false }]),
+      );
+      pressKey(key);
+      expect(latest!.composerTags).toHaveLength(1);
+      expect(latest!.pastedImages).toEqual([]);
+    },
+  );
+
+  it.each(['Backspace', 'Delete'])(
+    'preserves committed images during an in-flight paste with %s',
+    async (key) => {
+      await mount();
+      await pasteImages([
+        new File(['first'], 'first.png', { type: 'image/png' }),
+      ]);
+      const first = latest!.pastedImages[0];
+      vi.restoreAllMocks();
+      const readAsDataURL = FileReader.prototype.readAsDataURL;
+      let resumeRead: (() => void) | undefined;
+      let readSettled!: Promise<void>;
+      vi.spyOn(FileReader.prototype, 'readAsDataURL').mockImplementation(
+        function (this: FileReader, blob: Blob) {
+          readSettled = new Promise((resolve) =>
+            this.addEventListener('loadend', () => resolve(), { once: true }),
+          );
+          resumeRead = () => readAsDataURL.call(this, blob);
+        },
+      );
+      let pendingPaste!: Promise<void>;
+      await act(async () => {
+        pendingPaste = Promise.resolve(
+          latest!.ingestFiles([
+            new File(['second'], 'second.png', { type: 'image/png' }),
+          ]),
+        );
+        await vi.waitFor(() => expect(resumeRead).toBeDefined());
+      });
+      expect(latest!.pendingImageBatchCount).toBe(1);
+      pressKey(key);
+      expect(latest!.pastedImages).toEqual([first]);
+      await act(async () => {
+        resumeRead!();
+        await pendingPaste;
+        await readSettled;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(latest!.pendingImageBatchCount).toBe(0);
+      expect(latest!.pastedImages).toHaveLength(2);
+      pressKey(key);
+      expect(latest!.pastedImages).toEqual([first]);
+    },
+  );
+
+  it.each(['Backspace', 'Delete'])(
     'removes a pasted image from an empty composer with %s',
     async (key) => {
       await mount();

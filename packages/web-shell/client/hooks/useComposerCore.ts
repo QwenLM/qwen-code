@@ -3160,6 +3160,7 @@ export function useComposerCore(
     };
 
     const removeLastAttachment = (view: EditorView): boolean => {
+      if (imageIngestionLaneRef.current.pendingBatches > 0) return false;
       if (view.state.doc.length > 0) return false;
       if (pastedFilesRef.current.length > 0) {
         const next = pastedFilesRef.current.slice(0, -1);
