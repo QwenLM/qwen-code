@@ -164,26 +164,35 @@ public class SessionMessageRelayStore {
     }
 
     /** Whether an older command of the same sender is still unclassified:
-     * one sender's commands pass strictly in order. The open window is
-     * the outbound's planned/accepting span on an unclassified row — a
-     * terminal record never blocks again, whatever row state its last
-     * step left, and a terminal row never blocks again, whatever the
-     * record says. */
+     * one sender's commands pass strictly in order. Older is the sender's
+     * own commit order — each outbound's first_sequence in its journal,
+     * never its hashed id. The open window is the outbound's
+     * planned/accepting span, on an unclassified row or before discovery
+     * has opened one — a terminal record never blocks again, whatever row
+     * state its last step left, and a terminal row never blocks again,
+     * whatever the record says. */
     public boolean olderOpenCommand(String tenantId, String senderSessionId,
             String commandId) {
-        return !jdbc.query("SELECT l.message_id FROM"
-                        + " qwen_managed_session_message_relay l"
-                        + " JOIN qwen_managed_session_extension_record r"
-                        + " ON r.tenant_id = l.tenant_id"
-                        + " AND r.session_id = l.sender_session_id"
+        return !jdbc.query("SELECT 1 FROM"
+                        + " qwen_managed_session_extension_record r"
+                        + " JOIN qwen_managed_session_extension_record c"
+                        + " ON c.tenant_id = r.tenant_id"
+                        + " AND c.session_id = r.session_id"
+                        + " AND c.domain = r.domain"
+                        + " AND c.record_id = ?"
+                        + " LEFT JOIN qwen_managed_session_message_relay l"
+                        + " ON l.tenant_id = r.tenant_id"
+                        + " AND l.sender_session_id = r.session_id"
+                        + " AND l.message_id = r.record_id"
+                        + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'session_command'"
-                        + " AND r.record_id = l.message_id"
-                        + " WHERE l.tenant_id = ? AND l.sender_session_id = ?"
-                        + " AND l.message_id < ?"
-                        + " AND l.state NOT IN ('done', 'unknown', 'orphaned')"
-                        + " AND r.delivery_state IN ('planned', 'accepting')",
-                (result, row) -> result.getString(1), tenantId,
-                senderSessionId, commandId).isEmpty();
+                        + " AND r.first_sequence < c.first_sequence"
+                        + " AND r.delivery_state IN ('planned', 'accepting')"
+                        + " AND (l.state IS NULL"
+                        + " OR l.state NOT IN ('done', 'unknown', 'orphaned'))"
+                        + " LIMIT 1",
+                (result, row) -> result.getInt(1), commandId, tenantId,
+                senderSessionId).isEmpty();
     }
 
     /** Insert-or-claim: returns the row this worker now owns, or null when

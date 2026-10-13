@@ -25,6 +25,11 @@
         <maven-failsafe-plugin.version>3.5.6</maven-failsafe-plugin.version>
         <json-schema-validator.version>1.5.9</json-schema-validator.version>
         <spotbugs-maven-plugin.version>4.10.4.1</spotbugs-maven-plugin.version>
+        <!-- The gRPC client is a shaded artifact (io.grpc/com.google are
+             relocated), so the Boot BOM never re-aligns it; the dependency
+             gate is empirical (clean tree + a real-broker round-trip), not a
+             version-table check. -->
+        <rocketmq-client-java.version>5.1.0</rocketmq-client-java.version>
     </properties>
 
     <dependencies>
@@ -32,6 +37,11 @@
             <groupId>com.aliyun.oss</groupId>
             <artifactId>aliyun-sdk-oss</artifactId>
             <version>3.18.4</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-client-java</artifactId>
+            <version>${rocketmq-client-java.version}</version>
         </dependency>
         <dependency>
             <groupId>com.alibaba</groupId>
