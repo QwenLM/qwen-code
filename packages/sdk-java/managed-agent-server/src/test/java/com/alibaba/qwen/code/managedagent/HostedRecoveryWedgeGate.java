@@ -86,6 +86,10 @@ class HostedRecoveryWedgeGate {
         Path evidence = (System.getProperty("qwen.wedge.evidence") != null
                 ? Path.of(System.getProperty("qwen.wedge.evidence")).toAbsolutePath()
                 : moduleDir.resolve("target/wedge-evidence")).resolve("wedge");
+        Path moduleTarget = moduleDir.resolve("target").normalize();
+        assertThat(evidence.normalize().startsWith(moduleTarget))
+                .as("-Dqwen.wedge.evidence must resolve under %s before the recursive wipe", moduleTarget)
+                .isTrue();
         Files.createDirectories(evidence);
         // Runs share this fixed evidence directory; a stale wedged run's
         // artifacts must not survive into a later green run's bundle, so the
