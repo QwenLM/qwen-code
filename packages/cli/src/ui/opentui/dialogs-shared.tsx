@@ -26,6 +26,7 @@ import { keyMatchers, Command } from '../keyMatchers.js';
 import { toOriginalKey } from './key-map.js';
 import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import {
+  type scrollDialogLayout,
   applyNumberSelectKey,
   computeInitialActiveIndex,
   findNextEnabledIndex,
@@ -90,13 +91,23 @@ export function DialogFrame(props: {
    * region, with the unused rows blank below it.
    */
   fill?: boolean;
+  bodyLayout?: ReturnType<typeof scrollDialogLayout>;
 }) {
   return (
     <box
+      key={
+        props.bodyLayout?.compact
+          ? `compact-${props.bodyLayout.border}`
+          : 'normal'
+      }
       flexDirection="column"
       borderStyle="rounded"
+      border={props.bodyLayout?.border === false ? [] : true}
       borderColor={props.borderColor ?? C.borderDefault}
-      padding={1}
+      paddingLeft={1}
+      paddingRight={1}
+      paddingTop={props.bodyLayout?.compact ? 0 : 1}
+      paddingBottom={props.bodyLayout?.compact ? 0 : 1}
       flexGrow={props.fill ? 1 : 0}
       // Region-mounted, like the sibling frames: a shrinkable frame lets a
       // short region squeeze the body's unsized text rows to zero and paint

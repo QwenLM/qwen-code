@@ -12,3 +12,4 @@ bun packages/cli/scripts/opentui-stats-parity.tsx
 bun packages/cli/scripts/opentui-command-parity.ts
 bun packages/cli/scripts/opentui-wrap-parity.ts
 bun packages/cli/scripts/opentui-dialog-layout.tsx
+bun packages/cli/scripts/opentui-hook-content.tsx
