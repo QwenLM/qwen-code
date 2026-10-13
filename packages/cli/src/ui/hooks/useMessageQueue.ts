@@ -12,6 +12,10 @@ import type {
   GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
+import {
+  isOnlyLeadingSystemReminders,
+  scanLeadingEnvelopeBlock,
+} from '../utils/historyUtils.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
 export interface QueuedGoalTurn extends GoalContinuationTurn {
@@ -24,6 +28,16 @@ export interface QueuedUserSubmission {
   kind: 'user';
   modelText: string;
   submittedPrompt?: string;
+  /**
+   * The members' injected leading `<system-reminder>` envelope runs,
+   * joined in queue order. The aggregate's model text can carry a
+   * member's envelope mid-string (only the first member's envelope is
+   * leading), where the restore path's leading-only split cannot see
+   * it — carrying the producer's per-member decomposition lets the
+   * restore re-arm those consumed one-shot notices instead of dropping
+   * them.
+   */
+  reminders?: string;
   turnKey: string;
   /**
    * Shell intent recorded when the message was submitted. The drain routes
@@ -94,6 +108,7 @@ export interface UseMessageQueueReturn {
     submittedPrompt?: string,
     deferUntilIdle?: boolean,
     shellMode?: boolean,
+    reminders?: string,
   ) => void;
   restorePeerMessage: (
     message: string,
@@ -108,6 +123,15 @@ interface QueuedMessage {
   key: string;
   text: string;
   submittedPrompt?: string;
+  /**
+   * The producer decomposition a restored aggregate carried (see
+   * `restoreMessages`): the entry's text is the joined model text, so a
+   * member's injected envelope can sit mid-string where the aggregation's
+   * leading-prefix arithmetic cannot re-derive it. Re-checked against the
+   * newly joined text at aggregation time — a byte-identical twin in an
+   * earlier member demotes this member to projection-less.
+   */
+  reminders?: string;
   deferUntilIdle: boolean;
   /**
    * Shell intent recorded at submit time (see QueuedUserSubmission).
@@ -133,18 +157,96 @@ function aggregateUserMessages(
   messages: readonly QueuedMessage[],
 ): QueuedUserSubmission {
   const text = messages.map((message) => message.text).join('\n\n');
-  // Every member contributes a projection — its own when it has one, its
-  // model text otherwise — so a single projection-less member cannot drop
-  // a peer message's one-liner and surface the raw envelope as the
-  // user's prompt instead.
-  const submittedPrompt = messages
-    .map((message) => message.submittedPrompt ?? message.text)
-    .join('\n\n');
+  // Every member contributes a projection — its producer-carried one when
+  // it has one, its own text verbatim otherwise. A shape-stripped fallback
+  // is not producer provenance: a projection-less member (a vim submit, a
+  // legacy restore) keeps its text untouched rather than having a
+  // user-authored leading block classified as an injected envelope, and a
+  // single projection-less member still cannot drop a peer message's
+  // one-liner.
+  const projections = messages.map(
+    (message) => message.submittedPrompt ?? message.text,
+  );
+  // Each member's injected envelope run: the difference between its model
+  // text and its projection when that difference is a pure leading
+  // envelope prefix. A user-authored leading block (projection carried
+  // verbatim) contributes nothing — and neither does a projection-less
+  // member, whose verbatim projection leaves no difference to arm.
+  //
+  // A run is armed only when every block in it occurs for the FIRST time
+  // exactly at its own offset in the joined text: the restore path removes
+  // each armed block by first byte-match, so an armed block whose
+  // byte-identical twin sits earlier in the aggregate (a projection-less
+  // member's user-pasted copy) would delete the user's block and leave the
+  // injected one. A member failing that check is treated as
+  // projection-less — its text stays verbatim in the projection and
+  // nothing is armed, failing safe toward keeping text.
+  let memberOffset = 0;
+  const reminders = messages
+    .map((message, index) => {
+      const start = memberOffset;
+      memberOffset += message.text.length + '\n\n'.length;
+      if (message.reminders !== undefined) {
+        // The carried run was position-checked against the text it was
+        // produced from, not against THIS joined text: re-aggregation can
+        // seat a byte-identical twin of a carried block earlier (a
+        // projection-less member's user-pasted copy), and the restore
+        // removes armed blocks by first byte-match, which would delete the
+        // user's copy and keep the injected one. The run encodes no
+        // position inside its own member, so each block's own offset is
+        // located in the member text and only a strictly-earlier twin
+        // fails safe.
+        for (
+          let scanned = scanLeadingEnvelopeBlock(message.reminders);
+          scanned !== null;
+          scanned = scanLeadingEnvelopeBlock(scanned.rest)
+        ) {
+          const own = message.text.indexOf(scanned.block);
+          if (own === -1 || text.indexOf(scanned.block) !== start + own) {
+            projections[index] = message.text;
+            return '';
+          }
+        }
+        return message.reminders;
+      }
+      const projection = projections[index];
+      if (!message.text.endsWith(projection)) return '';
+      const prefix = message.text.slice(
+        0,
+        message.text.length - projection.length,
+      );
+      if (!isOnlyLeadingSystemReminders(prefix)) return '';
+      let blockOffset = start;
+      for (
+        let scanned = scanLeadingEnvelopeBlock(prefix);
+        scanned !== null;
+        scanned = scanLeadingEnvelopeBlock(scanned.rest)
+      ) {
+        if (text.indexOf(scanned.block) !== blockOffset) {
+          projections[index] = message.text;
+          return '';
+        }
+        blockOffset += scanned.block.length + scanned.separator.length;
+      }
+      return prefix;
+    })
+    .join('');
+  // No member carried producer provenance: the joined texts are not a
+  // projection, and emitting one would fabricate a byte-identity the
+  // dispatch path's adoption gate would trust. A projection-less aggregate
+  // must read as 'no provenance' so the read-back falls through to the
+  // strip, exactly like a direct projection-less submit.
+  const hasProducerProjection = messages.some(
+    (message) => message.submittedPrompt !== undefined,
+  );
   return {
     kind: 'user',
     modelText: text,
     turnKey: messages[0].key,
-    submittedPrompt,
+    ...(hasProducerProjection
+      ? { submittedPrompt: projections.join('\n\n') }
+      : {}),
+    ...(reminders === '' ? {} : { reminders }),
     // Callers keep batches intent-homogeneous, so every member carries the
     // same value; the first represents the batch.
     ...(messages[0].shellMode === undefined
@@ -386,6 +488,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
       submittedPrompt?: string,
       deferUntilIdle = false,
       shellMode?: boolean,
+      reminders?: string,
     ) => {
       const restored = messages
         .map((text) => text.trim())
@@ -395,6 +498,9 @@ export function useMessageQueue(): UseMessageQueueReturn {
           text,
           ...(messages.length === 1 && submittedPrompt !== undefined
             ? { submittedPrompt }
+            : {}),
+          ...(messages.length === 1 && reminders !== undefined
+            ? { reminders }
             : {}),
           deferUntilIdle,
           ...(shellMode === undefined ? {} : { shellMode }),
@@ -452,7 +558,16 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   return {
-    messageQueue: queuedMessages.map(({ text }) => text),
+    // Preview rows are display forms, not model text: the entry's
+    // producer projection verbatim when it has one (it is where a
+    // user-authored leading envelope survives as content), its own text
+    // otherwise — a projection-less entry (a vim submit, a legacy restore)
+    // has no provenance to strip by, so the preview shows exactly what a
+    // pop would restore. Peer entries always carry their displayText as
+    // the projection.
+    messageQueue: queuedMessages.map(
+      ({ text, submittedPrompt }) => submittedPrompt ?? text,
+    ),
     pendingSubmissionCount: queuedMessages.length + queuedGoalTurns.length,
     addMessage,
     addPeerMessage,
