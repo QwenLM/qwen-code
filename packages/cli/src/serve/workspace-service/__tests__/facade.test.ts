@@ -3477,7 +3477,50 @@ describe('createDaemonWorkspaceService', () => {
     });
   });
 
+  describe('refreshWorkspaceSkills', () => {
+    it.each([undefined, [], ['session-1']])(
+      'passes selection %j without changing the default ACP refresh',
+      async (sessionIds) => {
+        const result = {
+          sessionsRefreshed: 1,
+          sessionsFailed: 0,
+          configsRefreshed: 1,
+          configsFailed: 0,
+          reason: 'all',
+        };
+        const invokeWorkspaceCommand = vi.fn().mockResolvedValue(result);
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ invokeWorkspaceCommand }),
+        );
+        await expect(
+          svc.refreshWorkspaceSkills(makeCtx(), sessionIds),
+        ).resolves.toEqual(result);
+        expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+          'qwen/control/workspace/skills/refresh',
+          {
+            cwd: '/workspace',
+            reason: 'all',
+            ...(sessionIds !== undefined ? { sessionIds } : {}),
+          },
+        );
+      },
+    );
+  });
+
   describe('refreshExtensionsForAllSessions', () => {
+    it('passes selected sessions to the refresh callback', async () => {
+      const refreshExtensionsForAllSessions = vi
+        .fn()
+        .mockResolvedValue({ refreshed: 1, failed: 0 });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ refreshExtensionsForAllSessions }),
+      );
+      await svc.refreshExtensionsForAllSessions(['session-1']);
+      expect(refreshExtensionsForAllSessions).toHaveBeenCalledWith([
+        'session-1',
+      ]);
+    });
+
     it('delegates to the all-session refresh callback', async () => {
       const invokeWorkspaceCommand = vi.fn();
       const refreshExtensionsForAllSessions = vi

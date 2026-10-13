@@ -98,6 +98,7 @@ import {
   type ServeWorkspaceMcpResourcesStatus,
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceMcpToolsStatus,
+  type ServeWorkspaceSkillsRefreshResult,
 } from './status.js';
 import {
   BranchWhilePromptActiveError,
@@ -13357,6 +13358,83 @@ export function createSessionControlPlane(
       params?: Record<string, unknown>,
       invokeOpts?: { timeoutMs?: number },
     ) {
+      if (
+        method === SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh &&
+        params?.['sessionIds'] !== undefined
+      ) {
+        const rawSessionIds = params['sessionIds'];
+        if (
+          !Array.isArray(rawSessionIds) ||
+          !rawSessionIds.every(
+            (id) => typeof id === 'string' && id.trim().length > 0,
+          )
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'sessionIds must be an array of non-empty strings',
+          );
+        }
+        const reason =
+          params['reason'] === undefined ? 'all' : params['reason'];
+        if (reason !== 'settings' && reason !== 'content' && reason !== 'all') {
+          throw RequestError.invalidParams(
+            undefined,
+            'reason must be settings, content, or all',
+          );
+        }
+        const sessions = [...new Set(rawSessionIds as string[])].map((id) => {
+          const entry = byId.get(id);
+          if (!entry) throw new SessionNotFoundError(id);
+          return entry;
+        });
+        assertRuntimeNotStopping();
+        const result = {
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+          configsRefreshed: 0,
+          configsFailed: 0,
+          reason,
+        };
+        const groups = new Map<ChannelInfo, string[]>();
+        for (const entry of sessions) {
+          const info = channelInfoForEntry(entry);
+          if (!info || info.harness.isDying) {
+            result.sessionsFailed += 1;
+            continue;
+          }
+          const ids = groups.get(info) ?? [];
+          ids.push(entry.sessionId);
+          groups.set(info, ids);
+        }
+        const targets = [...groups];
+        const results = await Promise.allSettled(
+          targets.map(async ([info, sessionIds]) =>
+            harness.withWorkspaceControl(info.harness, async () =>
+              withTimeout(
+                Promise.race([
+                  info.connection.extMethod(method, { ...params, sessionIds }),
+                  getChannelClosedReject(info),
+                ]),
+                invokeOpts?.timeoutMs ?? initTimeoutMs,
+                method,
+              ),
+            ),
+          ),
+        );
+        results.forEach((settled, index) => {
+          if (settled.status === 'rejected') {
+            result.sessionsFailed += targets[index]![1].length;
+            return;
+          }
+          const counts =
+            settled.value as unknown as ServeWorkspaceSkillsRefreshResult;
+          result.sessionsRefreshed += counts.sessionsRefreshed;
+          result.sessionsFailed += counts.sessionsFailed;
+          result.configsRefreshed += counts.configsRefreshed ?? 0;
+          result.configsFailed += counts.configsFailed ?? 0;
+        });
+        return result as T;
+      }
       const startsWorkspaceChannel =
         method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart;
       const invoke = async (info: ChannelInfo) => {
@@ -13926,7 +14004,14 @@ export function createSessionControlPlane(
 
     async refreshExtensionsForAllSessions(data, options) {
       const skillsOnly = options?.skillsOnly === true;
-      const sessions = Array.from(byId.values());
+      const sessions =
+        options?.sessionIds === undefined
+          ? Array.from(byId.values())
+          : [...new Set(options.sessionIds)].map((id) => {
+              const entry = byId.get(id);
+              if (!entry) throw new SessionNotFoundError(id);
+              return entry;
+            });
       const bootstrapRefreshConnections = new Set<
         (typeof sessions)[number]['connection']
       >();

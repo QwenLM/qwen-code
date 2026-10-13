@@ -5860,6 +5860,58 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('refreshes only selected extensions and validates every id before refreshing', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const foreign = makeBridge({
+      boundWorkspace: WS_B,
+      channelFactory: async () => makeChannel().channel,
+    });
+    try {
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const third = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const other = await foreign.spawnOrAttach({ workspaceCwd: WS_B });
+      await expect(
+        bridge.refreshExtensionsForAllSessions(undefined, { sessionIds: [] }),
+      ).resolves.toEqual({ refreshed: 0, failed: 0 });
+      for (const invalid of ['missing', other.sessionId]) {
+        await expect(
+          bridge.refreshExtensionsForAllSessions(undefined, {
+            sessionIds: [first.sessionId, invalid],
+          }),
+        ).rejects.toBeInstanceOf(SessionNotFoundError);
+      }
+      expect(handle.agent.extMethodCalls).toEqual([]);
+      await expect(
+        bridge.refreshExtensionsForAllSessions(undefined, {
+          sessionIds: [second.sessionId, third.sessionId, second.sessionId],
+        }),
+      ).resolves.toEqual({ refreshed: 2, failed: 0 });
+      expect(handle.agent.extMethodCalls).toEqual([
+        {
+          method: SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+          params: { sessionId: second.sessionId },
+        },
+        {
+          method: SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+          params: { sessionId: third.sessionId, refreshBootstrap: false },
+        },
+      ]);
+    } finally {
+      await Promise.all([bridge.shutdown(), foreign.shutdown()]);
+    }
+  });
+
   it('bounds a hung session extension refresh', async () => {
     vi.useFakeTimers();
     const refreshGate = deferred<Record<string, unknown>>();
