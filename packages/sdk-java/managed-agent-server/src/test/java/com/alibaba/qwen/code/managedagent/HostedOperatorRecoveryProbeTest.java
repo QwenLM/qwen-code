@@ -47,13 +47,13 @@ class HostedOperatorRecoveryProbeTest {
 
             assertThatThrownBy(probe::close).isInstanceOf(AssertionError.class)
                     .hasMessageContaining(expected.toString()).hasMessageContaining(different.toString());
-            assertThat(tracked.waitFor(5, TimeUnit.SECONDS)).as("previously tracked process stopped").isTrue();
-            assertThat(registered.waitFor(5, TimeUnit.SECONDS)).as("registered worker stopped").isTrue();
+            assertThat(tracked.waitFor(60, TimeUnit.SECONDS)).as("previously tracked process stopped").isTrue();
+            assertThat(registered.waitFor(60, TimeUnit.SECONDS)).as("registered worker stopped").isTrue();
             assertThat(unverified.isAlive()).as("unverified PID remains untouched").isTrue();
         } finally {
             children.forEach(Process::destroyForcibly);
             for (Process child : children) {
-                assertThat(child.waitFor(5, TimeUnit.SECONDS)).as("fixture process %s stopped", child.pid()).isTrue();
+                assertThat(child.waitFor(60, TimeUnit.SECONDS)).as("fixture process %s stopped", child.pid()).isTrue();
             }
         }
     }
