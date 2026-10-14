@@ -744,13 +744,18 @@ describe('POST /workspace/settings', () => {
       systemDefaults?: Record<string, unknown>;
       workspace?: Record<string, unknown>;
       workspaceSettingsActive?: boolean;
+      userPath?: string;
+      workspacePath?: string;
     }) => {
       vi.mocked(loadSettings).mockReturnValue({
         merged: {},
-        user: { settings: scopes.user ?? {} },
+        user: { settings: scopes.user ?? {}, path: scopes.userPath },
         system: { settings: scopes.system ?? {} },
         systemDefaults: { settings: scopes.systemDefaults ?? {} },
-        workspace: { settings: scopes.workspace ?? {} },
+        workspace: {
+          settings: scopes.workspace ?? {},
+          path: scopes.workspacePath,
+        },
         workspaceSettingsActive: scopes.workspaceSettingsActive ?? true,
         forScope: vi.fn().mockReturnValue({ settings: {} }),
       } as never);
@@ -875,6 +880,8 @@ describe('POST /workspace/settings', () => {
       mockScopes({
         user: { general: { enableAutoUpdate: false } },
         workspaceSettingsActive: false,
+        userPath: '/home/operator/.qwen/settings.json',
+        workspacePath: '/home/operator/.qwen/settings.json',
       });
 
       const res = await request(app).post('/workspace/settings').send({
@@ -885,6 +892,35 @@ describe('POST /workspace/settings', () => {
 
       expect(res.status).toBe(200);
       expect(persistSetting).toHaveBeenCalled();
+    });
+
+    it('rejects a workspace write when the home-bound workspace file is not the user settings file', async () => {
+      // R3-2 follow-up: when QWEN_HOME redirects the user settings file,
+      // the home-bound workspace file is what processes without QWEN_HOME
+      // read as their user settings. The inactive-workspace shortcut must
+      // not skip the guard here: the write would overwrite a file this
+      // process never loads, so the verdict cannot see the opt-out it
+      // destroys.
+      const { app, persistSetting } = makeApp();
+      mockScopes({
+        user: { general: { enableAutoUpdate: false } },
+        workspaceSettingsActive: false,
+        userPath: '/config/qwenhome/settings.json',
+        workspacePath: '/home/operator/.qwen/settings.json',
+      });
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'workspace',
+        key: 'general.enableAutoUpdate',
+        value: true,
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_tighten_only_setting',
+      });
+      expect(res.body.error).toContain('QWEN_HOME');
+      expect(persistSetting).not.toHaveBeenCalled();
     });
 
     it('does not restrict the same key at user scope', async () => {

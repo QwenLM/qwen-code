@@ -179,8 +179,13 @@ function rejectWorkspaceRestrictedWrite(
  * already carries.
  *
  * When the bound workspace is the home directory the loader marks the
- * workspace scope inactive and the write lands in the user settings file,
- * where it is honored on the next load — the guard stays out of its way.
+ * workspace scope inactive and, when the write target really is this
+ * process's user settings file, the write lands there and is honored on the
+ * next load — the guard stays out of its way. With QWEN_HOME set the two
+ * files diverge: the home-bound workspace file is then what processes
+ * without QWEN_HOME read as their user settings, holding values this process
+ * never loads, so no verdict can be trusted — the guard refuses on the
+ * mismatch itself.
  *
  * Returns true when the request was answered and the caller must stop.
  */
@@ -198,7 +203,25 @@ function rejectWorkspaceTightenOnlyWrite(
     skipLoadEnvironment: true,
     workspaceTrusted: true,
   });
-  if (!loaded.workspaceSettingsActive) return false;
+  if (!loaded.workspaceSettingsActive) {
+    // The short-circuit assumes the write target IS this process's user
+    // settings file. When QWEN_HOME redirects the user settings file
+    // elsewhere that premise breaks: the target is the file processes
+    // without QWEN_HOME read as their user settings — a file this process
+    // never loads, so the verdict cannot see the values a write would
+    // overwrite. Refuse on the mismatch itself.
+    if (
+      loaded.workspace.path !== undefined &&
+      loaded.workspace.path !== loaded.user.path
+    ) {
+      res.status(400).json({
+        error: `Setting "${key}" is not honored from workspace scope because the bound workspace is the home directory while this process's user settings file resolves elsewhere (QWEN_HOME); the write would overwrite the settings file processes without QWEN_HOME read; set it at user scope instead`,
+        code: 'workspace_tighten_only_setting',
+      });
+      return true;
+    }
+    return false;
+  }
   const verdict = workspaceTightenOnlyWriteVerdict(
     key,
     value,
