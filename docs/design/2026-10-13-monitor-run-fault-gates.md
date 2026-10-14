@@ -240,7 +240,11 @@ mid-gap and the case hung on a gate that would never reopen. The watch
 runs with `idle_timeout_ms` = 180 s. The same poll bounds the resumed
 observer's catch-up to the committed ledger — rows committed between the
 replay read and the relay stop arrive a poll cycle late, so the catch-up
-wait runs at 120 s, outliving two cycles.
+wait runs at 120 s, outliving two cycles. A second discipline: the monitor
+producer never exits on its own — it idles past its last mark, and the
+quota stop's kill is the only way out. A natural exit closes the scope,
+and its cancel write races the quota settle, flipping the record to
+`stop_requested` instead of `max_events` (observed twice on the lane).
 
 ### FG8f — output delivery (slice 1, this PR)
 

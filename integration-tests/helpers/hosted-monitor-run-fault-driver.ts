@@ -327,7 +327,10 @@ function backgroundProducer(): string {
 // The monitor producer: one observation window, a deterministic hold, then
 // the second window that reaches max_events and auto-stops the watch. The
 // mon-mark timeline makes "where was the producer when the watch idled
-// out" readable from the case directory.
+// out" readable from the case directory. The producer never exits on its
+// own: a natural exit closes the scope and its cancel write races the
+// quota settle, flipping the record to stop_requested (seen twice on the
+// lane) — so the quota stop's kill is the only way out.
 function monitorProducer(): string {
   return [
     "const fs = require('fs');",
@@ -347,6 +350,7 @@ function monitorProducer(): string {
     '  await sleep(1600);',
     "  process.stdout.write('FG8_MON_2\\n');",
     "  mark('done');",
+    '  await new Promise(() => {});',
     '})();',
   ].join('\n');
 }

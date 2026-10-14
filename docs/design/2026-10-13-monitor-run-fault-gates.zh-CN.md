@@ -107,7 +107,7 @@ driver 在 broker 与 store 监听器前内嵌反向代理；lose-once 故障转
 
 `cursor-expired-resync` 暂缓、不进片 1 的字母：重放地板只有会话快照落地才会前移，所以一个诚实的过期游标需要先把重放地板机制驱动到那个点；该用例随片 2 落地，它的变异（下面的第 2 条）一并移动。本次交付的 FG8e 字母覆盖四个中止/续传用例。
 
-一条付出了一个 flake 的 fixture 教训：60 s 的事件轮询/心跳间隔（为强制 live hub 承载投递而设）可把 WebShell 续传压住一个完整轮询周期，而 monitor watch 的空闲窗口必须长过它 —— 空闲超时设 30 s 时，watch 在断流中途把顶在门边的生产者空闲杀掉，用例就吊死在一扇永不再开的门上。watch 以 `idle_timeout_ms` = 180 s 运行。同一轮询也限制续传 observer 追平已提交台账的速度 —— 在重放读取与 relay 停止之间提交的行要晚一个轮询周期才到，所以追平等待设为 120 s，长过两个周期。
+一条付出了一个 flake 的 fixture 教训：60 s 的事件轮询/心跳间隔（为强制 live hub 承载投递而设）可把 WebShell 续传压住一个完整轮询周期，而 monitor watch 的空闲窗口必须长过它 —— 空闲超时设 30 s 时，watch 在断流中途把顶在门边的生产者空闲杀掉，用例就吊死在一扇永不再开的门上。watch 以 `idle_timeout_ms` = 180 s 运行。同一轮询也限制续传 observer 追平已提交台账的速度 —— 在重放读取与 relay 停止之间提交的行要晚一个轮询周期才到，所以追平等待设为 120 s，长过两个周期。第二条纪律：monitor producer 绝不自然退出 —— 打过最后一个 mark 后空转，配额停表的 kill 是唯一出路。自然退出会关闭作用域，其 cancel 写入与配额结算赛跑，胜出时把记录翻折成 `stop_requested` 而不是 `max_events`（lane 上实测两次）。
 
 ### FG8f —— 输出投递（片 1，本 PR）
 
