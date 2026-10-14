@@ -419,6 +419,23 @@ class WorkspaceMigrationStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isEqualTo(1);
     }
 
+
+    @Test
+    void preservesTheServiceRefusalCodeWhenMountIdentityBecomesUnreadable() throws Exception {
+        var operation = store(true);
+        operation.retire(mock(RuntimeBrokerService.class));
+        guard.fence("tenant", "storage", 1, request.path("fenceOperationId").asText());
+        unreadableIdentity = target;
+        assertThatThrownBy(() -> operation.verify(false)).isInstanceOfSatisfying(RuntimeBrokerException.class,
+                error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(WorkspaceRecoveryStore.errorCode(error)).isEqualTo("workspace_unavailable");
+                    operation.failed(WorkspaceRecoveryStore.errorCode(error));
+                });
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRED");
+        assertThat(operation.inspect().path("lastErrorCode").asText()).isEqualTo("workspace_unavailable");
+    }
+
     @Test
     void publishesOnlyThePinnedTargetMarkerAndPromotesOneHigherRevision() throws Exception {
         var operation = store(true);

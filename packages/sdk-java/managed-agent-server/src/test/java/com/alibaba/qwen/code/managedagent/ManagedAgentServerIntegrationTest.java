@@ -1262,9 +1262,9 @@ class ManagedAgentServerIntegrationTest {
         assertThat(before).extracting(EventRecord::contentPartId)
                 .containsOnly(before.get(0).contentPartId());
 
+        store.materializeNextBatch(tenant, sessionId, 100);
         store.retractContinuationOutput(tenant, sessionId, turn.turnId(),
                 owner, "boot_old", "epoch_old");
-        store.materializeNextBatch(tenant, sessionId, 100);
 
         assertThat(assertEventsNameTheSnapshot(tenant, sessionId))
                 .filteredOn(event -> event.type().endsWith(".delta"))
