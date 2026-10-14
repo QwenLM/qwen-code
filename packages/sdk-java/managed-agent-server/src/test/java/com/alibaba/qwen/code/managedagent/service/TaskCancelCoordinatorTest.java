@@ -490,6 +490,42 @@ class TaskCancelCoordinatorTest {
                 eq(0L));
     }
 
+    // H4f-b: a workflow run rides the same record-first delivery — the
+    // kind gate admits it and every outcome is read from its record.
+    @Test
+    void aLiveWorkflowRunTakesTheStopRequestAndCompletesFromTheRecord() {
+        target.set(workflowRun("running", false));
+        afterSend.set(workflowRun("running", true));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).hasSize(1);
+        assertThat(sent.getFirst()).containsEntry("kind", "cancel")
+                .containsEntry("childRunId", "run-1");
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    @Test
+    void aWorkflowStopAlreadyRecordedCoalescesWithoutDelivery() {
+        target.set(workflowRun("running", true));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).isEmpty();
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.completed()), eq(0L));
+    }
+
+    @Test
+    void aWorkflowRunThatEndedWithoutAStopFailsDefinitively() {
+        target.set(workflowRun("completed", false));
+        coordinator.dispatch(TENANT, SESSION, OPERATION);
+        assertThat(sent).isEmpty();
+        verify(store).settleTaskCancel(eq(TENANT), eq(SESSION),
+                eq(OPERATION), anyString(), eq(1L),
+                eq(TaskCancelOutcome.failed("task_already_settled")),
+                eq(0L));
+    }
+
     @Test
     void aParkedCancelResolvesOnlyFromEvidence() {
         when(store.findParkedTaskCancels(anyInt()))
@@ -522,6 +558,13 @@ class TaskCancelCoordinatorTest {
     private static TaskTarget childRun(String state, boolean stopRequested) {
         return new TaskTarget("child_run", "run-1", "child_agent", state, 3,
                 JSON.createObjectNode().put("kind", "child_agent")
+                        .put("stopRequested", stopRequested));
+    }
+
+    private static TaskTarget workflowRun(String state,
+            boolean stopRequested) {
+        return new TaskTarget("child_run", "run-1", "workflow", state, 3,
+                JSON.createObjectNode().put("kind", "workflow")
                         .put("stopRequested", stopRequested));
     }
 
