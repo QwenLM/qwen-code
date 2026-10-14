@@ -22,14 +22,6 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/**
- * The durable command of a child Workspace (#13753 I1): one row per child
- * run in {@code qwen_managed_child_workspace} (V60). The row holds the
- * recorded base, the merge evidence and the outcome. Claims fence its
- * writers: every transition compares the state and the claim generation,
- * so a worker whose claim expired cannot commit a step. See
- * docs/design/2026-10-09-managed-child-workspace.md.
- */
 @Repository
 public class ChildWorkspaceStore {
     public static final String PREPARING = "preparing";
@@ -59,12 +51,16 @@ public class ChildWorkspaceStore {
             "base_commit", "result_commit", "parent_tree", "merged_tree", "finish_request", "outcome_code",
             "conflict_paths", "last_error");
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String SELECT = "SELECT tenant_id, parent_session_id, child_run_id,"
-            + " child_workspace_id, workspace_id, workspace_generation, storage_id,"
-            + " parent_cwd_relative, repository_relative, child_cwd_relative, base_commit,"
-            + " result_commit, parent_tree, merged_tree, state, finish_request, outcome_code,"
-            + " conflict_paths, last_error, claimed_by, claimed_until, claim_generation, attempts,"
-            + " next_retry_at, created_at, updated_at FROM qwen_managed_child_workspace";
+    private static final String SELECT = "SELECT w.tenant_id, w.parent_session_id, w.child_run_id,"
+            + " w.child_workspace_id, w.parent_workspace_id AS workspace_id, w.workspace_generation, w.storage_id,"
+            + " w.parent_cwd_relative, w.repository_relative, w.child_cwd_relative, w.base_commit,"
+            + " w.result_commit, w.parent_tree, w.merged_tree, w.child_state AS state, w.finish_request, w.outcome_code,"
+            + " w.conflict_paths, w.last_error, o.claim_owner AS claimed_by,"
+            + " FLOOR(UNIX_TIMESTAMP(o.claim_until) * 1000.0) AS claimed_until, o.claim_generation, o.attempt_count AS attempts,"
+            + " o.available_at AS next_retry_at, w.created_at, w.updated_at FROM ma_workspace w"
+            + " JOIN ma_operation o ON o.tenant_id = w.tenant_id AND o.operation_id = w.child_workspace_id"
+            + " AND o.operation_kind = 'CHILD_WORKSPACE'";
+    private static final WorkspaceOperations.Kind KIND = WorkspaceOperations.Kind.CHILD_WORKSPACE;
 
     /** One child Workspace row. */
     public record Row(String tenantId, String parentSessionId, String childRunId,
@@ -104,25 +100,34 @@ public class ChildWorkspaceStore {
      */
     public Row admit(String tenantId, String parentSessionId, String childRunId,
             ContextBinding parent, long now) {
-        jdbc.update("INSERT IGNORE INTO qwen_managed_child_workspace (tenant_id, parent_session_id,"
-                        + " child_run_id, child_workspace_id, workspace_id, workspace_generation,"
-                        + " storage_id, parent_cwd_relative, state, created_at, updated_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                tenantId, parentSessionId, childRunId,
-                childWorkspaceId(tenantId, parentSessionId, childRunId), parent.getWorkspaceId(),
-                parent.getWorkspaceGeneration(), parent.getStorageId(), parent.getCwdRelative(),
-                PREPARING, now, now);
-        Row row = find(tenantId, parentSessionId, childRunId);
-        if (row == null) {
-            throw new ApiException(HttpStatus.CONFLICT, "child_workspace_conflict",
-                    "The child Workspace belongs to another tenant.");
-        }
-        return row;
+        return transaction.execute(status -> {
+            String childId = childWorkspaceId(tenantId, parentSessionId, childRunId);
+            jdbc.update("INSERT IGNORE INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
+                    + " display_name, config_ref, policy_ref, state, workspace_kind, parent_workspace_id, parent_session_id,"
+                    + " child_run_id, child_workspace_id, parent_cwd_relative, child_state, created_at, updated_at)"
+                    + " SELECT tenant_id, ?, ?, ?, display_name, config_ref, policy_ref, 'ACTIVE', 'CHILD_GIT', workspace_id,"
+                    + " ?, ?, ?, ?, ?, ?, ? FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
+                    childId, parent.getWorkspaceGeneration(), parent.getStorageId(), parentSessionId, childRunId,
+                    childId, parent.getCwdRelative(), PREPARING, now, now, tenantId, parent.getWorkspaceId());
+            WorkspaceOperations operations = new WorkspaceOperations(jdbc, tenantId);
+            if (operations.find(KIND, childId, true) == null) {
+                operations.create(KIND, childId, WorkspaceOperations.values("session_id", parentSessionId,
+                        "storage_id", parent.getStorageId(), "state", PREPARING, "phase", PREPARING, "delivery_state", "PENDING", "available_at", now,
+                        "request_json", JSON.valueToTree(Map.of("tenantId", tenantId, "parentSessionId", parentSessionId,
+                                "childRunId", childRunId, "childWorkspaceId", childId)).toString()));
+            }
+            Row row = find(tenantId, parentSessionId, childRunId);
+            if (row == null) {
+                throw new ApiException(HttpStatus.CONFLICT, "child_workspace_conflict",
+                        "The child Workspace is unavailable.");
+            }
+            return row;
+        });
     }
 
     public Row find(String tenantId, String parentSessionId, String childRunId) {
-        List<Row> rows = jdbc.query(SELECT + " WHERE tenant_id = ? AND parent_session_id = ?"
-                + " AND child_run_id = ?", this::row, tenantId, parentSessionId, childRunId);
+        List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.parent_session_id = ?"
+                + " AND w.child_run_id = ?", this::row, tenantId, parentSessionId, childRunId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -133,14 +138,10 @@ public class ChildWorkspaceStore {
      * live claim is a step running right now.
      */
     public List<Row> findDue(long now, int limit) {
-        return jdbc.query(SELECT + " WHERE (state IN (?, ?, ?, ?, ?)"
-                        + " OR (state = ? AND finish_request IS NOT NULL)"
-                        + " OR (state IN (?, ?, ?) AND finish_request IN (?, ?)))"
-                        + " AND next_retry_at <= ?"
-                        + " AND (claimed_until IS NULL OR claimed_until <= ?)"
-                        + " ORDER BY next_retry_at, created_at, parent_session_id, child_run_id LIMIT ?",
-                this::row, PREPARING, MERGING, APPLYING, APPLIED, DISCARDING, READY, CONFLICTED, BLOCKED,
-                FAILED, DISCARD, DISCARD_PINNED, now, now, limit);
+        return jdbc.query(SELECT + " WHERE o.delivery_state = 'PENDING' AND o.available_at <= ?"
+                        + " AND (o.claim_until IS NULL OR o.claim_until <= FROM_UNIXTIME(? / 1000.0))"
+                        + " ORDER BY o.available_at, o.operation_key LIMIT ?",
+                this::row, now, now, limit);
     }
 
     /**
@@ -150,17 +151,25 @@ public class ChildWorkspaceStore {
      * claim it twice. Answers the claimed row, or null.
      */
     public Row claim(Row row, String owner, long now, long leaseMillis) {
-        int claimed = jdbc.update("UPDATE qwen_managed_child_workspace SET claimed_by = ?,"
-                        + " claimed_until = ?, claim_generation = claim_generation + 1, updated_at = ?"
-                        + " WHERE parent_session_id = ? AND child_run_id = ? AND tenant_id = ?"
-                        + " AND (claimed_until IS NULL OR claimed_until <= ?)",
-                owner, now + leaseMillis, now, row.parentSessionId(), row.childRunId(), row.tenantId(),
-                now);
-        if (claimed != 1) {
-            return null;
-        }
-        Row current = find(row.tenantId(), row.parentSessionId(), row.childRunId());
-        return current != null && owner.equals(current.claimedBy()) ? current : null;
+        return transaction.execute(status -> {
+            WorkspaceStorageKindGuard.lockDomain(jdbc, row.tenantId());
+            String storage = WorkspaceExecutionStore.storageKey(jdbc, new ContextBinding(row.tenantId(), row.workspaceId(),
+                    row.workspaceGeneration(), row.storageId(), ".", com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
+            List<String> physical = jdbc.queryForList("SELECT holder_key FROM ma_storage_owner WHERE storage_key = ?"
+                    + " AND maintenance_id = ? AND holder_key IS NOT NULL FOR UPDATE", String.class, storage, row.childWorkspaceId());
+            if (!physical.isEmpty()) {
+                return null;
+            }
+            int claimed = jdbc.update("UPDATE ma_operation SET claim_owner = ?, claim_until = FROM_UNIXTIME(? / 1000.0),"
+                    + " claim_generation = claim_generation + 1, updated_at = ? WHERE operation_key = ?"
+                    + " AND operation_kind = 'CHILD_WORKSPACE' AND (claim_until IS NULL OR claim_until <= FROM_UNIXTIME(? / 1000.0))",
+                    owner, Math.addExact(now, leaseMillis), now, operationKey(row), now);
+            if (claimed != 1) {
+                return null;
+            }
+            Row current = find(row.tenantId(), row.parentSessionId(), row.childRunId());
+            return current != null && owner.equals(current.claimedBy()) ? current : null;
+        });
     }
 
     /**
@@ -168,24 +177,33 @@ public class ChildWorkspaceStore {
      * given columns and clearing the retry bookkeeping. False when the
      * state or the claim moved on: the step must not be reported done.
      */
-    public boolean transition(Row claimed, String owner, String toState, Map<String, Object> columns,
-            long now) {
-        StringBuilder sql = new StringBuilder("UPDATE qwen_managed_child_workspace SET state = ?,"
-                + " attempts = 0, next_retry_at = 0, updated_at = ?");
-        List<Object> args = new ArrayList<>(List.of(toState, now));
-        for (Map.Entry<String, Object> column : columns.entrySet()) {
-            if (!COLUMNS.contains(column.getKey())) {
-                throw new IllegalArgumentException("Unknown child Workspace column " + column.getKey());
+    public boolean transition(Row claimed, String owner, String toState, Map<String, Object> columns, long now) {
+        WorkspaceOperations.requireState(KIND, toState);
+        return transaction.execute(status -> {
+            if (!lockClaim(claimed, owner, now)) {
+                return false;
             }
-            sql.append(", ").append(column.getKey()).append(" = ?");
-            Object value = column.getValue();
-            args.add(value instanceof List<?> list ? json(list) : value);
-        }
-        sql.append(" WHERE parent_session_id = ? AND child_run_id = ? AND tenant_id = ?"
-                + " AND state = ? AND claim_generation = ? AND claimed_by = ?");
-        args.addAll(List.of(claimed.parentSessionId(), claimed.childRunId(), claimed.tenantId(),
-                claimed.state(), claimed.claimGeneration(), owner));
-        return jdbc.update(sql.toString(), args.toArray()) == 1;
+            StringBuilder sql = new StringBuilder("UPDATE ma_workspace SET child_state = ?, updated_at = ?");
+            List<Object> args = new ArrayList<>(List.of(toState, now));
+            for (Map.Entry<String, Object> column : columns.entrySet()) {
+                if (!COLUMNS.contains(column.getKey())) {
+                    throw new IllegalArgumentException("Unknown child Workspace column " + column.getKey());
+                }
+                sql.append(", ").append(column.getKey()).append(" = ?");
+                Object value = column.getValue();
+                args.add(value instanceof List<?> list ? json(list) : value);
+            }
+            sql.append(" WHERE tenant_id = ? AND workspace_id = ? AND child_state = ?");
+            args.addAll(List.of(claimed.tenantId(), claimed.childWorkspaceId(), claimed.state()));
+            if (jdbc.update(sql.toString(), args.toArray()) != 1) {
+                return false;
+            }
+            Row current = find(claimed.tenantId(), claimed.parentSessionId(), claimed.childRunId());
+            jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, delivery_state = ?, attempt_count = 0, available_at = 0,"
+                    + " updated_at = ? WHERE operation_key = ?", toState, toState,
+                    owesWork(toState, current.finishRequest()) ? "PENDING" : "IDLE", now, operationKey(claimed));
+            return true;
+        });
     }
 
     /**
@@ -195,51 +213,51 @@ public class ChildWorkspaceStore {
      * merge it replaced.
      */
     public boolean startFinish(Row claimed, String owner, String toState, String finish, long now) {
-        return jdbc.update("UPDATE qwen_managed_child_workspace SET state = ?, attempts = 0,"
-                        + " next_retry_at = 0, last_error = NULL, updated_at = ? WHERE parent_session_id = ?"
-                        + " AND child_run_id = ?"
-                        + " AND tenant_id = ? AND state = ? AND claim_generation = ? AND claimed_by = ?"
-                        + " AND finish_request = ?",
-                toState, now, claimed.parentSessionId(), claimed.childRunId(), claimed.tenantId(),
-                claimed.state(), claimed.claimGeneration(), owner, finish) == 1;
+        return transaction.execute(status -> {
+            if (!lockClaim(claimed, owner, now)) {
+                return false;
+            }
+            Row current = find(claimed.tenantId(), claimed.parentSessionId(), claimed.childRunId());
+            return current != null && finish.equals(current.finishRequest())
+                    && transition(claimed, owner, toState, columns("last_error", null), now);
+        });
     }
 
     /** Whether every child Session bound to the row's run is closed (or there is none). */
     public boolean childSessionsClosed(Row row) {
-        return jdbc.queryForList("SELECT status FROM managed_agent_session WHERE tenant_id = ?"
+        return jdbc.queryForList("SELECT status FROM ma_session WHERE tenant_id = ?"
                         + " AND parent_session_id = ? AND parent_child_run_id = ?", String.class,
                 row.tenantId(), row.parentSessionId(), row.childRunId()).stream()
                 .allMatch(SETTLED_SESSION_STATES::contains);
     }
 
     /** Parks a claimed row until {@code nextRetryAt}, counting the attempt when asked. */
-    public boolean retry(Row claimed, String owner, boolean countAttempt, long nextRetryAt,
-            String error, long now) {
-        return jdbc.update("UPDATE qwen_managed_child_workspace SET attempts = attempts + ?,"
-                        + " next_retry_at = ?, last_error = ?, claimed_by = NULL, claimed_until = NULL,"
-                        + " updated_at = ? WHERE parent_session_id = ? AND child_run_id = ? AND tenant_id = ?"
-                        + " AND state = ? AND claim_generation = ? AND claimed_by = ?",
-                countAttempt ? 1 : 0, nextRetryAt, truncate(error), now, claimed.parentSessionId(),
-                claimed.childRunId(), claimed.tenantId(), claimed.state(), claimed.claimGeneration(),
-                owner) == 1;
+    public boolean retry(Row claimed, String owner, boolean countAttempt, long nextRetryAt, String error, long now) {
+        return transaction.execute(status -> {
+            if (!lockClaim(claimed, owner, now)) {
+                return false;
+            }
+            jdbc.update("UPDATE ma_workspace SET last_error = ?, updated_at = ? WHERE tenant_id = ? AND workspace_id = ?",
+                    truncate(error), now, claimed.tenantId(), claimed.childWorkspaceId());
+            return jdbc.update("UPDATE ma_operation SET attempt_count = attempt_count + ?, available_at = ?,"
+                    + " claim_owner = NULL, claim_until = NULL, updated_at = ? WHERE operation_key = ?"
+                    + " AND claim_generation = ? AND claim_owner = ?", countAttempt ? 1 : 0, nextRetryAt, now,
+                    operationKey(claimed), claimed.claimGeneration(), owner) == 1;
+        });
     }
 
     /** Extends a live claim; false once the claim moved on. */
     public boolean renew(Row claimed, String owner, long until, long now) {
-        return jdbc.update("UPDATE qwen_managed_child_workspace SET claimed_until = ?, updated_at = ?"
-                        + " WHERE parent_session_id = ? AND child_run_id = ? AND tenant_id = ?"
-                        + " AND claim_generation = ? AND claimed_by = ?",
-                until, now, claimed.parentSessionId(), claimed.childRunId(), claimed.tenantId(),
-                claimed.claimGeneration(), owner) == 1;
+        return jdbc.update("UPDATE ma_operation SET claim_until = FROM_UNIXTIME(? / 1000.0), updated_at = ? WHERE operation_key = ?"
+                + " AND claim_generation = ? AND claim_owner = ? AND claim_until > FROM_UNIXTIME(? / 1000.0)", until, now,
+                operationKey(claimed), claimed.claimGeneration(), owner, now) == 1;
     }
 
     /** Gives a claimed row back without touching anything else. */
     public void release(Row claimed, String owner, long now) {
-        jdbc.update("UPDATE qwen_managed_child_workspace SET claimed_by = NULL, claimed_until = NULL,"
-                        + " updated_at = ? WHERE parent_session_id = ? AND child_run_id = ? AND tenant_id = ?"
-                        + " AND claim_generation = ? AND claimed_by = ?",
-                now, claimed.parentSessionId(), claimed.childRunId(), claimed.tenantId(),
-                claimed.claimGeneration(), owner);
+        jdbc.update("UPDATE ma_operation SET claim_owner = NULL, claim_until = NULL, updated_at = ?"
+                + " WHERE operation_key = ? AND claim_generation = ? AND claim_owner = ?",
+                now, operationKey(claimed), claimed.claimGeneration(), owner);
     }
 
     /**
@@ -262,8 +280,8 @@ public class ChildWorkspaceStore {
             throw new IllegalArgumentException("Unknown child Workspace finish " + finish);
         }
         return transaction.execute(status -> {
-            List<Row> rows = jdbc.query(SELECT + " WHERE tenant_id = ? AND parent_session_id = ?"
-                    + " AND child_run_id = ? FOR UPDATE", this::row, tenantId, parentSessionId, childRunId);
+            List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.parent_session_id = ?"
+                    + " AND w.child_run_id = ? FOR UPDATE", this::row, tenantId, parentSessionId, childRunId);
             if (rows.isEmpty()) {
                 throw new ApiException(HttpStatus.NOT_FOUND, "child_workspace_not_found",
                         "The child run has no child Workspace.");
@@ -301,11 +319,32 @@ public class ChildWorkspaceStore {
                     recorded = DISCARD_PINNED;
                 }
             }
-            jdbc.update("UPDATE qwen_managed_child_workspace SET finish_request = ?, next_retry_at = 0,"
-                            + " updated_at = ? WHERE parent_session_id = ? AND child_run_id = ? AND tenant_id = ?",
-                    recorded, now, parentSessionId, childRunId, tenantId);
+            jdbc.update("UPDATE ma_workspace SET finish_request = ?, updated_at = ?"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", recorded, now, tenantId, row.childWorkspaceId());
+            jdbc.update("UPDATE ma_operation SET available_at = 0, delivery_state = 'PENDING', updated_at = ? WHERE operation_key = ?",
+                    now, operationKey(row));
             return find(tenantId, parentSessionId, childRunId);
         });
+    }
+
+    private static boolean owesWork(String state, String finish) {
+        return Set.of(PREPARING, MERGING, APPLYING, APPLIED, DISCARDING).contains(state)
+                || READY.equals(state) && finish != null
+                || Set.of(CONFLICTED, BLOCKED, FAILED).contains(state) && finish != null && Set.of(DISCARD, DISCARD_PINNED).contains(finish);
+    }
+
+    private boolean lockClaim(Row row, String owner, long now) {
+        List<Boolean> claims = jdbc.query("SELECT claim_owner, claim_generation, FLOOR(UNIX_TIMESTAMP(claim_until) * 1000.0) AS lease_epoch, state FROM ma_operation"
+                + " WHERE operation_key = ? FOR UPDATE", (result, index) -> owner.equals(result.getString("claim_owner"))
+                        && row.claimGeneration() == result.getLong("claim_generation")
+                        && row.state().equals(result.getString("state"))
+                        && result.getObject("lease_epoch") != null
+                        && result.getLong("lease_epoch") > now, operationKey(row));
+        return claims.size() == 1 && claims.getFirst();
+    }
+
+    private static String operationKey(Row row) {
+        return WorkspaceOperations.key(KIND, row.tenantId(), row.childWorkspaceId());
     }
 
     private Row row(ResultSet result, int index) throws SQLException {

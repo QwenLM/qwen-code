@@ -152,6 +152,14 @@
                         </configuration>
                     </execution>
                     <execution>
+                        <id>workspace-maintenance-recovery</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>workspace-maintenance-recovery</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.store.WorkspaceMaintenanceRecoveryMain</mainClass>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <id>operator-recovery</id>
                         <goals><goal>repackage</goal></goals>
                         <configuration>
