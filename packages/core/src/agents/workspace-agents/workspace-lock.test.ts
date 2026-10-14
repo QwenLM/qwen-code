@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import lockfile from 'proper-lockfile';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import {
   generateAgentId,
@@ -20,6 +20,29 @@ import {
 } from './store.js';
 
 const PROJECT_ROOT = '/agent-workspace-lock-test';
+
+// Observability only: every `lockfile.lock` call still goes to the real
+// implementation. A waiter reaching for the workspace lock tells the test its
+// retry budget has started burning, which is what anchors the contention hold
+// below to the waiter's own progress instead of the test's schedule.
+const lockProbe = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  reached: undefined as (() => void) | undefined,
+}));
+
+vi.mock('proper-lockfile', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('proper-lockfile')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      lock(...args: Parameters<typeof actual.lock>) {
+        if (String(args[0]) === lockProbe.path) lockProbe.reached?.();
+        return actual.lock(...args);
+      },
+    },
+  };
+});
 
 function runWorker(
   runtimeDir: string,
@@ -67,6 +90,8 @@ describe('agent workspace lock', () => {
   });
 
   afterEach(async () => {
+    lockProbe.path = undefined;
+    lockProbe.reached = undefined;
     await fs.rm(runtimeDir, { recursive: true, force: true });
   });
 
@@ -99,14 +124,16 @@ describe('agent workspace lock', () => {
 
       // Hold the cross-process lock the way a slow foreign process would —
       // through proper-lockfile directly, leaving the in-process mutex free
-      // so the store gets all the way to its own lock attempt. The 1.5s hold
-      // sits above the old 10-retry budget (~0.7s) and inside the 30-retry
-      // budget (~2.7s), far under the 10s stale threshold, so the waiter can
-      // only succeed by outlasting the hold through its own retries.
+      // so the store gets all the way to its own lock attempt.
       const release = await lockfile.lock(target, {
         retries: 0,
         realpath: false,
       });
+      const waiterReached = new Promise<void>((resolve) => {
+        lockProbe.reached = resolve;
+      });
+      lockProbe.path = target;
+
       const mutation = updateWorkspaceAgents(PROJECT_ROOT, (agents) => [
         ...agents,
         { id: generateAgentId(), name: 'contended', createdAt: Date.now() },
@@ -118,6 +145,17 @@ describe('agent workspace lock', () => {
         () => 'ok' as const,
         (error: unknown) => error,
       );
+
+      // Start the hold only once the waiter provably reached its own lock
+      // attempt: before that it has burned none of its retry budget, so a
+      // stalled test schedule can no longer eat the margin between the fixed
+      // hold and the budget. If the waiter never reaches the lock this await
+      // fails the test on timeout rather than letting it pass unobserved.
+      await waiterReached;
+
+      // The 1.5s hold sits above the old 10-retry budget (~0.7s) and inside
+      // the 30-retry budget (~2.7s), far under the 10s stale threshold, so
+      // the waiter can only succeed by outlasting the hold through retries.
       await new Promise((resolve) => setTimeout(resolve, 1500));
       await release();
 
